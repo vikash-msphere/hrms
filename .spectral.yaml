@@ -1,5 +1,5 @@
 extends:
-  - '/opt/homebrew/lib/node_modules/@aep_dev/aep-openapi-linter/spectral.yaml'
+  - './node_modules/@aep_dev/aep-openapi-linter/spectral.yaml'
 
 # Two AEP advisory rules are turned off because this API deliberately and uniformly departs from them; every
 # endpoint would otherwise "violate" them. (They were only reported clean before because the AEP linter's
