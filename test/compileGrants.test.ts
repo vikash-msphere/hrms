@@ -1,0 +1,127 @@
+import { describe, it, expect } from "vitest";
+import { GRANTS, grantFor } from "../src/domain/grants";
+import { resolveRequest, decide, type Decision } from "../src/domain/permissions";
+import { compileGrant, rulesToGrant, deriveNarrowing } from "../src/domain/compileGrants";
+
+// P0 BOLA oracle. The compiler flattens a Grant into access_rules rows; `rulesToGrant` rebuilds a Grant
+// from those rows (the runtime reconstructor P1 feeds the narrowed rows to). The security-critical claim of
+// P0 is that this projection is DECISION-LOSSLESS: deciding over compile->reconstruct yields the EXACT same
+// verdict as deciding over the original blob, for every request and every caller. If the compiler ever
+// widened a self/dept scope into something broader (a BOLA hole), a generated case below would diverge.
+//
+// The engine (`decide`) is the unchanged authority; this proves the new storage feeds it faithfully.
+
+const ROLES = Object.keys(GRANTS);
+
+// A broad request space: collections x id-position tokens x sub-resource tails, standard + custom methods.
+const COLLECTIONS = [
+  "employees", "leave-requests", "leave-balances", "payslips", "personal-documents", "org-documents",
+  "operations", "holidays", "departments", "compensation", "payroll-runs", "users", "preferences",
+  "settings", "holiday-selections", "announcements", "pay-periods", "pay-components", "leave-types",
+];
+// Includes a prefix-collision pair (04-002 vs 04-0029) so a sloppy prefix match would be caught.
+const IDS = ["me", "04-001", "04-002", "04-002-001", "04-0029", "04-0029-001", "07-001", "07-002-003"];
+const TAILS = ["", "/bank-account", "/identity", "/personal-info", "/department", "/manager"];
+const VERBS = ["approve", "reject", "cancel", "download", "getPhoto", "uploadPhoto", "clearPhoto"];
+const SELVES: (string | null)[] = [null, "04-001", "04-002", "04-002-001", "04-0029-001", "07-001"];
+
+type Req = { method: string; path: string; force: boolean };
+function* requests(): Generator<Req> {
+  for (const col of COLLECTIONS) {
+    yield { method: "GET", path: `/v1/${col}`, force: false }; // collection list
+    yield { method: "POST", path: `/v1/${col}`, force: false }; // collection create
+    for (const id of IDS) {
+      for (const tail of TAILS) {
+        const base = `/v1/${col}/${id}${tail}`;
+        yield { method: "GET", path: base, force: false }; // read
+        yield { method: "PATCH", path: base, force: false }; // write
+        yield { method: "DELETE", path: base, force: false }; // write (soft delete)
+        yield { method: "DELETE", path: base, force: true }; // admin (force purge)
+      }
+      for (const verb of VERBS) yield { method: "POST", path: `/v1/${col}/${id}:${verb}`, force: false };
+    }
+  }
+}
+
+const REQS = [...requests()];
+
+function sameVerdict(a: Decision, b: Decision): boolean {
+  return a.allow === b.allow;
+}
+
+describe("compileGrants - compile->reconstruct is decision-lossless (BOLA oracle)", () => {
+  for (const role of ROLES) {
+    it(`${role}: every request decides identically vs the blob`, () => {
+      const blob = grantFor(role);
+      const round = rulesToGrant(compileGrant(blob));
+      for (const self of SELVES) {
+        const ctx = { employeeCode: self };
+        for (const r of REQS) {
+          const resolved = resolveRequest(r.method, r.path, r.force);
+          const want = decide(blob, resolved, ctx);
+          const got = decide(round, resolved, ctx);
+          expect(
+            sameVerdict(want, got),
+            `${role} self=${self} ${r.method} ${r.path}${r.force ? "?force" : ""}: blob=${want.allow} compiled=${got.allow}`,
+          ).toBe(true);
+        }
+      }
+    });
+  }
+
+  it("reconstruction is structurally identical to the original (lossless round-trip)", () => {
+    for (const role of ROLES) {
+      const blob = grantFor(role);
+      const round = rulesToGrant(compileGrant(blob));
+      expect(round.levels).toEqual(blob.levels);
+      expect([...round.allow].sort()).toEqual([...blob.allow].sort());
+      expect([...(round.deny ?? [])].sort()).toEqual([...(blob.deny ?? [])].sort());
+    }
+  });
+});
+
+describe("compileGrants - narrowing keys", () => {
+  it("only super_admin compiles to a namespace='*' rule; every other role is collection-scoped", () => {
+    for (const role of ROLES) {
+      const wildcard = compileGrant(grantFor(role)).filter((r) => r.namespace === "*");
+      if (role === "super_admin") expect(wildcard.length).toBeGreaterThan(0);
+      else expect(wildcard, `${role} must not compile a cross-collection rule`).toEqual([]);
+    }
+  });
+
+  it("every compiled rule's namespace is the pattern's first token (or '*' for '**')", () => {
+    for (const role of ROLES) {
+      for (const r of compileGrant(grantFor(role))) {
+        const first = r.pattern.split(".")[0];
+        expect(r.namespace).toBe(first === "**" ? "*" : first);
+      }
+    }
+  });
+
+  it("a rule's match_code is set iff it is an exact-scope (per-object) rule", () => {
+    // The seed roles use only scope patterns (no literal codes), so every role rule is match_code NULL today -
+    // the split broad/narrowed load is a NO-OP for current data.
+    for (const role of ROLES) {
+      for (const r of compileGrant(grantFor(role))) expect(r.matchCode).toBe(r.scopeKind === "exact" ? r.scopeCode : null);
+    }
+    // An exact pattern (added via a grant edit) carries its code as match_code so it rides the narrowed lane:
+    const exactRule = compileGrant({ levels: { "leave-requests.04-002-001.**": "read" }, allow: [] })[0]!;
+    expect(exactRule).toMatchObject({ scopeKind: "exact", scopeCode: "04-002-001", matchCode: "04-002-001" });
+    // ...and reconstructs losslessly (match_code is reconstruction-blind; the decision rides the verbatim pattern).
+    expect(rulesToGrant([exactRule]).levels).toEqual({ "leave-requests.04-002-001.**": "read" });
+  });
+
+  it("derives scope kinds from the id-position token", () => {
+    expect(deriveNarrowing("**")).toEqual({ namespace: "*", scopeKind: "all", scopeCode: "" });
+    expect(deriveNarrowing("employees")).toEqual({ namespace: "employees", scopeKind: "all", scopeCode: "" });
+    expect(deriveNarrowing("employees.me")).toEqual({ namespace: "employees", scopeKind: "self", scopeCode: "" });
+    expect(deriveNarrowing("employees.me.bank-account.**")).toEqual({ namespace: "employees", scopeKind: "self", scopeCode: "" });
+    expect(deriveNarrowing("leave-requests.my-dept.**")).toEqual({ namespace: "leave-requests", scopeKind: "dept", scopeCode: "" });
+    expect(deriveNarrowing("employees.*")).toEqual({ namespace: "employees", scopeKind: "all", scopeCode: "" });
+    // A collection-scope custom-method rule (buildPattern emits `<col>.*.<verb>`): the `*` keeps it a broad
+    // all-scope rule (matchCode NULL), NOT an exact rule keyed on the verb token.
+    expect(deriveNarrowing("leave-requests.*.approve")).toEqual({ namespace: "leave-requests", scopeKind: "all", scopeCode: "" });
+    expect(deriveNarrowing("documents.04-*")).toEqual({ namespace: "documents", scopeKind: "subtree", scopeCode: "04" });
+    expect(deriveNarrowing("leave-requests.04-002-001")).toEqual({ namespace: "leave-requests", scopeKind: "exact", scopeCode: "04-002-001" });
+  });
+});

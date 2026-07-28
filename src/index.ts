@@ -1,0 +1,277 @@
+import { Hono } from "hono";
+import type { AppEnv } from "./env";
+import { makeDeps } from "./deps";
+import { dbContext } from "./middleware/dbContext";
+import { csrf } from "./middleware/csrf";
+import { auth } from "./middleware/auth";
+import { authz } from "./middleware/authz";
+import { encodeWireIdsMiddleware } from "./middleware/encodeWireIds";
+import { decodeWireIdsRequest } from "./middleware/decodeWireIds";
+import { makeIdCodec } from "./lib/idCodec";
+import { securityHeaders } from "./middleware/securityHeaders";
+import { errorHandler } from "./middleware/errorHandler";
+import { requestId } from "./middleware/requestId";
+import { runScheduled } from "./cron";
+
+import { users } from "./routes/users";
+import { preferences } from "./routes/preferences";
+import { settings } from "./routes/settings";
+import { roles } from "./routes/roles";
+import { policy } from "./routes/policy";
+import { accessRules } from "./routes/accessRules";
+import { employees } from "./routes/employees";
+import { departments } from "./routes/departments";
+import { leaveRequests } from "./routes/leaveRequests";
+import { goals } from "./routes/goals";
+import { boards } from "./routes/boards";
+import { cards } from "./routes/cards";
+import { sprints } from "./routes/sprints";
+import { activity } from "./routes/activity";
+import { taxVerifications } from "./routes/taxVerifications";
+import { reviewCycles } from "./routes/reviewCycles";
+import { reviews } from "./routes/reviews";
+import { reviewFeedback } from "./routes/reviewFeedback";
+import { transitions } from "./routes/transitions";
+import { transitionTasks } from "./routes/transitionTasks";
+import { checkIns } from "./routes/checkIns";
+import { benefitPlans } from "./routes/benefitPlans";
+import { dependents } from "./routes/dependents";
+import { benefitEnrollments } from "./routes/benefitEnrollments";
+import { shifts } from "./routes/shifts";
+import { shiftAssignments } from "./routes/shiftAssignments";
+import { projects } from "./routes/projects";
+import { timeEntries } from "./routes/timeEntries";
+import { loans } from "./routes/loans";
+import { taxDeclarations } from "./routes/taxDeclarations";
+import { leaveBalances } from "./routes/leaveBalances";
+import { payrollRuns } from "./routes/payrollRuns";
+import { operations } from "./routes/operations";
+import { cronRuns } from "./routes/cronRuns";
+import { cronTrigger } from "./routes/cronTrigger";
+import { holidays } from "./routes/holidays";
+import { holidaySelections } from "./routes/holidaySelections";
+import { complianceEvents } from "./routes/complianceEvents";
+import { complianceRules } from "./routes/complianceRules";
+import { backgroundChecks } from "./routes/backgroundChecks";
+import { announcements, announcementPost, announcementGiveKudos } from "./routes/announcements";
+import { letterTemplates } from "./routes/letterTemplatesRoutes";
+import { leaveTypes } from "./routes/leaveTypes";
+import { payComponents } from "./routes/payComponents";
+import { payGrades } from "./routes/payGrades";
+import { salaryStructures } from "./routes/salaryStructures";
+import { payPeriods } from "./routes/payPeriods";
+import { orgDocuments } from "./routes/orgDocuments";
+import { documentAcknowledgements } from "./routes/documentAcknowledgements";
+import { personalDocuments } from "./routes/personalDocuments";
+import { letterGenerate } from "./routes/letterGenerate";
+import { form16Generate } from "./routes/form16Generate";
+import { form16Upload } from "./routes/form16Upload";
+import { letterPreview } from "./routes/letterPreview";
+import { payslipTemplatePreview } from "./routes/payslipTemplatePreview";
+import { payslips } from "./routes/payslips";
+import { reimbursements } from "./routes/reimbursements";
+import { reimbursementCategories } from "./routes/reimbursementCategories";
+import { expenses } from "./routes/expenses";
+import { expenseCategories } from "./routes/expenseCategories";
+import { vendors } from "./routes/vendors";
+import { expenseBudgets } from "./routes/expenseBudgets";
+import { referrals } from "./routes/referrals";
+import { requisitions } from "./routes/requisitions";
+import { candidates } from "./routes/candidates";
+import { applications } from "./routes/applications";
+import { interviews } from "./routes/interviews";
+import { interviewFeedback } from "./routes/interviewFeedback";
+import { offers } from "./routes/offers";
+import { celebrations } from "./routes/celebrations";
+import { employeePhotosBatch } from "./routes/employeePhotosBatch";
+import { batch } from "./routes/batch";
+import { search } from "./routes/search";
+import { bankFormats } from "./routes/bankFormats";
+import { payrollDebit } from "./routes/payrollDebit";
+import { compensation } from "./routes/compensation";
+import { compensationReapply } from "./routes/compensationReapply";
+import { esignCallback } from "./routes/esignCallback";
+import { positions } from "./routes/positions";
+import { bonuses, bonusAward } from "./routes/bonuses";
+import { assets } from "./routes/assets";
+import { settlements } from "./routes/settlements";
+import { leaveEncashments } from "./routes/leaveEncashments";
+import { attendance } from "./routes/attendance";
+import { attendanceRegularizations } from "./routes/attendanceRegularizations";
+import { overtimeRequests } from "./routes/overtimeRequests";
+import { remoteWorkRequests } from "./routes/remoteWorkRequests";
+import { approvalDelegations } from "./routes/approvalDelegations";
+import { noticePeriods } from "./routes/noticePeriods";
+import { suggestions } from "./routes/suggestions";
+import { notifications, notificationsMarkAll } from "./routes/notifications";
+import { tickets } from "./routes/tickets";
+import { ticketChecklists } from "./routes/ticketChecklists";
+import { events } from "./routes/events";
+import { automations } from "./routes/automations";
+import { eventLog } from "./routes/eventLog";
+import { automationRuns } from "./routes/automationRuns";
+import { workflowInstances } from "./routes/workflowInstances";
+import { workflowMeta } from "./routes/workflowMeta";
+import { esignProviders } from "./routes/esignProviders";
+
+const app = new Hono<AppEnv>();
+app.onError(errorHandler);
+app.use("*", requestId); // correlation id on every request/response + in error logs
+
+// Unauthenticated health checks for uptime monitors / load balancers (everything under /v1 needs an Access
+// JWT, so there must be something to probe without one). /healthz is pure liveness; /readyz also pings D1.
+app.get("/healthz", (c) => c.json({ status: "ok" }));
+app.get("/readyz", async (c) => {
+  try {
+    await c.env.DB.prepare("SELECT 1").first();
+    return c.json({ status: "ready" });
+  } catch {
+    return c.json({ status: "unavailable" }, 503);
+  }
+});
+
+// Security headers on the public webhook responses too (the /v1 middleware below doesn't cover /esign).
+app.use("/esign/*", securityHeaders);
+// Public e-sign provider webhook, OUTSIDE /v1 so the session auth/authz/csrf middleware below does not apply -
+// it is authenticated by the provider's HMAC signature inside the driver. Mounted before the /v1 middleware.
+app.route("/esign", esignCallback);
+
+app.use("/v1/*", securityHeaders); // set response security headers on every /v1 response (incl. errors)
+app.use("/v1/*", dbContext);
+app.use("/v1/*", encodeWireIdsMiddleware); // outbound edge: internal ids -> opaque wire tokens
+app.use("/v1/*", csrf);
+app.use("/v1/*", auth);
+app.use("/v1/*", authz); // ENFORCE: path-based authz is the sole gate; fail-closed (null/error/unmatched -> deny)
+
+app.route("/v1/users", users);
+app.route("/v1/preferences", preferences);
+app.route("/v1/settings", settings);
+app.route("/v1/roles", roles);
+app.route("/v1/policy", policy);
+app.route("/v1/access-rules", accessRules);
+app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
+app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
+app.route("/v1/employees:upcomingCelebrations", celebrations); // collection custom method, before the employees mount
+app.route("/v1/employees:batchGetPhotos", employeePhotosBatch); // batched photo fetch (per-id scope in the service)
+app.route("/v1/employees", employees);
+app.route("/v1/departments", departments);
+app.route("/v1/leave-requests", leaveRequests);
+app.route("/v1/goals", goals);
+app.route("/v1/boards", boards);
+app.route("/v1/cards", cards);
+app.route("/v1/sprints", sprints);
+app.route("/v1/activity", activity);
+app.route("/v1/tax-verifications", taxVerifications);
+app.route("/v1/review-cycles", reviewCycles);
+app.route("/v1/reviews", reviews);
+app.route("/v1/review-feedback", reviewFeedback);
+app.route("/v1/transitions", transitions);
+app.route("/v1/transition-tasks", transitionTasks);
+app.route("/v1/check-ins", checkIns);
+app.route("/v1/benefit-plans", benefitPlans);
+app.route("/v1/dependents", dependents);
+app.route("/v1/benefit-enrollments", benefitEnrollments);
+app.route("/v1/shifts", shifts);
+app.route("/v1/shift-assignments", shiftAssignments);
+app.route("/v1/projects", projects);
+app.route("/v1/time-entries", timeEntries);
+app.route("/v1/loans", loans);
+app.route("/v1/tax-declarations", taxDeclarations);
+app.route("/v1/leave-balances", leaveBalances);
+app.route("/v1/payroll-runs", payrollRuns);
+app.route("/v1/operations", operations);
+app.route("/v1/cron-runs:run", cronTrigger); // collection custom method, before the cron-runs mount
+app.route("/v1/cron-runs", cronRuns);
+app.route("/v1/holidays", holidays);
+app.route("/v1/holiday-selections", holidaySelections);
+app.route("/v1/compliance-events", complianceEvents);
+app.route("/v1/compliance-rules", complianceRules);
+app.route("/v1/background-checks", backgroundChecks);
+app.route("/v1/announcements:post", announcementPost); // collection custom method, before the announcements mount
+app.route("/v1/announcements:giveKudos", announcementGiveKudos); // open recognition wall (kind="kudos")
+app.route("/v1/announcements", announcements);
+app.route("/v1/letter-templates", letterTemplates);
+app.route("/v1/leave-types", leaveTypes);
+app.route("/v1/pay-components", payComponents);
+app.route("/v1/pay-grades", payGrades);
+app.route("/v1/salary-structures", salaryStructures);
+app.route("/v1/pay-periods", payPeriods);
+app.route("/v1/org-documents", orgDocuments);
+app.route("/v1/document-acknowledgements", documentAcknowledgements);
+app.route("/v1/personal-documents:generateLetter", letterGenerate); // collection custom method, before the personal-documents mount
+app.route("/v1/personal-documents:generateForm16", form16Generate); // Form 16 (Part B) generator, same pattern/gate
+app.route("/v1/personal-documents:uploadForm16", form16Upload); // official TRACES Form 16 upload, same pattern/gate
+app.route("/v1/personal-documents:previewLetter", letterPreview); // draft-template preview (no persist), before the personal-documents mount
+app.route("/v1/personal-documents", personalDocuments);
+app.route("/v1/payslips:previewTemplate", payslipTemplatePreview); // payslip-design preview on sample data, before the payslips mount
+app.route("/v1/payslips", payslips);
+app.route("/v1/reimbursements", reimbursements);
+app.route("/v1/referrals", referrals);
+app.route("/v1/job-requisitions", requisitions);
+app.route("/v1/candidates", candidates);
+app.route("/v1/applications", applications);
+app.route("/v1/interviews", interviews);
+app.route("/v1/interview-feedback", interviewFeedback);
+app.route("/v1/offers", offers);
+app.route("/v1/reimbursement-categories", reimbursementCategories);
+app.route("/v1/expenses", expenses);
+app.route("/v1/expense-categories", expenseCategories);
+app.route("/v1/vendors", vendors);
+app.route("/v1/expense-budgets", expenseBudgets);
+app.route("/v1/bank-formats", bankFormats);
+app.route("/v1/payroll-debit-accounts", payrollDebit);
+app.route("/v1/compensation:reapplySplit", compensationReapply); // collection custom method, before the compensation mount
+app.route("/v1/compensation", compensation);
+app.route("/v1/positions", positions);
+app.route("/v1/bonuses:award", bonusAward); // collection custom method, before the bonuses mount
+app.route("/v1/bonuses", bonuses);
+app.route("/v1/assets", assets);
+app.route("/v1/settlements", settlements);
+app.route("/v1/leave-encashments", leaveEncashments);
+app.route("/v1/attendance-regularizations", attendanceRegularizations);
+app.route("/v1/overtime-requests", overtimeRequests);
+app.route("/v1/remote-work-requests", remoteWorkRequests);
+app.route("/v1/approval-delegations", approvalDelegations);
+app.route("/v1/notice-periods", noticePeriods);
+app.route("/v1/suggestions", suggestions);
+app.route("/v1/notifications:markAllRead", notificationsMarkAll); // collection custom method, before the notifications mount
+app.route("/v1/notifications", notifications);
+app.route("/v1/attendance", attendance);
+app.route("/v1/ticket-checklists", ticketChecklists);
+app.route("/v1/tickets", tickets);
+app.route("/v1/events", events);
+app.route("/v1/automations", automations);
+app.route("/v1/event-log", eventLog);
+app.route("/v1/automation-runs", automationRuns);
+app.route("/v1/workflow-instances", workflowInstances);
+app.route("/v1/workflow-meta", workflowMeta);
+app.route("/v1/esign-providers", esignProviders); // virtual: non-secret e-sign driver catalog for Settings
+
+app.notFound((c) =>
+  c.body(JSON.stringify({ type: "/errors/not-found", title: "Not Found", status: 404, instance: c.req.path }), 404, {
+    "Content-Type": "application/problem+json",
+  }),
+);
+
+// One codec per isolate (memoized) so the HKDF subkeys are derived once, not per request.
+let codec: ReturnType<typeof makeIdCodec> | null = null;
+// Shared so the batch route can decode each re-dispatched sub-request with the SAME derived subkeys.
+export function getCodec(env: AppEnv["Bindings"]) {
+  return (codec ??= makeIdCodec(env.WIRE_ID_KEY));
+}
+// Exported so /v1/batch:run can re-dispatch sub-requests through the full middleware chain via app.fetch.
+// Only referenced inside the batch handler (runtime), so the index<->batch import cycle is safe.
+export { app };
+
+export default {
+  // Inbound edge: decode wire tokens -> internal ids BEFORE Hono routes, so params/services/authz are
+  // id-native. Outbound encoding is the encodeWireIds middleware. Non-/v1 paths pass through unchanged.
+  async fetch(request: Request, env: AppEnv["Bindings"], ctx: ExecutionContext) {
+    const decoded = await decodeWireIdsRequest(request, getCodec(env));
+    return app.fetch(decoded, env, ctx);
+  },
+  // Non-/v1 paths are served from web/dist by the platform (SPA fallback).
+  async scheduled(event: ScheduledController, env: AppEnv["Bindings"], ctx: ExecutionContext) {
+    ctx.waitUntil(runScheduled(event.cron, makeDeps(env)));
+  },
+};

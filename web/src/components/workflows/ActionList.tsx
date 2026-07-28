@@ -1,0 +1,384 @@
+import { useState, type ReactNode } from "react";
+import { Plus, Trash2, ChevronUp, ChevronDown, Bell, Clock, Hourglass, Zap, Globe, Boxes, Mail } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Field } from "@/components/common/Field";
+import { TemplatedInput } from "./TemplatedInput";
+import type { Action, WaitArm, WorkflowMeta, Variable } from "./types";
+import { variablesFor } from "./useWorkflowMeta";
+
+// ---- Add-action intent menu (leads with WHAT you want to do, not HTTP) ----
+const INTENTS: { kind: Action["kind"]; label: string; icon: typeof Bell; make: () => Action }[] = [
+  { kind: "notify", label: "Notify someone", icon: Bell, make: () => ({ kind: "notify", recipient: { of: "subject" }, title: "" }) },
+  { kind: "notifyManager", label: "Notify the manager", icon: Bell, make: () => ({ kind: "notifyManager", noun: "" }) },
+  { kind: "notifyAudience", label: "Broadcast to an audience", icon: Bell, make: () => ({ kind: "notifyAudience", audience: { kind: "everyone" }, title: "" }) },
+  { kind: "email", label: "Send an email", icon: Mail, make: () => ({ kind: "email", to: { of: "subject" }, subject: "", html: "" }) },
+  { kind: "emailAudience", label: "Email an audience", icon: Mail, make: () => ({ kind: "emailAudience", audience: { kind: "everyone" }, subject: "", html: "" }) },
+  { kind: "apiCall", label: "Create / update a record", icon: Boxes, make: () => ({ kind: "apiCall", method: "POST", path: "/v1/" }) },
+  { kind: "waitFor", label: "Wait for an event", icon: Hourglass, make: () => ({ kind: "waitFor", on: [{ event: "", then: [] }] }) },
+  { kind: "wait", label: "Wait a while", icon: Clock, make: () => ({ kind: "wait", delayDays: 1, then: [] }) },
+  { kind: "emitEvent", label: "Emit an event", icon: Zap, make: () => ({ kind: "emitEvent", type: "" }) },
+  { kind: "webhook", label: "Send a webhook", icon: Globe, make: () => ({ kind: "webhook", url: "" }) },
+];
+
+const LABEL: Record<Action["kind"], string> = {
+  notify: "Notify", notifyManager: "Notify manager", notifyAudience: "Broadcast", apiCall: "API call",
+  emitEvent: "Emit event", wait: "Wait", waitFor: "Wait for", webhook: "Webhook", email: "Email", emailAudience: "Email audience",
+};
+
+// Captured names produced by the actions BEFORE index `i` (for the variable picker's "earlier steps").
+function capturesBefore(actions: Action[], i: number): string[] {
+  return actions.slice(0, i).flatMap((a) => (a.kind === "apiCall" && a.captureAs ? [a.captureAs] : []));
+}
+
+export function ActionList({ actions, onChange, meta, triggerType, inArm }: { actions: Action[]; onChange: (a: Action[]) => void; meta: WorkflowMeta | null; triggerType: string; inArm?: boolean }) {
+  const set = (i: number, a: Action) => onChange(actions.map((x, j) => (j === i ? a : x)));
+  const del = (i: number) => onChange(actions.filter((_, j) => j !== i));
+  const move = (i: number, d: -1 | 1) => { const j = i + d; if (j < 0 || j >= actions.length) return; const copy = [...actions]; [copy[i], copy[j]] = [copy[j]!, copy[i]!]; onChange(copy); };
+  const add = (mk: () => Action) => onChange([...actions, mk()]);
+  const hasTerminalWait = actions.some((a) => a.kind === "waitFor");
+
+  return (
+    <div className="space-y-2">
+      {actions.map((a, i) => (
+        <Card key={i} className="p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{i + 1}. {LABEL[a.kind]}</span>
+            <div className="flex gap-0.5">
+              <Button type="button" variant="ghost" size="icon" onClick={() => move(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></Button>
+              <Button type="button" variant="ghost" size="icon" onClick={() => move(i, 1)} disabled={i === actions.length - 1}><ChevronDown className="h-4 w-4" /></Button>
+              <Button type="button" variant="ghost" size="icon" onClick={() => del(i)}><Trash2 className="h-4 w-4" /></Button>
+            </div>
+          </div>
+          <ActionEditor action={a} onChange={(x) => set(i, x)} meta={meta} triggerType={triggerType} vars={variablesFor(meta, triggerType, capturesBefore(actions, i), inArm)} />
+        </Card>
+      ))}
+      {!hasTerminalWait && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="sm"><Plus className="mr-1 h-4 w-4" /> Add step</Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {INTENTS.map((it) => (
+              <DropdownMenuItem key={it.label} onClick={() => add(it.make)}><it.icon className="mr-2 h-4 w-4" /> {it.label}</DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {hasTerminalWait && <p className="text-xs text-muted-foreground">A "wait for" step ends the list - the continuation lives inside its branches.</p>}
+    </div>
+  );
+}
+
+function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: Action; onChange: (a: Action) => void; meta: WorkflowMeta | null; triggerType: string; vars: Variable[] }) {
+  const a = action;
+  switch (a.kind) {
+    case "notify":
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">To</span>
+            <Select value={a.recipient.of} onValueChange={(of) => onChange({ ...a, recipient: { of: of as never } })}>
+              <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>{(meta?.recipientKinds ?? []).map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}</SelectContent>
+            </Select>
+            {a.recipient.of === "ref" && <TemplatedInput value={a.recipient.field ?? ""} onChange={(field) => onChange({ ...a, recipient: { of: "ref", field } })} vars={vars} placeholder="employee ref field" />}
+          </div>
+          <Field label="Title"><TemplatedInput value={a.title} onChange={(title) => onChange({ ...a, title })} vars={vars} placeholder="Notification title" /></Field>
+          <Field label="Body"><TemplatedInput value={a.body ?? ""} onChange={(body) => onChange({ ...a, body })} vars={vars} textarea placeholder="Optional body" /></Field>
+          <Field label="Link"><Input value={a.link ?? ""} onChange={(e) => onChange({ ...a, link: e.target.value })} placeholder="e.g. leave-requests/history" /></Field>
+        </div>
+      );
+    case "notifyManager":
+      return <Field label="What is it about"><Input value={a.noun} onChange={(e) => onChange({ ...a, noun: e.target.value })} placeholder='e.g. "leave request to review"' /></Field>;
+    case "notifyAudience":
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Audience</span>
+            <Select value={a.audience.kind} onValueChange={(k) => onChange({ ...a, audience: k === "department" ? { kind: "department", department: "" } : k === "employees" ? { kind: "employees", employees: [] } : { kind: "everyone" } })}>
+              <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="everyone">Everyone</SelectItem><SelectItem value="department">A department</SelectItem><SelectItem value="employees">Specific employees</SelectItem></SelectContent>
+            </Select>
+            {a.audience.kind === "department" && <Input className="h-9 flex-1" value={a.audience.department} onChange={(e) => onChange({ ...a, audience: { kind: "department", department: e.target.value } })} placeholder="department id" />}
+          </div>
+          <Field label="Title"><TemplatedInput value={a.title} onChange={(title) => onChange({ ...a, title })} vars={vars} /></Field>
+          <Field label="Body"><TemplatedInput value={a.body ?? ""} onChange={(body) => onChange({ ...a, body })} vars={vars} textarea /></Field>
+        </div>
+      );
+    case "apiCall":
+      return <ApiCallEditor action={a} onChange={onChange} meta={meta} vars={vars} />;
+    case "emitEvent":
+      return (
+        <Field label="Event to emit">
+          <Select value={a.type} onValueChange={(type) => onChange({ ...a, type })}>
+            <SelectTrigger><SelectValue placeholder="pick an event" /></SelectTrigger>
+            <SelectContent>{(meta?.events ?? []).map((e) => <SelectItem key={e.type} value={e.type}>{e.label} ({e.type})</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+      );
+    case "wait":
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Wait</span>
+            <Input type="number" className="h-9 w-20" value={a.delayDays ?? 0} onChange={(e) => onChange({ ...a, delayDays: Number(e.target.value) })} /> <span>days</span>
+            <Input type="number" className="h-9 w-20" value={a.delayHours ?? 0} onChange={(e) => onChange({ ...a, delayHours: Number(e.target.value) })} /> <span>hours, then:</span>
+          </div>
+          <div className="ml-3 border-l pl-3">
+            <ActionList actions={a.then} onChange={(then) => onChange({ ...a, then })} meta={meta} triggerType={triggerType} />
+          </div>
+        </div>
+      );
+    case "waitFor":
+      return <WaitForEditor action={a} onChange={onChange} meta={meta} triggerType={triggerType} />;
+    case "webhook":
+      return (
+        <div className="space-y-2">
+          <Field label="URL"><Input value={a.url} onChange={(e) => onChange({ ...a, url: e.target.value })} placeholder="https://…" /></Field>
+          <Field label="Include fields (comma-separated; blank = whole payload)"><Input value={(a.includeFields ?? []).join(",")} onChange={(e) => onChange({ ...a, includeFields: e.target.value ? e.target.value.split(",").map((s) => s.trim()) : undefined })} /></Field>
+        </div>
+      );
+    case "email":
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">To</span>
+            <Select value={a.to.of} onValueChange={(of) => onChange({ ...a, to: of === "address" ? { of: "address", address: "" } : { of: of as never } })}>
+              <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {(meta?.recipientKinds ?? []).map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}
+                <SelectItem value="address">address</SelectItem>
+              </SelectContent>
+            </Select>
+            {a.to.of === "ref" && <TemplatedInput value={a.to.field ?? ""} onChange={(field) => onChange({ ...a, to: { of: "ref", field } })} vars={vars} placeholder="employee ref field" />}
+            {a.to.of === "address" && <TemplatedInput value={a.to.address} onChange={(address) => onChange({ ...a, to: { of: "address", address } })} vars={vars} placeholder="finance@company.com" />}
+          </div>
+          <Field label="Subject"><TemplatedInput value={a.subject} onChange={(subject) => onChange({ ...a, subject })} vars={vars} placeholder="Email subject" /></Field>
+          <Field label="Body (HTML)"><TemplatedInput value={a.html} onChange={(html) => onChange({ ...a, html })} vars={vars} textarea placeholder="<p>…</p>" /></Field>
+          <Field label="Attachments (a stored document like {{subject}} for a payslip, or a payroll bank file)">
+            <div className="space-y-1.5">
+              {(a.attachments ?? []).map((att, i) => {
+                const isBank = "bankFile" in att;
+                const setAtt = (next: typeof att) => onChange({ ...a, attachments: (a.attachments ?? []).map((x, j) => (j === i ? next : x)) });
+                return (
+                  <div key={i} className="space-y-1.5 rounded-md border p-2">
+                    <div className="flex items-center gap-1.5">
+                      <Select value={isBank ? "bankFile" : "document"} onValueChange={(t) => setAtt(t === "bankFile" ? { bankFile: { run: "{{subject}}", bank: "" }, filename: att.filename } : { document: "{{subject}}", filename: att.filename })}>
+                        <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
+                        <SelectContent><SelectItem value="document">Stored document</SelectItem><SelectItem value="bankFile">Payroll bank file</SelectItem></SelectContent>
+                      </Select>
+                      <Input className="h-9 flex-1" value={att.filename ?? ""} onChange={(e) => setAtt({ ...att, filename: e.target.value || undefined })} placeholder="filename (optional)" />
+                      <Button type="button" variant="ghost" size="icon" onClick={() => onChange({ ...a, attachments: (a.attachments ?? []).filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4" /></Button>
+                    </div>
+                    {isBank ? (
+                      <div className="flex items-center gap-1.5">
+                        <TemplatedInput value={att.bankFile.run} onChange={(run) => setAtt({ bankFile: { ...att.bankFile, run }, filename: att.filename })} vars={vars} placeholder="run, e.g. {{subject}}" />
+                        <Input className="h-9 w-40" value={att.bankFile.bank} onChange={(e) => setAtt({ bankFile: { ...att.bankFile, bank: e.target.value }, filename: att.filename })} placeholder="bank format slug" />
+                      </div>
+                    ) : (
+                      <TemplatedInput value={att.document} onChange={(document) => setAtt({ document, filename: att.filename })} vars={vars} placeholder="{{subject}}" />
+                    )}
+                  </div>
+                );
+              })}
+              <Button type="button" variant="outline" size="sm" onClick={() => onChange({ ...a, attachments: [...(a.attachments ?? []), { document: "" }] })}><Plus className="mr-1 h-4 w-4" /> Add attachment</Button>
+            </div>
+          </Field>
+        </div>
+      );
+    case "emailAudience":
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Audience</span>
+            <Select value={a.audience.kind} onValueChange={(k) => onChange({ ...a, audience: k === "department" ? { kind: "department", department: "" } : k === "employees" ? { kind: "employees", employees: [] } : { kind: "everyone" } })}>
+              <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="everyone">Everyone</SelectItem><SelectItem value="department">A department</SelectItem><SelectItem value="employees">Specific employees</SelectItem></SelectContent>
+            </Select>
+            {a.audience.kind === "department" && <Input className="h-9 flex-1" value={a.audience.department} onChange={(e) => onChange({ ...a, audience: { kind: "department", department: e.target.value } })} placeholder="department id" />}
+          </div>
+          <Field label="Subject"><TemplatedInput value={a.subject} onChange={(subject) => onChange({ ...a, subject })} vars={vars} placeholder="Email subject" /></Field>
+          <Field label="Body (HTML)"><TemplatedInput value={a.html} onChange={(html) => onChange({ ...a, html })} vars={vars} textarea placeholder="<p>…</p>" /></Field>
+        </div>
+      );
+  }
+}
+
+// ---- apiCall: guided Create / Act-on-record / Raw ----
+type BodyRow = { key: string; value: string };
+function bodyToRows(body: unknown): BodyRow[] {
+  return body && typeof body === "object" && !Array.isArray(body) ? Object.entries(body as Record<string, unknown>).map(([k, v]) => ({ key: k, value: typeof v === "string" ? v : JSON.stringify(v) })) : [];
+}
+function rowsToBody(rows: BodyRow[]): Record<string, unknown> | undefined {
+  const entries = rows.filter((r) => r.key.trim());
+  if (!entries.length) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const r of entries) { const v = r.value; out[r.key] = v === "true" ? true : v === "false" ? false : v !== "" && !Number.isNaN(Number(v)) && !v.includes("{{") ? Number(v) : v; }
+  return out;
+}
+
+function ApiCallEditor({ action, onChange, meta, vars }: { action: Extract<Action, { kind: "apiCall" }>; onChange: (a: Action) => void; meta: WorkflowMeta | null; vars: Variable[] }) {
+  const resources = meta?.resources ?? [];
+  // Infer mode from the current shape.
+  const mode = action.method.toUpperCase() === "POST" && !action.path.includes("{{") && /^\/v1\/[a-z-]+$/.test(action.path) ? "create" : action.path.includes("{{") ? "record" : "raw";
+  const rows = bodyToRows(action.body);
+  const setRows = (r: BodyRow[]) => onChange({ ...action, body: rowsToBody(r) });
+  const resourceOf = (path: string) => path.replace("/v1/", "").split(/[/:]/)[0] ?? "";
+
+  const bodyForm = (
+    <Field label="Fields">
+      <div className="space-y-1.5">
+        {rows.map((r, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <Input className="h-9 w-40" value={r.key} onChange={(e) => setRows(rows.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))} placeholder="field" />
+            <TemplatedInput value={r.value} onChange={(v) => setRows(rows.map((x, j) => (j === i ? { ...x, value: v } : x)))} vars={vars} placeholder="value" />
+            <Button type="button" variant="ghost" size="icon" onClick={() => setRows(rows.filter((_, j) => j !== i))}><Trash2 className="h-4 w-4" /></Button>
+          </div>
+        ))}
+        <Button type="button" variant="outline" size="sm" onClick={() => setRows([...rows, { key: "", value: "" }])}><Plus className="mr-1 h-4 w-4" /> Add field</Button>
+      </div>
+    </Field>
+  );
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-sm text-muted-foreground">Do</span>
+        <Select
+          value={mode}
+          onValueChange={(m) => {
+            if (m === "create") onChange({ ...action, method: "POST", path: "/v1/" });
+            else if (m === "record") onChange({ ...action, method: "PATCH", path: "/v1/{{subject}}" });
+            else onChange({ ...action, method: "POST", path: "/v1/" });
+          }}
+        >
+          <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="create">Create a record</SelectItem><SelectItem value="record">Act on a record</SelectItem><SelectItem value="raw">Raw API call</SelectItem></SelectContent>
+        </Select>
+      </div>
+
+      {mode === "create" && (
+        <>
+          <Field label="Resource">
+            <Select value={resourceOf(action.path)} onValueChange={(r) => onChange({ ...action, method: "POST", path: `/v1/${r}` })}>
+              <SelectTrigger><SelectValue placeholder="pick a resource" /></SelectTrigger>
+              <SelectContent>{resources.map((r) => <SelectItem key={r.name} value={r.name}>{r.label}</SelectItem>)}</SelectContent>
+            </Select>
+          </Field>
+          {bodyForm}
+        </>
+      )}
+
+      {mode === "record" && <RecordCall action={action} onChange={onChange} resources={resources} vars={vars} bodyForm={bodyForm} />}
+
+      {mode === "raw" && (
+        <>
+          <div className="flex items-center gap-1.5">
+            <Select value={action.method} onValueChange={(method) => onChange({ ...action, method })}>
+              <SelectTrigger className="h-9 w-28"><SelectValue /></SelectTrigger>
+              <SelectContent>{["POST", "PATCH", "DELETE", "GET"].map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}</SelectContent>
+            </Select>
+            <TemplatedInput value={action.path} onChange={(path) => onChange({ ...action, path })} vars={vars} placeholder="/v1/…" />
+          </div>
+          {bodyForm}
+        </>
+      )}
+
+      <Field label="Save the response as (optional - lets later steps use it)"><Input value={action.captureAs ?? ""} onChange={(e) => onChange({ ...action, captureAs: e.target.value || undefined })} placeholder="e.g. transition" /></Field>
+    </div>
+  );
+}
+
+function RecordCall({ action, onChange, resources, vars, bodyForm }: { action: Extract<Action, { kind: "apiCall" }>; onChange: (a: Action) => void; resources: WorkflowMeta["resources"]; vars: Variable[]; bodyForm: ReactNode }) {
+  // path = /v1/<record ref>[:verb]. record ref is a variable ("{{subject}}" / "{{results.x.path}}"). The chosen
+  // resource is LOCAL state (only to populate the verb dropdown) - it is never persisted on the action (the
+  // server write schema is strict).
+  const withoutV1 = action.path.replace("/v1/", "");
+  const colon = withoutV1.lastIndexOf(":");
+  const record = colon >= 0 ? withoutV1.slice(0, colon) : withoutV1;
+  const verb = colon >= 0 ? withoutV1.slice(colon + 1) : action.method.toUpperCase() === "DELETE" ? "delete" : "update";
+  const [resourceName, setResourceName] = useState("");
+  const resource = resources.find((r) => r.name === resourceName);
+  const setRecord = (r: string) => onChange({ ...action, path: `/v1/${r}${verb === "update" || verb === "delete" ? "" : `:${verb}`}` });
+  const setVerb = (v: string) => {
+    if (v === "update") onChange({ ...action, method: "PATCH", path: `/v1/${record}` });
+    else if (v === "delete") onChange({ ...action, method: "DELETE", path: `/v1/${record}` });
+    else onChange({ ...action, method: "POST", path: `/v1/${record}:${v}` });
+  };
+  return (
+    <>
+      <Field label="Which record"><TemplatedInput value={record} onChange={setRecord} vars={vars} placeholder="{{subject}}" /></Field>
+      <div className="flex items-center gap-2">
+        <span className="text-sm text-muted-foreground">Record type</span>
+        <Select value={resourceName} onValueChange={setResourceName}>
+          <SelectTrigger className="h-9 w-48"><SelectValue placeholder="pick to list actions" /></SelectTrigger>
+          <SelectContent>{resources.map((r) => <SelectItem key={r.name} value={r.name}>{r.label}</SelectItem>)}</SelectContent>
+        </Select>
+        <Select value={verb} onValueChange={setVerb}>
+          <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="update">Update</SelectItem>
+            <SelectItem value="delete">Delete</SelectItem>
+            {(resource?.verbs ?? []).map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+      {verb !== "delete" && bodyForm}
+    </>
+  );
+}
+
+// ---- waitFor: a selector of arms (first to fire wins) ----
+function WaitForEditor({ action, onChange, meta, triggerType }: { action: Extract<Action, { kind: "waitFor" }>; onChange: (a: Action) => void; meta: WorkflowMeta | null; triggerType: string }) {
+  const setArm = (i: number, arm: WaitArm) => onChange({ ...action, on: action.on.map((x, j) => (j === i ? arm : x)) });
+  const delArm = (i: number) => onChange({ ...action, on: action.on.filter((_, j) => j !== i) });
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">Suspends until the first branch fires. An event branch resumes on a matching event; a timer branch resumes after a delay. No timer branch = waits forever.</p>
+      {action.on.map((arm, i) => {
+        const isEvent = "event" in arm;
+        return (
+          <Card key={i} className="border-dashed p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Select value={isEvent ? "event" : "timer"} onValueChange={(t) => setArm(i, t === "event" ? { event: "", then: arm.then } : { timer: { days: 7 }, then: arm.then })}>
+                  <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="event">⚡ On event</SelectItem><SelectItem value="timer">⏲ After timer</SelectItem></SelectContent>
+                </Select>
+                {isEvent ? (
+                  <>
+                    <Select value={(arm as { event: string }).event} onValueChange={(event) => setArm(i, { ...(arm as { event: string; match?: string; then: Action[] }), event })}>
+                      <SelectTrigger className="h-8 w-56"><SelectValue placeholder="pick an event" /></SelectTrigger>
+                      <SelectContent>{(meta?.events ?? []).map((e) => <SelectItem key={e.type} value={e.type}>{e.label}</SelectItem>)}</SelectContent>
+                    </Select>
+                    <Select value={(arm as { match?: string }).match ?? "employeeId"} onValueChange={(match) => setArm(i, { ...(arm as { event: string; then: Action[] }), match })}>
+                      <SelectTrigger className="h-8 w-40"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="employeeId">same employee</SelectItem><SelectItem value="subject">same record</SelectItem></SelectContent>
+                    </Select>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-1 text-sm">
+                    <Input type="number" className="h-8 w-16" value={(arm as { timer: { days?: number } }).timer.days ?? 0} onChange={(e) => setArm(i, { timer: { ...(arm as { timer: { days?: number; hours?: number } }).timer, days: Number(e.target.value) }, then: arm.then })} /> days
+                    <Input type="number" className="h-8 w-16" value={(arm as { timer: { hours?: number } }).timer.hours ?? 0} onChange={(e) => setArm(i, { timer: { ...(arm as { timer: { days?: number; hours?: number } }).timer, hours: Number(e.target.value) }, then: arm.then })} /> hrs
+                  </div>
+                )}
+              </div>
+              <Button type="button" variant="ghost" size="icon" onClick={() => delArm(i)} disabled={action.on.length <= 1}><Trash2 className="h-4 w-4" /></Button>
+            </div>
+            <div className="ml-3 border-l pl-3">
+              <ActionList actions={arm.then} onChange={(then) => setArm(i, { ...arm, then } as WaitArm)} meta={meta} triggerType={isEvent ? (arm as { event: string }).event || triggerType : triggerType} inArm />
+            </div>
+          </Card>
+        );
+      })}
+      <div className="flex gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={() => onChange({ ...action, on: [...action.on, { event: "", then: [] }] })}><Plus className="mr-1 h-4 w-4" /> Event branch</Button>
+        <Button type="button" variant="outline" size="sm" onClick={() => onChange({ ...action, on: [...action.on, { timer: { days: 30 }, then: [] }] })}><Plus className="mr-1 h-4 w-4" /> Timer branch</Button>
+      </div>
+    </div>
+  );
+}

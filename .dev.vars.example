@@ -1,0 +1,20 @@
+# Copy to .dev.vars (git-ignored) for local `wrangler dev`. NEVER commit real secrets.
+# Generate the two base64 keys with:  openssl rand -base64 32
+FIELD_ENCRYPTION_KEY="paste-32-byte-base64-key"   # AES-256-GCM master key; must decode to exactly 32 bytes
+WIRE_ID_KEY="paste-32-byte-base64-key"            # wire-id codec master; >= 32 bytes of base64 entropy
+CF_ACCESS_AUD="paste-access-application-audience-tag"
+EMAIL_API_KEY="paste-resend-api-key"
+# EMAIL_FROM and CF_ACCESS_TEAM_DOMAIN default from wrangler.toml [vars]; override here only if needed.
+
+# Optional: restrict which email domains may AUTO-PROVISION on first login (comma-separated). Cloudflare Access
+# is the real perimeter; this is a cheap second net. Unset = no restriction. Example: ALLOWED_EMAIL_DOMAINS="example.com"
+#ALLOWED_EMAIL_DOMAINS="example.com"
+
+# Local-only dev bypass for the Access JWT (NEVER set in production). BOTH are required for the bypass:
+DEV_FAKE_EMAIL="you@yourcompany.com"
+ALLOW_DEV_AUTH="true"
+
+# Optional: e-sign (Cashfree Aadhaar eSign) vendor secrets. Only needed if you enable the cashfree provider.
+# The client secret also signs the webhook (Cashfree has no separate webhook secret). See docs/05-add-esign-provider.md.
+#ESIGN_CASHFREE_CLIENT_ID="..."
+#ESIGN_CASHFREE_CLIENT_SECRET="..."

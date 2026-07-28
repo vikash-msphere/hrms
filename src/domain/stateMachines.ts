@@ -1,0 +1,56 @@
+// State machines as DATA (PURE - no I/O). A collection's status workflow is a declarative table of
+// transitions (verb: from-states -> to-state) instead of an inline `if (status !== X) throw` ladder or a
+// hardcoded const map. Stored in settings so it is configurable, validated by validateStateMachine, and
+// evaluated by canTransition. This is the generalization of the payroll/tickets/offers transition maps; the
+// tickets workflow is the first consumer (services/tickets.ts). See docs/workflow-engine-plan.md (Layer 3).
+
+export type Transition = { verb: string; from: string[]; to: string };
+export type StateMachine = { states: string[]; initial: string; transitions: Transition[] };
+
+// The transition for `verb` that is legal from `fromState`, or null if the verb doesn't apply / isn't allowed
+// from that state. Callers throw a failedPrecondition on null.
+export function transitionFor(sm: StateMachine, verb: string, fromState: string): Transition | null {
+  const t = sm.transitions.find((x) => x.verb === verb);
+  if (!t) return null;
+  return t.from.includes(fromState) ? t : null;
+}
+
+export function canTransition(sm: StateMachine, verb: string, fromState: string): boolean {
+  return transitionFor(sm, verb, fromState) !== null;
+}
+
+// The set of verbs legal from a given state (drives "what can I do next" affordances).
+export function verbsFrom(sm: StateMachine, fromState: string): string[] {
+  return sm.transitions.filter((t) => t.from.includes(fromState)).map((t) => t.verb);
+}
+
+// Returns a list of problems; empty = valid. A saved workflow must reference only declared states and keep a
+// valid initial state, so a mis-edit can't strand a row in an unreachable status.
+export function validateStateMachine(sm: StateMachine): string[] {
+  const errors: string[] = [];
+  if (!sm.states?.length) errors.push("states must be non-empty");
+  const set = new Set(sm.states ?? []);
+  if (!set.has(sm.initial)) errors.push(`initial state "${sm.initial}" is not in states`);
+  if (!Array.isArray(sm.transitions) || !sm.transitions.length) errors.push("at least one transition is required");
+  for (const [i, t] of (sm.transitions ?? []).entries()) {
+    if (!t.verb) errors.push(`transitions[${i}]: verb is required`);
+    if (!set.has(t.to)) errors.push(`transitions[${i}]: to-state "${t.to}" is not in states`);
+    for (const f of t.from ?? []) if (!set.has(f)) errors.push(`transitions[${i}]: from-state "${f}" is not in states`);
+    if (!t.from?.length) errors.push(`transitions[${i}]: needs at least one from-state`);
+  }
+  return errors;
+}
+
+// Support tickets workflow (settings key "ticket-workflow"). Mirrors the former inline TRANSITIONS map exactly,
+// so making it data-driven is behaviour-preserving until an admin edits it.
+export const DEFAULT_TICKET_WORKFLOW: StateMachine = {
+  states: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "CANCELLED"],
+  initial: "OPEN",
+  transitions: [
+    { verb: "start", from: ["OPEN"], to: "IN_PROGRESS" },
+    { verb: "resolve", from: ["OPEN", "IN_PROGRESS"], to: "RESOLVED" },
+    { verb: "close", from: ["RESOLVED"], to: "CLOSED" },
+    { verb: "reopen", from: ["RESOLVED", "CLOSED"], to: "OPEN" },
+    { verb: "cancel", from: ["OPEN", "IN_PROGRESS"], to: "CANCELLED" },
+  ],
+};

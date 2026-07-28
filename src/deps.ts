@@ -1,0 +1,74 @@
+import { drizzle } from "drizzle-orm/d1";
+import * as schema from "./db/schema";
+import type { Bindings } from "./env";
+import { makeEncryptor } from "./lib/crypto";
+import { makeIdCodec, type IdCodec } from "./lib/idCodec";
+import { makeEmailSender, EMAIL_PROVIDERS, type EmailProvider } from "./lib/email";
+import { makeDocumentStore } from "./lib/docstore";
+import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender } from "./ports";
+import type { EsignSecrets } from "./domain/esign";
+import { makeDispatch, type Dispatch } from "./services/internalDispatch";
+
+export type DB = ReturnType<typeof drizzle<typeof schema>>;
+// `webhook` is optional: automation egress is OFF unless an operator wires a sender (allowlisted destinations).
+// `dispatch` runs an automation `apiCall` action through the app's own middleware as the system principal.
+// `automationBudget` bounds the TOTAL automation dispatches per originating request. It is a mutable counter
+// shared across the request's Deps; because an automation `apiCall` re-dispatches through the app reusing this
+// same Deps (env.__sharedCtx.deps), a rule whose action re-triggers its own event cannot loop unbounded.
+// `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
+// the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
+// reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
+export type Deps = { db: DB; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number }; trace?: string };
+
+// Route the request's reads to the nearest D1 read replica when the runtime supports Sessions
+// (production); fall back to the plain binding where it doesn't (miniflare, the local/test runtime,
+// lacks `withSession`). `first-unconstrained` lets the first query hit any replica, while the session's
+// sequential consistency keeps read-your-writes intact for the rest of the request. Behavior-neutral
+// otherwise: a D1DatabaseSession exposes the same prepare/batch the drizzle D1 driver uses (it just
+// lacks exec/dump, hence the cast).
+export function sessionBinding(d1: D1Database): D1Database {
+  return typeof d1.withSession === "function"
+    ? (d1.withSession("first-unconstrained") as unknown as D1Database)
+    : d1;
+}
+
+// Fail fast on misconfiguration. A missing/short crypto key otherwise surfaces as a generic per-request 500
+// deep inside Web Crypto with no hint; these checks turn that into one clear error at Deps construction.
+function assertConfigured(env: Bindings): void {
+  const b64len = (s: string | undefined): number => {
+    if (!s) return -1;
+    try { return Buffer.from(s, "base64").length; } catch { return -1; }
+  };
+  // AES-256-GCM master key MUST decode to exactly 32 bytes.
+  if (b64len(env.FIELD_ENCRYPTION_KEY) !== 32) throw new Error("FIELD_ENCRYPTION_KEY must be a base64-encoded 32-byte key");
+  // Wire-id master feeds HKDF; require >=32 bytes of base64 entropy.
+  if (b64len(env.WIRE_ID_KEY) < 32) throw new Error("WIRE_ID_KEY must be a base64-encoded key of at least 32 bytes");
+  // Other required strings: absence here also produces opaque downstream failures.
+  for (const k of ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "EMAIL_API_KEY", "EMAIL_FROM"] as const) {
+    if (!env[k]) throw new Error(`${k} is not configured`);
+  }
+  if (env.EMAIL_PROVIDER && !EMAIL_PROVIDERS.includes(env.EMAIL_PROVIDER as EmailProvider)) {
+    throw new Error(`EMAIL_PROVIDER must be one of ${EMAIL_PROVIDERS.join(", ")}`);
+  }
+}
+
+export function makeDeps(env: Bindings): Deps {
+  assertConfigured(env);
+  const encryptor = makeEncryptor(env.FIELD_ENCRYPTION_KEY);
+  const deps: Deps = {
+    db: drizzle(sessionBinding(env.DB), { schema }),
+    clock: { now: () => new Date() },
+    encryptor,
+    idCodec: makeIdCodec(env.WIRE_ID_KEY),
+    email: makeEmailSender((env.EMAIL_PROVIDER as EmailProvider) || "resend", env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_REGION),
+    docs: makeDocumentStore(env.DOCS, encryptor), // R2 objects are encrypted app-side
+    // E-sign vendor secrets, keyed by provider id (never sourced from the settings blob). For Cashfree,
+    // apiKey = x-client-id, apiSecret = x-client-secret (also the webhook HMAC key).
+    esignSecrets: {
+      cashfree: { apiKey: env.ESIGN_CASHFREE_CLIENT_ID, apiSecret: env.ESIGN_CASHFREE_CLIENT_SECRET, publicKey: env.ESIGN_CASHFREE_PUBLIC_KEY },
+    },
+  };
+  // Internal API dispatch for automation `apiCall` actions (re-dispatches through app.fetch as system).
+  deps.dispatch = makeDispatch(env, deps);
+  return deps;
+}

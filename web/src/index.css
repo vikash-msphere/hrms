@@ -1,0 +1,240 @@
+/* App UI font (Inter) plus the optional wordmark faces for the organization-name font selector
+   (Settings -> Organization). One @import so no rule sits between imports (a comment there can make a CSS
+   bundler drop the following @import). Each family loads the full weight range the selector offers
+   (Regular..Extra bold) so the weight picker takes effect; faces whose max is 700 (Comfortaa, Oswald, Space
+   Grotesk) cap there, and Pacifico is a single-weight script. */
+@import url("https://fonts.googleapis.com/css2?family=Comfortaa:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&family=Montserrat:wght@400;500;600;700;800&family=Oswald:wght@400;500;600;700&family=Pacifico&family=Playfair+Display:wght@400;500;600;700;800&family=Poppins:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Design language: modern-enterprise, on the Metasphere identity - a navy -> teal brand (from Metasphere.svg,
+     mirrored in the email template). Primary is the navy-blue anchor; teal is the complementary accent; the
+     neutral ramp is a calm cool slate biased toward the brand hue. Real elevation (white cards lift off a
+     faintly tinted page). Every colour is a token so the .dark block re-skins the whole app by overriding the
+     same names. Identity = brand blue (primary) with a teal accent + the brand gradient for signature surfaces. */
+  :root {
+    --background: 220 24% 97%;
+    --foreground: 222 26% 13%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 26% 13%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 26% 13%;
+
+    --primary: 224 64% 44%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 18% 94%;
+    --secondary-foreground: 222 24% 22%;
+
+    --muted: 220 18% 94%;
+    --muted-foreground: 220 10% 46%;
+
+    /* Accent = a light teal surface (the gradient's far end), with a deep teal-blue foreground. */
+    --accent: 187 58% 93%;
+    --accent-foreground: 197 76% 28%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 60% 38%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 35 92% 48%;
+    --warning-foreground: 35 80% 16%;
+
+    --border: 220 18% 90%;
+    --input: 220 18% 90%;
+    --ring: 224 64% 44%;
+
+    /* Light sidebar: a hair greyer than the page so it recedes as chrome (cards 100% > page 97% > sidebar
+       95%), separated by a right border. Nav text is a medium slate; the active item carries the brand blue.
+       In dark mode (below) it flips to a dark slate. */
+    --sidebar: 222 16% 95%;
+    --sidebar-foreground: 222 12% 42%;
+    --sidebar-accent: 224 64% 44%;
+    --sidebar-border: 220 14% 88%;
+
+    /* The Metasphere brand gradient (navy -> mid -> teal), for signature surfaces (sidebar brand, hero, auth).
+       Kept as its own token so components opt in via the .brand-gradient utility rather than hard-coding it. */
+    --brand-gradient: linear-gradient(120deg, hsl(232 66% 32%), hsl(203 67% 40%), hsl(179 64% 45%));
+
+    /* Themeable elevation: cards rely on shadow in light mode, on border + a deeper shadow in dark. */
+    --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 2px 6px -1px rgba(16, 24, 40, 0.06);
+    --shadow-card-hover: 0 8px 24px -8px rgba(16, 24, 40, 0.18);
+    --shadow-pop: 0 12px 32px -8px rgba(16, 24, 40, 0.16), 0 2px 6px -2px rgba(16, 24, 40, 0.08);
+
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    --background: 224 28% 8%;
+    --foreground: 214 18% 90%;
+
+    --card: 223 24% 11%;
+    --card-foreground: 214 18% 90%;
+
+    --popover: 223 26% 12%;
+    --popover-foreground: 214 18% 90%;
+
+    --primary: 205 78% 62%;
+    --primary-foreground: 224 45% 9%;
+
+    --secondary: 223 18% 18%;
+    --secondary-foreground: 214 18% 88%;
+
+    --muted: 223 18% 17%;
+    --muted-foreground: 217 14% 60%;
+
+    --accent: 195 44% 20%;
+    --accent-foreground: 185 72% 76%;
+
+    --destructive: 0 64% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 52% 46%;
+    --success-foreground: 152 40% 8%;
+
+    --warning: 35 88% 56%;
+    --warning-foreground: 35 60% 10%;
+
+    --border: 223 18% 21%;
+    --input: 223 18% 23%;
+    --ring: 205 78% 62%;
+
+    --sidebar: 224 22% 11%;
+    --sidebar-foreground: 217 14% 68%;
+    --sidebar-accent: 205 78% 62%;
+    --sidebar-border: 224 16% 18%;
+
+    /* Gradient reads brighter on the dark ground so it still carries the brand. */
+    --brand-gradient: linear-gradient(120deg, hsl(226 60% 46%), hsl(200 66% 50%), hsl(179 62% 52%));
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
+    --shadow-card-hover: 0 10px 28px -10px rgba(0, 0, 0, 0.6);
+    --shadow-pop: 0 16px 40px -12px rgba(0, 0, 0, 0.7), 0 2px 8px -2px rgba(0, 0, 0, 0.5);
+  }
+
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Cross-fade colours when the theme flips, so the light/dark switch feels intentional rather than a flash.
+     Scoped to colour/shadow so layout/transform animations elsewhere are untouched. */
+  .theme-transition * {
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, fill 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  /* Signature Metasphere surface: the navy -> teal brand gradient. Opt in on brand chrome (sidebar brand,
+     auth hero) rather than baking it into every primary surface. */
+  .brand-gradient {
+    background-image: var(--brand-gradient);
+    background-color: hsl(224 64% 44%); /* fallback ground before the image paints */
+  }
+}
+
+@layer components {
+  /* Elevation utilities backed by themeable tokens (see --shadow-* above). */
+  .shadow-card {
+    box-shadow: var(--shadow-card);
+  }
+  .shadow-card-hover {
+    box-shadow: var(--shadow-card-hover);
+  }
+  .shadow-pop {
+    box-shadow: var(--shadow-pop);
+  }
+}
+
+/* Org chart: pure-CSS top-down tree connectors (nested ul/li). Roots (direct children of .org-tree) get no
+   connector; nested children get the classic centre-drop + horizontal bus. Border colour follows the theme. */
+.org-tree,
+.org-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.org-tree {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+.org-tree ul {
+  display: flex;
+  justify-content: center;
+  position: relative;
+  padding-top: 1.25rem;
+}
+.org-tree li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 0.5rem;
+}
+/* horizontal bus across nested children */
+.org-tree ul > li::before,
+.org-tree ul > li::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 1.25rem;
+  border-top: 2px solid hsl(var(--border));
+}
+.org-tree ul > li::before { right: 50%; }
+.org-tree ul > li::after { left: 50%; }
+.org-tree ul > li:first-child::before,
+.org-tree ul > li:last-child::after { border: 0 none; }
+.org-tree ul > li:last-child::before { border-right: 2px solid hsl(var(--border)); }
+.org-tree ul > li:only-child::before,
+.org-tree ul > li:only-child::after { display: none; }
+/* centre drop from a parent card into its children bus */
+.org-tree ul::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  height: 1.25rem;
+  border-left: 2px solid hsl(var(--border));
+}
+
+/* Thin, unobtrusive scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.55);
+  background-clip: content-box;
+}
+
+/* Keep horizontal overflow scrollable (narrow viewports) without painting a scrollbar. Used by tab bars, whose
+   active underline sits 1px below the line (-mb-px): overflow-x:auto forces overflow-y:auto, so that 1px would
+   otherwise raise a stray scrollbar even when the tabs fit. */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* old Edge/IE */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
+}

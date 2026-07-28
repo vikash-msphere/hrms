@@ -1,0 +1,1552 @@
+// Row -> AEP wire resource boundary. Emits `path`, snake_case fields, and standard fields.
+// NEVER emit *Enc columns or other DB-only fields.
+import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
+import { round2 } from "../domain/money";
+import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
+
+// Entities whose id resolves via uuidToCode (the same set the activity authz gate uses). An activity row's
+// drill-ref is only emitted for these, so the feed never links to a non-resource entity (settings, batch,
+// the activity endpoint itself, …) that would fail the target-resolve gate and audit a bogus denial.
+const RESOLVABLE_ENTITIES = new Set(RESOURCE_COLLECTIONS);
+
+export const etagOf = (updateTimeMs: number) => `W/"${updateTimeMs}"`;
+const iso = (d: Date | number) => new Date(d).toISOString();
+
+type BaseRow = {
+  uuid: string;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+  deleteTime?: Date | number | null;
+  disabled?: boolean | null;
+  locked?: boolean | null;
+  lockedBy?: string | null;
+  published?: boolean | null;
+};
+
+// Standard fields shared by every resource (+ lifecycle flags where the row carries them).
+function baseResource(row: BaseRow, collection: string) {
+  return {
+    path: `${collection}/${row.uuid}`,
+    create_time: iso(row.createdAt),
+    update_time: iso(row.updatedAt),
+    etag: etagOf(+new Date(row.updatedAt)),
+    ...(row.deleteTime ? { delete_time: iso(row.deleteTime) } : {}),
+    ...(row.disabled !== undefined ? { disabled: !!row.disabled } : {}),
+    ...(row.locked !== undefined ? { locked: !!row.locked } : {}),
+    ...(row.lockedBy ? { locked_by: row.lockedBy } : {}),
+    ...(row.published !== undefined ? { published: !!row.published } : {}),
+  };
+}
+const ref = (collection: string, id: string | null) => (id ? `${collection}/${id}` : undefined);
+
+export function toPreferenceResource(r: any) {
+  return {
+    path: `preferences/${r.key}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    key: r.key,
+    value: r.value ? JSON.parse(r.value) : {},
+  };
+}
+
+export function toUserResource(r: any) {
+  return {
+    ...baseResource(r, "users"),
+    email: r.email,
+    role: r.role,
+    status: r.status,
+    employee: ref("employees", r.employeeId),
+  };
+}
+
+export function toEmployeeResource(r: any) {
+  return {
+    ...baseResource(r, "employees"),
+    first_name: r.firstName,
+    last_name: r.lastName,
+    legal_name: r.legalName ?? undefined,
+    employee_number: r.employeeNumber ?? undefined,
+    work_email: r.workEmail,
+    job_title: r.jobTitle ?? undefined,
+    department: ref("departments", r.departmentId),
+    manager: ref("employees", r.managerId),
+    start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
+    probation_end_date: r.probationEndDate ? iso(r.probationEndDate).slice(0, 10) : undefined,
+    epf_enrolled: !!r.epfEnrolled,
+    photo: r.photoKey ? `employees/${r.uuid}:getPhoto` : undefined,
+    signature: r.signatureKey ? `employees/${r.uuid}:getSignature` : undefined,
+    // national_id / bank_details intentionally omitted (write-only, encrypted at rest).
+  };
+}
+
+export function toDepartmentResource(r: any) {
+  let managerIds: string[] = [];
+  try {
+    const a = JSON.parse(r.managerIds ?? "[]");
+    if (Array.isArray(a)) managerIds = a.filter((x: unknown): x is string => typeof x === "string");
+  } catch {
+    /* malformed -> none */
+  }
+  return {
+    ...baseResource(r, "departments"),
+    display_name: r.name,
+    parent: ref("departments", r.parentId),
+    managers: managerIds.map((id) => `employees/${id}`),
+  };
+}
+
+export function toHolidayResource(r: any) {
+  return {
+    ...baseResource(r, "holidays"),
+    display_name: r.name,
+    date: iso(r.date).slice(0, 10),
+    kind: r.kind,
+    ...(r.selected !== undefined ? { selected: !!r.selected } : {}),
+    ...(r.selectionId ? { selection: `holiday-selections/${r.selectionId}` } : {}),
+  };
+}
+
+export function toComplianceEventResource(r: any) {
+  const overdue = r.status === "pending" && r.dueDate ? +new Date(r.dueDate) < Date.now() : false;
+  return {
+    ...baseResource(r, "compliance-events"),
+    title: r.title,
+    category: r.category ?? undefined,
+    frequency: r.frequency,
+    due_date: iso(r.dueDate).slice(0, 10),
+    period_label: r.periodLabel ?? undefined,
+    status: r.status,
+    overdue: overdue || undefined,
+    filed_date: r.filedDate ? iso(r.filedDate).slice(0, 10) : undefined,
+    reference: r.reference ?? undefined,
+    assignee: ref("employees", r.assigneeId),
+    notes: r.notes ?? undefined,
+    rule: ref("compliance-rules", r.ruleId),
+  };
+}
+
+export function toBackgroundCheckResource(r: any) {
+  return {
+    ...baseResource(r, "background-checks"),
+    employee: ref("employees", r.employeeId),
+    transition: ref("transitions", r.transitionId),
+    check_type: r.checkType,
+    status: r.status,
+    vendor: r.vendor ?? undefined,
+    reference_no: r.referenceNo ?? undefined,
+    initiated_date: r.initiatedDate ? iso(r.initiatedDate).slice(0, 10) : undefined,
+    completed_date: r.completedDate ? iso(r.completedDate).slice(0, 10) : undefined,
+    notes: r.notes ?? undefined,
+  };
+}
+
+export function toComplianceRuleResource(r: any) {
+  return {
+    ...baseResource(r, "compliance-rules"),
+    title: r.title,
+    category: r.category ?? undefined,
+    frequency: r.frequency,
+    due_day: r.dueDay,
+    anchor_month: r.anchorMonth ?? undefined,
+    assignee: ref("employees", r.assigneeId),
+    notes: r.notes ?? undefined,
+    active: r.active,
+  };
+}
+
+export function toEventResource(r: any) {
+  return {
+    ...baseResource(r, "events"),
+    title: r.title,
+    // Full instants; for an all-day event the time-of-day is not meaningful (only the date matters).
+    start_time: iso(r.startTime),
+    end_time: iso(r.endTime),
+    all_day: !!r.allDay,
+    count_as_work: !!r.countAsWork,
+    color: r.color ?? undefined,
+    description: r.description ?? undefined,
+    // attendeeIds is stored as a JSON array of employee uuids; emit as employee refs (tokenized on the wire).
+    attendees: ((): string[] => {
+      try { return (JSON.parse(r.attendeeIds ?? "[]") as string[]).map((id) => `employees/${id}`); } catch { return []; }
+    })(),
+  };
+}
+
+export function toHolidaySelectionResource(r: any) {
+  return {
+    path: `holiday-selections/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    etag: etagOf(+new Date(r.createdAt)),
+    holiday: ref("holidays", r.holidayId),
+    employee: ref("employees", r.employeeId),
+  };
+}
+
+export function toSettingResource(r: any) {
+  return {
+    path: `settings/${r.key}`,
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    key: r.key,
+    value: r.value ? JSON.parse(r.value) : {},
+  };
+}
+
+export function toRoleResource(r: any) {
+  return {
+    path: `roles/${r.name}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    name: r.name,
+    label: r.label,
+    protected: !!r.protected,
+  };
+}
+
+// One access rule (an access_rules row, role OR user). Reverses the row to the structured shape: subject as
+// `users/<uuid>` (or the role name), collection = namespace, scope = scopeKind, plus the rule's level OR verb
+// and effect. `field` and `verb` are read back from the verbatim pattern (tokens after the id position); for
+// an exact rule, `scope_ref` is rebuilt as `<collection>/<objectUuid>` (resolved by the caller). The outbound
+// edge encodes the `users/<uuid>` and `<col>/<uuid>` refs to wire tokens.
+export function toAccessRuleResource(r: any, objectUuid: string | null) {
+  const toks = String(r.pattern).split(".");
+  const tail = toks[toks.length - 1];
+  // A custom-method rule (allow OR deny) has no level and a non-`**` tail (the verb). Deny rules carry the verb
+  // too, so a verb-deny round-trips as a custom-method rule (not misread as an object-level deny).
+  const verb = r.level === null && tail !== "**" ? tail : undefined;
+  // <col>.<id>.<field...>.** - the field is everything between the id token and the `**` tail, so a sub-resource
+  // field path (identity.uan) round-trips whole (not just its last token).
+  const field = toks.length >= 4 && tail === "**" ? toks.slice(2, -1).join(".") : undefined;
+  return {
+    path: `access-rules/${r.id}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    subject_kind: r.subjectKind,
+    subject: r.subjectKind === "user" ? `users/${r.subject}` : r.subject,
+    collection: r.namespace,
+    scope: r.scopeKind, // all | self | dept | subtree | exact
+    ...(r.scopeKind === "exact" && objectUuid ? { scope_ref: `${r.namespace}/${objectUuid}` } : {}),
+    ...(field ? { field } : {}),
+    ...(r.level ? { level: r.level } : {}),
+    ...(verb ? { verb } : {}),
+    effect: r.effect,
+  };
+}
+
+export function toPolicyResource(r: any) {
+  return {
+    path: `policy/${r.key}`,
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    key: r.key,
+    value: r.valueJson ? JSON.parse(r.valueJson) : {},
+  };
+}
+
+export function toAnnouncementResource(r: any) {
+  return {
+    ...baseResource(r, "announcements"),
+    kind: r.kind ?? "announcement",
+    title: r.title,
+    // `body` is markdown-lite source (the card renders it); `body_text` is the same words with the markup
+    // stripped, for anywhere that wants prose - a search snippet, a dashboard teaser, an export.
+    body: r.body,
+    body_text: r.bodyText ?? r.body,
+    title_align: r.titleAlign ?? undefined,
+    body_valign: r.bodyValign ?? undefined,
+    author: ref("employees", r.authorEmployeeId),
+    publish_time: r.publishTime ? iso(r.publishTime) : undefined,
+    // Whether the calling viewer has a read receipt for this post (drives the dashboard "unread" widget).
+    // Attached by the route from the caller's read rows; absent = treat as unread. The author/HR-only
+    // "Read by" list (read_by / read_count) is attached by the route, gated on the access affordance.
+    read: !!r._read,
+    // Grouped reactions [{ emoji, count, reacted }], attached by the route. `reacted` = the calling viewer.
+    reactions: (r._reactions as { emoji: string; count: number; reacted: boolean }[] | undefined) ?? [],
+    // The reply thread (oldest-first) + its count, attached by the route.
+    replies: (r._replies as any[] | undefined)?.map(toAnnouncementReplyResource) ?? [],
+    reply_count: (r._replies as any[] | undefined)?.length ?? 0,
+    // Poll block (kind="poll" only): options + anonymous tallies (attached by the route as `_poll`), plus the
+    // config from the row. `closed` = locked or past the deadline; `voted` = the caller has cast a vote.
+    poll: r.kind === "poll"
+      ? {
+          multiple: !!r.pollMultiple,
+          closes_time: r.pollClosesAt ? iso(r.pollClosesAt) : undefined,
+          closed: !!r.locked || (!!r.pollClosesAt && Date.now() > +new Date(r.pollClosesAt)),
+          total_votes: r._poll?.totalVotes ?? 0,
+          voted: !!r._poll?.voted,
+          options: (r._poll?.options as { id: string; label: string; votes: number; voted: boolean }[] | undefined) ?? [],
+        }
+      : undefined,
+    // Kudos (kind="kudos"): the recognized employee + recognition meta. The giver is `author` (above); the
+    // message is `body`. `points` is the server-snapshotted weight of the level (drives the leaderboard).
+    recipient: r.kind === "kudos" ? ref("employees", r.recipientEmployeeId) : undefined,
+    recipient_department: r.kind === "kudos" ? ref("departments", r.recipientDepartmentId) : undefined,
+    value: r.kind === "kudos" ? (r.value ?? undefined) : undefined,
+    category: r.kind === "kudos" ? (r.category ?? undefined) : undefined,
+    level: r.kind === "kudos" ? (r.level ?? undefined) : undefined,
+    points: r.kind === "kudos" ? (r.points ?? 0) : undefined,
+    // Card art - every kind carries it, not only kudos - and where the author placed it (absent = inline default).
+    illustration: r.illustration ?? undefined,
+    illustration_layout: parseIllustrationLayout(r.illustrationLayout),
+    recipient_layout: r.kind === "kudos" ? parseRecipientLayout(r.recipientLayout) : undefined,
+  };
+}
+
+// A board post's reply. Not a directly-addressable resource (no `path`); emitted only inline on the post. `id`
+// is the reply's raw pk (a sub-resource handle, like ticket todos - NOT wire-id encoded), used to target the
+// reply with the `react` verb. `author` is an employees ref (tokenized on the wire); `author_email` is the
+// fallback for an actor with no employee record. `reactions` are grouped like a post's, attached by the route.
+export function toAnnouncementReplyResource(r: any) {
+  return {
+    id: r.uuid,
+    author: ref("employees", r.authorId),
+    author_email: r.authorEmail ?? undefined,
+    body: r.body,
+    create_time: iso(r.createdAt),
+    reactions: (r._reactions as { emoji: string; count: number; reacted: boolean }[] | undefined) ?? [],
+  };
+}
+
+export function toLeaveTypeResource(r: any) {
+  return {
+    ...baseResource(r, "leave-types"),
+    display_name: r.name,
+    accrual_days_per_year: r.accrualDaysPerYear ?? undefined,
+    accrual_frequency: r.accrualFrequency ?? "monthly",
+    paid: r.paid,
+    color: r.color ?? undefined,
+    available_during_probation: r.availableDuringProbation,
+    probation_accrual_days_per_year: r.probationAccrualDaysPerYear ?? 0,
+    probation_cap_days: r.probationCapDays ?? undefined,
+    encashable: r.encashable,
+    encashment_cap_days_per_year: r.encashmentCapDaysPerYear ?? undefined,
+    min_balance_retained_days: r.minBalanceRetainedDays ?? 0,
+    carry_forward: r.carryForward,
+    carry_forward_cap_days: r.carryForwardCapDays ?? undefined,
+  };
+}
+
+export function toGoalResource(r: any) {
+  return {
+    ...baseResource(r, "goals"),
+    employee: ref("employees", r.employeeId),
+    title: r.title,
+    description: r.description ?? undefined,
+    weight: r.weight ?? 0,
+    progress: r.progress ?? 0,
+    status: r.status,
+    due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
+  };
+}
+
+export function toBoardResource(r: any) {
+  const parse = (s: string | null | undefined) => {
+    try {
+      return s ? JSON.parse(s) : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    ...baseResource(r, "boards"),
+    name: r.name,
+    description: r.description ?? undefined,
+    task_prefix: r.taskPrefix ?? "",
+    mode: r.mode ?? "kanban",
+    columns: parse(r.columnsJson),
+    swimlane_mode: r.swimlaneMode,
+    swimlanes: parse(r.swimlanesJson),
+    labels: parse(r.labelsJson),
+    hide_empty_lanes: !!r.hideEmptyLanes,
+    reassign_lane_on_move: !!r.reassignLaneOnMove,
+    no_lane_label: r.noLaneLabel ?? undefined,
+    card_count: r._cardCount, // attached by the route on list/get
+  };
+}
+
+export function toCardResource(r: any) {
+  return {
+    ...baseResource(r, "cards"),
+    board: ref("boards", r.boardId),
+    key: r.seq != null ? (r.keyPrefix ? `${r.keyPrefix}-${r.seq}` : `#${r.seq}`) : undefined,
+    sprint: ref("sprints", r.sprintId),
+    employee: ref("employees", r.employeeId),
+    department: ref("departments", r.departmentId), // the card's department (defaults to the org default at create)
+    assignee: ref("employees", r.assigneeId),
+    column_key: r.columnKey,
+    swimlane_key: r.swimlaneKey ?? undefined,
+    rank: r.rank ?? 0,
+    title: r.title,
+    description: r.description ?? undefined,
+    priority: r.priority,
+    labels: (() => { try { return r.labelsJson ? JSON.parse(r.labelsJson) : []; } catch { return []; } })(),
+    size: r.size ?? undefined,
+    due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
+    blocked: !!r.blocked,
+    block_reason: r.blockReason ?? undefined,
+    blocked_by: ref("cards", r.blockedById),
+    goal: ref("goals", r.goalId),
+    commit_time: r.committedAt ? iso(r.committedAt) : undefined,
+    start_time: r.startedAt ? iso(r.startedAt) : undefined,
+    deliver_time: r.deliveredAt ? iso(r.deliveredAt) : undefined,
+    comments: (r._comments ?? []).map(toCardCommentResource), // attached by the route on Get
+    // Checklist: full items on the item Get (_todos); compact progress on the list (todoDone/todoTotal).
+    ...(r._todos ? { todos: r._todos.map(toCardTodoResource) } : {}),
+    todo_done: Array.isArray(r._todos) ? r._todos.filter((x: any) => x.done).length : (r.todoDone ?? 0),
+    todo_total: Array.isArray(r._todos) ? r._todos.length : (r.todoTotal ?? 0),
+  };
+}
+
+// A card's checklist item (subtask; sub-resource, no path). `id` is the handle for :toggleTodo/:removeTodo.
+export function toCardTodoResource(r: any) {
+  return { id: r.uuid, text: r.text, done: !!r.done, create_time: iso(r.createdAt) };
+}
+
+// A card's threaded comment (sub-resource; no path). `author` is an employees ref (tokenized on the wire).
+export function toCardCommentResource(r: any) {
+  return {
+    author: ref("employees", r.authorId),
+    author_email: r.authorEmail ?? undefined,
+    body: r.body,
+    create_time: iso(r.createdAt),
+  };
+}
+
+// One audit-trail entry, for the on-demand activity feed. `actor` is the actor's employee ref (tokenized on
+// the wire; the client resolves name/avatar from its cached employees) with the email as a fallback. Lean by
+// design — the caller already knows which resource they asked about.
+export function toActivityResource(r: any) {
+  let meta: unknown;
+  try {
+    meta = r.meta ? JSON.parse(r.meta) : undefined;
+  } catch {
+    meta = undefined;
+  }
+  return {
+    path: `activity/${r.uuid}`,
+    action: r.action,
+    entity: r.entity ?? undefined,
+    // The touched record, as a wire ref so the org-wide feed can link out (encodeWireIds tokenizes it
+    // outbound). Only for resolvable resource entities — a non-resource entity (e.g. settings, a denied
+    // activity read) has no drillable trail, so omit its ref rather than offer a link that can't resolve.
+    // Rows with no entityId (a collection-level create) are omitted too.
+    entity_ref: r.entity && r.entityId && RESOLVABLE_ENTITIES.has(r.entity) ? ref(r.entity, r.entityId) : undefined,
+    entity_name: r.entityName ?? undefined, // resolved display name of the touched record (feed label)
+    actor: ref("employees", r.actorId),
+    actor_email: r.actorEmail,
+    actor_name: r.actorName ?? undefined, // resolved actor employee name (falls back to email on the client)
+    create_time: iso(r.at),
+    ...(r.ip ? { ip: r.ip } : {}),
+    ...(r.userAgent ? { user_agent: r.userAgent } : {}),
+    ...(meta !== undefined ? { meta } : {}),
+  };
+}
+
+export function toSprintResource(r: any) {
+  return {
+    ...baseResource(r, "sprints"),
+    board: ref("boards", r.boardId),
+    name: r.name,
+    goal: r.goal ?? undefined,
+    start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
+    end_date: r.endDate ? iso(r.endDate).slice(0, 10) : undefined,
+    state: r.state,
+  };
+}
+
+export function toReviewCycleResource(r: any) {
+  return {
+    ...baseResource(r, "review-cycles"),
+    name: r.name,
+    period_start: r.periodStart ? iso(r.periodStart).slice(0, 10) : undefined,
+    period_end: r.periodEnd ? iso(r.periodEnd).slice(0, 10) : undefined,
+    self_due_date: r.selfDueDate ? iso(r.selfDueDate).slice(0, 10) : undefined,
+    manager_due_date: r.managerDueDate ? iso(r.managerDueDate).slice(0, 10) : undefined,
+    state: r.state,
+    review_count: r._reviewCount, // attached by the route on list/get
+  };
+}
+
+// A review. The manager's assessment (ratings / overall / manager comment) is withheld from the owner-employee
+// until the review is SHARED; the route sets `_managerVisible` from the access affordance (an editor - manager
+// or HR - always sees it). The self-assessment is always visible to the owner + editors.
+export function toReviewResource(r: any) {
+  const out: Record<string, unknown> = {
+    ...baseResource(r, "reviews"),
+    cycle: ref("review-cycles", r.cycleId),
+    employee: ref("employees", r.employeeId),
+    state: r.state,
+    self_comment: r.selfComment ?? undefined,
+  };
+  if (r._managerVisible) {
+    out.manager_comment = r.managerComment ?? undefined;
+    out.overall_rating = r.overallRating ?? undefined;
+    out.ratings = r.ratingsJson ? JSON.parse(r.ratingsJson) : {};
+  }
+  // Embedded 360 feedback, attached by the route. `_feedbackNamed` = the viewer (manager/HR) may see authors;
+  // for the employee the entries arrive already filtered (submitted-only) and are rendered author-less.
+  if (r._feedback !== undefined) {
+    out.feedback = (r._feedback as any[]).map((f) => reviewFeedbackEntry(f, !!r._feedbackNamed));
+  }
+  return out;
+}
+
+// A single 360 feedback entry embedded on a review. `id` is the raw pk (a sub-resource handle, like a reply id
+// - NOT wire-id encoded). `author` is present only when the viewer may see who gave it.
+function reviewFeedbackEntry(f: any, named: boolean) {
+  return {
+    id: f.uuid,
+    state: f.state,
+    comment: f.comment ?? undefined,
+    overall_rating: f.overallRating ?? undefined,
+    ...(named ? { author: ref("employees", f.authorId) } : {}),
+  };
+}
+
+// The nominee's own view of a feedback request (review-feedback collection): who to give feedback on + their draft.
+export function toReviewFeedbackResource(r: any) {
+  return {
+    ...baseResource(r, "review-feedback"),
+    review: ref("reviews", r.reviewId),
+    reviewee: ref("employees", r.revieweeId),
+    author: ref("employees", r.authorId),
+    state: r.state,
+    comment: r.comment ?? undefined,
+    overall_rating: r.overallRating ?? undefined,
+  };
+}
+
+export function toTransitionResource(r: any) {
+  const out: Record<string, unknown> = {
+    ...baseResource(r, "transitions"),
+    employee: ref("employees", r.employeeId),
+    kind: r.kind,
+    name: r.name,
+    anchor_date: r.anchorDate ? iso(r.anchorDate).slice(0, 10) : undefined,
+    state: r.state,
+  };
+  // Tasks embedded for the subject/manager/HR view, attached by the route. Counts ride along for list cards.
+  if (r._tasks !== undefined) {
+    const tasks = r._tasks as any[];
+    out.tasks = tasks.map(toTransitionTaskResource);
+    out.task_count = tasks.length;
+    out.done_count = tasks.filter((t) => t.status === "DONE").length;
+  }
+  return out;
+}
+
+export function toTransitionTaskResource(r: any) {
+  return {
+    ...baseResource(r, "transition-tasks"),
+    transition: ref("transitions", r.transitionId),
+    subject: ref("employees", r.subjectId),
+    assignee: ref("employees", r.assigneeId),
+    title: r.title,
+    description: r.description ?? undefined,
+    due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
+    status: r.status,
+    note: r.note ?? undefined,
+    background_check: ref("background-checks", r.backgroundCheckId),
+    doc_type: r.docType ?? undefined,
+    document: ref("personal-documents", r.documentId),
+  };
+}
+
+export function toCheckInResource(r: any) {
+  return {
+    ...baseResource(r, "check-ins"),
+    employee: ref("employees", r.employeeId),
+    counterpart: ref("employees", r.counterpartId),
+    meeting_date: r.meetingDate ? iso(r.meetingDate).slice(0, 10) : undefined,
+    notes: r.notes ?? undefined,
+    action_items: r.actionItemsJson ? JSON.parse(r.actionItemsJson) : [],
+  };
+}
+
+export function toBenefitPlanResource(r: any) {
+  return {
+    ...baseResource(r, "benefit-plans"),
+    name: r.name,
+    category: r.category,
+    description: r.description ?? undefined,
+    provider: r.provider ?? undefined,
+    employee_cost: r.employeeCost ?? 0,
+    employer_cost: r.employerCost ?? 0,
+    cost_period: r.costPeriod ?? "month",
+    allows_dependents: !!r.allowsDependents,
+    auto_enroll: !!r.autoEnroll,
+  };
+}
+
+export function toDependentResource(r: any) {
+  return {
+    ...baseResource(r, "dependents"),
+    employee: ref("employees", r.employeeId),
+    name: r.name,
+    relationship: r.relationship,
+    date_of_birth: r.dateOfBirth ? iso(r.dateOfBirth).slice(0, 10) : undefined,
+  };
+}
+
+export function toBenefitEnrollmentResource(r: any) {
+  return {
+    ...baseResource(r, "benefit-enrollments"),
+    employee: ref("employees", r.employeeId),
+    plan: ref("benefit-plans", r.planId),
+    status: r.status,
+    effective_date: r.effectiveDate ? iso(r.effectiveDate).slice(0, 10) : undefined,
+    dependents: (r.dependentsJson ? (JSON.parse(r.dependentsJson) as string[]) : []).map((id) => ref("dependents", id)),
+  };
+}
+
+export function toShiftResource(r: any) {
+  return {
+    ...baseResource(r, "shifts"),
+    name: r.name,
+    start: r.startTime,
+    end: r.endTime,
+    break_minutes: r.breakMinutes ?? 0,
+    color: r.color ?? undefined,
+  };
+}
+
+export function toShiftAssignmentResource(r: any) {
+  return {
+    ...baseResource(r, "shift-assignments"),
+    employee: ref("employees", r.employeeId),
+    shift: ref("shifts", r.shiftId),
+    date: r.date ? iso(r.date).slice(0, 10) : undefined,
+    note: r.note ?? undefined,
+  };
+}
+
+export function toProjectResource(r: any) {
+  return {
+    ...baseResource(r, "projects"),
+    name: r.name,
+    client: r.client ?? undefined,
+    code: r.projectCode ?? undefined,
+    billable: !!r.billable,
+    status: r.status,
+  };
+}
+
+export function toTimeEntryResource(r: any) {
+  return {
+    ...baseResource(r, "time-entries"),
+    employee: ref("employees", r.employeeId),
+    project: ref("projects", r.projectId),
+    date: r.date ? iso(r.date).slice(0, 10) : undefined,
+    hours: r.hours ?? 0,
+    description: r.description ?? undefined,
+    billable: !!r.billable,
+    status: r.status,
+  };
+}
+
+export function toLoanResource(r: any) {
+  const principal = r.principal ?? 0;
+  const repaid = r.repaid ?? 0;
+  return {
+    ...baseResource(r, "loans"),
+    employee: ref("employees", r.employeeId),
+    kind: r.kind,
+    principal,
+    installments: r.installments ?? 1,
+    monthly_amount: r.monthlyAmount ?? 0,
+    repaid,
+    outstanding: Math.max(0, principal - repaid),
+    reason: r.reason ?? undefined,
+    start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
+    status: r.status,
+  };
+}
+
+export function toTaxDeclarationResource(r: any) {
+  return {
+    ...baseResource(r, "tax-declarations"),
+    employee: ref("employees", r.employeeId),
+    financial_year: r.financialYear,
+    section: r.section,
+    label: r.label ?? undefined,
+    declared_amount: r.declaredAmount ?? 0,
+    verified_amount: r.verifiedAmount ?? undefined,
+    status: r.status,
+    note: r.note ?? undefined,
+    has_proof: !!r.hasProof, // set by the route when an attachment exists
+  };
+}
+
+export function toLeaveRequestResource(r: any) {
+  return {
+    ...baseResource(r, "leave-requests"),
+    employee: ref("employees", r.employeeId),
+    leave_type: ref("leave-types", r.leaveTypeId),
+    start_date: iso(r.startDate).slice(0, 10),
+    end_date: iso(r.endDate).slice(0, 10),
+    days: r.days,
+    start_session: r.startSession ?? 1,
+    end_session: r.endSession ?? 2,
+    state: r.state,
+    reason: r.reason ?? undefined,
+  };
+}
+
+export function toCompensationResource(r: any) {
+  // The grade's band (when attached by the service via `r.grade`) yields two derived signals: the
+  // compa-ratio (base / band midpoint, 2dp) and whether base sits below / within / above the band. Bands
+  // are guardrails - "below"/"above" is informational, never an error.
+  const g = r.grade as { name?: string; bandMin?: number | null; bandMid?: number | null; bandMax?: number | null } | undefined;
+  const compaRatio = g && g.bandMid ? round2(r.ctcAnnual / g.bandMid) : undefined;
+  let bandStatus: "below" | "in_band" | "above" | undefined;
+  if (g && (g.bandMin != null || g.bandMax != null)) {
+    if (g.bandMin != null && r.ctcAnnual < g.bandMin) bandStatus = "below";
+    else if (g.bandMax != null && r.ctcAnnual > g.bandMax) bandStatus = "above";
+    else bandStatus = "in_band";
+  }
+  return {
+    ...baseResource(r, "compensation"),
+    employee: ref("employees", r.employeeId),
+    annual_ctc: r.ctcAnnual, // the authoritative figure everything leads with
+    base_pay: r.basePay, // derived: the monthly basic the split resolved to (for the payslip/statutory view)
+    special_allowance: r.specialAllowance || undefined, // derived: the balancing plug of the split
+    currency_code: r.currency,
+    pay_grade: ref("pay-grades", r.payGradeId),
+    pay_grade_name: g?.name ?? undefined,
+    compa_ratio: compaRatio,
+    band_status: bandStatus,
+    salary_structure: ref("salary-structures", r.structureId),
+    salary_structure_name: (r.structure as { name?: string } | undefined)?.name ?? undefined,
+    effective_from: iso(r.effectiveFrom).slice(0, 10),
+    effective_to: r.effectiveTo ? iso(r.effectiveTo).slice(0, 10) : undefined,
+    current: !r.effectiveTo, // the active salary
+    arrears_amount: r.arrearsAmount || undefined, // retro arrears owed by this backdated revision
+    arrears_paid: r.arrearsAmount ? !!r.arrearsPaidRunId : undefined, // whether a run has paid them
+  };
+}
+
+export function toSalaryStructureResource(r: any) {
+  // Stored lines hold internal component ids; render each as a `pay-components/<id>` ref (the outbound edge
+  // tokenizes it). `lines` is an ordered array of { component, rate }.
+  let lines: { component: string; rate: number | null }[] = [];
+  try {
+    const arr = JSON.parse(r.linesJson ?? "[]");
+    if (Array.isArray(arr)) lines = arr.map((l: any) => ({ component: ref("pay-components", l.component)!, rate: l.rate ?? null }));
+  } catch { /* leave empty on malformed json */ }
+  return {
+    ...baseResource(r, "salary-structures"),
+    display_name: r.name,
+    description: r.description ?? undefined,
+    lines,
+  };
+}
+
+export function toPayGradeResource(r: any) {
+  return {
+    ...baseResource(r, "pay-grades"),
+    display_name: r.name,
+    level: r.level,
+    band_min: r.bandMin ?? undefined,
+    band_mid: r.bandMid ?? undefined,
+    band_max: r.bandMax ?? undefined,
+    currency_code: r.currency,
+    description: r.description ?? undefined,
+  };
+}
+
+export function toSettlementResource(r: any) {
+  return {
+    ...baseResource(r, "settlements"),
+    employee: ref("employees", r.employeeId),
+    settlement_date: iso(r.settlementDate).slice(0, 10),
+    currency_code: r.currency,
+    leave_days: r.leaveDays,
+    notice_shortfall_days: r.noticeShortfallDays,
+    lines: JSON.parse(r.linesJson),
+    total_earnings: r.totalEarnings,
+    total_deductions: r.totalDeductions,
+    net: r.net,
+  };
+}
+
+export function toBonusResource(r: any) {
+  return {
+    ...baseResource(r, "bonuses"),
+    employee: ref("employees", r.employeeId),
+    amount: r.amount,
+    currency_code: r.currency,
+    kind: r.kind ?? undefined,
+    reason: r.reason ?? undefined,
+    award_date: iso(r.awardDate).slice(0, 10),
+    scope: r.scope ?? "individual",
+    scope_ref: r.scopeRef ?? undefined, // departments/<id> for a department-wide award
+    batch_id: r.batchId ?? undefined, // groups the rows of one company/department award
+    paid: !!r.paidRunId, // paid out by a payroll run
+    paid_run: r.paidRunId ? ref("payroll-runs", r.paidRunId) : undefined,
+  };
+}
+
+export function toAssetResource(r: any) {
+  return {
+    ...baseResource(r, "assets"),
+    asset_tag: r.assetTag ?? undefined,
+    name: r.name,
+    category: r.category ?? undefined,
+    serial_number: r.serialNumber ?? undefined,
+    status: r.status,
+    assigned_to: r.assignedTo ? ref("employees", r.assignedTo) : undefined,
+    assigned_on: r.assignedOn ? iso(r.assignedOn).slice(0, 10) : undefined,
+    purchase_date: r.purchaseDate ? iso(r.purchaseDate).slice(0, 10) : undefined,
+    notes: r.notes ?? undefined,
+  };
+}
+
+export function toPositionResource(r: any) {
+  return {
+    ...baseResource(r, "positions"),
+    employee: ref("employees", r.employeeId),
+    job_title: r.jobTitle ?? undefined,
+    department: r.departmentId ? ref("departments", r.departmentId) : undefined,
+    location: r.location ?? undefined,
+    note: r.note ?? undefined,
+    effective_from: iso(r.effectiveFrom).slice(0, 10),
+    effective_to: r.effectiveTo ? iso(r.effectiveTo).slice(0, 10) : undefined,
+    current: !r.effectiveTo, // the active role
+  };
+}
+
+export function toAttendanceSessionResource(r: any) {
+  return {
+    ...baseResource(r, "attendance"),
+    employee: ref("employees", r.employeeId),
+    clock_in: iso(r.clockIn),
+    clock_out: r.clockOut ? iso(r.clockOut) : undefined,
+    open: !r.clockOut, // currently clocked in
+    source: r.source,
+    note: r.note ?? undefined,
+  };
+}
+
+export function toAttendanceRegularizationResource(r: any) {
+  return {
+    ...baseResource(r, "attendance-regularizations"),
+    employee: ref("employees", r.employeeId),
+    date: iso(r.date).slice(0, 10),
+    sessions: (typeof r.sessions === "string" ? JSON.parse(r.sessions) : r.sessions) ?? [],
+    reason: r.reason ?? undefined,
+    state: r.state,
+    decided_by: r.decidedBy ?? undefined,
+  };
+}
+
+export function toOvertimeRequestResource(r: any) {
+  const minutes = Math.max(0, Math.round((+new Date(r.endTime) - +new Date(r.startTime)) / 60000));
+  return {
+    ...baseResource(r, "overtime-requests"),
+    employee: ref("employees", r.employeeId),
+    date: iso(r.date).slice(0, 10),
+    start_time: iso(r.startTime),
+    end_time: iso(r.endTime),
+    minutes, // derived duration; clients sum these per employee per month for the monthly total
+    reason: r.reason ?? undefined,
+    state: r.state,
+    decided_by: r.decidedBy ?? undefined,
+    decision_note: r.decisionNote ?? undefined,
+    paid: !!r.paidRunId, // whether a payroll run has paid this overtime
+    paid_run: r.paidRunId ? ref("payroll-runs", r.paidRunId) : undefined,
+  };
+}
+
+export function toApprovalDelegationResource(r: any) {
+  return {
+    ...baseResource(r, "approval-delegations"),
+    delegator: ref("employees", r.delegatorId),
+    delegate: ref("employees", r.delegateId),
+    from_date: iso(r.fromDate).slice(0, 10),
+    to_date: iso(r.toDate).slice(0, 10),
+    reason: r.reason ?? undefined,
+  };
+}
+
+export function toRemoteWorkRequestResource(r: any) {
+  // Inclusive calendar days, less a half for a leading PM start (startSession=2) or trailing AM end (endSession=1).
+  const cal = Math.round((+new Date(r.endDate) - +new Date(r.startDate)) / 86400000) + 1;
+  const days = Math.max(0.5, cal - (r.startSession === 2 ? 0.5 : 0) - (r.endSession === 1 ? 0.5 : 0));
+  return {
+    ...baseResource(r, "remote-work-requests"),
+    employee: ref("employees", r.employeeId),
+    start_date: iso(r.startDate).slice(0, 10),
+    end_date: iso(r.endDate).slice(0, 10),
+    start_session: r.startSession,
+    end_session: r.endSession,
+    days, // half-day-aware count
+    location: r.location ?? undefined,
+    reason: r.reason ?? undefined,
+    state: r.state,
+    decided_by: r.decidedBy ?? undefined,
+    decision_note: r.decisionNote ?? undefined,
+  };
+}
+
+export function toNoticePeriodResource(r: any) {
+  const lwd = +new Date(r.lastWorkingDay);
+  const totalDays = Math.max(0, Math.round((lwd - +new Date(r.noticeDate)) / 86400000));
+  const now = new Date();
+  const todayMid = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const remaining = r.status === "serving" ? Math.max(0, Math.round((lwd - todayMid) / 86400000)) : 0;
+  return {
+    ...baseResource(r, "notice-periods"),
+    employee: ref("employees", r.employeeId),
+    type: r.type,
+    notice_date: iso(r.noticeDate).slice(0, 10),
+    last_working_day: iso(r.lastWorkingDay).slice(0, 10),
+    total_days: totalDays, // notice length (last working day - notice date)
+    days_remaining: r.status === "serving" ? remaining : undefined, // calendar days until the last working day
+    status: r.status,
+    reason: r.reason ?? undefined,
+    notes: r.notes ?? undefined,
+    transition: ref("transitions", r.transitionId),
+  };
+}
+
+export function toSuggestionResource(r: any) {
+  return {
+    ...baseResource(r, "suggestions"),
+    // Hidden when anonymous (still owned by the submitter for their own view + scope).
+    submitter: r.anonymous ? undefined : ref("employees", r.submitterId),
+    anonymous: !!r.anonymous,
+    category: r.category ?? undefined,
+    title: r.title,
+    body: r.body,
+    status: r.status,
+    response: r.response ?? undefined,
+    responded_by: r.respondedById ?? undefined,
+    upvotes: r.upCount ?? 0,
+    downvotes: r.downCount ?? 0,
+    my_vote: r.myVote ?? 0, // -1 down, 0 none, +1 up
+    own: !!r.own, // the caller submitted this one (can't vote on it) - true even when anonymous
+  };
+}
+
+export function toLetterTemplateResource(r: any) {
+  return {
+    ...baseResource(r, "letter-templates"),
+    label: r.label,
+    category: r.category ?? undefined,
+    filename: r.filename ?? undefined,
+    inputs: r.inputs ?? undefined,
+    blocks: r.blocks ?? [],
+  };
+}
+
+export function toNotificationResource(r: any) {
+  return {
+    ...baseResource(r, "notifications"),
+    recipient: ref("employees", r.recipientId),
+    type: r.type,
+    title: r.title,
+    body: r.body ?? undefined,
+    link: r.link ?? undefined,
+    // The resource path this is about (e.g. "overtime-requests/<id>"). The outbound wire-id middleware encodes
+    // the id segment, so it matches the row's `path` in the web; drives the per-row "New" marker.
+    subject: r.subject ?? undefined,
+    priority: r.priority ?? "normal",
+    action: r.action ?? undefined,
+    // The person who caused this (denormalized name for the avatar; ref for a profile deep-link). Absent for
+    // system/broadcast events.
+    actor: r.actorName ?? undefined,
+    actor_id: r.actorId ? ref("employees", r.actorId) : undefined,
+    snooze_until_time: r.snoozeUntil ? iso(r.snoozeUntil) : undefined,
+    read_time: r.readTime ? iso(r.readTime) : undefined,
+    read: !!r.readTime,
+  };
+}
+
+export function toReimbursementCategoryResource(r: any) {
+  return {
+    ...baseResource(r, "reimbursement-categories"),
+    display_name: r.name,
+    requires_receipt: !!r.requiresReceipt,
+  };
+}
+
+export function toTicketChecklistResource(r: any) {
+  let items: string[] = [];
+  try { items = Array.isArray(r.items) ? r.items : JSON.parse(r.items ?? "[]"); } catch { items = []; }
+  return {
+    ...baseResource(r, "ticket-checklists"),
+    display_name: r.name,
+    items,
+  };
+}
+
+export function toReimbursementResource(r: any) {
+  return {
+    ...baseResource(r, "reimbursements"),
+    employee: ref("employees", r.employeeId),
+    category: ref("reimbursement-categories", r.categoryId),
+    amount: r.amount,
+    incurred_on: r.incurredOn ? iso(r.incurredOn).slice(0, 10) : undefined,
+    description: r.description ?? undefined,
+    state: r.state,
+    has_receipt: !!r.hasReceipt, // set by the route when an attachment exists for this claim
+    paid_run: ref("payroll-runs", r.paidRunId),
+    paid_time: r.paidAt ? iso(r.paidAt) : undefined,
+  };
+}
+
+export function toExpenseCategoryResource(r: any) {
+  return {
+    ...baseResource(r, "expense-categories"),
+    display_name: r.name,
+    requires_receipt: !!r.requiresReceipt,
+    gl_code: r.glCode ?? undefined,
+  };
+}
+
+export function toVendorResource(r: any) {
+  return {
+    ...baseResource(r, "vendors"),
+    display_name: r.name,
+    contact_email: r.contactEmail ?? undefined,
+    contact_phone: r.contactPhone ?? undefined,
+    tax_id: r.taxId ?? undefined,
+    payment_terms: r.paymentTerms ?? undefined,
+    bank_details: r.bankDetails ?? undefined,
+    default_category: ref("expense-categories", r.defaultCategoryId),
+    notes: r.notes ?? undefined,
+  };
+}
+
+export function toExpenseResource(r: any) {
+  return {
+    ...baseResource(r, "expenses"),
+    employee: ref("employees", r.employeeId),
+    vendor: ref("vendors", r.vendorId),
+    category: ref("expense-categories", r.categoryId),
+    department: ref("departments", r.departmentId),
+    amount: r.amount,
+    tax_amount: r.taxAmount,
+    incurred_on: r.incurredOn ? iso(r.incurredOn).slice(0, 10) : undefined,
+    description: r.description ?? undefined,
+    invoice_number: r.invoiceNumber ?? undefined,
+    payment_method: r.paymentMethod ?? undefined,
+    payment_ref: r.paymentRef ?? undefined,
+    state: r.state,
+    reimbursable: !!r.reimbursable,
+    reimbursement: ref("reimbursements", r.reimbursementId),
+    has_invoice: !!r.hasInvoice, // set by the route when an attachment exists
+    paid_time: r.paidAt ? iso(r.paidAt) : undefined,
+    recurring: !!r.isRecurring,
+    recurrence_rule: r.recurrenceRule ?? undefined,
+    next_occurrence_on: r.nextOccurrenceOn ? iso(r.nextOccurrenceOn).slice(0, 10) : undefined,
+    template: ref("expenses", r.templateId),
+  };
+}
+
+export function toExpenseBudgetResource(r: any) {
+  return {
+    ...baseResource(r, "expense-budgets"),
+    department: ref("departments", r.departmentId),
+    category: ref("expense-categories", r.categoryId),
+    period_type: r.periodType,
+    period_key: r.periodKey,
+    amount: r.amount,
+    spent: r.spent ?? 0, // derived by the service
+    remaining: r.remaining ?? r.amount,
+    utilization: r.utilization ?? 0,
+  };
+}
+
+export function toReferralResource(r: any) {
+  return {
+    ...baseResource(r, "referrals"),
+    referrer: ref("employees", r.referrerId),
+    candidate_name: r.candidateName,
+    candidate_email: r.candidateEmail ?? undefined,
+    candidate_phone: r.candidatePhone ?? undefined,
+    position_title: r.positionTitle ?? undefined,
+    department: ref("departments", r.departmentId),
+    notes: r.notes ?? undefined,
+    status: r.status,
+    hired_employee: ref("employees", r.hiredEmployeeId),
+    has_resume: !!r.hasResume, // set by the route when a resume attachment exists
+    bonus: ref("bonuses", r.bonusId),
+    bonus_status: r.bonusStatus,
+    bonus_amount: r.bonusAmount ?? undefined,
+    bonus_eligible_time: r.bonusEligibleDate ? iso(r.bonusEligibleDate) : undefined,
+    bonus_paid_time: r.bonusPaidDate ? iso(r.bonusPaidDate) : undefined,
+  };
+}
+
+// ATS - a job requisition (role to fill).
+export function toRequisitionResource(r: any) {
+  return {
+    ...baseResource(r, "job-requisitions"),
+    title: r.title,
+    department: ref("departments", r.departmentId),
+    hiring_manager: ref("employees", r.hiringManagerId),
+    location: r.location ?? undefined,
+    employment_type: r.employmentType ?? undefined,
+    openings: r.openings,
+    description: r.description ?? undefined,
+    status: r.status,
+    applicant_count: r.applicantCount, // set by the route (List enrichment) when available
+    opened_time: r.openedDate ? iso(r.openedDate) : undefined,
+    closed_time: r.closedDate ? iso(r.closedDate) : undefined,
+  };
+}
+
+// ATS - a candidate (talent-pool person). Resume presence via `has_resume` (set by the route).
+export function toCandidateResource(r: any) {
+  return {
+    ...baseResource(r, "candidates"),
+    name: r.name,
+    email: r.email ?? undefined,
+    phone: r.phone ?? undefined,
+    source: r.source ?? undefined,
+    source_detail: r.sourceDetail ?? undefined,
+    referral: ref("referrals", r.referralId),
+    tags: r.tags ?? undefined,
+    notes: r.notes ?? undefined,
+    has_resume: !!r.hasResume,
+  };
+}
+
+// ATS - an application (candidate x requisition; the pipeline entity).
+export function toApplicationResource(r: any) {
+  return {
+    ...baseResource(r, "applications"),
+    candidate: ref("candidates", r.candidateId),
+    requisition: ref("job-requisitions", r.requisitionId),
+    stage: r.stage,
+    status: r.status,
+    rejection_reason: r.rejectionReason ?? undefined,
+    source: r.source ?? undefined,
+    referral: ref("referrals", r.referralId),
+    applied_time: r.appliedDate ? iso(r.appliedDate) : undefined,
+    stage_changed_time: r.stageChangedDate ? iso(r.stageChangedDate) : undefined,
+  };
+}
+
+// ATS - a scheduled interview. `interviewers` is emitted as employee refs (tokenized on the wire).
+export function toInterviewResource(r: any) {
+  return {
+    ...baseResource(r, "interviews"),
+    application: ref("applications", r.applicationId),
+    title: r.title,
+    mode: r.mode,
+    scheduled_start_time: r.scheduledStart ? iso(r.scheduledStart) : undefined,
+    scheduled_end_time: r.scheduledEnd ? iso(r.scheduledEnd) : undefined,
+    interviewers: ((): string[] => { try { return (JSON.parse(r.interviewerIds ?? "[]") as string[]).map((id) => `employees/${id}`); } catch { return []; } })(),
+    location: r.location ?? undefined,
+    status: r.status,
+  };
+}
+
+// ATS - an interview scorecard (one interviewer's evaluation).
+export function toInterviewFeedbackResource(r: any) {
+  return {
+    ...baseResource(r, "interview-feedback"),
+    interview: ref("interviews", r.interviewId),
+    author: ref("employees", r.authorId),
+    ratings: ((): Record<string, number> => { try { return JSON.parse(r.ratingsJson ?? "{}"); } catch { return {}; } })(),
+    overall_rating: r.overallRating ?? undefined,
+    recommendation: r.recommendation ?? undefined,
+    comment: r.comment ?? undefined,
+  };
+}
+
+// ATS - an offer on an application.
+export function toOfferResource(r: any) {
+  return {
+    ...baseResource(r, "offers"),
+    application: ref("applications", r.applicationId),
+    base_comp: r.baseComp ?? undefined,
+    currency_code: r.currency,
+    offer_time: r.offerDate ? iso(r.offerDate) : undefined,
+    join_time: r.joinDate ? iso(r.joinDate) : undefined,
+    expiry_time: r.expiryDate ? iso(r.expiryDate) : undefined,
+    status: r.status,
+    approver: ref("employees", r.approverId),
+    notes: r.notes ?? undefined,
+    created_employee: ref("employees", r.createdEmployeeId),
+    transition: ref("transitions", r.transitionId),
+  };
+}
+
+// A ticket's threaded comment. Not a directly-addressable resource (no `path`); emitted only inline on the
+// ticket Get. `author` is an employees ref (tokenized on the wire); `author_email` is the admin fallback.
+export function toTicketCommentResource(r: any) {
+  return {
+    author: ref("employees", r.authorId),
+    author_email: r.authorEmail ?? undefined,
+    body: r.body,
+    create_time: iso(r.createdAt),
+  };
+}
+
+export function toTicketTodoResource(r: any) {
+  // `id` is the item's random pk - the handle :toggleTodo/:removeTodo address it by (sub-resource, not a wire
+  // collection, so it isn't wire-id encoded - matching the pk's own random, non-sequential form).
+  return {
+    id: r.uuid,
+    text: r.text,
+    done: !!r.done,
+    create_time: iso(r.createdAt),
+  };
+}
+
+export function toTicketResource(r: any) {
+  return {
+    ...baseResource(r, "tickets"),
+    employee: ref("employees", r.employeeId), // the requester
+    category: r.category ?? undefined, // key into the ticket-categories settings blob
+    department: ref("departments", r.departmentId), // the servicing department
+    assignee: ref("employees", r.assigneeId),
+    subject: r.subject,
+    description: r.description ?? undefined,
+    priority: r.priority,
+    state: r.state,
+    // Checklist progress on every ticket (list + get): from the loaded items when present (Get), else the
+    // counts the list query attached. Lets the table show done/total without loading the full items.
+    todo_done: Array.isArray(r.todos) ? r.todos.filter((x: any) => x.done).length : (r.todoDone ?? 0),
+    todo_total: Array.isArray(r.todos) ? r.todos.length : (r.todoTotal ?? 0),
+    // Comments and the full checklist are attached by the Get route (the list endpoint omits them to stay cheap).
+    ...(r.comments ? { comments: r.comments.map(toTicketCommentResource) } : {}),
+    ...(r.todos ? { todos: r.todos.map(toTicketTodoResource) } : {}),
+  };
+}
+
+export function toLeaveEncashmentResource(r: any) {
+  return {
+    ...baseResource(r, "leave-encashments"),
+    employee: ref("employees", r.employeeId),
+    leave_type: ref("leave-types", r.leaveTypeId),
+    days: r.days,
+    rate_per_day: r.ratePerDay,
+    amount: r.amount,
+    currency_code: r.currency,
+    state: r.state,
+    paid_run: ref("payroll-runs", r.paidRunId),
+    paid_time: r.paidAt ? iso(r.paidAt) : undefined,
+  };
+}
+
+export function toLeaveBalanceResource(r: any) {
+  return {
+    ...baseResource(r, "leave-balances"),
+    employee: ref("employees", r.employeeId),
+    leave_type: ref("leave-types", r.leaveTypeId),
+    balance_days: round2(r.balanceDays ?? 0),
+  };
+}
+
+// Shared document fields (both resources). No `visibility` - audience is grant policy, not data.
+function docFields(r: any) {
+  return {
+    display_name: r.title,
+    document_type: r.documentType,
+    file_name: r.fileName ?? undefined,
+    content_type: r.contentType ?? undefined,
+    size_bytes: r.sizeBytes ?? undefined,
+    expire_time: r.expireTime ? iso(r.expireTime) : undefined,
+  };
+}
+
+export function toOrgDocumentResource(r: any) {
+  // `acknowledged` (per caller) needs the row decorated with the caller's signed version (`ackedVersion`).
+  const requiresAck = !!r.requiresAck;
+  return {
+    ...baseResource(r, "org-documents"),
+    ...docFields(r),
+    requires_ack: requiresAck || undefined,
+    ack_version: requiresAck ? r.ackVersion ?? 1 : undefined,
+    acknowledged: requiresAck ? (r.ackedVersion ?? 0) >= (r.ackVersion ?? 1) : undefined,
+    ack_method: requiresAck ? r.ackMethod ?? undefined : undefined,
+    sign_anchor: requiresAck && r.signAnchorJson ? safeParse(r.signAnchorJson) : undefined,
+    // Set only on the :acknowledge response for an Aadhaar doc: the vendor signing link to open. Not persisted
+    // on the org-document row - attached ad-hoc by the acknowledge service.
+    esign_url: r.esignUrl ?? undefined,
+  };
+}
+
+function safeParse(s: string): unknown {
+  try { return JSON.parse(s); } catch { return undefined; }
+}
+
+export function toPersonalDocumentResource(r: any) {
+  return {
+    ...baseResource(r, "personal-documents"),
+    employee: ref("employees", r.employeeId),
+    source_document: ref("org-documents", r.sourceDocId),
+    requires_signature: r.requiresSignature || undefined,
+    signed_time: r.signedTime ? iso(r.signedTime) : undefined,
+    signature_name: r.signatureName ?? undefined,
+    esign_provider: r.esignProvider ?? undefined,
+    esign_status: r.esignStatus && r.esignStatus !== "none" ? r.esignStatus : undefined,
+    esign_url: r.esignUrl ?? undefined,
+    financial_year: r.financialYear ?? undefined,
+    official: r.official || undefined,
+    ...docFields(r),
+  };
+}
+
+export function toDocumentAcknowledgementResource(r: any) {
+  return {
+    ...baseResource(r, "document-acknowledgements"),
+    employee: ref("employees", r.employeeId),
+    document: ref("org-documents", r.documentId),
+    version: r.version,
+    signature: r.signature,
+    signed_document: ref("personal-documents", r.signedDocId),
+    acknowledged_time: iso(r.acknowledgedTime),
+  };
+}
+
+export function toPayComponentResource(r: any) {
+  return {
+    ...baseResource(r, "pay-components"),
+    display_name: r.name,
+    kind: r.kind,
+    method: r.method,
+    rate: r.rate ?? undefined,
+    cap: r.cap ?? undefined,
+    regime: r.regime ?? undefined,
+    recurring: r.recurring,
+  };
+}
+
+export function toPayPeriodResource(r: any) {
+  return {
+    ...baseResource(r, "pay-periods"),
+    display_name: r.label,
+    period_start: iso(r.periodStart).slice(0, 10),
+    period_end: iso(r.periodEnd).slice(0, 10),
+    pay_date: iso(r.payDate).slice(0, 10),
+  };
+}
+
+export function toPayrollRunResource(r: any) {
+  return {
+    ...baseResource(r, "payroll-runs"),
+    pay_period: ref("pay-periods", r.payPeriodId),
+    state: r.state,
+    submitted_by: r.submittedBy ?? undefined,
+    submitted_by_name: r.submittedByName ?? undefined,
+    approved_by: r.approvedBy ?? undefined,
+    approved_by_name: r.approvedByName ?? undefined,
+  };
+}
+
+export function toPayslipResource(r: any) {
+  return {
+    ...baseResource(r, "payslips"),
+    payroll_run: ref("payroll-runs", r.runId),
+    employee: ref("employees", r.employeeId),
+    gross: r.gross,
+    total_deductions: r.totalDeductions,
+    net: r.net,
+  };
+}
+
+// Operation is not a DB resource shape; the jobs row maps to it here.
+export function toOperationResource(job: {
+  uuid: string;
+  kind?: string;
+  status: "queued" | "running" | "done" | "error";
+  attempts?: number;
+  lastError: string | null;
+  resultJson: string | null;
+  createdAt?: Date | number;
+  updatedAt?: Date | number;
+}) {
+  const done = job.status === "done" || job.status === "error";
+  return {
+    path: `operations/${job.uuid}`,
+    done,
+    ...(job.status === "error" ? { error: { title: "Operation failed", detail: job.lastError ?? "error" } } : {}),
+    ...(job.status === "done" && job.resultJson ? { response: JSON.parse(job.resultJson) } : {}),
+    // AEP operations carry free-form metadata: the admin-facing detail (kind/live status/attempts/timing)
+    // lives here so the LRO contract (path/done/error/response) stays clean.
+    metadata: {
+      ...(job.kind !== undefined ? { kind: job.kind } : {}),
+      status: job.status,
+      ...(job.attempts !== undefined ? { attempts: job.attempts } : {}),
+      ...(job.createdAt !== undefined ? { create_time: iso(job.createdAt) } : {}),
+      ...(job.updatedAt !== undefined ? { update_time: iso(job.updatedAt) } : {}),
+    },
+  };
+}
+
+// A recorded domain event (admin-only). The spine of the workflow engine (see services/eventBus.ts).
+// Replace every value with a marker, keeping only KEY names. The observability logs embed domain payloads
+// (e.g. loan amounts/balances) that a viewer without the underlying collection's read grant should not see;
+// non-super viewers get event SHAPE, not values. Only super_admin (source-of-truth access) sees raw payloads.
+function redactValues(o: unknown): unknown {
+  if (Array.isArray(o)) return o.map(() => "[redacted]");
+  if (o && typeof o === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(o)) out[k] = "[redacted]";
+    return out;
+  }
+  return "[redacted]";
+}
+
+export function toEventLogResource(r: {
+  uuid: string;
+  type: string;
+  subject: string | null;
+  actorId: string | null;
+  employeeId: string | null;
+  payloadJson: string | null;
+  correlationId?: string | null;
+  occurredAt: Date | number;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}, redactPayload = false) {
+  const payload = r.payloadJson ? JSON.parse(r.payloadJson) : {};
+  return {
+    path: `event-log/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    type: r.type,
+    ...(r.subject ? { subject: r.subject } : {}),
+    ...(r.actorId ? { actor: ref("users", r.actorId) } : {}),
+    ...(r.employeeId ? { employee: ref("employees", r.employeeId) } : {}),
+    ...(r.correlationId ? { correlation_id: r.correlationId } : {}),
+    payload: redactPayload ? redactValues(payload) : payload,
+    occurred_time: iso(r.occurredAt),
+  };
+}
+
+// An automation rule (when/if/then). condition/actions are the domain/automations.ts JSON shapes.
+export function toAutomationResource(r: {
+  uuid: string;
+  name: string;
+  description: string | null;
+  triggerType: string;
+  conditionJson: string | null;
+  actionsJson: string;
+  scheduleJson?: string | null;
+  lastScheduledOn?: string | null;
+  enabled: boolean | null;
+  disabled: boolean | null;
+  locked: boolean | null;
+  lockedBy: string | null;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}) {
+  return {
+    ...baseResource(r, "automations"),
+    name: r.name,
+    ...(r.description ? { description: r.description } : {}),
+    trigger_type: r.triggerType,
+    condition: r.conditionJson ? JSON.parse(r.conditionJson) : null,
+    actions: JSON.parse(r.actionsJson),
+    schedule: r.scheduleJson ? JSON.parse(r.scheduleJson) : null,
+    ...(r.lastScheduledOn ? { last_scheduled_on: r.lastScheduledOn } : {}),
+    enabled: !!r.enabled,
+  };
+}
+
+// A recorded automation firing (observability, like cron-runs).
+export function toAutomationRunResource(r: {
+  uuid: string;
+  automationId: string;
+  eventId: string | null;
+  eventType: string;
+  status: "done" | "partial" | "error" | "skipped";
+  resultJson: string | null;
+  subject?: string | null;
+  employeeId?: string | null;
+  correlationId?: string | null;
+  startedAt: Date | number;
+  finishedAt: Date | number | null;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}, redactResult = false) {
+  // Non-super viewers get action kind + status only (the `detail` string can carry ids/paths from the run).
+  const result = r.resultJson ? JSON.parse(r.resultJson) : undefined;
+  const shown = redactResult && Array.isArray(result) ? result.map((o) => ({ kind: o?.kind, status: o?.status })) : result;
+  return {
+    path: `automation-runs/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    automation: ref("automations", r.automationId),
+    ...(r.eventId ? { event: ref("event-log", r.eventId) } : {}),
+    event_type: r.eventType,
+    status: r.status,
+    ...(r.subject ? { subject: r.subject } : {}),
+    ...(r.employeeId ? { employee: ref("employees", r.employeeId) } : {}),
+    ...(r.correlationId ? { correlation_id: r.correlationId } : {}),
+    ...(shown !== undefined ? { result: shown } : {}),
+    start_time: iso(r.startedAt),
+    ...(r.finishedAt ? { end_time: iso(r.finishedAt) } : {}),
+  };
+}
+
+// A suspended/finished durable workflow (admin observability). Arms/results are the domain JSON shapes.
+export function toWorkflowInstanceResource(r: {
+  uuid: string;
+  automationId: string | null;
+  status: "waiting" | "done" | "expired" | "error";
+  awaitedTypes: string | null;
+  armsJson: string;
+  originType: string | null;
+  subject: string | null;
+  employeeId: string | null;
+  correlationId?: string | null;
+  resumedAt: Date | number | null;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}) {
+  return {
+    path: `workflow-instances/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    ...(r.automationId ? { automation: ref("automations", r.automationId) } : {}),
+    status: r.status,
+    ...(r.awaitedTypes ? { awaited_types: r.awaitedTypes.split(",") } : {}),
+    arms: JSON.parse(r.armsJson),
+    ...(r.originType ? { origin_type: r.originType } : {}),
+    ...(r.subject ? { subject: r.subject } : {}),
+    ...(r.employeeId ? { employee: ref("employees", r.employeeId) } : {}),
+    ...(r.correlationId ? { correlation_id: r.correlationId } : {}),
+    ...(r.resumedAt ? { resumed_time: iso(r.resumedAt) } : {}),
+  };
+}
+
+// A recorded cron tick (admin-only). started_at/finished_at use the AEP `*_time` time-field convention.
+export function toCronRunResource(r: {
+  uuid: string;
+  cron: string;
+  status: "running" | "done" | "error";
+  startedAt: Date | number;
+  finishedAt: Date | number | null;
+  durationMs: number | null;
+  error: string | null;
+  summaryJson: string | null;
+  createdAt: Date | number;
+  updatedAt: Date | number;
+}) {
+  return {
+    path: `cron-runs/${r.uuid}`,
+    create_time: iso(r.createdAt),
+    update_time: iso(r.updatedAt),
+    etag: etagOf(+new Date(r.updatedAt)),
+    cron: r.cron,
+    status: r.status,
+    start_time: iso(r.startedAt),
+    ...(r.finishedAt ? { end_time: iso(r.finishedAt) } : {}),
+    ...(r.durationMs != null ? { duration_ms: r.durationMs } : {}),
+    ...(r.error ? { error: r.error } : {}),
+    ...(r.summaryJson ? { summary: JSON.parse(r.summaryJson) } : {}),
+  };
+}

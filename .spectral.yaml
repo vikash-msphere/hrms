@@ -1,0 +1,54 @@
+extends:
+  - '/opt/homebrew/lib/node_modules/@aep_dev/aep-openapi-linter/spectral.yaml'
+
+# Two AEP advisory rules are turned off because this API deliberately and uniformly departs from them; every
+# endpoint would otherwise "violate" them. (They were only reported clean before because the AEP linter's
+# nimma alias resolution matches item paths nondeterministically as the document grows - so which endpoints
+# got flagged shifted with unrelated edits. Turning them off makes the result deterministic and states intent.)
+rules:
+  # PATCH bodies use application/json (merge semantics) across the whole service, not application/merge-patch+json.
+  aep-134-content-type: off
+  # Create uses a `?id=` query parameter (the client-supplied id convention here), not an AEP `id` path/body field.
+  aep-133-id-parameter: off
+
+# /v1/workflow-meta is a virtual singleton (builder metadata assembled live, no table, no items). Its GET has
+# no path parameter, so the AEP linter classifies it as a List operation and demands pagination + a List*
+# operation id - none of which can apply to a singleton document. Scope the exemption to just that surface.
+overrides:
+  - files:
+      - 'openapi.yaml#/paths/~1v1~1workflow-meta'
+      - 'openapi.yaml#/components/schemas/workflow_meta'
+    rules:
+      aep-158-response-next-page-token-property: off
+      aep-158-max-page-size-parameter: off
+      aep-158-page-token-parameter: off
+      aep-132-operation-id: off
+  # /v1/esign-providers is the same shape as workflow-meta: a virtual catalog (no table, fixed set of
+  # registered e-sign drivers, never paginated). The AEP List rules + List* operation-id can't apply.
+  - files:
+      - 'openapi.yaml#/paths/~1v1~1esign-providers'
+    rules:
+      aep-158-response-next-page-token-property: off
+      aep-158-max-page-size-parameter: off
+      aep-158-page-token-parameter: off
+      aep-132-operation-id: off
+  # /v1/search is a virtual query surface, not a collection: it has no table, no items and no item path, and
+  # it deliberately returns one bounded top-N page (a "next page" of a relevance-ranked palette query is
+  # meaningless - you refine the query instead). The AEP linter classifies its GET as a List, so the
+  # pagination rules and the List* operation id can't apply; `q` is genuinely required, since without it
+  # there is no query to run.
+  - files:
+      - 'openapi.yaml#/paths/~1v1~1search'
+    rules:
+      aep-158-response-next-page-token-property: off
+      aep-158-max-page-size-parameter: off
+      aep-158-page-token-parameter: off
+      aep-132-operation-id: off
+      aep-132-required-params: off
+  # personal-document.esign_url mirrors the e-sign vendor's signing URL; the service uses `_url` for
+  # actual URLs elsewhere, so this deliberately departs from the AEP `uri` naming advisory.
+  - files:
+      - 'openapi.yaml#/components/schemas/personal-document/properties/esign_url'
+      - 'openapi.yaml#/components/schemas/org-document/properties/esign_url'
+    rules:
+      aep-140-uri-property-naming: off

@@ -1,0 +1,240 @@
+import { describe, it, expect } from "vitest";
+import { computeAccrual, leaveDays, roundToIncrement, ymOf } from "../src/domain/leave";
+
+const ms = (d: string) => Date.parse(d + "T00:00:00Z");
+// 12 days/year -> exactly 1.0 day per full month, keeps the arithmetic easy to read.
+const ANNUAL = 12;
+
+describe("computeAccrual", () => {
+  it("prorates the joining month, then full months thereafter", () => {
+    // Joined Jan 16 of a 31-day month: 16 days worked / 31 = ~0.516 of one month.
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-16"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-03-10"),
+    });
+    // Jan (prorated 16/31) + Feb (1) + Mar (1)
+    expect(r.add).toBeCloseTo(16 / 31 + 1 + 1, 2);
+    expect(r.newLastYm).toBe("2026-03");
+  });
+
+  it("is idempotent within a month (nothing new once caught up)", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-03",
+      currentMs: ms("2026-03-20"),
+    });
+    expect(r.add).toBe(0);
+    expect(r.newLastYm).toBe("2026-03");
+  });
+
+  it("credits only the new month after a prior run", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-03",
+      currentMs: ms("2026-04-05"),
+    });
+    expect(r.add).toBeCloseTo(1, 5);
+    expect(r.newLastYm).toBe("2026-04");
+  });
+
+  it("no accrual during probation when the probation rate is 0, resuming the month probation ends", () => {
+    // Joined Jan 1, probation ends Mar 31. Probation rate 0: Jan/Feb accrue nothing, Mar onward normal.
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: ms("2026-03-31"),
+      probationAccrualDaysPerYear: 0,
+      lastAccrualYm: null,
+      currentMs: ms("2026-04-30"),
+    });
+    // Mar (1) + Apr (1); Jan & Feb accrue 0.
+    expect(r.add).toBeCloseTo(2, 5);
+    expect(r.newLastYm).toBe("2026-04");
+  });
+
+  it("accrues at a REDUCED rate during probation, then the normal rate after", () => {
+    // Probation rate 6/yr (0.5/mo), normal 12/yr (1/mo); probation ends Mar 31.
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      probationAccrualDaysPerYear: 6,
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: ms("2026-03-31"),
+      lastAccrualYm: null,
+      currentMs: ms("2026-04-30"),
+    });
+    // Jan(0.5) + Feb(0.5) + Mar(1) + Apr(1) = 3.0
+    expect(r.add).toBeCloseTo(3, 5);
+    expect(r.newLastYm).toBe("2026-04");
+  });
+
+  it("uses the full rate throughout when the probation rate equals the normal rate", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: ms("2026-03-31"),
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-04-30"),
+    });
+    expect(r.add).toBeCloseTo(4, 5); // Jan..Apr all accrue
+  });
+
+  it("stops accruing after the employee end month", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-02-15"),
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-06-01"),
+    });
+    expect(r.add).toBeCloseTo(2, 5); // Jan + Feb only
+    expect(r.newLastYm).toBe("2026-02");
+  });
+
+  it("does nothing before the employee starts", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-09-01"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-06-01"),
+    });
+    expect(r.add).toBe(0);
+    expect(r.newLastYm).toBe(null);
+  });
+
+  it("ymOf returns a UTC year-month key", () => {
+    expect(ymOf(ms("2026-07-15"))).toBe("2026-07");
+  });
+});
+
+describe("computeAccrual (semi-monthly: annual/24 on the 1st & 16th)", () => {
+  it("credits each half-period from a Jan 1 start", () => {
+    // Jan 1 .. Mar 10 = Jan-H1, Jan-H2, Feb-H1, Feb-H2, Mar-H1 = 5 halves of 12/24 = 0.5 each.
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      frequency: "semi_monthly",
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-03-10"),
+    });
+    expect(r.add).toBeCloseTo(2.5, 5);
+    expect(r.newLastYm).toBe("2026-03-H1");
+  });
+
+  it("is idempotent once caught up within a half-period", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      frequency: "semi_monthly",
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-03-H1",
+      currentMs: ms("2026-03-10"),
+    });
+    expect(r.add).toBe(0);
+    expect(r.newLastYm).toBe("2026-03-H1");
+  });
+
+  it("credits only the new half after a prior run", () => {
+    // lastAccrualYm = Mar-H1, now Mar 20 (>=16) reaches Mar-H2: one more half = 0.5.
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      frequency: "semi_monthly",
+      startMs: ms("2026-01-01"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-03-H1",
+      currentMs: ms("2026-03-20"),
+    });
+    expect(r.add).toBeCloseTo(0.5, 5);
+    expect(r.newLastYm).toBe("2026-03-H2");
+  });
+
+  it("prorates the joining half-period when starting mid-half", () => {
+    // Joined Jan 8: first half is days 1-15, worked 15-8+1 = 8 days / 15 = 0.5333 of 0.5.
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      frequency: "semi_monthly",
+      startMs: ms("2026-01-08"),
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-01-20"),
+    });
+    // Jan-H1 prorated (8/15 * 0.5 = 0.2667) + Jan-H2 full (0.5) = 0.7667, rounded to 2dp = 0.77.
+    expect(r.add).toBe(0.77);
+    expect(r.newLastYm).toBe("2026-01-H2");
+  });
+});
+
+describe("leaveDays (sessions: 1=AM, 2=PM)", () => {
+  // 2026-06-01 Mon .. 2026-06-03 Wed = 3 working days.
+  const mon = ms("2026-06-01");
+  const wed = ms("2026-06-03");
+  it("full multi-day range (1..2)", () => expect(leaveDays(mon, wed, 1, 2)).toBe(3));
+  it("starts in the afternoon (2..2) -> 2.5", () => expect(leaveDays(mon, wed, 2, 2)).toBe(2.5));
+  it("ends at midday (1..1) -> 2.5", () => expect(leaveDays(mon, wed, 1, 1)).toBe(2.5));
+  it("PM start + AM end (2..1) -> 2.0", () => expect(leaveDays(mon, wed, 2, 1)).toBe(2));
+  it("single working day: full / first half (AM) / second half (PM)", () => {
+    expect(leaveDays(mon, mon, 1, 2)).toBe(1);
+    expect(leaveDays(mon, mon, 1, 1)).toBe(0.5); // morning only
+    expect(leaveDays(mon, mon, 2, 2)).toBe(0.5); // afternoon only
+  });
+  it("defaults are a full range", () => expect(leaveDays(mon, wed)).toBe(3));
+  it("excludes holidays from the count", () => {
+    // Mon..Wed with Tue (2026-06-02) a holiday -> Mon + Wed = 2 working days.
+    expect(leaveDays(mon, wed, 1, 2, [1, 2, 3, 4, 5], new Set(["2026-06-02"]))).toBe(2);
+  });
+  it("honors a custom working week (Saturday configured as a working day)", () => {
+    const sat = ms("2026-06-06");
+    expect(leaveDays(sat, sat, 1, 2, [1, 2, 3, 4, 5, 6])).toBe(1); // Sat counts when configured
+    expect(leaveDays(sat, sat, 1, 2, [1, 2, 3, 4, 5])).toBe(0); // and not otherwise
+  });
+  it("weekends don't count and sessions on a weekend boundary are ignored", () => {
+    expect(leaveDays(ms("2026-06-06"), ms("2026-06-07"), 2, 1)).toBe(0); // Sat..Sun, no working days
+    // Fri..Mon = Fri + Mon = 2 working days; PM-start (Fri) + AM-end (Mon) = half each = 1.
+    expect(leaveDays(ms("2026-06-05"), ms("2026-06-08"), 2, 1)).toBe(1);
+  });
+});
+
+describe("roundToIncrement", () => {
+  it("rounds to half days (the .41 case)", () => {
+    expect(roundToIncrement(2.41, 0.5)).toBe(2.5);
+    expect(roundToIncrement(2.2, 0.5)).toBe(2);
+    expect(roundToIncrement(2.75, 0.5)).toBe(3); // .75 rounds up to nearest 0.5
+  });
+  it("rounds to whole days", () => {
+    expect(roundToIncrement(2.41, 1)).toBe(2);
+    expect(roundToIncrement(2.6, 1)).toBe(3);
+  });
+  it("0 increment = exact (2dp)", () => {
+    expect(roundToIncrement(2.414, 0)).toBe(2.41);
+  });
+});

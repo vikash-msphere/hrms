@@ -1,0 +1,194 @@
+import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
+import { applyScope } from "./listScope";
+import { searchFilter } from "./searchFilter";
+import type { ListScope } from "../domain/access";
+import { eq, and, isNull, sql } from "drizzle-orm";
+import * as schema from "../db/schema";
+import type { Deps } from "../deps";
+import type { AppUser } from "../env";
+import { audit, fieldDiff } from "../lib/audit";
+import { emitEvent } from "./eventBus";
+import { notify } from "./notifications";
+import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { moveEmployee } from "./codeCascade";
+import { keysetPage } from "./keysetPage";
+import { etagOf } from "../http/serialize";
+import { restoreRow, purgeRow } from "./softDelete";
+import { assertNotLocked } from "./lifecycle";
+import { getSettingValue } from "./settings";
+import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from "../domain/employeeNumber";
+
+// Wire input is snake_case (matches the OpenAPI schema). national_id/bank_details are write-only.
+export type EmployeeInput = {
+  first_name?: string;
+  last_name?: string;
+  legal_name?: string | null;
+  work_email?: string;
+  job_title?: string | null;
+  employee_number?: string | null; // human ID; auto-assigned on create when omitted, HR-overridable
+  department?: string | null; // departments/{id}
+  manager?: string | null; // employees/{id}
+  start_date?: string | null; // YYYY-MM-DD
+  probation_end_date?: string | null; // YYYY-MM-DD
+  epf_enrolled?: boolean;
+  national_id?: string | null;
+  // bank details are managed via the dedicated :getBankDetails/:setBankDetails methods.
+};
+
+// Next auto employee number from the org format (settings/employee-number) + the highest existing sequence.
+// Read-then-write like code allocation - a concurrent double-create can race, but the UNIQUE index on
+// employee_number is the backstop (the loser's insert fails). Fine for an internal-scale app.
+async function allocEmployeeNumber(deps: Deps): Promise<string> {
+  const cfg = await getSettingValue(deps, "employee-number", DEFAULT_EMPLOYEE_NUMBER_CONFIG);
+  const rows = await deps.db.select({ n: schema.employees.employeeNumber }).from(schema.employees);
+  return formatEmployeeNumber(cfg, nextSeq(cfg, rows.map((r) => r.n)), new Date().getUTCFullYear());
+}
+
+// Reject a duplicate human ID (case-insensitive), so an HR override never collides. `exceptId` skips the row
+// being updated. The UNIQUE index enforces this at the DB too; this is the friendly, pre-flight check.
+async function assertNumberFree(deps: Deps, number: string, exceptId?: string): Promise<void> {
+  const key = number.trim().toLowerCase();
+  const rows = await deps.db
+    .select({ uuid: schema.employees.uuid, n: schema.employees.employeeNumber })
+    .from(schema.employees);
+  if (rows.some((r) => r.uuid !== exceptId && (r.n ?? "").trim().toLowerCase() === key))
+    throw invalidArgument(`employee number ${number} is already in use`);
+}
+
+const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
+const dateMs = (s?: string | null) => (s ? new Date(s + "T00:00:00Z") : null);
+const addMonths = (ms: number, months: number) => {
+  const d = new Date(ms);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
+};
+
+export async function listEmployees(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string) {
+  // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
+  // `q` narrows further via the FTS index - a filter, never a widening (see services/searchFilter.ts).
+  const conds = [
+    applyScope(scope, schema.employees.code, schema.employees.uuid),
+    showDeleted ? undefined : isNull(schema.employees.deleteTime),
+    await searchFilter(deps, "employees", q, schema.employees.uuid),
+  ].filter(Boolean);
+  return keysetPage(deps, schema.employees, "employees", and(...(conds as any)), { dir: "asc", max: maxPageSize, pageToken });
+}
+
+export async function getEmployee(deps: Deps, actor: AppUser, id: string) {
+  const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
+  // Item-level access (own / dept / hr / super) is enforced by the middleware on employees/<code>.
+  if (!row || row.deleteTime) throw notFound("employee not found");
+  return row;
+}
+
+export async function createEmployee(deps: Deps, actor: AppUser, input: EmployeeInput, id?: string) {
+  if (!input.first_name || !input.last_name || !input.work_email)
+    throw invalidArgument("first_name, last_name, work_email are required");
+  const nationalIdEnc = input.national_id ? await deps.encryptor.encrypt(input.national_id) : null;
+  // Human ID: an HR-provided override (validated unique), else auto-assigned from the org format.
+  const override = input.employee_number?.trim();
+  if (override) await assertNumberFree(deps, override);
+  const employeeNumber = override || (await allocEmployeeNumber(deps));
+  const startDate = dateMs(input.start_date);
+  // Default probation end to start_date + the org default probation period when not given explicitly.
+  let probationEndDate = dateMs(input.probation_end_date);
+  if (!probationEndDate && startDate) {
+    const { default_months } = await getSettingValue(deps, "probation", { default_months: 3 });
+    probationEndDate = addMonths(+startDate, default_months);
+  }
+  const row = (await deps.db
+    .insert(schema.employees)
+    .values({
+      ...(id ? { id } : {}),
+      firstName: input.first_name,
+      lastName: input.last_name,
+      legalName: input.legal_name ?? null,
+      workEmail: input.work_email,
+      jobTitle: input.job_title ?? null,
+      employeeNumber,
+      code: await allocUnderDept(deps, idFromPath(input.department) ?? null, CODE_WIDTH.employee),
+      departmentId: idFromPath(input.department),
+      managerId: idFromPath(input.manager),
+      startDate,
+      probationEndDate,
+      nationalIdEnc,
+    })
+    .returning())[0]!;
+  await audit(deps, actor, "employee.create", "employees", row.uuid, undefined, row);
+  // Auto-link an existing, unlinked user account that signed in with this email.
+  await deps.db
+    .update(schema.users)
+    .set({ employeeId: row.uuid, updatedAt: new Date() })
+    .where(and(sql`lower(${schema.users.email}) = ${row.workEmail.toLowerCase()}`, isNull(schema.users.employeeId)));
+  await emitEvent(deps, actor, "employee.created", {
+    subject: `employees/${row.uuid}`,
+    employeeId: row.uuid,
+    payload: { departmentId: row.departmentId ?? null, startDate: row.startDate ? new Date(row.startDate).toISOString() : null },
+  });
+  return row;
+}
+
+// JSON Merge Patch: present = set, explicit null = clear, absent = unchanged.
+export async function updateEmployee(deps: Deps, actor: AppUser, id: string, patch: EmployeeInput, ifMatch?: string) {
+  const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
+  if (!row || row.deleteTime) throw notFound("employee not found");
+  assertNotLocked(row);
+  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+
+  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const has = (k: keyof EmployeeInput) => Object.prototype.hasOwnProperty.call(patch, k);
+  if (has("first_name")) set.firstName = patch.first_name;
+  if (has("last_name")) set.lastName = patch.last_name;
+  if (has("legal_name")) set.legalName = patch.legal_name ?? null;
+  if (has("work_email")) set.workEmail = patch.work_email;
+  if (has("job_title")) set.jobTitle = patch.job_title ?? null;
+  if (has("employee_number")) {
+    const n = patch.employee_number?.trim();
+    if (!n) throw invalidArgument("employee_number can't be blank");
+    await assertNumberFree(deps, n, id);
+    set.employeeNumber = n;
+  }
+  if (has("department")) {
+    const next = idFromPath(patch.department) ?? null;
+    // Re-parent: recompute the employee's code + cascade every owned row (leave, payslips, comp, ...) + any
+    // access-rule codes. moveEmployee sets departmentId itself, so it's not added to `set`.
+    if (next !== row.departmentId) { await moveEmployee(deps, id, row.code!, next); await audit(deps, actor, "employee.reparent", "employees", id, { from: row.departmentId, to: next }); }
+  }
+  if (has("manager")) set.managerId = idFromPath(patch.manager) ?? null;
+  if (has("start_date")) set.startDate = dateMs(patch.start_date);
+  if (has("probation_end_date")) set.probationEndDate = dateMs(patch.probation_end_date);
+  if (has("epf_enrolled")) set.epfEnrolled = !!patch.epf_enrolled;
+  if (has("national_id")) set.nationalIdEnc = patch.national_id ? await deps.encryptor.encrypt(patch.national_id) : null;
+
+  const [updated] = await deps.db.update(schema.employees).set(set).where(eq(schema.employees.uuid, id)).returning();
+  // Diff non-sensitive fields (never the encrypted national id) for the activity trail; fall back to field names.
+  const keys = Object.keys(set).filter((k) => k !== "updatedAt" && k !== "nationalIdEnc");
+  const diff = fieldDiff(row, updated!, keys);
+  const changedSensitive = "nationalIdEnc" in set;
+  await audit(deps, actor, "employee.update", "employees", id, Object.keys(diff).length || changedSensitive ? { diff, ...(changedSensitive ? { fields: ["national_id"] } : {}) } : undefined);
+  // A manager reassignment tells the employee who they now report to, and the new manager who joined their team.
+  if (has("manager") && updated!.managerId !== row.managerId && updated!.managerId) {
+    const empName = `${updated!.firstName} ${updated!.lastName}`.trim();
+    if (updated!.managerId !== actor.employeeId)
+      await notify(deps, { recipient: updated!.managerId, type: "system.reports_to_you", title: "New report", body: `${empName} now reports to you.`, link: "employees", subject: `employees/${id}`, actorId: actor.employeeId });
+    if (id !== actor.employeeId)
+      await notify(deps, { recipient: id, type: "system.manager_changed", title: "Your manager was updated", body: "Your reporting manager has changed - see your profile.", link: "profile", subject: `employees/${id}`, actorId: actor.employeeId });
+  }
+  return updated;
+}
+
+export async function deleteEmployee(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+  const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
+  if (!row || row.deleteTime) throw notFound("employee not found");
+  assertNotLocked(row);
+  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  await deps.db.update(schema.employees).set({ deleteTime: new Date(), updatedAt: new Date() }).where(eq(schema.employees.uuid, id));
+  await audit(deps, actor, "employee.delete", "employees", id);
+}
+
+export async function restoreEmployee(deps: Deps, actor: AppUser, id: string) {
+  return restoreRow(deps, actor, schema.employees, "employee", "employees", id);
+}
+
+export async function purgeEmployee(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+  await purgeRow(deps, actor, schema.employees, "employee", "employees", id, ifMatch);
+}

@@ -1,0 +1,34 @@
+// RFC 9457 problem details (AEP-193). One error shape, emitted as application/problem+json.
+
+export type Problem = {
+  type: string;       // URI reference identifying the problem class
+  title: string;      // short, human-readable summary
+  status: number;     // HTTP status code
+  detail?: string;    // explanation specific to this occurrence
+  instance?: string;  // URI reference identifying this occurrence (we use the request path)
+};
+
+export class AppError extends Error {
+  constructor(
+    public readonly httpStatus: number,
+    public readonly type: string,
+    public readonly title: string,
+    detail?: string,
+  ) {
+    super(detail ?? title);
+  }
+  toProblem(instance?: string): Problem {
+    const detail = this.message && this.message !== this.title ? this.message : undefined;
+    return { type: this.type, title: this.title, status: this.httpStatus, ...(detail ? { detail } : {}), ...(instance ? { instance } : {}) };
+  }
+}
+
+// Canonical constructors (map to HTTP status). Use these everywhere.
+export const invalidArgument = (d?: string) => new AppError(400, "/errors/invalid-argument", "Invalid Argument", d);
+export const unauthenticated = (d?: string) => new AppError(401, "/errors/unauthenticated", "Unauthenticated", d);
+export const forbidden = (d?: string) => new AppError(403, "/errors/permission-denied", "Permission Denied", d);
+export const notFound = (d?: string) => new AppError(404, "/errors/not-found", "Not Found", d);
+export const alreadyExists = (d?: string) => new AppError(409, "/errors/already-exists", "Already Exists", d);
+export const failedPrecondition = (d?: string) => new AppError(409, "/errors/failed-precondition", "Failed Precondition", d);
+export const aborted = (d?: string) => new AppError(409, "/errors/aborted", "Aborted", d);
+export const unimplemented = (d?: string) => new AppError(501, "/errors/unimplemented", "Not Implemented", d);

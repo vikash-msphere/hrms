@@ -1,0 +1,15 @@
+node_modules
+web/dist
+.dev.vars
+.wrangler
+src/http/openapi.d.ts
+CLAUDE.md
+
+# local dev stack logs (scripts/start.sh)
+/tmp/
+misc/
+.tokensave/
+.DS_Store
+
+# Claude Code local session state
+.claude/projects/

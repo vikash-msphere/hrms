@@ -1,0 +1,83 @@
+name = "hrms"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
+# live `wrangler tail`. Without this a production 500 leaves no trace to debug.
+[observability]
+enabled = true
+
+# The built SPA (web/dist) is served as static assets with SPA fallback. run_worker_first forces API +
+# webhook paths to the Worker FIRST, so the SPA `not_found_handling` can never intercept `/v1/*` or
+# `/esign/*` and serve index.html in place of a real API/webhook response.
+[assets]
+directory = "./web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*", "/esign/*"]
+
+# Explicit CPU ceiling: PDF / Form-16 / letter rendering is CPU-heavy. Bounded so a runaway render can't run
+# away, with headroom above a normal request.
+[limits]
+cpu_ms = 60000
+
+[vars]
+CF_ACCESS_TEAM_DOMAIN = "https://msphere.cloudflareaccess.com"
+# EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
+EMAIL_PROVIDER = "resend"
+EMAIL_FROM = "hr@msphere.io"
+# Second perimeter (Cloudflare Access is primary): only these email domains may auto-provision on first login.
+# Comma-separated; unset = no restriction. Keep in sync with the Access application's allowed identities.
+ALLOWED_EMAIL_DOMAINS = "msphere.io"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hrms"
+database_id = "98bb8050-7b26-4b8e-8642-6681a19dd682"
+migrations_dir = "src/db/migrations"
+
+[[r2_buckets]]
+binding = "DOCS"
+bucket_name = "hrms"
+
+# Drain async jobs (LRO) every 5 min; nightly accrual/reminders at 02:00 UTC.
+[triggers]
+crons = ["*/5 * * * *", "0 2 * * *"]
+
+# ---------------------------------------------------------------------------------------------------------
+# Named environments. The top-level config above is the default target (`wrangler deploy`) and is production.
+# Staging is a separate deploy target (`wrangler deploy --env staging`) with its OWN D1 + R2 so migrations
+# and releases can be rehearsed before prod. Wrangler does NOT inherit top-level bindings/vars into a named
+# env, so they are redeclared here. Fill in the staging database_id after `wrangler d1 create hrms-staging`.
+[env.staging]
+name = "hrms-staging"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[env.staging.observability]
+enabled = true
+
+[env.staging.assets]
+directory = "./web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*", "/esign/*"]
+
+[env.staging.vars]
+CF_ACCESS_TEAM_DOMAIN = "https://msphere.cloudflareaccess.com"
+# EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
+EMAIL_PROVIDER = "resend"
+EMAIL_FROM = "hr@msphere.io"
+ALLOWED_EMAIL_DOMAINS = "msphere.io"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "hrms-staging"
+database_id = "REPLACE_WITH_STAGING_D1_ID"
+migrations_dir = "src/db/migrations"
+
+[[env.staging.r2_buckets]]
+binding = "DOCS"
+bucket_name = "hrms-staging"
+
+[env.staging.triggers]
+crons = ["*/5 * * * *", "0 2 * * *"]

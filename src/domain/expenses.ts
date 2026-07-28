@@ -1,0 +1,57 @@
+// Pure expense domain (NO I/O): budget-period keys/bounds, spend rollup, recurrence next-date. Shared by the
+// expense-budgets service (utilization), the cron (recurring generation + budget alerts), and tests.
+import { round2 } from "./money";
+
+export type RecurrenceRule = "monthly" | "quarterly" | "yearly";
+export type PeriodType = "monthly" | "quarterly" | "yearly";
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+// The period key a UTC date falls into, for a period type: "2026" | "2026-Q3" | "2026-07".
+export function periodKeyFor(type: PeriodType, d: Date): string {
+  const y = d.getUTCFullYear();
+  if (type === "yearly") return `${y}`;
+  if (type === "quarterly") return `${y}-Q${Math.floor(d.getUTCMonth() / 3) + 1}`;
+  return `${y}-${pad2(d.getUTCMonth() + 1)}`;
+}
+
+// [start, end) millisecond bounds of a period key. Throws on a malformed key (defensive; keys are generated).
+export function periodBounds(type: PeriodType, key: string): { start: number; end: number } {
+  if (type === "yearly") {
+    const y = Number(key);
+    if (!Number.isInteger(y)) throw new Error(`bad yearly period key: ${key}`);
+    return { start: Date.UTC(y, 0, 1), end: Date.UTC(y + 1, 0, 1) };
+  }
+  if (type === "quarterly") {
+    const m = /^(\d{4})-Q([1-4])$/.exec(key);
+    if (!m) throw new Error(`bad quarterly period key: ${key}`);
+    const y = Number(m[1]);
+    const startMonth = (Number(m[2]) - 1) * 3;
+    return { start: Date.UTC(y, startMonth, 1), end: Date.UTC(y, startMonth + 3, 1) };
+  }
+  const m = /^(\d{4})-(\d{2})$/.exec(key);
+  if (!m) throw new Error(`bad monthly period key: ${key}`);
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  return { start: Date.UTC(y, mo, 1), end: Date.UTC(y, mo + 1, 1) };
+}
+
+// Advance a UTC date by one recurrence step. Month arithmetic clamps end-of-month overflow (Jan 31 + 1mo ->
+// Feb 28/29) the way Date.UTC naturally rolls; we cap the day to the target month's length to avoid rollover.
+export function advanceRecurrence(d: Date, rule: RecurrenceRule): Date {
+  const step = rule === "monthly" ? 1 : rule === "quarterly" ? 3 : 12;
+  const y = d.getUTCFullYear();
+  const mo = d.getUTCMonth() + step;
+  const targetY = y + Math.floor(mo / 12);
+  const targetMo = ((mo % 12) + 12) % 12;
+  const lastDay = new Date(Date.UTC(targetY, targetMo + 1, 0)).getUTCDate();
+  const day = Math.min(d.getUTCDate(), lastDay);
+  return new Date(Date.UTC(targetY, targetMo, day, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()));
+}
+
+// Utilization from a cap + spent. `remaining` goes negative on overspend; `utilization` is a 0..>1 fraction
+// (0 when the cap is 0, to avoid divide-by-zero).
+export function budgetUtilization(amount: number, spent: number): { spent: number; remaining: number; utilization: number } {
+  const s = round2(spent);
+  return { spent: s, remaining: round2(amount - s), utilization: amount > 0 ? s / amount : 0 };
+}
