@@ -24,7 +24,10 @@ jobs:
       - run: npm ci
       # Gate the deploy on the same checks as CI (spectral + tsc + vitest).
       - run: npm run verify
+      # Build the SPA BEFORE any wrangler command: wrangler validates `[assets].directory` on every
+      # subcommand (including `d1 migrations apply`), so a missing web/dist fails the migration step.
+      - run: npm run build:web
       # Idempotent: wrangler skips migrations already recorded in the remote D1.
       - run: npm run db:migrate:remote
-      # build:web + wrangler deploy (uploads Worker + web/dist assets, registers crons).
-      - run: npm run deploy
+      # Uploads Worker + web/dist assets, registers crons.
+      - run: npx wrangler deploy

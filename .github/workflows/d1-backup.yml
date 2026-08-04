@@ -24,6 +24,9 @@ jobs:
         with:
           node-version: "20"
       - run: npm ci
+      # wrangler validates `[assets].directory` on every subcommand, so the d1/r2 calls below need
+      # web/dist to exist. This job uploads no assets, so an empty directory is enough - no SPA build.
+      - run: mkdir -p web/dist
       - name: Export production D1
         run: |
           STAMP="$(date -u +%F)"
