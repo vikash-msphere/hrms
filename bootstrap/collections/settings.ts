@@ -7,9 +7,10 @@ import { DEFAULT_TAX_CONFIG } from "../../src/domain/incomeTax";
 import { DEFAULT_PT_CONFIG } from "../../src/domain/statutory";
 import { DEFAULT_ATTENDANCE } from "../../src/domain/attendance";
 import { DEFAULT_TRANSITION_TEMPLATES } from "../../src/domain/transitions";
+import { BRAND } from "../../src/domain/brand";
 import { DEFAULT_ESIGN } from "../../src/domain/esign";
 
-const ORGANIZATION = { name: "Your Company Pvt Ltd", address: "", logo: "", default_currency: "INR", letter_defaults: { hr_email: "" }, primary_color: "#1A2980", email_logo_url: "" };
+const ORGANIZATION = { name: "Your Company Pvt Ltd", address: "", logo: "", favicon: "", default_currency: "INR", letter_defaults: { hr_email: "" }, primary_color: BRAND.primary, email_logo_url: "" };
 
 const SETTINGS: Array<[string, unknown]> = [
   ["organization", ORGANIZATION],

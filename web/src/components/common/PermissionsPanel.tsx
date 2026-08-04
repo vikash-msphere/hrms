@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { list, create, remove } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { roleLabel } from "@/lib/roles";
+import { CopyEmail } from "@/components/common/CopyEmail";
 import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleScope";
 import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules } from "@/components/access/permMatrix";
 import { FineRulesEditor } from "@/components/access/FineRulesEditor";
@@ -98,7 +99,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
 
   // Users matrix: one row per user (DataTable paginates them), one column per collection.
   const userMatrixCols: Column<{ path: string; email: string }>[] = [
-    { id: "user", header: "User", filter: "text", accessor: (u) => u.email, cell: (u) => <span className="font-medium">{u.email}</span> },
+    { id: "user", header: "User", filter: "text", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
     ...collections.map((c) => ({ id: c, header: labelOf(c), sortable: false, filter: "none", accessor: (u: { path: string; email: string }) => valueOf("user", u.path, c), cell: (u: { path: string; email: string }) => levelCell("user", u.path, c, u.email) } as Column<{ path: string; email: string }>)),
   ];
 

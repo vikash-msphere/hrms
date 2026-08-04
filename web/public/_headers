@@ -3,16 +3,14 @@
 # and its bundled assets. script-src is 'self' only (the theme bootstrap is an external file, and the
 # module-preload polyfill is disabled in vite.config.ts), so no inline scripts are permitted. style-src keeps
 # 'unsafe-inline' because React and the card-template renderer set element style attributes.
-# The two fonts.google origins are the ONLY remote hosts in this policy, and they carry no script: the app's
-# typefaces - the org wordmark and the nine faces a post can be set in - are loaded by the @import at the top of
-# web/src/index.css, so the stylesheet needs fonts.googleapis.com and the woff2 files need fonts.gstatic.com.
-# Both are stated exactly, on the two directives that need them; script-src and connect-src stay 'self'.
+# No remote host appears anywhere in this policy: the app's typefaces (the UI font, the org wordmark and the
+# faces a post can be set in) are self-hosted via @fontsource and ship as same-origin bundled assets.
 # frame-src allows blob: ONLY: the in-app PDF viewers (payslip preview, letter-template preview) fetch the PDF
 # through the authorized API, wrap the bytes in a same-origin Blob, and show them in an iframe. Without it the
 # frame falls back to default-src 'self', which excludes blob: - the viewer renders as an empty box. No remote
 # origin is framed, and object-src stays 'none' (no <object>/<embed> plugin surface).
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer

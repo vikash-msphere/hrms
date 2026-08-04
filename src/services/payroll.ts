@@ -15,14 +15,15 @@ import { allStructureLines } from "./salaryStructures";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthlyRecurringGross, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations } from "./taxProjection";
-import { reimbursementPayoutMode, approvedUnpaidReimbursements, resetReimbursementsPaidByRun, markReimbursementsPaidByRun } from "./reimbursements";
-import { approvedUnpaidEncashments, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
-import { unpaidBonuses, markBonusesPaidByRun, resetBonusesPaidByRun } from "./bonuses";
-import { dueLoanInstallments, markLoanRepaymentsByRun, resetLoanRepaymentsByRun } from "./loans";
+import { reimbursementPayoutMode, approvedUnpaidReimbursementsAll, resetReimbursementsPaidByRun, markReimbursementsPaidByRun } from "./reimbursements";
+import { approvedUnpaidEncashmentsAll, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
+import { unpaidBonusesAll, markBonusesPaidByRun, resetBonusesPaidByRun } from "./bonuses";
+import { dueLoanInstallmentsAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
+import { runBatch, runBatchChecked, chunk, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
-import { approvedUnpaidOvertime, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
+import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
 import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun } from "./compensation";
 import { renderPayslipPdf } from "../lib/pdf";
 import { payslipTemplateOrDefault, type PayslipTemplate } from "../domain/payslipTemplate";
@@ -107,8 +108,9 @@ function assertEtag(row: { updatedAt: Date }, ifMatch?: string) {
 // rebuilding an old period after a raise must not silently apply the new salary.) Falls back to the open row
 // when there's no period. A backdated raise's delta for ALREADY-PUBLISHED periods is paid via arrears
 // (reviseCompensation); unpublished/future periods pick up the new comp directly here, so nothing double-counts.
-async function compForPeriod(deps: Deps, employeeId: string, asOfMs: number | undefined) {
-  const rows = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, employeeId));
+// Pure over one employee's (prefetched) compensation rows - the build reads the whole table once and picks
+// per employee here, instead of one query per employee.
+function compForPeriodFrom(rows: (typeof schema.compensation.$inferSelect)[], asOfMs: number | undefined) {
   if (asOfMs === undefined) return rows.find((r) => r.effectiveTo === null);
   return rows
     .filter((r) => +new Date(r.effectiveFrom) <= asOfMs && (r.effectiveTo === null || +new Date(r.effectiveTo) > asOfMs))
@@ -166,13 +168,14 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   assertEtag(run, ifMatch);
   if (!isEditable(run.state as RunState)) throw failedPrecondition("run is not editable");
 
-  const employees = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
+  // Active AND not soft-deleted: deleteEmployee only stamps `deleteTime` (status stays "active"), so filtering
+  // on status alone would keep paying a deleted employee - salary, statutory contributions and all.
+  const employees = (await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"))).filter((e) => !e.deleteTime);
   // Apply every component that's enabled (not disabled) and not soft-deleted.
   const components = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.disabled && !c.deleteTime);
   // Salary structures (lines by id), loaded once: an employee with an assigned structure gets only that
   // structure's earning components (with its rate overrides); deductions/statutory lines always apply.
   const structById = await allStructureLines(deps);
-  await deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
 
   // Income-tax (TDS): driven by a configured `income_tax` deduction component (opt-in). Compute each
   // employee's monthly TDS for the run's financial year, with deducted-to-date taken from OTHER finalized
@@ -183,23 +186,48 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const cfg = tds ? await loadTaxConfig(deps) : null;
   const paidTotals = tds ? await finalizedTotals(deps, fy, runId) : new Map();
 
-  // Reimbursements paid via payroll: approved-unpaid claims become a non-taxable earning line and are
-  // marked PAID. Reset any claim this run paid in a prior build first, so a rebuild is idempotent.
+  // A rebuild first releases everything the PREVIOUS build of this run marked paid (idempotency), and drops
+  // the old items. All of it goes in ONE atomic batch - one subrequest, and a crash can't leave the run
+  // half-reset. After this batch the run is in the clean "never built" state (items gone, nothing stamped
+  // paid by it, `itemsBuiltAt` cleared); the second batch at the end of the build commits the new state
+  // atomically. (Loan resets need two small reads first - see loans.ts.)
+  //
+  // EVERY kind is released unconditionally, exactly as releasePaidByRun does, and for the same reason: a
+  // reset matches only rows whose paidRunId is this run, so releasing a kind the run never used is a no-op -
+  // whereas gating a release on the CURRENT config strands the previous build's payouts when the config
+  // changed since (flip reimbursements to "separate", or turn overtime off, and a rebuild would leave those
+  // rows marked paid by a run that no longer pays them - the employee is never paid).
   const payViaPayroll = (await reimbursementPayoutMode(deps)) === "payroll";
-  if (payViaPayroll) await resetReimbursementsPaidByRun(deps, runId);
-  // Leave encashments are always paid via payroll (taxable earning). Reset any this run paid in a prior build.
-  await resetEncashmentsPaidByRun(deps, runId);
-  // Bonuses (individual + company/department awards) are paid as a taxable earning by the next run. Reset any
-  // this run paid in a prior build so a rebuild is idempotent.
-  await resetBonusesPaidByRun(deps, runId);
-  // Loan repayments this run recorded (a post-tax deduction). Reset first so a rebuild re-applies idempotently.
-  await resetLoanRepaymentsByRun(deps, runId);
-  // Overtime pay (opt-in) + backdated-increment arrears are also paid as taxable earnings by the next run.
   const otCfg = await getSettingValue<OvertimeConfig>(deps, "overtime", DEFAULT_OVERTIME_CONFIG);
-  if (otCfg.enabled) await resetOvertimePaidByRun(deps, runId);
-  await resetCompArrearsPaidByRun(deps, runId);
+  await runBatch(deps.db, [
+    deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
+    ...(await releasePaidByRun(deps, runId)),
+    // Un-stamp the build: until the commit batch below lands, this run has no items, and a `built_time` left
+    // pointing at the previous build would read as "built and up to date" for an EMPTY run (runStaleness
+    // compares inputs against it) - which an approver could then approve and publish, paying nobody.
+    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null }).where(eq(schema.payrollRuns.uuid, runId)),
+  ]);
   const periodEndMs = period ? +new Date(period.periodEnd) : undefined;
   const now = new Date();
+
+  // Every payout queue + compensation, prefetched in ONE read each and grouped by employee - the per-employee
+  // loop below touches the DB not at all, so the build's subrequest count is flat in headcount (the free-plan
+  // Workers budget is 50 an invocation).
+  const compByEmp = groupBy(await deps.db.select().from(schema.compensation), (r) => r.employeeId);
+  const encashByEmp = groupBy(await approvedUnpaidEncashmentsAll(deps), (r) => r.employeeId);
+  const bonusByEmp = groupBy(await unpaidBonusesAll(deps), (r) => r.employeeId);
+  const otByEmp = otCfg.enabled ? groupBy(await approvedUnpaidOvertimeAll(deps, periodEndMs), (r) => r.employeeId) : new Map<string, never[]>();
+  const reimbByEmp = payViaPayroll ? groupBy(await approvedUnpaidReimbursementsAll(deps), (r) => r.employeeId) : new Map<string, never[]>();
+  const dueLoansByEmp = await dueLoanInstallmentsAll(deps);
+
+  // What the loop decides, collected for the single write batch after it.
+  const paidEncashIds: string[] = [];
+  const paidBonusIds: string[] = [];
+  const paidOtIds: string[] = [];
+  const paidArrearIds: string[] = [];
+  const paidReimbIds: string[] = [];
+  const loanEntries: { loanId: string; amount: number }[] = [];
+  const itemRows: (typeof schema.payrollRunItems.$inferInsert)[] = [];
 
   // Loss-of-pay for unexcused absences (opt-in via settings/attendance.lop_enabled). Assemble the period's
   // holidays, approved leave and attendance punches ONCE; the per-employee absent-day count + amount follow.
@@ -254,7 +282,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   }
 
   for (const e of employees) {
-    const comp = await compForPeriod(deps, e.uuid, periodEndMs);
+    const comp = compForPeriodFrom(compByEmp.get(e.uuid) ?? [], periodEndMs);
     if (!comp) continue;
     if ((comp.currency || "INR") !== orgCurrency) {
       throw failedPrecondition(`${e.firstName} ${e.lastName}'s compensation is in ${comp.currency || "INR"}, but payroll runs in ${orgCurrency}`);
@@ -337,49 +365,56 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     }
 
     // Leave encashment payouts: TAXABLE earning (encashment is salary income, so it lifts the TDS base below).
-    const encashments = await approvedUnpaidEncashments(deps, e.uuid);
+    const encashments = encashByEmp.get(e.uuid) ?? [];
     for (const r of encashments) if ((r.currency || "INR") !== orgCurrency) throw failedPrecondition(`a leave encashment for ${e.firstName} ${e.lastName} is in ${r.currency || "INR"}, not ${orgCurrency}`);
     const encashDays = encashments.reduce((s, r) => s + r.days, 0);
     const encashTotal = encashments.reduce((s, r) => s + r.amount, 0);
     if (encashTotal > 0) {
       lines.push({ code: "ENCASH", name: `Leave encashment (${round2(encashDays)} day(s))`, kind: "earning", amount: round2(encashTotal) });
-      await markEncashmentsPaidByRun(deps, encashments.map((r) => r.uuid), runId, now);
+      paidEncashIds.push(...encashments.map((r) => r.uuid));
     }
 
     // Bonuses (individual + group awards): each unpaid award is a TAXABLE earning line, so it lifts the TDS
     // base below; then mark them paid by this run. One line per award, labelled by its kind.
-    const empBonuses = await unpaidBonuses(deps, e.uuid);
+    const empBonuses = bonusByEmp.get(e.uuid) ?? [];
     for (const b of empBonuses) {
       if ((b.currency || "INR") !== orgCurrency) throw failedPrecondition(`a bonus for ${e.firstName} ${e.lastName} is in ${b.currency || "INR"}, not ${orgCurrency}`);
       lines.push({ code: "BONUS", name: b.kind || "Bonus", kind: "earning", amount: round2(b.amount) });
     }
-    if (empBonuses.length) await markBonusesPaidByRun(deps, empBonuses.map((b) => b.uuid), runId, now);
+    paidBonusIds.push(...empBonuses.map((b) => b.uuid));
 
     // Overtime pay: approved-unpaid overtime (up to the period end) priced from base pay, as a TAXABLE earning.
     if (otCfg.enabled) {
-      const ot = await approvedUnpaidOvertime(deps, e.uuid, periodEndMs);
+      const ot = otByEmp.get(e.uuid) ?? [];
       const otMinutes = ot.reduce((s, r) => s + Math.max(0, Math.round((+new Date(r.endTime) - +new Date(r.startTime)) / 60000)), 0);
       const otAmt = overtimePay(otMinutes, comp.basePay, otCfg);
       if (otAmt > 0) {
         const h = Math.floor(otMinutes / 60), m = otMinutes % 60;
         lines.push({ code: "OT", name: `Overtime (${h}h${m ? ` ${m}m` : ""})`, kind: "earning", amount: otAmt });
-        await markOvertimePaidByRun(deps, ot.map((r) => r.uuid), runId, now);
+        paidOtIds.push(...ot.map((r) => r.uuid));
       }
     }
 
-    // Backdated-increment arrears: the current comp row's stored arrears, paid once as a TAXABLE earning.
-    if (comp.arrearsAmount > 0 && !comp.arrearsPaidRunId) {
-      lines.push({ code: "ARREARS", name: "Salary arrears", kind: "earning", amount: round2(comp.arrearsAmount) });
-      await markCompArrearsPaidByRun(deps, [comp.uuid], runId, now);
+    // Backdated-increment arrears: every UNPAID arrears amount the employee has accrued, paid once as a TAXABLE
+    // earning. Scanning all of their comp rows - not just the period-effective one - matters when a second
+    // revision lands before the first one's arrears were paid: the first row is closed by then, so keying off
+    // the effective row alone would strand that raise's back pay forever.
+    // `arrearsPaidAt` with no run = paid by an FnF settlement; either marker means the arrears are settled.
+    const unpaidArrears = (compByEmp.get(e.uuid) ?? []).filter((c) => c.arrearsAmount > 0 && !c.arrearsPaidRunId && !c.arrearsPaidAt);
+    for (const c of unpaidArrears) if ((c.currency || "INR") !== orgCurrency) throw failedPrecondition(`salary arrears for ${e.firstName} ${e.lastName} are in ${c.currency || "INR"}, not ${orgCurrency}`);
+    const arrearsTotal = round2(unpaidArrears.reduce((s, c) => s + c.arrearsAmount, 0));
+    if (arrearsTotal > 0) {
+      lines.push({ code: "ARREARS", name: "Salary arrears", kind: "earning", amount: arrearsTotal });
+      paidArrearIds.push(...unpaidArrears.map((c) => c.uuid));
     }
 
     // Reimbursement payouts: non-taxable earning (paid in net, excluded from the income-tax base).
     if (payViaPayroll) {
-      const claims = await approvedUnpaidReimbursements(deps, e.uuid);
+      const claims = reimbByEmp.get(e.uuid) ?? [];
       const total = claims.reduce((s, r) => s + r.amount, 0);
       if (total > 0) {
         lines.push({ code: "REIMB", name: "Reimbursement", kind: "earning", amount: round2(total), taxable: false });
-        await markReimbursementsPaidByRun(deps, claims.map((r) => r.uuid), runId, now);
+        paidReimbIds.push(...claims.map((r) => r.uuid));
       }
     }
 
@@ -391,7 +426,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       const paid = paidTotals.get(e.uuid) ?? { gross: 0, taxableGross: 0, tax: 0, months: 0, paidMonths: new Set<string>() };
       const proj = assembleProjection({
         cfg, regime: tds.regime ?? "new", tdsConfigured: true,
-        employedMonths: employedMonthsInFy(e.startDate ?? null, fy),
+        employedMonths: employedMonthsInFy(e.startDate ?? null, fy, e.endDate ?? null),
         paidGross: paid.taxableGross, paidTax: paid.tax, paidMonths: paid.months,
         // Spread the balance over the calendar months left from this run's pay month (inclusive - this run
         // collects the first installment), skipping months another finalized run already covered.
@@ -409,26 +444,70 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // recoverable base is net MINUS reimbursements. Allocate each due EMI (already capped at its outstanding)
     // against that base, in order; an uncollected shortfall stays outstanding for the next run. Record only what
     // is actually deducted.
-    const dueLoans = await dueLoanInstallments(deps, e.uuid);
+    const dueLoans = dueLoansByEmp.get(e.uuid) ?? [];
     if (dueLoans.length) {
       const reimbInNet = lines.filter((l) => l.kind === "earning" && l.taxable === false).reduce((s, l) => s + l.amount, 0);
       let available = Math.max(0, round2(computeRunItem(lines).net - reimbInNet));
-      const repaidEntries: { loanId: string; amount: number }[] = [];
       for (const d of dueLoans) {
         const take = round2(Math.min(d.amount, available));
         if (take <= 0.005) continue;
         lines.push({ code: "LOAN", name: d.loan.kind === "advance" ? "Advance recovery" : "Loan repayment", kind: "deduction", amount: take });
-        repaidEntries.push({ loanId: d.loan.uuid, amount: take });
+        loanEntries.push({ loanId: d.loan.uuid, amount: take });
         available = round2(available - take);
       }
-      if (repaidEntries.length) await markLoanRepaymentsByRun(deps, repaidEntries, runId, now);
     }
 
     const totals = computeRunItem(lines);
-    await deps.db.insert(schema.payrollRunItems).values({ runId, employeeId: e.uuid, linesJson: JSON.stringify(lines), ...totals, tax });
+    itemRows.push({ runId, employeeId: e.uuid, linesJson: JSON.stringify(lines), ...totals, tax });
   }
-  // Stamp the build time: any income-affecting input touched after this makes the run stale (see runStaleness).
-  await deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: now, updatedAt: now }).where(eq(schema.payrollRuns.uuid, runId));
+
+  // Commit the whole build in ONE atomic batch: every paid-by-run marker, the loan ledger + balances, the
+  // line items, and the build stamp land together or not at all - a crash mid-build can no longer mark a
+  // payout paid without the item that pays it (and it all costs one subrequest). IN-lists and multi-row
+  // inserts are chunked under D1's 100-bound-params-per-statement cap; chunks ride in the same batch.
+  const loansById = new Map([...dueLoansByEmp.values()].flat().map((d) => [d.loan.uuid, d.loan]));
+  const loanWrites = loanRepaymentWrites(deps, loansById, loanEntries, runId, now);
+  // Every paid-by-this-run marker is CHECKED: its guard only matches a payable that is STILL eligible, and the
+  // queues above were read at the start of the build, so a payable can have left the queue since (an
+  // encashment cancelled and its days credited back, a claim paid separately, another run claiming the same
+  // bonus). The guard stops the bad flip; the row count tells us it happened. Without the check, that payable
+  // would sit on this run's payslip while remaining queued - and get paid a second time by the next run.
+  const marks: CheckedStmt[] = [
+    ...chunk(paidEncashIds, 90).map((ids) => ({ stmt: markEncashmentsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.leaveEncashments.uuid }), expect: ids.length, label: "leave encashments" })),
+    ...chunk(paidBonusIds, 90).map((ids) => ({ stmt: markBonusesPaidByRun(deps, ids, runId, now).returning({ uuid: schema.bonuses.uuid }), expect: ids.length, label: "bonuses" })),
+    ...chunk(paidOtIds, 90).map((ids) => ({ stmt: markOvertimePaidByRun(deps, ids, runId, now).returning({ uuid: schema.overtimeRequests.uuid }), expect: ids.length, label: "overtime" })),
+    ...chunk(paidArrearIds, 90).map((ids) => ({ stmt: markCompArrearsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.compensation.uuid }), expect: ids.length, label: "salary arrears" })),
+    ...chunk(paidReimbIds, 90).map((ids) => ({ stmt: markReimbursementsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.reimbursements.uuid }), expect: ids.length, label: "reimbursements" })),
+  ];
+  const stmts: (BatchStmt | CheckedStmt)[] = [
+    ...marks,
+    ...loanWrites.stmts,
+    ...chunk(itemRows, 8).map((rows) => deps.db.insert(schema.payrollRunItems).values(rows)),
+    // Stamp the build time: any income-affecting input touched after this makes the run stale (see runStaleness).
+    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: now, updatedAt: now }).where(eq(schema.payrollRuns.uuid, runId)),
+  ];
+  const drifted = await runBatchChecked(deps.db, stmts);
+  if (drifted.length) {
+    // The build priced payables that moved under it. The items just written would pay them without settling
+    // them, so undo the whole build back to the clean "never built" state (the same reset the build opens
+    // with) and fail loudly. Nothing is paid, no marker survives, and a rebuild re-reads the queues.
+    await runBatch(deps.db, [
+      deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
+      ...(await releasePaidByRun(deps, runId)),
+      deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null }).where(eq(schema.payrollRuns.uuid, runId)),
+    ]);
+    throw failedPrecondition(`payables changed while the run was building (${[...new Set(drifted)].join(", ")}) - nothing was paid; build the run again`);
+  }
+
+  // Loan events only announce what the committed batch actually did. Best-effort: the money is already
+  // consistent, so an event-pipeline failure must not fail a completed build.
+  for (const ev of loanWrites.events) {
+    try {
+      await emitEvent(deps, null, ev.type, { subject: `loans/${ev.loanId}`, employeeId: ev.employeeId, payload: ev.payload });
+    } catch (err) {
+      console.error(`[payroll] ${ev.type} emit failed (non-fatal)`, err);
+    }
+  }
   await audit(deps, actor, "payroll.build", "payroll-runs", runId, { employees: employees.length });
   return getRun(deps, runId);
 }
@@ -485,6 +564,12 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
   // marker (only one-offs do), so a second APPROVED/PUBLISHED run for the same period would pay the monthly
   // salary twice. Drafts are unrestricted; the money commits at APPROVE, and APPROVED never rolls back.
   if (to === "APPROVED") {
+    // Approving commits the period: it consumes the one-run-per-period slot below and makes the bank file
+    // downloadable. A run that was never built (or built and left empty) pays nobody while still locking the
+    // period, so the real run for it can't be approved until someone works out why and deletes this one.
+    if (!run.itemsBuiltAt) throw failedPrecondition("build the run before approving it");
+    const [anyItem] = await deps.db.select({ uuid: schema.payrollRunItems.uuid }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)).limit(1);
+    if (!anyItem) throw failedPrecondition("this run has no payslip items - build it before approving");
     const committed = await deps.db
       .select({ uuid: schema.payrollRuns.uuid })
       .from(schema.payrollRuns)
@@ -515,16 +600,18 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
 
 // Release EVERY payout kind a build may have marked paid by this run, back to approved-unpaid. Each reset
 // matches only rows whose paidRunId is this run, so resetting a kind the run never used is a harmless no-op -
-// which is why this can run unconditionally (config may have changed since the build). resetLoanRepaymentsByRun
+// which is why this can run unconditionally (config may have changed since the build). resetLoanRepaymentStmts
 // also DELETEs the loan_repayments ledger rows, clearing their NOT-NULL FK to payroll_runs before the run row
 // is deleted. Shared by build (idempotent rebuild) and deleteRun (release-on-delete).
-async function releasePaidByRun(deps: Deps, runId: string) {
-  await resetReimbursementsPaidByRun(deps, runId);
-  await resetEncashmentsPaidByRun(deps, runId);
-  await resetBonusesPaidByRun(deps, runId);
-  await resetLoanRepaymentsByRun(deps, runId);
-  await resetOvertimePaidByRun(deps, runId);
-  await resetCompArrearsPaidByRun(deps, runId);
+async function releasePaidByRun(deps: Deps, runId: string): Promise<BatchStmt[]> {
+  return [
+    resetReimbursementsPaidByRun(deps, runId),
+    resetEncashmentsPaidByRun(deps, runId),
+    resetBonusesPaidByRun(deps, runId),
+    ...(await resetLoanRepaymentStmts(deps, runId)),
+    resetOvertimePaidByRun(deps, runId),
+    resetCompArrearsPaidByRun(deps, runId),
+  ];
 }
 
 // Delete an UNPUBLISHED run (DRAFT/REVIEW/APPROVED). A published run has payslips and is immutable, so it
@@ -537,9 +624,16 @@ export async function deleteRun(deps: Deps, actor: AppUser, runId: string, ifMat
   const run = await getRun(deps, runId);
   assertEtag(run, ifMatch);
   if (run.state === "PUBLISHED") throw failedPrecondition("a published run cannot be deleted");
-  await releasePaidByRun(deps, runId);
-  await deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
-  await deps.db.delete(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, runId));
+  // Deleting releases every payable this run paid back into the queue, so the next run pays them again. That
+  // is only safe while no money has gone out - and the bank payout file is the moment it does.
+  if (run.bankFileAt) throw failedPrecondition("a bank payout file was already generated for this run, so it may already have been paid; it cannot be deleted");
+  // One atomic batch: the releases, the items and the run go together - a crash can't strand payouts
+  // stamped with a run that no longer exists.
+  await runBatch(deps.db, [
+    ...(await releasePaidByRun(deps, runId)),
+    deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
+    deps.db.delete(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, runId)),
+  ]);
   await audit(deps, actor, "payroll.delete", "payroll-runs", runId);
 }
 

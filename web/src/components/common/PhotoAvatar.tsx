@@ -22,6 +22,8 @@ export function PhotoAvatar({
   editable,
   onChanged,
   className = "h-16 w-16",
+  open: openProp,
+  onOpenChange,
 }: {
   employeeId: string;
   name: string;
@@ -29,9 +31,15 @@ export function PhotoAvatar({
   editable?: boolean;
   onChanged?: () => void;
   className?: string;
+  // Optional controlled open, so the upload dialog can also be opened from outside the avatar's
+  // hover overlay (the profile completeness meter's "Profile photo" chip does).
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const [openLocal, setOpenLocal] = useState(false);
+  const open = openProp ?? openLocal;
+  const setOpen = onOpenChange ?? setOpenLocal;
   const [saving, setSaving] = useState(false);
   // The photo bytes come from the shared session cache, which batches every avatar mounted in the same tick
   // into one `employees:batchGetPhotos` request (no per-avatar fetch). `src` is a data URI or null.
@@ -90,14 +98,16 @@ export function PhotoAvatar({
     setOff({ x: 0, y: 0 });
   }
 
-  function openDialog() {
+  // Init on open (whether via the hover overlay or the controlled prop): reset the crop and preload
+  // the current photo into the cropper so it can be re-adjusted.
+  useEffect(() => {
+    if (!open) return;
     setZoom(1);
     setOff({ x: 0, y: 0 });
     setNat(null);
-    // Preload the current photo into the cropper so it can be re-adjusted.
     setImgSrc(src);
-    setOpen(true);
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   async function save() {
     if (!nat || !imgRef.current) return;
@@ -153,7 +163,7 @@ export function PhotoAvatar({
         {editable && (
           <button
             type="button"
-            onClick={openDialog}
+            onClick={() => setOpen(true)}
             className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 text-transparent transition-colors hover:bg-black/50 hover:text-white"
             title="Change photo"
             aria-label="Change photo"

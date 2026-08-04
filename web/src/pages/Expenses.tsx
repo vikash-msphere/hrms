@@ -327,7 +327,13 @@ export default function Expenses({ me }: { me: Me }) {
 
       <DataState state={state} error={error} onRetry={reload}>
         {rows.length === 0 ? (
-          <EmptyState illustration="expenses" icon={Wallet} title="No expenses yet" description="Record an operational or office expense to get started." />
+          <EmptyState
+            illustration="expenses"
+            icon={Wallet}
+            title="No expenses yet"
+            description="Record an operational or office expense to get started."
+            action={<AccessAction collection="expenses" create label="New expense"><Button onClick={openCreate}><Plus className="h-4 w-4" /> New expense</Button></AccessAction>}
+          />
         ) : (
           <DataTable
             columns={columns}

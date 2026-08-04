@@ -205,8 +205,8 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-1">
-                          {r.has_resume && <Button variant="ghost" size="sm" className="h-7" onClick={() => download(`referrals/${idOf(r.path)}`, `resume-${r.candidate_name}`)}><Download className="h-3.5 w-3.5" /> View</Button>}
-                          {can.includes("upload") && <Button variant="ghost" size="sm" className="h-7 text-muted-foreground" loading={uploading === r.path} onClick={() => pickResume(r)}><Paperclip className="h-3.5 w-3.5" /> {r.has_resume ? "Replace" : "Attach"}</Button>}
+                          {r.has_resume && <AccessAction verb="download" objectPath={r.path} can={can} label="Download referral resume"><Button variant="ghost" size="sm" className="h-7" onClick={() => download(`referrals/${idOf(r.path)}`, `resume-${r.candidate_name}`)}><Download className="h-3.5 w-3.5" /> View</Button></AccessAction>}
+                          {can.includes("upload") && <AccessAction verb="upload" objectPath={r.path} can={can} label="Attach referral resume"><Button variant="ghost" size="sm" className="h-7 text-muted-foreground" loading={uploading === r.path} onClick={() => pickResume(r)}><Paperclip className="h-3.5 w-3.5" /> {r.has_resume ? "Replace" : "Attach"}</Button></AccessAction>}
                         </div>
                       </td>
                       <td className="px-3 py-2">
@@ -214,7 +214,7 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
                           {can.includes("award") && (inPipeline.has(idOf(r.path))
                             ? <Button size="sm" variant="ghost" className="h-7 text-muted-foreground" title="Open the candidate this referral became" onClick={() => navigate(`candidates/${inPipeline.get(idOf(r.path))}`)}><UserCheck className="h-3.5 w-3.5" /> In pipeline</Button>
                             : <Button size="sm" variant="ghost" className="h-7" onClick={() => toPipeline(r)}><UserCheck className="h-3.5 w-3.5" /> To pipeline</Button>)}
-                          {can.includes("award") && (r.bonus_status ?? "pending") === "pending" && !!r.hired_employee && <Button size="sm" variant="outline" className="h-7" onClick={() => award(r)}><Gift className="h-3.5 w-3.5" /> Award now</Button>}
+                          {can.includes("award") && (r.bonus_status ?? "pending") === "pending" && !!r.hired_employee && <AccessAction verb="award" objectPath={r.path} can={can} label="Award referral bonus"><Button size="sm" variant="outline" className="h-7" onClick={() => award(r)}><Gift className="h-3.5 w-3.5" /> Award now</Button></AccessAction>}
                           {can.includes("update") && <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setDialog(r)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>}
                           {can.includes("delete") && <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-destructive" onClick={() => del(r)} aria-label="Withdraw"><Trash2 className="h-3.5 w-3.5" /></Button>}
                         </div>

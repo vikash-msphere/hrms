@@ -17,14 +17,14 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   cards: ["move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo"],
   sprints: ["activate", "complete"],
   "review-cycles": ["launch", "enroll", "close", "reopen"],
-  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate"],
+  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "nudge", "pdf"],
   "review-feedback": ["submitFeedback", "decline"],
   "time-entries": ["submit", "approve", "reject"],
   loans: ["approve", "reject", "disburse", "recordRepayment"],
   "tax-declarations": ["verify", "reject", "upload", "download"],
   transitions: ["complete", "cancel", "reopen", "appendTask"],
   "transition-tasks": ["complete", "reopen", "upload"],
-  announcements: ["post", "giveKudos", "markRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock"],
+  announcements: ["post", "giveKudos", "markRead", "markAllRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock", "pin", "unpin"],
   holidays: [],
   "leave-types": [],
   "letter-templates": [],
@@ -54,6 +54,9 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   interviews: ["complete", "cancel"],
   "interview-feedback": [],
   offers: ["approve", "extend", "accept", "decline", "rescind"],
+  expenses: ["submit", "approve", "reject", "cancel", "pay", "upload", "download"],
+  automations: ["enable", "disable", "test"],
+  "access-rules": ["preview", "requestAccess"],
 };
 
 // The standard methods that live on the level ladder (read/write/admin), NOT grantable as custom methods.

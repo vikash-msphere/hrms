@@ -57,11 +57,16 @@ const r0 = (n: number) => Math.round(n);
 export type SlabRow = { from: number; to: number | null; rate: number; amount: number };
 
 // Progressive slab tax + a per-band breakdown (only bands that contribute).
+// Slabs/surcharge bands MUST be walked in ascending order; the stored config is HR-editable data, so sort
+// rather than trust the array's order. An out-of-order band would otherwise silently tax the whole income at
+// the wrong rate (a top band listed first caps every lower band out of the walk).
+const ascSlabs = (slabs: Slab[]): Slab[] => [...slabs].sort((a, b) => (a.upTo ?? Infinity) - (b.upTo ?? Infinity));
+
 export function slabTax(taxable: number, cfg: RegimeConfig): { tax: number; rows: SlabRow[] } {
   let tax = 0;
   let prev = 0;
   const rows: SlabRow[] = [];
-  for (const s of cfg.slabs) {
+  for (const s of ascSlabs(cfg.slabs)) {
     const cap = s.upTo ?? Infinity;
     if (taxable > prev) {
       const inBand = Math.min(taxable, cap) - prev;
@@ -88,11 +93,19 @@ export function rebate87A(tax: number, taxable: number, cfg: RegimeConfig): numb
 // (config simply omits the 37% band). Marginal relief: (taxAfterRebate + surcharge) may not exceed the tax at
 // the threshold income plus the income earned over that threshold.
 export function surcharge(taxAfterRebate: number, taxable: number, cfg: RegimeConfig): number {
+  const bands = [...cfg.surcharge].sort((a, b) => a.over - b.over);
   let band: { over: number; rate: number } | null = null;
-  for (const b of cfg.surcharge) if (taxable > b.over) band = b;
+  let prevBand: { over: number; rate: number } | null = null;
+  for (const b of bands) if (taxable > b.over) { prevBand = band; band = b; }
   if (!band) return 0;
   const raw = taxAfterRebate * (band.rate / 100);
-  const taxAtThreshold = slabTax(band.over, cfg).tax; // no rebate applies at these income levels
+  // Tax payable AT the threshold, which is what relief compares against. That figure includes the surcharge
+  // charged at the threshold itself: at exactly ₹1cr the income is still in the 10% band (the walk above is
+  // strict `>`), so the comparison point is slab tax PLUS 10% - not the bare slab tax. Leaving the lower
+  // band's surcharge out lowers the ceiling by that amount and under-withholds by lakhs for anyone sitting in
+  // the relief window just above a threshold. No rebate applies at these income levels.
+  const slabAtThreshold = slabTax(band.over, cfg).tax;
+  const taxAtThreshold = slabAtThreshold + (prevBand ? slabAtThreshold * (prevBand.rate / 100) : 0);
   const allowedOverThreshold = taxAtThreshold + (taxable - band.over);
   const capped = Math.min(raw, allowedOverThreshold - taxAfterRebate);
   return r0(Math.max(0, capped));

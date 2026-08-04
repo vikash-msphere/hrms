@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
 import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
 import { get } from "@/api";
@@ -123,7 +123,7 @@ const STATUS_TEXT: Record<DayStatus, string> = {
   half_day: "text-yellow-600 dark:text-yellow-400",
   insufficient: "text-red-600 dark:text-red-400",
   absent: "text-red-600 dark:text-red-400",
-  on_leave: "text-slate-500 dark:text-slate-400",
+  on_leave: "text-brand-neutral-500 dark:text-brand-neutral-400",
   on_event: "text-indigo-600 dark:text-indigo-400",
   holiday: "text-violet-600 dark:text-violet-400",
 };
@@ -599,7 +599,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
 
   const colBg = (i: number, d: Date) => {
     if (holByCol.get(i)) return "bg-violet-100/70 dark:bg-violet-950/30";
-    if (!workDays.includes(d.getUTCDay())) return "bg-slate-100/80 dark:bg-slate-800/40";
+    if (!workDays.includes(d.getUTCDay())) return "bg-brand-neutral-100/80 dark:bg-brand-neutral-800/40";
     return "";
   };
   // The half-aware overlay drawn inside a (relative) day cell - header and every row use it. While dragging it
@@ -629,7 +629,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
           <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full" style={{ backgroundColor: ONE_LEAVE_COLOR }} /> Leave</span>
         )}
         <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-violet-200 dark:bg-violet-900" /> Holiday</span>
-        <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-slate-200 dark:bg-slate-700" /> Weekend</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-brand-neutral-200 dark:bg-brand-neutral-700" /> Weekend</span>
       </div>
       <div className="flex flex-col gap-1.5 border-t pt-2">
         {showCat("events") && <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded border border-l-[3px] border-indigo-500" /> Event</span>}
@@ -678,16 +678,21 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
           </Tooltip>
           <span className="hidden text-sm text-muted-foreground sm:inline">{rangeLabel}</span>
           <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setPage((p) => p - 1)} aria-label="Previous"><ChevronLeft className="h-4 w-4" /></Button>
-          <Button variant="outline" size="sm" className="h-7" onClick={() => setPage(0)}>Today</Button>
+          <Button variant="outline" size="sm" className="h-7" onClick={() => setPage(0)} disabled={page === 0}>Today</Button>
           <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setPage((p) => p + 1)} aria-label="Next"><ChevronRight className="h-4 w-4" /></Button>
         </div>
       </CardHeader>
       <CardContent className="px-0">
-        <div className="overflow-x-auto border-y">
+        {/* Vertical cap so a big team doesn't let the timeline swallow the page: ~7 rows visible, the rest
+            scroll within the card while the day header stays pinned (sticky needs the opaque bg-card). */}
+        <div className="max-h-[560px] overflow-x-auto overflow-y-auto border-y">
           <div className="min-w-[700px]">
             {/* Day headers */}
-            <div className="grid border-b bg-muted/30" style={gridCols}>
-              <div className="flex items-center px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Team</div>
+            <div className="sticky top-0 z-20 grid border-b bg-card" style={gridCols}>
+              <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Team
+                {rows.length > 0 && <span className="rounded-full bg-muted px-1.5 py-px font-semibold normal-case tabular-nums">{rows.length}</span>}
+              </div>
               {cols.map((d, i) => {
                 const nonWorking = !workDays.includes(d.getUTCDay());
                 const hol = holByCol.get(i);
@@ -721,7 +726,10 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
             </div>
             {/* Employee rows (relative wrapper so the live "now" line can span all of them at once) */}
             {rows.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">No one to show here.</p>
+              <div className="flex flex-col items-center gap-2 py-6 text-center">
+                <Users className="h-8 w-8 text-muted-foreground/40" aria-hidden />
+                <p className="text-sm text-muted-foreground">No one to show here.</p>
+              </div>
             ) : (
             <div className="relative">
             {/* Live now-line: a thin red marker at the current time-of-day inside today's column (org tz),

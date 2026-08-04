@@ -11,11 +11,11 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 
-import { createRun, buildRunItems, transition, listRunItems, getRun, runStaleness, previewRunItemPayslip } from "../src/services/payroll";
-import { createLoan, approveLoan, disburseLoan, recordLoanRepayment } from "../src/services/loans";
-import { recordBonus } from "../src/services/bonuses";
-import { computeAndStoreEncashment, approveEncashment, cancelEncashment } from "../src/services/leaveEncashments";
-import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements } from "../src/services/reimbursements";
+import { createRun, buildRunItems, transition, deleteRun, listRunItems, getRun, runStaleness, previewRunItemPayslip } from "../src/services/payroll";
+import { createLoan, approveLoan, disburseLoan, recordLoanRepayment, repaidCreditStmt, resetLoanRepaymentStmts } from "../src/services/loans";
+import { recordBonus, unpaidBonuses } from "../src/services/bonuses";
+import { computeAndStoreEncashment, approveEncashment, cancelEncashment, approvedUnpaidEncashments } from "../src/services/leaveEncashments";
+import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement } from "../src/services/reimbursements";
 import { computeAndStoreSettlement } from "../src/services/settlements";
 import { createSalaryStructure } from "../src/services/salaryStructures";
 import { reviseCompensation, reapplySplitCurrent, splitStatus } from "../src/services/compensation";
@@ -216,14 +216,30 @@ describe("payroll: ESI eligibility keys off the FULL monthly wage, not the prora
 
 describe("payroll: one committed run per pay period", () => {
   it("blocks approving a second run for a period that already has an APPROVED run", async () => {
-    const actor = await seedActor(await seedEmployee());
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
     const period = await seedPeriod();
     const runA = await createRun(deps, actor, `pay-periods/${period}`);
     const runB = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, runA.uuid);
+    await buildRunItems(deps, actor, runB.uuid);
     await transition(deps, actor, runA.uuid, "REVIEW");
     await transition(deps, actor, runA.uuid, "APPROVED");
     await transition(deps, actor, runB.uuid, "REVIEW");
     await expect(transition(deps, actor, runB.uuid, "APPROVED")).rejects.toThrow(/already approved/);
+  });
+
+  it("refuses to approve a run that was never built, or built empty (it would lock the period and pay nobody)", async () => {
+    const actor = await seedActor(await seedEmployee());
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await transition(deps, actor, run.uuid, "REVIEW");
+    await expect(transition(deps, actor, run.uuid, "APPROVED")).rejects.toThrow(/build the run/);
+
+    // Built, but nobody has compensation on record -> zero items. Still refused.
+    await buildRunItems(deps, actor, run.uuid);
+    await expect(transition(deps, actor, run.uuid, "APPROVED")).rejects.toThrow(/no payslip items/);
   });
 });
 
@@ -580,5 +596,248 @@ describe("payslip preview (pre-publish, nothing persisted)", () => {
     await buildRunItems(deps, actor, run.uuid);
 
     await expect(previewRunItemPayslip(deps, run.uuid, outsider)).rejects.toThrow(/no item for that employee/);
+  });
+});
+
+// A payroll build reads its payout queues once at the start and stamps them paid in one batch at the end.
+// These lock in what must happen when a payable leaves the queue in between: the money must never move.
+describe("payroll: a payable that changes mid-build is never paid", () => {
+  // Wrap deps so that `fn` runs just before the build's Nth db.batch - i.e. after the build has read its
+  // queues, before it commits. That is exactly the window a concurrent request would land in.
+  function racingDeps(nth: number, fn: () => Promise<unknown>): Deps {
+    let batches = 0;
+    const db = new Proxy(deps.db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop) as unknown;
+        if (prop !== "batch") return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        return async (...args: unknown[]) => {
+          if (++batches === nth) await fn();
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+    return { ...deps, db: db as Deps["db"] };
+  }
+
+  it("aborts the build (and pays nobody) when an encashment is cancelled while the run is building", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const lt = genId();
+    await deps.db.insert(schema.leaveTypes).values({ uuid: lt, code: short("lt"), name: "Earned", encashable: true, minBalanceRetainedDays: 0 });
+    await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId: emp, leaveTypeId: lt, balanceDays: 10 });
+    const enc = await computeAndStoreEncashment(deps, actor, { employee: `employees/${emp}`, leave_type: `leave-types/${lt}`, days: 4 });
+    await approveEncashment(deps, actor, enc.uuid); // queued for payout, balance debited to 6
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    // Batch 1 is the build's reset; batch 2 is its commit. Cancel between them: the encashment leaves the
+    // queue and its days go back on the balance, while the build still holds it as payable.
+    const raced = racingDeps(2, () => cancelEncashment(deps, actor, enc.uuid));
+    await expect(buildRunItems(raced, actor, run.uuid)).rejects.toThrow(/changed while the run was building/);
+
+    const after = (await deps.db.select().from(schema.leaveEncashments).where(eq(schema.leaveEncashments.uuid, enc.uuid)))[0]!;
+    expect(after.state).toBe("CANCELLED"); // NOT flipped to PAID over the cancellation
+    expect(after.paidRunId).toBeNull();
+    const bal = (await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp)))[0]!;
+    expect(bal.balanceDays).toBe(10); // days stayed credited back - not paid out AND kept
+    // The run is back to "never built": no items, no build stamp, so nothing can be approved or published.
+    expect(await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, run.uuid))).toEqual([]);
+    expect((await runStaleness(deps, await getRun(deps, run.uuid))).built_time).toBeNull();
+  });
+
+  it("aborts the build when a reimbursement is paid separately while the run is building", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const claim = await createReimbursement(deps, actor, { employee: `employees/${emp}`, amount: 2000 });
+    await approveReimbursement(deps, actor, claim.uuid);
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    const raced = racingDeps(2, () => payReimbursement(deps, actor, claim.uuid)); // paid out of band
+    await expect(buildRunItems(raced, actor, run.uuid)).rejects.toThrow(/changed while the run was building/);
+
+    const after = (await deps.db.select().from(schema.reimbursements).where(eq(schema.reimbursements.uuid, claim.uuid)))[0]!;
+    expect(after.paidRunId).toBeNull(); // the separate payout stands; the run did not also claim it
+    expect(await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, run.uuid))).toEqual([]);
+  });
+
+  it("aborts the build when a loan is closed by a manual repayment while the run is building", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 40000 });
+    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 6000, installments: 6 }); // EMI 1000
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    const raced = racingDeps(2, () => recordLoanRepayment(deps, actor, loan.uuid, 6000)); // settles it in full
+    await expect(buildRunItems(raced, actor, run.uuid)).rejects.toThrow(/changed while the run was building/);
+
+    const after = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!;
+    expect(after.status).toBe("CLOSED");
+    expect(after.repaid).toBe(6000); // the run's installment was rolled back, not stacked on top
+    const ledger = await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.loanId, loan.uuid));
+    expect(ledger).toHaveLength(1); // only the manual repayment survives
+    expect(await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, run.uuid))).toEqual([]);
+  });
+});
+
+describe("loans: `repaid` is the ledger's running total (relative, never an absolute overwrite)", () => {
+  it("keeps a manual repayment and a payroll installment that land against the same starting balance", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 40000 });
+    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 10000, installments: 10 }); // EMI 1000
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+    const repaidOf = async () => (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!.repaid;
+
+    // Both writers computed their move from the same `repaid = 0` snapshot; both must count.
+    await Promise.all([recordLoanRepayment(deps, actor, loan.uuid, 500), repaidCreditStmt(deps, loan.uuid, 1000, new Date())]);
+    expect(await repaidOf()).toBe(1500);
+  });
+
+  it("a run's rollback re-derives `repaid` from the ledger, keeping repayments it never made", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 40000 });
+    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 10000, installments: 10 }); // EMI 1000
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+    await recordLoanRepayment(deps, actor, loan.uuid, 2500); // manual, run-less
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid); // + 1000 installment
+    const loanRow = async () => (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!;
+    expect((await loanRow()).repaid).toBe(3500);
+
+    // Rolling the run's repayments back leaves the manual one untouched (recomputed from the ledger).
+    for (const s of await resetLoanRepaymentStmts(deps, run.uuid)) await s;
+    expect((await loanRow()).repaid).toBe(2500);
+    expect(await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.runId, run.uuid))).toEqual([]);
+  });
+
+  it("closes at the principal, refuses further credits, and reopens when the closing run is rolled back", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 40000 });
+    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 1000, installments: 1 }); // EMI 1000 = full
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+    const loanRow = async () => (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!;
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await loanRow()).status).toBe("CLOSED");
+
+    // A closed loan takes no further credit (the guard), so nothing can deduct for it again.
+    await repaidCreditStmt(deps, loan.uuid, 1000, new Date());
+    expect((await loanRow()).repaid).toBe(1000);
+
+    for (const s of await resetLoanRepaymentStmts(deps, run.uuid)) await s;
+    const reopened = await loanRow();
+    expect(reopened.status).toBe("DISBURSED");
+    expect(reopened.repaid).toBe(0);
+  });
+});
+
+// A terminated employee is in no payroll run, so the full & final settlement is the last chance to pay what
+// they are owed - and the last chance to recover what they owe.
+describe("FnF settlement: every open payable is settled at exit", () => {
+  it("pays the leaver's unpaid bonus, approved encashment and arrears, and recovers the loan outstanding", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    await recordBonus(deps, actor, { employee: `employees/${emp}`, amount: 5000, kind: "Retention", award_date: today() });
+    const lt = genId();
+    await deps.db.insert(schema.leaveTypes).values({ uuid: lt, code: short("lt"), name: "Earned", encashable: true, minBalanceRetainedDays: 0 });
+    await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId: emp, leaveTypeId: lt, balanceDays: 10 });
+    const enc = await computeAndStoreEncashment(deps, actor, { employee: `employees/${emp}`, leave_type: `leave-types/${lt}`, days: 4 });
+    await approveEncashment(deps, actor, enc.uuid); // balance 10 -> 6, queued for payout
+    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 12000, installments: 12 });
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+
+    const s = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31", notice_shortfall_days: 0 });
+    const lines = JSON.parse(s.linesJson) as { name: string; kind: string; amount: number }[];
+    const line = (frag: string) => lines.find((l) => l.name.toLowerCase().includes(frag))?.amount;
+    expect(line("retention")).toBe(5000); // the bonus a run would never have paid
+    expect(line("approved leave encashment")).toBe(4000); // 4 days x 30000/30
+    expect(line("loan recovery")).toBe(12000); // the WHOLE outstanding, not one installment
+    expect(line("leave encashment (6")).toBe(6000); // the 6 days still on the balance
+
+    // Every source row left its queue, so nothing can be paid twice.
+    expect(await unpaidBonuses(deps, emp)).toHaveLength(0);
+    expect(await approvedUnpaidEncashments(deps, emp)).toHaveLength(0);
+    expect((await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!.status).toBe("CLOSED");
+    // The encashed balance is consumed, not left on the books for a second payout.
+    const bal = (await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp)))[0]!;
+    expect(bal.balanceDays).toBe(0);
+  });
+
+  it("recomputing a settlement releases the first one's claims and prices the same figures again", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    await recordBonus(deps, actor, { employee: `employees/${emp}`, amount: 5000, kind: "Retention", award_date: today() });
+    const lt = genId();
+    await deps.db.insert(schema.leaveTypes).values({ uuid: lt, code: short("lt"), name: "Earned", encashable: true, minBalanceRetainedDays: 0 });
+    await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId: emp, leaveTypeId: lt, balanceDays: 10 });
+    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 3000, installments: 3 });
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+
+    const first = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    const second = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    // Without release-then-reprice the recompute would read empty queues and understate the payout.
+    expect(second.net).toBe(first.net);
+    expect(second.totalEarnings).toBe(first.totalEarnings);
+    // Superseded, so the FnF letter can't render a stale snapshot whose claims were released.
+    expect(await deps.db.select().from(schema.settlements).where(eq(schema.settlements.employeeId, emp))).toHaveLength(1);
+    // The loan is recovered exactly once: one ledger row, repaid == principal.
+    const ledger = await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.loanId, loan.uuid));
+    expect(ledger).toHaveLength(1);
+    expect((await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!.repaid).toBe(3000);
+    // And the leave balance is debited once, not twice.
+    expect((await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp)))[0]!.balanceDays).toBe(0);
+  });
+});
+
+describe("payroll: a run cannot be deleted once its bank payout file exists", () => {
+  it("refuses the delete that would re-queue already-disbursed payables", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    await transition(deps, actor, run.uuid, "REVIEW");
+    await transition(deps, actor, run.uuid, "APPROVED");
+    await deleteRun(deps, actor, run.uuid); // still deletable: no file has been generated
+
+    const run2 = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run2.uuid);
+    await transition(deps, actor, run2.uuid, "REVIEW");
+    await transition(deps, actor, run2.uuid, "APPROVED");
+    await deps.db.update(schema.payrollRuns).set({ bankFileAt: new Date() }).where(eq(schema.payrollRuns.uuid, run2.uuid)); // buildBankFile stamps this
+    await expect(deleteRun(deps, actor, run2.uuid)).rejects.toThrow(/bank payout file/);
+  });
+});
+
+describe("compensation: only one open row per employee", () => {
+  it("rejects the loser of two concurrent revisions instead of paying the raise twice", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000, ctcAnnual: 360000 });
+    const revise = () => reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 480000, effective_from: "2026-02-01" });
+    const results = await Promise.allSettled([revise(), revise()]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const open = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).filter((c) => c.effectiveTo === null);
+    expect(open).toHaveLength(1); // never two "current" salaries
   });
 });

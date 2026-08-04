@@ -84,11 +84,15 @@ export function monthlyRecurringGross(basePay: number, components: PayComp[], sp
   return round2(g);
 }
 
-// Whole months the employee is employed within the FY (join month .. March), clamped 0..12.
-export function employedMonthsInFy(startDate: Date | null, fy: { start: Date; end: Date }): number {
+// Whole months the employee is employed within the FY (join month .. leaving month, else March), clamped 0..12.
+// `endDate` matters as much as the start: projecting a leaver's income to March inflates the year's total, and
+// the whole inflated liability is then spread over their few remaining months - the final payslips withhold
+// TDS on salary the employee will never earn, refundable only at ITR.
+export function employedMonthsInFy(startDate: Date | null, fy: { start: Date; end: Date }, endDate?: Date | null): number {
   const empStart = startDate && startDate > fy.start ? firstOfMonthUTC(startDate) : fy.start;
-  if (empStart > fy.end) return 0;
-  const months = (fy.end.getUTCFullYear() - empStart.getUTCFullYear()) * 12 + (fy.end.getUTCMonth() - empStart.getUTCMonth()) + 1;
+  const empEnd = endDate && endDate < fy.end ? endDate : fy.end;
+  if (empStart > fy.end || empEnd < fy.start || empStart > empEnd) return 0;
+  const months = (empEnd.getUTCFullYear() - empStart.getUTCFullYear()) * 12 + (empEnd.getUTCMonth() - empStart.getUTCMonth()) + 1;
   return Math.max(0, Math.min(12, months));
 }
 
@@ -228,7 +232,7 @@ export async function getEmployeeTaxProjection(deps: Deps, employee: typeof sche
   const comp = await currentComp(deps, employee.uuid);
   const effective = applyStructure(components, await structureLinesById(deps, comp?.structureId));
   const recurringMonthly = comp ? monthlyRecurringGross(comp.basePay, effective, comp.specialAllowance) : 0;
-  const employedMonths = employedMonthsInFy(employee.startDate ?? null, fy);
+  const employedMonths = employedMonthsInFy(employee.startDate ?? null, fy, employee.endDate ?? null);
   const t = (await finalizedTotals(deps, fy)).get(employee.uuid) ?? { gross: 0, taxableGross: 0, tax: 0, months: 0, paidMonths: new Set<string>() };
   const collectMonths = collectibleMonths(asOf, employee.startDate ?? null, fy, t.paidMonths);
   return assembleProjection({ cfg, regime, tdsConfigured: !!tds, employedMonths, paidGross: t.taxableGross, paidTax: t.tax, paidMonths: t.months, collectMonths, recurringMonthly, decl });

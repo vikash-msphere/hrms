@@ -45,9 +45,11 @@ export const DEFAULT_PT_CONFIG: PtConfig = {
   ],
 };
 
+// Slabs are matched in ASCENDING order; the table is HR-editable settings data, so sort rather than trust the
+// stored order - a top (`up_to: null`) slab listed first would otherwise charge its amount to every wage.
 export function professionalTax(grossWages: number, cfg: PtConfig): number {
   if (grossWages <= 0) return 0;
-  for (const s of cfg.slabs) {
+  for (const s of [...cfg.slabs].sort((a, b) => (a.up_to ?? Infinity) - (b.up_to ?? Infinity))) {
     if (s.up_to == null || grossWages <= s.up_to) return Math.max(0, s.amount);
   }
   return 0;

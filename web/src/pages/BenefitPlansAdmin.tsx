@@ -6,6 +6,9 @@ import { formatMoney, idOf } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { BenefitCategory, BenefitPlan } from "@/types";
 import { DataState } from "@/components/common/DataState";
+import { AccessScope } from "@/components/access/AccessScope";
+import { AccessAction } from "@/components/access/AccessAction";
+import { AccessItem } from "@/components/access/AccessItem";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -68,13 +71,19 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
   }
 
   return (
+    // Settings-embedded editor: no route scope to inherit, so bind the benefit-plans collection explicitly.
+    <AccessScope collection="benefit-plans">
     <div>
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h3 className="text-base font-semibold">Benefit plans</h3>
+          <h3 className="text-base font-semibold">
+            <AccessAction collection="benefit-plans" label="Benefit plans"><span>Benefit plans</span></AccessAction>
+          </h3>
           <p className="text-sm text-muted-foreground">The catalog employees can enrol in. Costs are monthly.</p>
         </div>
-        <Button onClick={openCreate}><Plus className="h-4 w-4" /> New plan</Button>
+        <AccessAction create label="Benefit plan">
+          <Button onClick={openCreate}><Plus className="h-4 w-4" /> New plan</Button>
+        </AccessAction>
       </div>
 
       <DataState state={state} error={error} onRetry={reload}>
@@ -83,7 +92,8 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
         ) : (
           <div className="space-y-2">
             {sorted.map((p) => (
-              <Card key={p.path} className="flex flex-wrap items-center justify-between gap-3 p-3">
+              <AccessItem key={p.path} objectPath={p.path} can={p.access?.can} label={p.name}>
+              <Card className="flex flex-wrap items-center justify-between gap-3 p-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{p.name}</span>
@@ -97,6 +107,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
                   <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => del(p)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
                 </div>
               </Card>
+              </AccessItem>
             ))}
           </div>
         )}
@@ -139,5 +150,6 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
         </DialogContent>
       </Dialog>
     </div>
+    </AccessScope>
   );
 }

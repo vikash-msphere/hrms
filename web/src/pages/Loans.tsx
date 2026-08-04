@@ -16,7 +16,6 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Combobox } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
@@ -142,10 +141,10 @@ export default function Loans({ me }: { me: Me }) {
                     )}
                   </div>
                   <div className="mt-auto flex flex-wrap gap-2">
-                    {l.status === "PENDING" && can.includes("approve") && <Button size="sm" loading={acting === `${l.path}:approve`} onClick={() => act(l, "approve")}><Check className="h-3.5 w-3.5" /> Approve</Button>}
-                    {l.status === "PENDING" && can.includes("reject") && <Button size="sm" variant="outline" loading={acting === `${l.path}:reject`} onClick={() => act(l, "reject")}><X className="h-3.5 w-3.5" /> Reject</Button>}
-                    {l.status === "APPROVED" && can.includes("disburse") && <Button size="sm" loading={acting === `${l.path}:disburse`} onClick={() => disburse(l)}><Banknote className="h-3.5 w-3.5" /> Mark disbursed</Button>}
-                    {l.status === "DISBURSED" && can.includes("recordRepayment") && <Button size="sm" variant="outline" onClick={() => setRepay(l)}>Record repayment</Button>}
+                    {l.status === "PENDING" && can.includes("approve") && <AccessAction verb="approve" can={can} label="Approve loan"><Button size="sm" loading={acting === `${l.path}:approve`} onClick={() => act(l, "approve")}><Check className="h-3.5 w-3.5" /> Approve</Button></AccessAction>}
+                    {l.status === "PENDING" && can.includes("reject") && <AccessAction verb="reject" can={can} label="Reject loan"><Button size="sm" variant="outline" loading={acting === `${l.path}:reject`} onClick={() => act(l, "reject")}><X className="h-3.5 w-3.5" /> Reject</Button></AccessAction>}
+                    {l.status === "APPROVED" && can.includes("disburse") && <AccessAction verb="disburse" can={can} label="Disburse loan"><Button size="sm" loading={acting === `${l.path}:disburse`} onClick={() => disburse(l)}><Banknote className="h-3.5 w-3.5" /> Mark disbursed</Button></AccessAction>}
+                    {l.status === "DISBURSED" && can.includes("recordRepayment") && <AccessAction verb="recordRepayment" can={can} label="Record loan repayment"><Button size="sm" variant="outline" onClick={() => setRepay(l)}>Record repayment</Button></AccessAction>}
                   </div>
                 </Card>
                 </AccessItem>
@@ -156,22 +155,21 @@ export default function Loans({ me }: { me: Me }) {
         )}
       </DataState>
 
-      {requesting && <RequestDialog employees={employees} me={me} onClose={() => setRequesting(false)} onCreated={() => { setRequesting(false); reload(); }} toastErr={(m) => toast({ title: "Couldn't request", description: m, variant: "destructive" })} />}
+      {requesting && <RequestDialog onClose={() => setRequesting(false)} onCreated={() => { setRequesting(false); reload(); }} toastErr={(m) => toast({ title: "Couldn't request", description: m, variant: "destructive" })} />}
       {repay && <RepayDialog loan={repay} onClose={() => setRepay(null)} onSave={async (amount) => { await act(repay, "recordRepayment", { amount }); setRepay(null); }} />}
     </div>
   );
 }
 
-function RequestDialog({ employees, me, onClose, onCreated, toastErr }: {
-  employees: Employee[];
-  me: Me;
+// Self-service only: a loan/advance is always requested for the signed-in employee, so there is no "For"
+// picker. The server forces it too (`employee` is readOnly on the wire), this just keeps the form honest.
+function RequestDialog({ onClose, onCreated, toastErr }: {
   onClose: () => void;
   onCreated: () => void;
   toastErr: (msg: string) => void;
 }) {
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
-  const [employee, setEmployee] = useState("me");
   const [kind, setKind] = useState<"loan" | "advance">("loan");
   const [principal, setPrincipal] = useState("");
   const [installments, setInstallments] = useState("6");
@@ -183,7 +181,7 @@ function RequestDialog({ employees, me, onClose, onCreated, toastErr }: {
   async function submit() {
     setBusy(true);
     try {
-      await create("loans", { ...(employee !== "me" ? { employee } : {}), kind, principal: amount, installments: Number(installments), reason: reason.trim() || undefined });
+      await create("loans", { kind, principal: amount, installments: Number(installments), reason: reason.trim() || undefined });
       onCreated();
     } catch (e) { toastErr((e as Error).message); } finally { setBusy(false); }
   }
@@ -197,14 +195,6 @@ function RequestDialog({ employees, me, onClose, onCreated, toastErr }: {
             <Button type="button" size="sm" variant={kind === "loan" ? "default" : "outline"} onClick={() => setKind("loan")}>Loan</Button>
             <Button type="button" size="sm" variant={kind === "advance" ? "default" : "outline"} onClick={() => setKind("advance")}>Salary advance</Button>
           </div>
-        </Field>
-        <Field label="For">
-          <Combobox
-            value={employee}
-            onValueChange={setEmployee}
-            searchPlaceholder="Search people…"
-            options={[{ value: "me", label: "Myself" }, ...employees.filter((e) => idOf(e.path) !== me.employee_id).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))]}
-          />
         </Field>
         <FieldRow>
           <Field label="Amount" error={principal !== "" && Number(principal) <= 0 ? "Enter an amount greater than 0." : undefined}><Input type="number" min={0} value={principal} onChange={(e) => setPrincipal(e.target.value)} autoFocus /></Field>

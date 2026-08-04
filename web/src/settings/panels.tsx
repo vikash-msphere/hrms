@@ -2,6 +2,7 @@ import * as React from "react";
 import type { Me } from "@/types";
 import type { useToast } from "@/components/ui/use-toast";
 import { renderSettingsPanel } from "@/pages/Settings";
+import { UnsavedScope } from "@/components/common/UnsavedChanges";
 
 type Toast = ReturnType<typeof useToast>["toast"];
 
@@ -27,5 +28,5 @@ export function SettingsPanelContent({
   objectPath?: string;
   onClose?: () => void;
 }) {
-  return <>{renderSettingsPanel(entryKey, me, toast, slot ?? null, openId, objectPath, onClose)}</>;
+  return <UnsavedScope>{renderSettingsPanel(entryKey, me, toast, slot ?? null, openId, objectPath, onClose)}</UnsavedScope>;
 }

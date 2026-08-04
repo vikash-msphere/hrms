@@ -1,7 +1,7 @@
 // Leave types (India statutory shape). accrual = days credited per year (0 = entitlement granted by HR, not
 // auto-accrued, e.g. maternity). Flags left unset fall back to the schema defaults (paid=true, no
 // carry-forward, not encashable).
-import { Ctx, T0, q, n, b, code2, rows } from "../lib";
+import { type Ctx, T0, q, n, b, code2, rows } from "../lib";
 
 type LeaveTypeSeed = {
   name: string;

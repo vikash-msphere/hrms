@@ -1,15 +1,19 @@
 import { useMemo, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import {
+  ArrowLeft, ChevronLeft, ChevronRight, Network, Hash, UserCog, Users,
+  UserRound, Contact, Briefcase, CalendarDays, IdCard, Landmark, ShieldCheck, Wallet, Package, FileText, History,
+} from "lucide-react";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
 import { patch } from "@/api";
-import { formatDate, idOf, tenureLabel } from "@/lib/utils";
+import { formatDate, idOf, probationLabel, tenureLabel } from "@/lib/utils";
 import { navigate } from "@/router";
 import { usePermission, useCanSeeActivity } from "@/lib/perm";
 import type { Department, Employee, LeaveBalance, LeaveRequest, LeaveType, Me } from "@/types";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { DataState } from "@/components/common/DataState";
 import { ProfileView, ProfileDetails } from "@/components/common/ProfileView";
+import { EditBioDialog } from "@/components/common/EditBioDialog";
 import { EmployeeDocuments } from "@/components/common/EmployeeDocuments";
 import { GenerateLetterButton } from "@/components/common/GenerateLetterButton";
 import { GenerateForm16Button } from "@/components/common/GenerateForm16Button";
@@ -28,6 +32,7 @@ import { EmployeeProfilePersonal } from "@/components/common/EmployeeProfilePers
 import { AccessAction } from "@/components/access/AccessAction";
 import { EmergencyQuickView } from "@/components/common/EmergencyQuickView";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
+import { ProfileCompleteness, type CompletenessKey } from "@/components/common/ProfileCompleteness";
 import { IconEdit } from "@/components/common/IconEdit";
 import { Field } from "@/components/common/Field";
 import { Button } from "@/components/ui/button";
@@ -44,6 +49,9 @@ import { useToast } from "@/components/ui/use-toast";
 
 const NONE = "__none__";
 
+// Small linkable chip in the header meta row (employee ID / reports-to / direct reports).
+const CHIP = "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
+
 // Which org-settings panels surface as inline gears on each profile tab. The gear opens the SAME panel as the
 // central Settings hub (org singletons, not per-employee config) - it just puts the relevant knob where HR is
 // already looking. Data, not scattered JSX; a tab with no row here (contact/assets/activity) shows no gears.
@@ -58,7 +66,9 @@ const TAB_SETTINGS: Record<string, string[]> = {
   documents: ["letters", "letter-defaults", "esign"],
 };
 
-export default function EmployeeProfile({ id, me }: { id: string; me: Me }) {
+// `sub` is the URL's third segment (…#/employees/<id>/<sub>): the active tab, so tabs are
+// deep-linkable and survive refresh. Absent/unknown/not-permitted values fall back to "profile".
+export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; sub?: string }) {
   const empPath = `employees/${id}`;
   // Core profile + employment fields are HR/super_admin only (not self-service).
   const canManage = usePermission("employees.write");
@@ -114,9 +124,42 @@ export default function EmployeeProfile({ id, me }: { id: string; me: Me }) {
 
   const onProbation = !!emp?.probation_end_date && Date.parse(emp.probation_end_date) >= Date.now();
 
+  // Which tabs THIS viewer gets (mirrors the render gates below) - guards the URL's tab segment.
+  const tabValues = useMemo(() => {
+    const t = new Set(["profile", "employment", "documents"]);
+    if (canBank) { t.add("contact"); t.add("identity"); t.add("bank"); }
+    if (myBalances.length > 0 || myLeaves.length > 0) t.add("leave");
+    if (canTax) t.add("tax");
+    if (canComp || canBonuses || canSettlement) t.add("compensation");
+    if (canAssets) t.add("assets");
+    if (canActivity) t.add("activity");
+    return t;
+  }, [canBank, myBalances.length, myLeaves.length, canTax, canComp, canBonuses, canSettlement, canAssets, canActivity]);
+  const tab = sub && tabValues.has(sub) ? sub : "profile";
+  const setTab = (v: string) => navigate(v === "profile" ? `employees/${id}` : `employees/${id}/${v}`);
+
+  // Org relations + prev/next stepping, all from the already-cached employees collection.
+  const liveEmployees = useMemo(() => employees.filter((e) => !e.delete_time), [employees]);
+  const empIdx = liveEmployees.findIndex((e) => idOf(e.path) === id);
+  const prevEmp = empIdx > 0 ? liveEmployees[empIdx - 1] : undefined;
+  const nextEmp = empIdx >= 0 ? liveEmployees[empIdx + 1] : undefined;
+  const directReports = useMemo(() => liveEmployees.filter((e) => e.manager && idOf(e.manager) === id), [liveEmployees, id]);
+
+  const copyText = (text: string, done: string) =>
+    navigator.clipboard.writeText(text).then(() => toast({ title: done, variant: "success" })).catch(() => {});
+
   // --- edit: core profile fields ---
   const [docsKey, setDocsKey] = useState(0); // bump to refetch the documents tab after generating a letter
-  const [tab, setTab] = useState("profile"); // controlled so the tab bar can carry the active tab's settings gears
+  const [bioOpen, setBioOpen] = useState(false);
+  const [photoOpen, setPhotoOpen] = useState(false);
+  const [emergencyOpen, setEmergencyOpen] = useState(false);
+  // Completeness chips jump to the section where the data is filled in (mirrors /profile's gotoItem).
+  function gotoRecordItem(key: CompletenessKey) {
+    if (key === "photo") setPhotoOpen(true);
+    else if (key === "emergency") setEmergencyOpen(true);
+    else if (key === "personal") setTab("profile");
+    else setTab(key); // contact / identity / bank are tabs of the same name
+  }
   const [coreOpen, setCoreOpen] = useState(false);
   const [core, setCore] = useState({ first_name: "", last_name: "", legal_name: "", employee_number: "", work_email: "", job_title: "", department: NONE, manager: NONE });
   function openCore() {
@@ -199,48 +242,109 @@ export default function EmployeeProfile({ id, me }: { id: string; me: Me }) {
       <DataState state={state} error={error} rows={2}>
         {emp && (
           <>
-            <Button variant="ghost" size="sm" className="-ml-2 mb-3 text-muted-foreground" onClick={() => navigate("employees")}>
-              <ArrowLeft className="h-4 w-4" /> Back to directory
-            </Button>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <Button variant="ghost" size="sm" className="-ml-2 text-muted-foreground" onClick={() => navigate("employees")}>
+                <ArrowLeft className="h-4 w-4" /> Back to directory
+              </Button>
+              {empIdx >= 0 && liveEmployees.length > 1 && (
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <Button
+                    variant="ghost" size="sm" className="h-7 px-1.5" disabled={!prevEmp}
+                    title={prevEmp ? `${prevEmp.first_name} ${prevEmp.last_name}` : undefined}
+                    onClick={() => prevEmp && navigate(`employees/${idOf(prevEmp.path)}`)}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <span className="tabular-nums">{empIdx + 1} of {liveEmployees.length}</span>
+                  <Button
+                    variant="ghost" size="sm" className="h-7 px-1.5" disabled={!nextEmp}
+                    title={nextEmp ? `${nextEmp.first_name} ${nextEmp.last_name}` : undefined}
+                    onClick={() => nextEmp && navigate(`employees/${idOf(nextEmp.path)}`)}
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
+            </div>
             <ProfileView
               name={`${emp.first_name} ${emp.last_name}`}
               email={emp.work_email}
               jobTitle={emp.job_title}
               department={deptName(emp.department)}
-              avatar={<PhotoAvatar employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} />}
+              bio={emp.bio}
+              // Bio is personal: the "Add a short bio" prompt is owner-only. HR still gets the edit
+              // pencil once a bio EXISTS (moderation), just not the empty-state nudge.
+              onEditBio={me.employee_id === id || (canManage && !!emp.bio) ? () => setBioOpen(true) : undefined}
+              avatar={<PhotoAvatar employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+              meta={
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {emp.employee_number && (
+                    <button type="button" className={CHIP} title="Copy employee ID" onClick={() => copyText(emp.employee_number!, "Employee ID copied")}>
+                      <Hash className="h-3 w-3" /> <span className="font-mono">{emp.employee_number}</span>
+                    </button>
+                  )}
+                  {emp.manager && empName(emp.manager) && (
+                    <button type="button" className={CHIP} title="Open their profile" onClick={() => navigate(`employees/${idOf(emp.manager!)}`)}>
+                      <UserCog className="h-3 w-3" /> Reports to {empName(emp.manager)}
+                    </button>
+                  )}
+                  {directReports.length > 0 && (
+                    <button type="button" className={CHIP} title="View team in the org chart" onClick={() => navigate(`org-chart/${id}`)}>
+                      <Users className="h-3 w-3" /> {directReports.length} direct report{directReports.length === 1 ? "" : "s"}
+                    </button>
+                  )}
+                </div>
+              }
               actions={
-                <>
-                  {/* Surface the employment status up top so HR doesn't have to open the Employment tab for it. */}
-                  {!!emp.start_date && <Badge variant="outline">{tenureLabel(emp.start_date)}</Badge>}
-                  {emp.disabled && <Badge variant="secondary">Inactive</Badge>}
-                  {!emp.disabled && onProbation && <Badge variant="warning">On probation</Badge>}
-                  {canBank && <EmergencyQuickView employeeId={id} canEdit={canBank} />}
-                </>
+                /* Stacked, right-aligned: status badges on top, action buttons underneath - buttons
+                   inline with badges read oddly. */
+                /* Kept quiet on purpose - the identity (left) side should out-rank this stack. Tenure is
+                   plain muted text; only exception states (inactive/probation) earn badge chrome. */
+                <div className="flex flex-col items-end gap-1.5">
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {/* Surface the employment status up top so HR doesn't have to open the Employment tab for it. */}
+                    {!!emp.start_date && <span className="text-xs text-muted-foreground">{tenureLabel(emp.start_date)}</span>}
+                    {emp.disabled && <Badge variant="secondary">Inactive</Badge>}
+                    {!emp.disabled && onProbation && <Badge variant="warning">{probationLabel(emp.probation_end_date!) || "On probation"}</Badge>}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="sm" className="text-muted-foreground" title="View in org chart" onClick={() => navigate(`org-chart/${id}`)}>
+                      <Network className="h-3.5 w-3.5" /> Org chart
+                    </Button>
+                    {canBank && <EmergencyQuickView employeeId={id} canEdit={canBank} open={emergencyOpen} onOpenChange={setEmergencyOpen} onSaved={reload} />}
+                  </div>
+                </div>
               }
             />
+            <EditBioDialog employeeId={id} current={emp.bio} open={bioOpen} onOpenChange={setBioOpen} onSaved={reload} />
 
             <Tabs value={tab} onValueChange={setTab} className="mt-6">
               {/* Each tab carries the access key for the section/sub-resource it manages, scoped to this
                   employee record - the affordance lives on the tab bar. The active tab's inline settings gears
                   sit at the right end of the same bar, so no tab spends a whole row on them. */}
               <div className="flex items-center justify-between gap-2">
-              <TabsList>
-                <AccessTab value="profile" target={{ collection: "employees", objectPath: empPath, label: "Profile" }}>Profile</AccessTab>
-                {canBank && <AccessTab value="contact" target={{ collection: "employees", objectPath: empPath, field: "personal-info", label: "Contact" }}>Contact</AccessTab>}
-                <AccessTab value="employment" target={{ collection: "employees", objectPath: empPath, label: "Employment" }}>Employment</AccessTab>
-                {(myBalances.length > 0 || myLeaves.length > 0) && <AccessTab value="leave" target={{ collection: "leave-requests", label: "Leave" }}>Leave</AccessTab>}
-                {canBank && <AccessTab value="identity" target={{ collection: "employees", objectPath: empPath, field: "identity", label: "Identity" }}>Identity</AccessTab>}
-                {canBank && <AccessTab value="bank" target={{ collection: "employees", objectPath: empPath, field: "bank-account", label: "Bank details" }}>Bank details</AccessTab>}
-                {canTax && <AccessTab value="tax" target={{ collection: "employees", objectPath: empPath, field: "tax", label: "Tax" }}>Tax</AccessTab>}
-                {(canComp || canBonuses || canSettlement) && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}>Compensation</AccessTab>}
-                {canAssets && <AccessTab value="assets" target={{ collection: "assets", label: "Assets" }}>Assets</AccessTab>}
-                <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}>Documents</AccessTab>
-                {canActivity && <AccessTab value="activity" target={{ collection: "employees", objectPath: empPath, label: "Activity" }}>Activity</AccessTab>}
+              <TabsList variant="underline">
+                <AccessTab value="profile" target={{ collection: "employees", objectPath: empPath, label: "Profile" }}><UserRound className="h-4 w-4" /> Profile</AccessTab>
+                {canBank && <AccessTab value="contact" target={{ collection: "employees", objectPath: empPath, field: "personal-info", label: "Contact" }}><Contact className="h-4 w-4" /> Contact</AccessTab>}
+                <AccessTab value="employment" target={{ collection: "employees", objectPath: empPath, label: "Employment" }}><Briefcase className="h-4 w-4" /> Employment</AccessTab>
+                {(myBalances.length > 0 || myLeaves.length > 0) && <AccessTab value="leave" target={{ collection: "leave-requests", label: "Leave" }}><CalendarDays className="h-4 w-4" /> Leave</AccessTab>}
+                {canBank && <AccessTab value="identity" target={{ collection: "employees", objectPath: empPath, field: "identity", label: "Identity" }}><IdCard className="h-4 w-4" /> Identity</AccessTab>}
+                {canBank && <AccessTab value="bank" target={{ collection: "employees", objectPath: empPath, field: "bank-account", label: "Bank details" }}><Landmark className="h-4 w-4" /> Bank details</AccessTab>}
+                {canTax && <AccessTab value="tax" target={{ collection: "employees", objectPath: empPath, field: "tax", label: "Tax" }}><ShieldCheck className="h-4 w-4" /> Tax</AccessTab>}
+                {(canComp || canBonuses || canSettlement) && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}><Wallet className="h-4 w-4" /> Compensation</AccessTab>}
+                {canAssets && <AccessTab value="assets" target={{ collection: "assets", label: "Assets" }}><Package className="h-4 w-4" /> Assets</AccessTab>}
+                <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>
+                {canActivity && <AccessTab value="activity" target={{ collection: "employees", objectPath: empPath, label: "Activity" }}><History className="h-4 w-4" /> Activity</AccessTab>}
               </TabsList>
                 {tabGears(tab)}
               </div>
 
               <TabsContent value="profile" className="space-y-4">
+                {/* Server sends the flags to the owner + HR only. Signature is stripped client-side too:
+                    it has no section on this page (managed on /profile), so a chip would dead-end. */}
+                {emp.profile_completeness && (
+                  <ProfileCompleteness variant="record" flags={{ ...emp.profile_completeness, signature: undefined }} onItem={gotoRecordItem} />
+                )}
                 <Card>
                   <CardHeader className="flex flex-row items-center justify-between">
                     <CardTitle className="text-base">Profile</CardTitle>

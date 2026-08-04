@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { useUnsaved } from "@/components/common/UnsavedChanges";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "col";
 
@@ -51,7 +52,7 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
   const [busy, setBusy] = useState(false);
 
   const setCol = (i: number, patch: Partial<BoardColumn>) => setCols((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
-  const addCol = () => setCols((cs) => [...cs, { key: `col_${cs.length + 1}`, label: "New column", wipLimit: null, policy: "", isCommitment: false, isDelivery: false }]);
+  const addCol = () => setCols((cs) => [...cs, { key: `col_${cs.length + 1}`, label: "New column", wipLimit: null, policy: "", commitment: false, delivery: false }]);
   const removeCol = (i: number) => setCols((cs) => cs.filter((_, j) => j !== i));
   const moveCol = (i: number, d: -1 | 1) => setCols((cs) => {
     const j = i + d;
@@ -59,7 +60,7 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
     const n = [...cs]; [n[i], n[j]] = [n[j]!, n[i]!]; return n;
   });
   // Commitment/delivery are single-select across columns.
-  const setFlag = (i: number, flag: "isCommitment" | "isDelivery", on: boolean) =>
+  const setFlag = (i: number, flag: "commitment" | "delivery", on: boolean) =>
     setCols((cs) => cs.map((c, j) => ({ ...c, [flag]: j === i ? on : on ? false : c[flag] })));
 
   const canDelete = (board.access?.can ?? []).includes("delete");
@@ -82,6 +83,12 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
     }
   }
 
+  // Local drafts come straight from the board prop (no async load), so the baseline is ready immediately.
+  const { markSaved } = useUnsaved(
+    { name, description, prefix, boardMode, cols, mode, labelCat, lanes, hideEmpty, reassignLane, noLaneLabel },
+    true,
+    save,
+  );
   async function save() {
     if (!name.trim()) return;
     setBusy(true);
@@ -110,6 +117,7 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
         reassign_lane_on_move: reassignLane,
         no_lane_label: mode === "custom" ? (noLaneLabel.trim() || null) : board.no_lane_label ?? null,
       });
+      markSaved();
       toast({ title: "Board configured", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -172,8 +180,8 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
                 </div>
               )}
               <div className="mt-2 flex items-center gap-4 text-sm">
-                <label className="flex items-center gap-1.5"><Checkbox checked={c.isCommitment} onCheckedChange={(v) => setFlag(i, "isCommitment", !!v)} /> Commitment point</label>
-                <label className="flex items-center gap-1.5"><Checkbox checked={c.isDelivery} onCheckedChange={(v) => setFlag(i, "isDelivery", !!v)} /> Delivery point</label>
+                <label className="flex items-center gap-1.5"><Checkbox checked={c.commitment} onCheckedChange={(v) => setFlag(i, "commitment", !!v)} /> Commitment point</label>
+                <label className="flex items-center gap-1.5"><Checkbox checked={c.delivery} onCheckedChange={(v) => setFlag(i, "delivery", !!v)} /> Delivery point</label>
               </div>
             </div>
           ))}

@@ -28,7 +28,7 @@ export type LetterDefaults = {
 // from every section is disabled org-wide. `order` is the legacy flat shape, still read for migration. Per-user
 // capability gating still applies on top, so an enabled action a person can't perform won't show. See
 // lib/quickActions.ts (normalizeQuickMenu / resolveQuickMenu).
-export type OrgSettings = { name: string; legal_name?: string; logo?: string; logo_text?: string; name_font?: string; name_weight?: string; name_size?: string; address?: string; incorporation_date?: string; currencies?: string[]; default_currency?: string; currency_decimals?: Record<string, number>; default_department?: string | null; banks?: string[]; letter_defaults?: LetterDefaults; quick_actions?: { groups?: { id: string; label: string; items: string[] }[]; order?: string[] }; primary_color?: string; email_logo_url?: string };
+export type OrgSettings = { name: string; legal_name?: string; logo?: string; favicon?: string; logo_text?: string; name_font?: string; name_weight?: string; name_size?: string; address?: string; incorporation_date?: string; currencies?: string[]; default_currency?: string; currency_decimals?: Record<string, number>; default_department?: string | null; banks?: string[]; letter_defaults?: LetterDefaults; quick_actions?: { groups?: { id: string; label: string; items: string[] }[]; order?: string[] }; primary_color?: string; email_logo_url?: string };
 
 // The wordmark's typeface list lives in lib/fonts.ts, shared with the typeface control on a board post; it is
 // re-exported here so the settings/sidebar call sites keep importing it from the module they always have.
@@ -112,6 +112,23 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     reload();
   }, [reload]);
+  // Browser-tab icon follows the org's uploaded favicon (a small data URL, like the logo). With nothing
+  // configured, the shipped default (index.html's /favicon.svg) is restored.
+  useEffect(() => {
+    let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    if (org.favicon) {
+      link.removeAttribute("type"); // uploaded icon's format lives in the data URL itself
+      link.href = org.favicon;
+    } else {
+      link.type = "image/svg+xml";
+      link.href = "/favicon.svg";
+    }
+  }, [org.favicon]);
   return <Ctx.Provider value={{ org, reload }}>{children}</Ctx.Provider>;
 }
 

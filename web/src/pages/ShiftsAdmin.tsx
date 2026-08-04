@@ -5,6 +5,9 @@ import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
 import type { Shift } from "@/types";
 import { DataState } from "@/components/common/DataState";
+import { AccessScope } from "@/components/access/AccessScope";
+import { AccessAction } from "@/components/access/AccessAction";
+import { AccessItem } from "@/components/access/AccessItem";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -56,13 +59,19 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
   }
 
   return (
+    // Settings-embedded editor: no route scope to inherit, so bind the shifts collection explicitly.
+    <AccessScope collection="shifts">
     <div>
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h3 className="text-base font-semibold">Shifts</h3>
+          <h3 className="text-base font-semibold">
+            <AccessAction collection="shifts" label="Shifts"><span>Shifts</span></AccessAction>
+          </h3>
           <p className="text-sm text-muted-foreground">Reusable shift patterns for the roster. Times are wall-clock.</p>
         </div>
-        <Button onClick={openCreate}><Plus className="h-4 w-4" /> New shift</Button>
+        <AccessAction create label="Shift">
+          <Button onClick={openCreate}><Plus className="h-4 w-4" /> New shift</Button>
+        </AccessAction>
       </div>
 
       <DataState state={state} error={error} onRetry={reload}>
@@ -71,7 +80,8 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
         ) : (
           <div className="space-y-2">
             {sorted.map((s) => (
-              <Card key={s.path} className="flex items-center justify-between gap-3 p-3">
+              <AccessItem key={s.path} objectPath={s.path} can={s.access?.can} label={s.name}>
+              <Card className="flex items-center justify-between gap-3 p-3">
                 <div className="flex items-center gap-3">
                   <span className="h-8 w-2 rounded-full" style={{ backgroundColor: s.color ?? "#64748b" }} />
                   <div>
@@ -84,6 +94,7 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
                   <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => del(s)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
                 </div>
               </Card>
+              </AccessItem>
             ))}
           </div>
         )}
@@ -115,5 +126,6 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
         </DialogContent>
       </Dialog>
     </div>
+    </AccessScope>
   );
 }

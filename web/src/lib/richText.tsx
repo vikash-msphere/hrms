@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { NAME_FONTS, orgNameFontStack } from "@/lib/fonts";
+import { orgNameFontStack } from "@/lib/fonts";
 import { splitSource } from "@/lib/splitSource";
+import { parseAttrLine, type RichAttrs } from "@/lib/richTextEdit";
 
 // Markdown-lite for board posts: what an author writes is stored as plain text and rendered to React ELEMENTS -
 // never to an HTML string. That is the whole security argument. There is no `dangerouslySetInnerHTML` anywhere in
@@ -11,57 +12,45 @@ import { splitSource } from "@/lib/splitSource";
 // Markdown proper has no alignment, no type size and no typeface, so those ride on a BLOCK ATTRIBUTE LINE: a line
 // of nothing but `{...}` tokens applies to the block that follows it.
 //
-//     {center xl serif}
+//     {center lg serif}
 //     Happy Diwali from all of us
 //
-// Tokens are drawn from fixed vocabularies below and anything unrecognised is dropped, which is what keeps a feed
-// coherent: an author picks from the design system's ramp rather than naming a font or a colour. Free-form colours
-// and typefaces are deliberately absent - they break in dark mode and turn a shared wall into ransom notes.
+// Its grammar and its vocabularies live in lib/richTextEdit.ts, beside the toolbar commands that write them; this
+// file holds what each token LOOKS like. Anything unrecognised is dropped, which is what keeps a feed coherent: an
+// author picks from the design system's ramp rather than naming a font or a colour. Free-form colours and
+// typefaces are deliberately absent - they break in dark mode and turn a shared wall into ransom notes.
 //
-// The composer's toolbar writes all of this; nobody is expected to type `{center xl}` by hand (though it reads
+// The composer's toolbar writes all of this; nobody is expected to type `{center lg}` by hand (though it reads
 // fine if they do). Server-side, src/domain/richText.ts strips the same markup back to prose for the search index
 // and for notification excerpts.
 
 const ALIGN: Record<string, string> = { left: "text-left", center: "text-center", right: "text-right", justify: "text-justify" };
-const SIZE: Record<string, string> = { sm: "text-sm", base: "text-base", lg: "text-lg" };
-const TONE: Record<string, string> = { muted: "text-muted-foreground" };
+// Size is RELATIVE to whatever the surface sets, which is why `base` is nothing at all rather than `text-base`.
+// Every surface picks its own reading size - a post body is text-sm, a kudos remark scales with how long it is -
+// and an absolute ramp cannot serve both: pinned to the body's ramp, "Large" on a kudos card would render its
+// short remark SMALLER than leaving it alone, which is a button lying about what it does. So the three are steps
+// from the surface's own size: a bit smaller, as-set, a good deal bigger, on whatever it is applied to.
+//
+// Clamped, because a step is a multiplier and a multiplier on an already-large surface runs away - 1.3x of a
+// 1.5rem remark is nearly 2rem, far past anything else on the card. The bounds are the largest and smallest a
+// board card ever wants to read at, so the step is honoured until it would leave the design's range and then
+// stops. Monotonic on every surface: Small < Normal < Large, always.
+//
+// The line-height goes with them. A surface sets its own in rem (`text-sm` carries `1.25rem`), and a fixed
+// line-height inherited by bigger words is what makes them collide - so a step in size sets a step in leading,
+// unitless, which scales with the font instead of fighting it.
+// The steps are wide on purpose. A ramp of 0.85x / 1x / 1.3x lands a post body on 12 / 14 / 18px, which is three
+// sizes you have to compare side by side to tell apart - and a control whose settings look alike is not worth
+// pressing. Far enough apart to be read at a glance, near enough that the card still looks composed.
+const SIZE: Record<string, string> = {
+  sm: "text-[clamp(0.7rem,0.8em,1.1rem)] leading-[1.5]",
+  base: "",
+  lg: "text-[clamp(1.25rem,1.55em,1.9rem)] leading-[1.3]",
+};
+const MUTED = "text-muted-foreground";
 
-/** The vocabularies the toolbar offers, in the order it offers them. */
-export const RICH_ALIGNMENTS = ["left", "center", "right", "justify"] as const;
-export const RICH_SIZES = ["sm", "base", "lg"] as const;
-// The typefaces the app already loads, shared with the organization wordmark (lib/fonts.ts). "default" is the UI
-// font and is expressed by having no face token at all, so it is not one of the choices here.
-export const RICH_FACES = NAME_FONTS.filter((f) => f.value !== "default").map((f) => f.value);
-const FACE_KEYS = new Set(RICH_FACES);
-export type RichAlign = (typeof RICH_ALIGNMENTS)[number];
-export type RichSize = (typeof RICH_SIZES)[number];
-export type RichFace = string;
-
-export type RichAttrs = { align?: RichAlign; size?: RichSize; face?: RichFace; muted?: boolean };
-
-const ATTR_LINE = /^\{([a-z0-9 _-]*)\}$/i;
-
-/** `{center xl serif}` -> attrs, or null when the line is ordinary text. */
-export function parseAttrLine(line: string): RichAttrs | null {
-  const m = ATTR_LINE.exec(line.trim());
-  if (!m) return null;
-  const attrs: RichAttrs = {};
-  for (const raw of m[1]!.toLowerCase().split(/\s+/).filter(Boolean)) {
-    if (raw in ALIGN) attrs.align = raw as RichAlign;
-    else if (raw in SIZE) attrs.size = raw as RichSize;
-    else if (FACE_KEYS.has(raw)) attrs.face = raw;
-    else if (raw in TONE) attrs.muted = true;
-  }
-  return attrs;
-}
-
-/** attrs -> `{center xl serif}`, or "" when nothing is set (the line is then dropped entirely). */
-export function formatAttrLine(attrs: RichAttrs): string {
-  const tokens = [attrs.align, attrs.size, attrs.face, attrs.muted ? "muted" : ""].filter(Boolean);
-  return tokens.length ? `{${tokens.join(" ")}}` : "";
-}
-
-const attrClass = (a: RichAttrs) => cn(a.align && ALIGN[a.align], a.size && SIZE[a.size], a.muted && TONE.muted);
+// `withSize` is for the one block that carries a font-size of its own: see the heading branch in RichText.
+const attrClass = (a: RichAttrs, withSize = true) => cn(a.align && ALIGN[a.align], withSize && a.size && SIZE[a.size], a.muted && MUTED);
 // The typeface is the one thing that cannot be a class: the stacks are shared data (lib/fonts.ts), not a fixed
 // Tailwind vocabulary, and Tailwind only emits classes it can see spelled out in the source.
 const attrStyle = (a: RichAttrs) => (a.face ? { fontFamily: orgNameFontStack(a.face) } : undefined);
@@ -150,9 +139,44 @@ function parseBlocks(src: string): Block[] {
 
 // One pass, longest-marker-first, recursing into what it captured so `**bold with *stress***` works. A URL is
 // only ever linked when it is http(s) or mailto - the one place a document could otherwise smuggle a scheme.
-const INLINE = /(\*\*|__)([\s\S]+?)\1|(\*|_)([\s\S]+?)\3|~~([\s\S]+?)~~|`([^`]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|((?:https?:\/\/|mailto:)[^\s<>()]+)/;
+//
+// Emphasis is a RUN of one character, so the three lengths are three alternatives tried longest first: `***both***`
+// has to be read as bold AND italic before `**` gets a look at it, or it comes out as bold text beginning with a
+// stray star. The toolbar writes exactly these runs (see markState in RichTextToolbar).
+//
+// The underscore forms are guarded by word boundaries and the asterisk ones are not, because that is where the two
+// characters differ in prose: nobody writes `a*b*c` by accident, while `EMP_0042`, `first_name` and `snake_case`
+// are ordinary words in an HR post and must not turn half a sentence italic.
+//
+// Named groups rather than numbered ones: ten alternatives deep, counting parentheses to find "the bold one" is a
+// bug waiting for the next construct to be added.
+const INLINE = new RegExp(
+  [
+    String.raw`\*\*\*(?<both>[\s\S]+?)\*\*\*`,
+    String.raw`\*\*(?<bold>[\s\S]+?)\*\*`,
+    String.raw`\*(?<em>[\s\S]+?)\*`,
+    String.raw`(?<![\p{L}\p{N}])___(?<bothU>[\s\S]+?)___(?![\p{L}\p{N}])`,
+    String.raw`(?<![\p{L}\p{N}])__(?<boldU>[\s\S]+?)__(?![\p{L}\p{N}])`,
+    String.raw`(?<![\p{L}\p{N}])_(?<emU>[\s\S]+?)_(?![\p{L}\p{N}])`,
+    String.raw`~~(?<strike>[\s\S]+?)~~`,
+    "`(?<code>[^`]+)`",
+    // An @mention: the link shape with an `@` on the label and an employee ref as the target (see
+    // src/domain/mentions.ts). Ahead of the general link rule, which would otherwise claim it and - since
+    // `employees/...` is not a scheme safeHref allows - render it as flat text.
+    String.raw`\[@(?<mentionName>[^\]\n]{1,80})\]\(employees\/(?<mentionId>[0-9a-hj-km-np-tv-z]{26})\)`,
+    String.raw`\[(?<linkText>[^\]\n]+)\]\((?<linkUrl>[^)\s]+)\)`,
+    // A bare URL stops before the punctuation that ended the sentence it sits in: `see https://example.com.` is a
+    // link to the site and then a full stop, not a link to a hostname with a dot on the end. Requiring a real
+    // character after the scheme is also what keeps the toolbar's unfinished `https://` out of the feed.
+    String.raw`(?<bare>(?:https?://|mailto:)[^\s<>()]*[^\s<>().,;:!?'"])`,
+  ].join("|"),
+  "u",
+);
 
-const safeHref = (url: string) => (/^(https?:\/\/|mailto:)/i.test(url) ? url : undefined);
+// A scheme this document is allowed to link to, AND something after it to go to: the toolbar hands the author
+// `[](https://)` to fill in, and a label still sitting on the bare scheme is a half-written link, not a link. It
+// renders as the words it is - live, it would be a piece of blue underlined text that goes nowhere.
+const safeHref = (url: string) => (/^(https?:\/\/[^/\s]|mailto:[^\s@]+@)/i.test(url) ? url : undefined);
 
 function renderInline(text: string, keyPrefix = "i"): ReactNode[] {
   const out: ReactNode[] = [];
@@ -166,33 +190,92 @@ function renderInline(text: string, keyPrefix = "i"): ReactNode[] {
     }
     if (m.index > 0) out.push(rest.slice(0, m.index));
     const key = `${keyPrefix}${n++}`;
-    const [, , bold, , italic, strike, code, linkText, linkUrl, bare] = m;
-    if (bold !== undefined) out.push(<strong key={key} className="font-semibold">{renderInline(bold, key)}</strong>);
+    const g = (m.groups ?? {}) as Record<string, string | undefined>;
+    // The asterisk and underscore spellings of a mark mean the same thing, so they meet here and part no further.
+    const both = g.both ?? g.bothU;
+    const bold = g.bold ?? g.boldU;
+    const italic = g.em ?? g.emU;
+    const { strike, code, linkText, linkUrl, bare, mentionName, mentionId } = g;
+    if (both !== undefined) out.push(<strong key={key} className="font-semibold"><em>{renderInline(both, key)}</em></strong>);
+    else if (bold !== undefined) out.push(<strong key={key} className="font-semibold">{renderInline(bold, key)}</strong>);
     else if (italic !== undefined) out.push(<em key={key}>{renderInline(italic, key)}</em>);
     else if (strike !== undefined) out.push(<s key={key} className="opacity-70">{renderInline(strike, key)}</s>);
     else if (code !== undefined) out.push(<code key={key} className="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em]">{code}</code>);
+    else if (mentionName !== undefined) out.push(<Mention key={key} name={mentionName} employeeId={mentionId!} />);
     else if (linkText !== undefined) {
       const href = safeHref(linkUrl!);
       out.push(href ? <Anchor key={key} href={href}>{renderInline(linkText, key)}</Anchor> : <span key={key}>{linkText}</span>);
-    } else if (bare !== undefined) out.push(<Anchor key={key} href={bare}>{bare}</Anchor>);
+    } else if (bare !== undefined) out.push(<Anchor key={key} href={bare} title={bare}>{bareLabel(bare)}</Anchor>);
     rest = rest.slice(m.index + m[0]!.length);
   }
   return out;
 }
 
-// Board cards are clickable (they expand), so a link stops the click from also toggling the post.
-function Anchor({ href, children }: { href: string; children: ReactNode }) {
+/**
+ * A link in the middle of someone's writing.
+ *
+ * Set in the same weight as the words around it - the colour and the rule beneath already say it is a link, and a
+ * bolder run of text in the middle of a sentence reads as emphasis the author did not write. The rule is a
+ * hairline at a third strength, dropped clear of the descenders, so a link inside a paragraph is marked without
+ * being scored through; hovering brings it up to full rather than taking it away, because an affordance that
+ * vanishes when you reach for it is backwards.
+ *
+ * Board cards are clickable (they expand), so a link stops the click from also toggling the post.
+ */
+/**
+ * A person named in the text. Drawn as a soft chip so a mention reads as a reference to someone rather than
+ * as emphasis, and links to their profile - the useful thing to do with a name you just read.
+ *
+ * The NAME comes from the source, not from a lookup: it is what the author picked at the time, and a chip
+ * that needs the directory loaded would flicker (or read "Someone") on every card the moment the page opens.
+ * A later rename therefore leaves the old wording in old posts, exactly as a name typed into a sentence does.
+ */
+function Mention({ name, employeeId }: { name: string; employeeId: string }) {
+  return (
+    <a
+      href={`#/employees/${employeeId}`}
+      onClick={(e) => e.stopPropagation()} // board cards expand on click; following a mention must not also toggle the post
+      className="rounded bg-primary/10 px-1 font-medium text-primary transition-colors hover:bg-primary/20"
+    >
+      @{name}
+    </a>
+  );
+}
+
+function Anchor({ href, title, children }: { href: string; title?: string; children: ReactNode }) {
   return (
     <a
       href={href}
+      title={title}
       target="_blank"
       rel="noopener noreferrer nofollow ugc"
       onClick={(e) => e.stopPropagation()}
-      className="font-medium text-primary underline underline-offset-2 hover:no-underline"
+      className={cn(
+        "text-primary underline decoration-primary/30 decoration-1 underline-offset-[3px] transition-colors",
+        "hover:decoration-primary focus-visible:decoration-primary",
+        // A URL has no spaces to wrap at, and a card is only so wide.
+        "break-words",
+      )}
     >
       {children}
     </a>
   );
+}
+
+/**
+ * What a BARE url shows as. Written out in full - scheme, `www.`, query, tracking - it is a wall of characters in
+ * the middle of a sentence, and the ugliest thing on the card by some way. What is left is the part a reader
+ * recognises: the host, and a mark to say the address goes on. The href is untouched, and the whole of it is on
+ * the title, so nothing is hidden - only tidied.
+ *
+ * A link the AUTHOR labelled is left exactly as they wrote it; this is only for the ones the renderer found.
+ */
+function bareLabel(url: string): string {
+  if (/^mailto:/i.test(url)) return url.slice("mailto:".length);
+  const bare = url.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "");
+  if (bare.length <= 44) return bare;
+  const slash = bare.indexOf("/");
+  return slash === -1 ? bare : `${bare.slice(0, slash)}/…`;
 }
 
 // ---- Render ------------------------------------------------------------------------------------------------
@@ -247,7 +330,16 @@ export function RichText({
           // The card's own title is the h1 of this document, so a body heading starts a level below it.
           const H = (["h2", "h3", "h4"] as const)[b.level - 1]!;
           const size = (["text-xl", "text-lg", "text-base"] as const)[b.level - 1]!;
-          return <H key={key} style={attrStyle(b.attrs)} className={cn("font-semibold", size, attrClass(b.attrs))}>{renderInline(b.text, key)}</H>;
+          // A size step goes on a span INSIDE the heading, not on the heading. `em` resolves against the PARENT's
+          // font size, and a heading is the one block with a size of its own - put the step on the element and it
+          // would measure itself against the body text instead, which made "Large" render a heading SMALLER than
+          // leaving it alone. Inside, the parent is the heading, and the step means what it says.
+          const step = b.attrs.size ? SIZE[b.attrs.size] : "";
+          return (
+            <H key={key} style={attrStyle(b.attrs)} className={cn("font-semibold", size, attrClass(b.attrs, false))}>
+              {step ? <span className={step}>{renderInline(b.text, key)}</span> : renderInline(b.text, key)}
+            </H>
+          );
         }
         return <p key={key} style={attrStyle(b.attrs)} className={attrClass(b.attrs)}>{renderInline(b.text, key)}</p>;
       }).flatMap((node, i) => (gap === i + 1 ? [node, <div key={`ins${i}`}>{insert}</div>] : [node]))}

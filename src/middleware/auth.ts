@@ -10,10 +10,14 @@ import type { Policy } from "../domain/manifests";
 import { mergeGrants } from "../domain/compileGrants";
 import { loadRoleGrant, loadUserGrant, loadManifest } from "../lib/policyLoad";
 import { unauthenticated, forbidden } from "../lib/errors";
+import { getCookie } from "hono/cookie";
+import { openSession } from "../lib/session";
+import { SESSION_COOKIE } from "../routes/authRoutes";
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
-// Verifies the Cloudflare Access JWT, resolves the caller, auto-provisions on first login.
+// Authenticates the caller (Cloudflare Access JWT, or the app's own Google-OIDC session cookie - see
+// routes/authRoutes.ts for the mode split), resolves them, auto-provisions on first login.
 export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // Batch sub-request: the caller was already verified once for the batch envelope. Reuse the resolved user
   // (skip the JWT verify + user join + grant/manifest load) - authz still runs per sub-request below, so this
@@ -35,6 +39,14 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const devBypass = !!c.env.DEV_FAKE_EMAIL && c.env.ALLOW_DEV_AUTH === "true";
   if (devBypass) {
     email = c.env.DEV_FAKE_EMAIL!.toLowerCase();
+  } else if (c.env.GOOGLE_CLIENT_ID) {
+    // Direct Google sign-in mode: the caller is whoever the signed session cookie says, verified by HMAC +
+    // expiry (stateless - zero reads). Everything below (status check, role grant, provisioning) still runs
+    // fresh per request, so disabling a user bites immediately despite the live cookie.
+    const token = getCookie(c, SESSION_COOKIE);
+    const session = token ? await openSession(token, c.env.AUTH_SESSION_KEY!, Date.now()) : null;
+    if (!session) throw unauthenticated("not signed in");
+    email = session.email.toLowerCase();
   } else {
     const token = c.req.header("Cf-Access-Jwt-Assertion");
     if (!token) throw unauthenticated("missing Access token");

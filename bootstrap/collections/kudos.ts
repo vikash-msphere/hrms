@@ -44,7 +44,7 @@ export const KUDOS_CONFIG: KudosConfig = {
     {
       name: "Customer Focus",
       icon: "heart",
-      art: ["I-heart-design.png", "think-about.png"],
+      art: ["i-heart-design.png", "think-about.png"],
       prompts: [
         "You stayed on that support call until the customer was genuinely unblocked, not just handed off. They noticed - so did we.",
         "The way you translated the client's vague ask into exactly what they needed was masterful.",
@@ -56,7 +56,7 @@ export const KUDOS_CONFIG: KudosConfig = {
     {
       name: "Ownership",
       icon: "shield-check",
-      art: ["hard-work.png", "tiddy-up.png"],
+      art: ["hard-work.png", "tidy-up.png"],
       prompts: [
         "You saw the incident, took the lead, and drove it to resolution before anyone even assigned it. Textbook ownership.",
         "\"I'll take that\" might be your catchphrase - and you always follow through.",
@@ -128,7 +128,7 @@ export const KUDOS_CONFIG: KudosConfig = {
     {
       name: "Positivity",
       icon: "smile",
-      art: ["relex-time.png", "drawin.png"],
+      art: ["relax-time.png", "drawing.png"],
       prompts: [
         "Even when the build was red and the coffee machine died, you kept the team laughing. Priceless.",
         "Your energy in Monday standups genuinely sets up the whole week.",

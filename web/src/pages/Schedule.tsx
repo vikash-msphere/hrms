@@ -7,6 +7,7 @@ import { cn, idOf } from "@/lib/utils";
 import type { Department, Employee, Me, Shift, ShiftAssignment } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
+import { AccessScope } from "@/components/access/AccessScope";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
 import { Button } from "@/components/ui/button";
@@ -119,8 +120,11 @@ export default function Schedule({ me }: { me: Me }) {
   const today = ymd(new Date());
 
   return (
+    // The route key ("schedule") is not a collection; the roster's data is shift-assignments. Rebind the
+    // ambient scope so the header icon and any nested affordance manage the right resource.
+    <AccessScope collection="shift-assignments">
     <div>
-      <PageHeader title="Schedule" description={canManage ? "Click any cell to assign or change a shift." : undefined} actions={<PageSettings me={me} host="schedule" />} />
+      <PageHeader accessCollection="shift-assignments" title="Schedule" description={canManage ? "Click any cell to assign or change a shift." : undefined} actions={<PageSettings me={me} host="schedule" />} />
 
       <div className="mb-4 flex items-center gap-2">
         <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w - 7 * DAY))} aria-label="Previous week"><ChevronLeft className="h-4 w-4" /></Button>
@@ -256,6 +260,7 @@ export default function Schedule({ me }: { me: Me }) {
         />
       )}
     </div>
+    </AccessScope>
   );
 }
 

@@ -19,7 +19,7 @@ const EMPTY: Form = { bank_name: "", account_name: "", account_number: "", ifsc_
 
 /** An employee's bank account. The server keeps it encrypted and only ever returns the
  *  account number masked; access is restricted to the owner, HR and super_admin. */
-export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details" }: { employeeId: string; canEdit: boolean; title?: string }) {
+export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details", onSaved }: { employeeId: string; canEdit: boolean; title?: string; onSaved?: () => void }) {
   const { toast } = useToast();
   const { org } = useOrg();
   const allowedCurrencies = org.currencies ?? ["INR"];
@@ -59,6 +59,7 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
       const updated = await patch<BankDetails>(`employees/${employeeId}/bank-account`, form);
       setData(updated);
       toast({ title: "Bank details saved", variant: "success" });
+      onSaved?.();
       setOpen(false);
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });

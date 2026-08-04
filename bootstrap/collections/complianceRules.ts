@@ -1,7 +1,7 @@
 // Recurring statutory obligations. The daily cron rolls each active rule into dated compliance_events
 // occurrences over a ~12-month horizon. dueDay = day of month; anchorMonth = quarterly cycle start / annual
 // month (omit for monthly).
-import { Ctx, T0, q, n, code2, rows } from "../lib";
+import { type Ctx, T0, q, n, code2, rows } from "../lib";
 
 type ComplianceRuleSeed = {
   title: string;

@@ -22,6 +22,7 @@ import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChec
 import { DEFAULT_ATS_CONFIG } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { EmptyState } from "@/components/common/EmptyState";
+import { UnsavedScope, useUnsaved, useUnsavedTracker } from "@/components/common/UnsavedChanges";
 import { Field } from "@/components/common/Field";
 import { KudosLevelsTab } from "@/components/common/KudosLevelsTab";
 import { RolesPanel } from "@/components/common/RolesPanel";
@@ -56,6 +57,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CONFIGURABLE_QUICK_ACTIONS, normalizeQuickMenu, type QuickMenuGroup } from "@/lib/quickActions";
+import { shortcutCatalog, DEFAULT_DASHBOARD_SHORTCUTS } from "@/lib/dashboardShortcuts";
+import { SHEET_FORMATS, DEFAULT_CATEGORY_CODES, DEFAULT_TAG_SETTINGS, allFormats, resolveTagConfig, formatTag, type AssetTagSettings, type SheetFormat } from "@/lib/assetTags";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -120,12 +123,14 @@ function NotificationsTab({ toast }: { toast: Toast }) {
   const setOne = (key: string, patchCfg: Partial<EventCfg>, def: string) =>
     setEvents((e) => ({ ...e, [key]: { ...(e[key] ?? { enabled: true, priority: def }), ...patchCfg } }));
   const [saving, setSaving] = useState(false);
+  const { markSaved } = useUnsaved(events, ready, save);
   async function save() {
     setSaving(true);
     try {
       // Materialize every category so the saved blob is complete + explicit.
       const full = Object.fromEntries(NOTIF_CATEGORIES.map((c) => [c.key, cfgOf(c)]));
       await patch("settings/notifications", { value: { events: full } });
+      markSaved();
       toast({ title: "Notification settings saved" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
@@ -135,7 +140,7 @@ function NotificationsTab({ toast }: { toast: Toast }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle><AccessAction objectPath="settings/notifications" label="Notification settings"><span>In-app notifications</span></AccessAction></CardTitle>
+        <CardTitle><AccessAction collection="settings" objectPath="settings/notifications" label="Notification settings"><span>In-app notifications</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="space-y-1">
         <p className="mb-4 text-sm text-muted-foreground">Turn an event category on or off for everyone, and set its priority. Urgent and high items float to the top of the bell and are highlighted. Disabling a category stops those notifications being created.</p>
@@ -381,7 +386,7 @@ function SettingsPanel({ me, entry, toast, openId }: { me: Me; entry: SettingsEn
           </div>
           <div ref={setSlot} className="flex flex-wrap items-center justify-end gap-2" />
         </div>
-        {renderSettingsPanel(entry.key, me, toast, slot, openId)}
+        <UnsavedScope bannerClassName="top-16">{renderSettingsPanel(entry.key, me, toast, slot, openId)}</UnsavedScope>
       </div>
     </div>
   );
@@ -400,6 +405,7 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
     case "banks-currency": return <OrgBanksPanel toast={toast} />;
     case "defaults": return <DefaultsTab toast={toast} />;
     case "employee-ids": return <EmployeeIdsTab toast={toast} />;
+    case "asset-tags": return <AssetTagsTab toast={toast} />;
     case "departments": return <Departments embedded title="Departments" />;
     case "employee-fields": return <FieldsTab toast={toast} />;
     case "dashboard": return <DashboardTab toast={toast} />;
@@ -445,6 +451,7 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
 type Toast = ReturnType<typeof useToast>["toast"];
 
 const MAX_LOGO_BYTES = 256 * 1024;
+const MAX_FAVICON_BYTES = 64 * 1024; // favicons are tiny; the data URL lives in the settings/organization blob
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -461,11 +468,13 @@ type ProviderMeta = { id: string; label: string; requiresAadhaar: boolean; suppo
 function EsignTab({ toast }: { toast: Toast }) {
   const [cfg, setCfg] = useState<EsignCfg>(DEFAULT_ESIGN_CFG);
   const [providers, setProviders] = useState<ProviderMeta[]>([]);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: Partial<EsignCfg> }>("settings/esign").then((s) => { if (s.value) setCfg((p) => ({ ...p, ...s.value, providers: s.value!.providers ?? {} })); }).catch(() => {});
+    get<{ value?: Partial<EsignCfg> }>("settings/esign").then((s) => { if (s.value) setCfg((p) => ({ ...p, ...s.value, providers: s.value!.providers ?? {} })); }).catch(() => {}).finally(() => setReady(true));
     get<{ providers: ProviderMeta[] }>("esign-providers").then((r) => setProviders(r.providers ?? [])).catch(() => {});
   }, []);
-  const save = async () => { try { await patch("settings/esign", { value: cfg }); toast({ title: "E-signature settings saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const save = async () => { try { await patch("settings/esign", { value: cfg }); markSaved(); toast({ title: "E-signature settings saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const { markSaved } = useUnsaved(cfg, ready, save);
   // Vendor config only for providers that HAVE config (Aadhaar/Cashfree); the in-app "internal" method has none.
   const vendors = providers.filter((p) => p.configFields.length > 0);
   const setField = (id: string, key: string, v: string | number) => setCfg((c) => ({ ...c, providers: { ...c.providers, [id]: { ...(c.providers[id] ?? {}), [key]: v } } }));
@@ -513,10 +522,13 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const { canReapply, staleCount, skippedCount, reapplying, reapply: doReapply, promptReapply } = useSplitStaleness();
   const [ot, setOt] = useState({ enabled: false, multiplier: 2, hours_per_month: 200, rate_per_hour: 0 });
   const [pt, setPt] = useState<{ slabs: { up_to: number | null; amount: number }[] }>({ slabs: [{ up_to: 25000, amount: 0 }, { up_to: null, amount: 200 }] });
+  const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: Partial<typeof ctc> }>("settings/ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }).catch(() => {});
-    get<{ value?: Partial<typeof ot> }>("settings/overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }).catch(() => {});
-    get<{ value?: { slabs?: { up_to: number | null; amount: number }[] } }>("settings/professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs }); }).catch(() => {});
+    Promise.allSettled([
+      get<{ value?: Partial<typeof ctc> }>("settings/ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
+      get<{ value?: Partial<typeof ot> }>("settings/overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
+      get<{ value?: { slabs?: { up_to: number | null; amount: number }[] } }>("settings/professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs }); }),
+    ]).then(() => setReady(true));
   }, []);
   // Save the provisions, then offer to re-derive basic + Special Allowance for every current comp row under
   // them (CTC held fixed). Explicit because it shifts take-home org-wide - a config change alone never touches
@@ -524,17 +536,21 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const saveCtc = async () => {
     try {
       await patch("settings/ctc", { value: ctc });
+      markCtcSaved();
       toast({ title: "CTC provisions saved" });
       await promptReapply();
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
     }
   };
-  const saveOt = async () => { try { await patch("settings/overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); toast({ title: "Overtime policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const saveOt = async () => { try { await patch("settings/overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); markOtSaved(); toast({ title: "Overtime policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const savePt = async () => {
     const slabs = pt.slabs.map((s, i) => ({ up_to: i === pt.slabs.length - 1 ? null : Number(s.up_to) || 0, amount: Number(s.amount) || 0 }));
-    try { await patch("settings/professional-tax", { value: { slabs } }); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
+    try { await patch("settings/professional-tax", { value: { slabs } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
   };
+  const { markSaved: markCtcSaved } = useUnsaved(ctc, ready, saveCtc);
+  const { markSaved: markOtSaved } = useUnsaved(ot, ready, saveOt);
+  const { markSaved: markPtSaved } = useUnsaved(pt, ready, savePt);
   const setSlab = (i: number, patchSlab: Partial<{ up_to: number | null; amount: number }>) => setPt((p) => ({ slabs: p.slabs.map((s, j) => (j === i ? { ...s, ...patchSlab } : s)) }));
 
   return (
@@ -547,7 +563,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
 
       <TabsContent value="ctc">
         <Card>
-          <CardHeader><CardTitle className="text-base"><AccessAction objectPath="settings/ctc" label="CTC provisions"><span>CTC provisions</span></AccessAction></CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/ctc" label="CTC provisions"><span>CTC provisions</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here.</p>
             <SplitStaleBanner staleCount={staleCount} skippedCount={skippedCount} reapplying={reapplying} canReapply={canReapply} onReapply={doReapply} />
@@ -571,7 +587,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
 
       <TabsContent value="overtime">
         <Card>
-          <CardHeader><CardTitle className="text-base"><AccessAction objectPath="settings/overtime" label="Overtime policy"><span>Overtime pay</span></AccessAction></CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/overtime" label="Overtime policy"><span>Overtime pay</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">When enabled, approved overtime is paid as a taxable earning in the next payroll run.</p>
             <label className="flex items-center gap-2 text-sm"><Checkbox checked={ot.enabled} onCheckedChange={(v) => setOt((c) => ({ ...c, enabled: v === true }))} /> Pay overtime via payroll</label>
@@ -587,7 +603,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
 
       <TabsContent value="pt">
         <Card>
-          <CardHeader><CardTitle className="text-base"><AccessAction objectPath="settings/professional-tax" label="Professional Tax"><span>Professional Tax slabs</span></AccessAction></CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/professional-tax" label="Professional Tax"><span>Professional Tax slabs</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">Monthly slabs by gross wage (state-specific). The last row is the open-ended top bracket (and above).</p>
             <div className="space-y-2">
@@ -636,12 +652,14 @@ function ReferralsTab({ toast }: { toast: Toast }) {
   const addTier = () => setTiers((t) => [...t, { max_days: 30, amount: Number(amount) || 0 }]);
   const removeTier = (i: number) => setTiers((t) => t.filter((_, j) => j !== i));
   const [saving, setSaving] = useState(false);
+  const { markSaved } = useUnsaved({ trigger, amount, tiers }, ready, save);
   async function save() {
     setSaving(true);
     try {
       // Keep tiers ordered ascending by max_days (nulls last = catch-all), matching the resolver's expectation.
       const clean = [...tiers].sort((a, b) => (a.max_days ?? Infinity) - (b.max_days ?? Infinity));
       await patch("settings/referrals", { value: { award_trigger: trigger, default_bonus_amount: Number(amount) || 0, join_tiers: clean } });
+      markSaved();
       toast({ title: "Referral settings saved" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
@@ -650,7 +668,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle><AccessAction objectPath="settings/referrals" label="Referral settings"><span>Referral bonuses</span></AccessAction></CardTitle>
+        <CardTitle><AccessAction collection="settings" objectPath="settings/referrals" label="Referral settings"><span>Referral bonuses</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="max-w-xl space-y-4">
         <p className="text-sm text-muted-foreground">When a referred candidate is hired and linked to their new employee record, the referral bonus is awarded automatically once they reach the milestone below, then paid on the referrer's next payroll run.</p>
@@ -702,6 +720,7 @@ function AtsTab({ toast }: { toast: Toast }) {
   });
 
   const [saving, setSaving] = useState(false);
+  const { markSaved } = useUnsaved(cfg, ready, save);
   async function save() {
     // Freeze a stable key per stage from its label (keep an existing key so live applications keep their stage).
     const stages = cfg.stages.map((s) => ({ ...s, key: s.key || stageSlug(s.label), label: s.label.trim() || s.key }));
@@ -709,6 +728,7 @@ function AtsTab({ toast }: { toast: Toast }) {
     setSaving(true);
     try {
       await patch("settings/ats", { value: { stages, sources: cfg.sources.filter(Boolean), rejection_reasons: cfg.rejection_reasons.filter(Boolean), scorecard_criteria: cfg.scorecard_criteria.filter((c) => c.label.trim()) } });
+      markSaved();
       toast({ title: "Recruiting settings saved" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
@@ -718,7 +738,7 @@ function AtsTab({ toast }: { toast: Toast }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle><AccessAction objectPath="settings/ats" label="Recruiting settings"><span>Recruiting pipeline</span></AccessAction></CardTitle>
+        <CardTitle><AccessAction collection="settings" objectPath="settings/ats" label="Recruiting settings"><span>Recruiting pipeline</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="max-w-2xl space-y-6">
         <Tabs defaultValue="pipeline">
@@ -785,10 +805,12 @@ function AttendanceTab({ toast }: { toast: Toast }) {
   const toggleDay = (d: number) =>
     setCfg((c) => ({ ...c, work_days: c.work_days.includes(d) ? c.work_days.filter((x) => x !== d) : [...c.work_days, d].sort((a, b) => a - b) }));
   const [saving, setSaving] = useState(false);
+  const { markSaved } = useUnsaved(cfg, ready, save);
   async function save() {
     setSaving(true);
     try {
       await patch("settings/attendance", { value: cfg });
+      markSaved();
       toast({ title: "Attendance schedule saved" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
@@ -797,7 +819,7 @@ function AttendanceTab({ toast }: { toast: Toast }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle><AccessAction objectPath="settings/attendance" label="Attendance schedule"><span>Attendance schedule</span></AccessAction></CardTitle>
+        <CardTitle><AccessAction collection="settings" objectPath="settings/attendance" label="Attendance schedule"><span>Attendance schedule</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="max-w-xl space-y-4">
         <Tabs defaultValue="schedule">
@@ -955,6 +977,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
   const [autoApprove, setAutoApprove] = useState("");
   const [recurringState, setRecurringState] = useState<"SUBMITTED" | "DRAFT">("SUBMITTED");
   const [thresholds, setThresholds] = useState("80, 100");
+  const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -965,9 +988,11 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
         if (v.recurring_default_state === "DRAFT") setRecurringState("DRAFT");
         if (Array.isArray(v.budget_alert_thresholds) && v.budget_alert_thresholds.length) setThresholds(v.budget_alert_thresholds.join(", "));
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setReady(true));
   }, []);
 
+  const { markSaved } = useUnsaved({ autoApprove, recurringState, thresholds }, ready, save);
   async function save() {
     setSaving(true);
     try {
@@ -979,6 +1004,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
           budget_alert_thresholds: parsedThresholds.length ? parsedThresholds : [80, 100],
         },
       });
+      markSaved();
       toast({ title: "Expense settings saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -1051,6 +1077,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const addMember = (i: number, ref: string) => setCats((cs) => cs.map((c, j) => (j === i && !(c.members ?? []).includes(ref) ? { ...c, members: [...(c.members ?? []), ref] } : c)));
   const removeMember = (i: number, ref: string) => setCats((cs) => cs.map((c, j) => (j === i ? { ...c, members: (c.members ?? []).filter((m) => m !== ref) } : c)));
 
+  const { markSaved } = useUnsaved(cats, ready, save);
   async function save() {
     // Derive a stable key from the name for any new/blank rows; keep existing keys (tickets reference them).
     const used = new Set<string>();
@@ -1067,6 +1094,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
     try {
       await patch("settings/ticket-categories", { value: { categories: out } });
       setCats(out);
+      markSaved();
       toast({ title: "Ticket categories saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -1078,7 +1106,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle><AccessAction objectPath="settings/ticket-categories" label="Ticket categories"><span>Ticket categories</span></AccessAction></CardTitle>
+        <CardTitle><AccessAction collection="settings" objectPath="settings/ticket-categories" label="Ticket categories"><span>Ticket categories</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">Each category routes new tickets to a default assignee and servicing department (changeable per ticket). Members and the department's managers see every ticket in the category.</p>
@@ -1184,6 +1212,7 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
   const [items, setItems] = useState(original);
   const [busy, setBusy] = useState(false);
   const dirty = name !== checklist.display_name || items !== original;
+  useUnsavedTracker(dirty, () => (name.trim() ? save() : undefined));
 
   async function save() {
     setBusy(true);
@@ -1238,7 +1267,8 @@ function useOrgBlob(toast: Toast) {
       .then((s) => setBlob(s.value ?? {}))
       .catch(() => setBlob({}));
   }, []);
-  async function save(slice: Record<string, unknown>, savedTitle: string) {
+  // Returns whether the save landed, so callers can clear their unsaved-changes baseline only on success.
+  async function save(slice: Record<string, unknown>, savedTitle: string): Promise<boolean> {
     setSaving(true);
     try {
       const value = { ...(blob ?? {}), ...slice };
@@ -1246,8 +1276,10 @@ function useOrgBlob(toast: Toast) {
       setBlob(value as Partial<OrgSettings>);
       reload();
       toast({ title: savedTitle, variant: "success" });
+      return true;
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      return false;
     } finally {
       setSaving(false);
     }
@@ -1264,6 +1296,7 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
   const { blob, save, saving } = useOrgBlob(toast);
   const metaOf = (id: string) => CONFIGURABLE_QUICK_ACTIONS.find((a) => a.id === id);
   const [groups, setGroups] = useState<QuickMenuGroup[]>([]);
+  const [ready, setReady] = useState(false);
   const hydrated = useRef(false);
 
   useEffect(() => {
@@ -1274,6 +1307,7 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
     setGroups(
       normalizeQuickMenu(blob.quick_actions).groups.map((g) => ({ ...g, items: g.items.filter((id) => known.has(id)) })),
     );
+    setReady(true); // batched with setGroups, so the unsaved baseline captures the hydrated value
   }, [blob]);
 
   const placed = new Set(groups.flatMap((g) => g.items));
@@ -1299,9 +1333,10 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
       return g.id === targetGid ? { ...g, items: [...stripped, id] } : { ...g, items: stripped };
     }));
 
+  const { markSaved } = useUnsaved(groups, ready, onSave);
   async function onSave() {
     const cleaned = groups.map((g) => ({ id: g.id, label: g.label.trim() || "Untitled", items: g.items }));
-    await save({ quick_actions: { groups: cleaned, order: undefined } }, "Quick create menu saved");
+    if (await save({ quick_actions: { groups: cleaned, order: undefined } }, "Quick create menu saved")) markSaved();
   }
 
   if (!blob) return panelLoading;
@@ -1382,6 +1417,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
   const [name, setName] = useState("");
   const [legalName, setLegalName] = useState("");
   const [logo, setLogo] = useState<string | undefined>(undefined);
+  const [favicon, setFavicon] = useState<string | undefined>(undefined); // browser-tab icon (small data URL)
   const [logoText, setLogoText] = useState(""); // sidebar wordmark override (casing/spelling); blank = use name
   const [nameFont, setNameFont] = useState("default");
   const [nameWeight, setNameWeight] = useState("bold");
@@ -1389,17 +1425,20 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
   const [address, setAddress] = useState("");
   const [incorporationDate, setIncorporationDate] = useState("");
   const [defaultDept, setDefaultDept] = useState("none"); // org-wide default department for cards + tickets
-  const [primaryColor, setPrimaryColor] = useState("#1A2980"); // brand accent (email header/buttons; hex)
+  const [primaryColor, setPrimaryColor] = useState("#1D4C91"); // brand accent (email header/buttons; hex)
   const [emailLogoUrl, setEmailLogoUrl] = useState(""); // public https logo for email headers (the app logo is a data URL, which email clients strip)
   const { rows: departments } = useCollection<Department>("departments");
 
+  const [ready, setReady] = useState(false);
   const hydrated = useRef(false);
   useEffect(() => {
     if (!blob || hydrated.current) return;
     hydrated.current = true;
+    setReady(true); // batched with the hydration setters below, so the baseline captures the loaded values
     if (blob.name) setName(blob.name);
     if (blob.legal_name) setLegalName(blob.legal_name);
     if (blob.logo) setLogo(blob.logo);
+    if (blob.favicon) setFavicon(blob.favicon);
     if (blob.logo_text) setLogoText(blob.logo_text);
     if (blob.name_font) setNameFont(blob.name_font);
     if (blob.name_weight) setNameWeight(blob.name_weight);
@@ -1423,11 +1462,29 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
     r.readAsDataURL(f);
   }
 
+  function onFaviconFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > MAX_FAVICON_BYTES) {
+      toast({ variant: "destructive", title: "Favicon too large", description: "Use an image under 64 KB." });
+      return;
+    }
+    const r = new FileReader();
+    r.onload = () => setFavicon(r.result as string);
+    r.readAsDataURL(f);
+  }
+
+  const { markSaved } = useUnsaved(
+    { name, legalName, logo, favicon, logoText, nameFont, nameWeight, nameSize, address, incorporationDate, defaultDept, primaryColor, emailLogoUrl },
+    ready,
+    saveIdentity,
+  );
   async function saveIdentity() {
-    await save(
-      { name: name.trim(), legal_name: legalName.trim() || null, logo: logo ?? null, logo_text: logoText.trim() || null, name_font: nameFont, name_weight: nameWeight, name_size: nameSize, address: address.trim() || null, incorporation_date: incorporationDate || null, default_department: defaultDept === "none" ? null : defaultDept, primary_color: primaryColor || null, email_logo_url: emailLogoUrl.trim() || null },
+    const ok = await save(
+      { name: name.trim(), legal_name: legalName.trim() || null, logo: logo ?? null, favicon: favicon ?? null, logo_text: logoText.trim() || null, name_font: nameFont, name_weight: nameWeight, name_size: nameSize, address: address.trim() || null, incorporation_date: incorporationDate || null, default_department: defaultDept === "none" ? null : defaultDept, primary_color: primaryColor || null, email_logo_url: emailLogoUrl.trim() || null },
       "Organization saved",
     );
+    if (ok) markSaved();
   }
 
   return (
@@ -1436,23 +1493,44 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
       <Card>
         <CardContent className="pt-6">
           <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:gap-8">
-            <div className="flex items-center gap-4">
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted">
-                {logo ? <img src={logo} alt="" className="h-full w-full object-cover" /> : <Building className="h-6 w-6 text-muted-foreground" />}
-              </div>
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-2">
-                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
-                    {logo ? "Replace" : "Choose logo"}
-                    <input type="file" accept="image/*" className="hidden" onChange={onFile} />
-                  </label>
-                  {logo && (
-                    <Button variant="ghost" size="sm" onClick={() => setLogo(undefined)}>
-                      <X className="h-4 w-4" /> Remove
-                    </Button>
-                  )}
+            <div className="space-y-5">
+              <div className="flex items-center gap-4">
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted">
+                  {logo ? <img src={logo} alt="" className="h-full w-full object-cover" /> : <Building className="h-6 w-6 text-muted-foreground" />}
                 </div>
-                <p className="text-xs text-muted-foreground">PNG or JPG, under 256 KB.</p>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
+                      {logo ? "Replace" : "Choose logo"}
+                      <input type="file" accept="image/*" className="hidden" onChange={onFile} />
+                    </label>
+                    {logo && (
+                      <Button variant="ghost" size="sm" onClick={() => setLogo(undefined)}>
+                        <X className="h-4 w-4" /> Remove
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">PNG or JPG, under 256 KB.</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted">
+                  {favicon ? <img src={favicon} alt="" className="h-8 w-8 object-contain" /> : <Globe className="h-6 w-6 text-muted-foreground" />}
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
+                      {favicon ? "Replace" : "Choose favicon"}
+                      <input type="file" accept="image/png,image/svg+xml,image/x-icon,image/vnd.microsoft.icon,image/jpeg" className="hidden" onChange={onFaviconFile} />
+                    </label>
+                    {favicon && (
+                      <Button variant="ghost" size="sm" onClick={() => setFavicon(undefined)}>
+                        <X className="h-4 w-4" /> Remove
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">Browser-tab icon. PNG, SVG or ICO, under 64 KB.</p>
+                </div>
               </div>
             </div>
             <div className="flex-1 space-y-6">
@@ -1507,8 +1585,8 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Brand colour" hint="Accent for email headers and buttons.">
                   <div className="flex items-center gap-2">
-                    <input type="color" aria-label="Brand colour" value={/^#[0-9a-fA-F]{6}$/.test(primaryColor) ? primaryColor : "#1A2980"} onChange={(e) => setPrimaryColor(e.target.value)} className="h-9 w-12 shrink-0 cursor-pointer rounded-md border bg-background p-1" />
-                    <Input value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} placeholder="#1A2980" className="font-mono" />
+                    <input type="color" aria-label="Brand colour" value={/^#[0-9a-fA-F]{6}$/.test(primaryColor) ? primaryColor : "#1D4C91"} onChange={(e) => setPrimaryColor(e.target.value)} className="h-9 w-12 shrink-0 cursor-pointer rounded-md border bg-background p-1" />
+                    <Input value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} placeholder="#1D4C91" className="font-mono" />
                   </div>
                 </Field>
                 <Field label="Email logo URL" hint="Public https image shown in email headers. The uploaded logo above is embedded (data URL) which email clients block, so email uses this URL instead; blank shows the name.">
@@ -1533,10 +1611,12 @@ function OrgBanksPanel({ toast }: { toast: Toast }) {
   // many places each currency is shown and paid in (INR = 0 -> whole rupees by default).
   const [decimals, setDecimals] = useState<Record<string, number>>({});
 
+  const [ready, setReady] = useState(false);
   const hydrated = useRef(false);
   useEffect(() => {
     if (!blob || hydrated.current) return;
     hydrated.current = true;
+    setReady(true); // batched with the hydration setters below
     if (Array.isArray(blob.currencies) && blob.currencies.length) setCurrencies(blob.currencies.join(", "));
     if (blob.default_currency) setDefaultCurrency(blob.default_currency);
     if (blob.currency_decimals) setDecimals(blob.currency_decimals);
@@ -1550,12 +1630,13 @@ function OrgBanksPanel({ toast }: { toast: Toast }) {
   const dpFor = (c: string) => decimals[c] ?? currencyDecimals(c, { currency_decimals: decimals } as OrgSettings);
   const setDp = (c: string, v: number) => setDecimals((d) => ({ ...d, [c]: Math.min(4, Math.max(0, Math.trunc(v) || 0)) }));
 
+  const { markSaved } = useUnsaved({ currencies, defaultCurrency, banks, decimals }, ready, saveBanks);
   async function saveBanks() {
     const allowed = allowedList.length ? allowedList : ["INR"];
     const def = allowed.includes(defaultCurrency) ? defaultCurrency : allowed[0];
     // Persist a decimals entry for every allowed currency (resolved value), so the config is explicit.
     const currency_decimals = Object.fromEntries(allowed.map((c) => [c, dpFor(c)]));
-    await save({ currencies: allowed, default_currency: def, currency_decimals, banks: bankList }, "Banks & currency saved");
+    if (await save({ currencies: allowed, default_currency: def, currency_decimals, banks: bankList }, "Banks & currency saved")) markSaved();
   }
 
   return (
@@ -1611,10 +1692,12 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
   // Company stamp/seal image (data URL); like the signature, an image upload kept apart from the text map.
   const [companyStamp, setCompanyStamp] = useState<string | undefined>(undefined);
 
+  const [ready, setReady] = useState(false);
   const hydrated = useRef(false);
   useEffect(() => {
     if (!blob || hydrated.current) return;
     hydrated.current = true;
+    setReady(true); // batched with the hydration setters below
     const ld = blob.letter_defaults;
     if (ld) {
       if (ld.signatory_signature) setSignatorySig(ld.signatory_signature);
@@ -1647,6 +1730,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
     r.readAsDataURL(f);
   }
 
+  const { markSaved } = useUnsaved({ letter, signatorySig, companyStamp }, ready, saveLetterDefaults);
   async function saveLetterDefaults() {
     // Drop blank fields so the stored block stays tidy; coerce validity to a number.
     const letterDefaults: LetterDefaults = {};
@@ -1656,7 +1740,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
     }
     if (signatorySig) letterDefaults.signatory_signature = signatorySig; // employer e-signature (omitted when cleared)
     if (companyStamp) letterDefaults.company_stamp = companyStamp; // company stamp/seal (omitted when cleared)
-    await save({ letter_defaults: letterDefaults }, "Letter defaults saved");
+    if (await save({ letter_defaults: letterDefaults }, "Letter defaults saved")) markSaved();
   }
 
   return (
@@ -1673,7 +1757,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
               </Field>
               <Field label="Signatory signature" hint="The employer's e-signature, stamped above the signatory name on generated letters.">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-14 w-40 items-center justify-center overflow-hidden rounded-md border bg-white p-1 dark:bg-zinc-100">
+                  <div className="flex h-14 w-40 items-center justify-center overflow-hidden rounded-md border bg-white p-1 dark:bg-brand-neutral-100">
                     {signatorySig ? <img src={signatorySig} alt="" className="max-h-full max-w-full object-contain" /> : <span className="text-xs text-muted-foreground">No signature</span>}
                   </div>
                   <div className="flex flex-col gap-1">
@@ -1687,7 +1771,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
               </Field>
               <Field label="Company stamp" hint="Company seal/stamp, overlaid beside the signatory on generated letters. A transparent PNG works best.">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-md border bg-white p-1 dark:bg-zinc-100">
+                  <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-md border bg-white p-1 dark:bg-brand-neutral-100">
                     {companyStamp ? <img src={companyStamp} alt="" className="max-h-full max-w-full object-contain" /> : <span className="text-xs text-muted-foreground">No stamp</span>}
                   </div>
                   <div className="flex flex-col gap-1">
@@ -1772,10 +1856,12 @@ function DashboardTab({ toast }: { toast: Toast }) {
     });
   // Both sections live in the one `settings/dashboard` blob, so each save persists the whole `cfg` (KPIs +
   // markers); the two buttons just let you save from where you're working, with a section-specific toast.
+  const { markSaved } = useUnsaved(cfg, ready, () => save("Dashboard settings saved"));
   async function save(savedMsg: string) {
     setSaving(true);
     try {
       await patch("settings/dashboard", { value: cfg });
+      markSaved();
       toast({ title: savedMsg, variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -1846,20 +1932,76 @@ function DashboardTab({ toast }: { toast: Toast }) {
       <Button onClick={() => save("KPI visibility saved")} disabled={!ready || saving}><Save className="h-4 w-4" /> Save KPIs</Button>
     </div>
   );
+  // Shortcut tiles at the bottom of the dashboard: an ordered pick from every quick-create action and every
+  // page/tab in the app. Unset = the built-in default set; clearing the list switches the row off. Capability
+  // gating still applies per person at render, so a tile only shows to people who can use it.
+  const shortcuts = cfg.shortcuts ?? DEFAULT_DASHBOARD_SHORTCUTS;
+  const setShortcuts = (ids: string[]) => setCfg((c) => ({ ...c, shortcuts: ids }));
+  const shortcutSection = () => {
+    const catalog = shortcutCatalog();
+    const byId = new Map(catalog.map((s) => [s.id, s]));
+    const chosen = shortcuts.filter((id) => byId.has(id));
+    const available = catalog.filter((s) => !chosen.includes(s.id));
+    const move = (i: number, dir: -1 | 1) => {
+      const j = i + dir;
+      if (j < 0 || j >= chosen.length) return;
+      const n = [...chosen];
+      [n[i], n[j]] = [n[j], n[i]];
+      setShortcuts(n);
+    };
+    return (
+      <div className="space-y-2">
+        {chosen.length === 0 ? (
+          <p className="rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">No shortcuts - the tile row is hidden on the dashboard.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {chosen.map((id, i) => {
+              const s = byId.get(id)!;
+              const Icon = s.icon;
+              return (
+                <div key={id} className="flex items-center gap-3 rounded-md border px-3 py-2">
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="flex-1 truncate text-sm">{s.label}</span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">{s.kind === "action" ? "Action" : "Page"}</span>
+                  <div className="flex items-center gap-0.5">
+                    <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up"><ArrowUp className="h-3.5 w-3.5" /></Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === chosen.length - 1} onClick={() => move(i, 1)} aria-label="Move down"><ArrowDown className="h-3.5 w-3.5" /></Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => setShortcuts(chosen.filter((x) => x !== id))} aria-label="Remove shortcut"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <Select value="" onValueChange={(v) => setShortcuts([...chosen, v])}>
+            <SelectTrigger className="h-8 w-72 text-xs"><SelectValue placeholder="Add a shortcut..." /></SelectTrigger>
+            <SelectContent>
+              {available.map((s) => <SelectItem key={s.id} value={s.id}>{s.kind === "action" ? `${s.detail}: ${s.label}` : s.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Button variant="ghost" size="sm" onClick={() => setShortcuts([...DEFAULT_DASHBOARD_SHORTCUTS])}>Reset to default</Button>
+        </div>
+        <Button onClick={() => save("Dashboard shortcuts saved")} disabled={!ready || saving}><Save className="h-4 w-4" /> Save shortcuts</Button>
+      </div>
+    );
+  };
   return (
     <Card>
       <CardHeader>
         <CardTitle><AccessAction collection="settings" objectPath="settings/dashboard" label="Dashboard"><span>Dashboard</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">Choose who sees each KPI card and timeline marker: Everyone, specific roles, or specific people. Selecting no one hides the item. KPI cards group into categories (Needs attention / Coming up / At a glance) - untick a category to hide the whole band. Out of the box, broadly useful cards show to everyone, HR-related cards to HR admins, and the rest stay hidden until you share them; timeline markers default to everyone. Leaves, holidays and weekends always show on the timeline.</p>
+        <p className="text-sm text-muted-foreground">Choose who sees each KPI card and timeline marker, and which shortcut tiles the dashboard ends with. Selecting no one hides an item.</p>
         <Tabs defaultValue="kpis">
           <TabsList variant="segmented">
             <TabsTrigger value="kpis">KPI cards</TabsTrigger>
             <TabsTrigger value="timeline">Timeline markers</TabsTrigger>
+            <TabsTrigger value="shortcuts">Shortcuts</TabsTrigger>
           </TabsList>
           <TabsContent value="kpis">{kpiSection()}</TabsContent>
           <TabsContent value="timeline">{section(MARKER_DEFS, "timeline", "Save markers", "Timeline markers saved", "Everyone")}</TabsContent>
+          <TabsContent value="shortcuts">{shortcutSection()}</TabsContent>
         </Tabs>
       </CardContent>
     </Card>
@@ -1963,22 +2105,25 @@ function AudienceCell({ value, roles, employees, defaultLabel = "Everyone", onCh
 function DefaultsTab({ toast }: { toast: Toast }) {
   const [probation, setProbation] = useState("3");
   const [maxOptional, setMaxOptional] = useState("2");
+  const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { default_months?: number } }>("settings/probation")
-      .then((s) => typeof s.value?.default_months === "number" && setProbation(String(s.value.default_months)))
-      .catch(() => {});
-    get<{ value?: { max_optional?: number } }>("settings/holidays")
-      .then((s) => typeof s.value?.max_optional === "number" && setMaxOptional(String(s.value.max_optional)))
-      .catch(() => {});
+    Promise.allSettled([
+      get<{ value?: { default_months?: number } }>("settings/probation")
+        .then((s) => typeof s.value?.default_months === "number" && setProbation(String(s.value.default_months))),
+      get<{ value?: { max_optional?: number } }>("settings/holidays")
+        .then((s) => typeof s.value?.max_optional === "number" && setMaxOptional(String(s.value.max_optional))),
+    ]).then(() => setReady(true));
   }, []);
 
+  const { markSaved } = useUnsaved({ probation, maxOptional }, ready, save);
   async function save() {
     setSaving(true);
     try {
       await patch("settings/probation", { value: { default_months: Number(probation) } });
       await patch("settings/holidays", { value: { max_optional: Number(maxOptional) } });
+      markSaved();
       toast({ title: "Policies saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -2019,18 +2164,22 @@ function formatNum(c: NumCfg, seq: number): string {
 function EmployeeIdsTab({ toast }: { toast: Toast }) {
   const [cfg, setCfg] = useState<NumCfg>(DEFAULT_NUM_CFG);
   const [saving, setSaving] = useState(false);
+  const [ready, setReady] = useState(false);
   const set = (p: Partial<NumCfg>) => setCfg((c) => ({ ...c, ...p }));
 
   useEffect(() => {
     get<{ value?: Partial<NumCfg> }>("settings/employee-number")
       .then((s) => s.value && setCfg({ ...DEFAULT_NUM_CFG, ...s.value }))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setReady(true));
   }, []);
 
+  const { markSaved } = useUnsaved(cfg, ready, save);
   async function save() {
     setSaving(true);
     try {
       await patch("settings/employee-number", { value: { ...cfg, width: Number(cfg.width), start: Number(cfg.start) } });
+      markSaved();
       toast({ title: "Employee ID format saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -2091,6 +2240,209 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
   );
 }
 
+// Asset tag printing (settings/asset-tags): the org-wide tag pattern (prefix/separator/digits), the
+// category -> code map generated tags use, the sticker-sheet formats offered in the printer (presets +
+// org-specific custom grids) and the default QR/label content. Device-specific state (printer offsets,
+// used-slot map) deliberately stays on each device - only policy lives here.
+function AssetTagsTab({ toast }: { toast: Toast }) {
+  const { org } = useOrg();
+  const [cfg, setCfg] = useState<AssetTagSettings>({});
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const set = (p: Partial<AssetTagSettings>) => setCfg((c) => ({ ...c, ...p }));
+
+  useEffect(() => {
+    get<{ value?: AssetTagSettings }>("settings/asset-tags")
+      .then((s) => s.value && setCfg(s.value))
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+
+  const { markSaved } = useUnsaved(cfg, loaded, save);
+  async function save() {
+    setSaving(true);
+    try {
+      const digits = cfg.digits != null ? Number(cfg.digits) : undefined;
+      // Blank-id custom format rows are editing scaffolding; a saved row's label falls back to its id.
+      const customs = (cfg.custom_formats ?? []).filter((f) => f.id.trim()).map((f) => ({ ...f, id: f.id.trim(), label: f.label.trim() || f.id.trim() }));
+      await patch("settings/asset-tags", { value: { ...cfg, digits, category_codes: cleanCodes(cfg.category_codes), custom_formats: customs.length ? customs : undefined } });
+      markSaved();
+      toast({ title: "Asset tag settings saved", variant: "success" });
+    } catch (e) {
+      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Drop blank rows from the codes editor before saving (they're editing scaffolding, not config).
+  const cleanCodes = (codes?: Record<string, string>) => {
+    const entries = Object.entries(codes ?? {}).filter(([k, v]) => k.trim() && v.trim());
+    return entries.length ? Object.fromEntries(entries.map(([k, v]) => [k.trim(), v.trim().toUpperCase()])) : undefined;
+  };
+
+  const resolved = resolveTagConfig(org.name, { ...cfg, category_codes: cleanCodes(cfg.category_codes) });
+  const codeRows = Object.entries(cfg.category_codes ?? {});
+  const customs = cfg.custom_formats ?? [];
+  const label = { ...DEFAULT_TAG_SETTINGS.label, ...(cfg.label ?? {}) };
+  const setCustom = (i: number, p: Partial<SheetFormat>) => set({ custom_formats: customs.map((f, j) => (j === i ? { ...f, ...p } : f)) });
+
+  if (!loaded) return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader><CardTitle className="text-base">Tag pattern</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Assets without a tag get one generated in this pattern when queued for printing (the tag is saved onto the asset). Existing tags are never rewritten.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="Prefix" hint={`Blank = your org initials (${resolveTagConfig(org.name).prefix}).`}>
+              <Input value={cfg.prefix ?? ""} onChange={(e) => set({ prefix: e.target.value })} placeholder={resolveTagConfig(org.name).prefix} />
+            </Field>
+            <Field label="Separator">
+              <Input value={cfg.separator ?? DEFAULT_TAG_SETTINGS.separator} onChange={(e) => set({ separator: e.target.value })} placeholder="-" />
+            </Field>
+            <Field label="Number width" hint="Zero-padded, e.g. 3 → 042.">
+              <Input type="number" min={1} max={6} value={cfg.digits ?? DEFAULT_TAG_SETTINGS.digits} onChange={(e) => set({ digits: Number(e.target.value) })} />
+            </Field>
+          </div>
+          <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+            <span className="text-muted-foreground">Preview: </span>
+            <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 1)}</span>
+            <span className="mx-2 text-muted-foreground">→</span>
+            <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 2)}</span>
+            <span className="mx-2 text-muted-foreground">→</span>
+            <span className="font-mono font-medium">{formatTag(resolved, "Monitor", 1)}</span>
+          </div>
+          <div>
+            <div className="mb-1 text-sm font-medium">Category codes</div>
+            <p className="mb-2 text-xs text-muted-foreground">
+              The short code the tag uses per category. Unlisted categories fall back to their first three letters. Built-ins: {Object.entries(DEFAULT_CATEGORY_CODES).map(([k, v]) => `${k} → ${v}`).join(", ")}.
+            </p>
+            <div className="space-y-2">
+              {codeRows.map(([cat, code], i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input className="flex-1" value={cat} placeholder="Category, e.g. Tablet" onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [e.target.value, v] : [k, v]))) })} />
+                  <Input className="w-28 font-mono uppercase" value={code} placeholder="TAB" maxLength={6} onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [k, e.target.value] : [k, v]))) })} />
+                  <Button variant="ghost" size="sm" aria-label="Remove code" onClick={() => set({ category_codes: Object.fromEntries(codeRows.filter((_, j) => j !== i)) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                </div>
+              ))}
+              <Button variant="outline" size="sm" onClick={() => set({ category_codes: { ...(cfg.category_codes ?? {}), "": "" } })}><Plus className="h-4 w-4" /> Add code</Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Sticker sheets & label</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Default sheet format" hint="What the printer opens with.">
+              <Select value={cfg.default_format ?? DEFAULT_TAG_SETTINGS.default_format} onValueChange={(v) => set({ default_format: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{allFormats(cfg).map((f) => <SelectItem key={f.id} value={f.id}>{f.label}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            <Field label="Code type" hint="Code 128 suits existing 1D laser scanners; it always encodes the plain tag.">
+              <Select value={cfg.code_type ?? "qr"} onValueChange={(v) => set({ code_type: v as "qr" | "code128" })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="qr">QR code</SelectItem>
+                  <SelectItem value="code128">Code 128 barcode</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="QR code encodes" hint="Deep link opens the asset in the app when scanned.">
+              <Select value={cfg.qr_mode ?? DEFAULT_TAG_SETTINGS.qr_mode} onValueChange={(v) => set({ qr_mode: v as AssetTagSettings["qr_mode"] })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="link">Link to the asset record</SelectItem>
+                  <SelectItem value="found">Public found-it page</SelectItem>
+                  <SelectItem value="tag">Tag text only</SelectItem>
+                  <SelectItem value="tag_serial">Tag + serial number</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="Label footer (optional)" hint='Small last line on every label, e.g. "If found: hr@company.com".'>
+              <Input maxLength={120} value={cfg.label?.footer ?? ""} onChange={(e) => set({ label: { ...(cfg.label ?? {}), footer: e.target.value || undefined } })} />
+            </Field>
+          </div>
+          <div>
+            <div className="mb-1 text-sm font-medium">Label shows</div>
+            <div className="grid gap-1.5 text-sm sm:grid-cols-2">
+              <label className="flex items-center gap-2"><Checkbox checked={label.name} onCheckedChange={(v) => set({ label: { ...label, name: v === true } })} /> Asset name</label>
+              <label className="flex items-center gap-2"><Checkbox checked={label.serial} onCheckedChange={(v) => set({ label: { ...label, serial: v === true } })} /> Serial number</label>
+              <label className="flex items-center gap-2"><Checkbox checked={label.org} onCheckedChange={(v) => set({ label: { ...label, org: v === true } })} /> Organization name</label>
+              <label className="flex items-center gap-2"><Checkbox checked={label.logo} onCheckedChange={(v) => set({ label: { ...label, logo: v === true } })} /> Logo instead of the name</label>
+            </div>
+          </div>
+          <div>
+            <div className="mb-1 text-sm font-medium">Custom sheet formats</div>
+            <p className="mb-2 text-xs text-muted-foreground">
+              For sticker stock the presets don't cover. All measurements in mm; reusing a preset's id ({SHEET_FORMATS.map((f) => f.id).join(", ")}) replaces that preset's geometry.
+            </p>
+            <div className="space-y-3">
+              {customs.map((f, i) => (
+                <div key={i} className="rounded-md border p-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <Input className="w-32 font-mono" value={f.id} placeholder="id" onChange={(e) => setCustom(i, { id: e.target.value })} />
+                    <Input className="flex-1" value={f.label} placeholder="Shown in the format picker" onChange={(e) => setCustom(i, { label: e.target.value })} />
+                    <Button variant="ghost" size="sm" aria-label="Remove format" onClick={() => set({ custom_formats: customs.filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                    {([["cols", "Cols"], ["rows", "Rows"], ["w", "W"], ["h", "H"], ["marginX", "Mgn X"], ["marginY", "Mgn Y"], ["gapX", "Gap X"], ["gapY", "Gap Y"]] as const).map(([k, lbl]) => (
+                      <label key={k} className="text-xs text-muted-foreground">
+                        {lbl}
+                        <Input type="number" step={k === "cols" || k === "rows" ? 1 : 0.05} value={f[k]} onChange={(e) => setCustom(i, { [k]: Number(e.target.value) } as Partial<SheetFormat>)} />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <Button variant="outline" size="sm" onClick={() => set({ custom_formats: [...customs, { id: "", label: "", cols: 3, rows: 8, w: 63.5, h: 33.9, marginX: 7.25, marginY: 12.9, gapX: 2.5, gapY: 0 }] })}>
+                <Plus className="h-4 w-4" /> Add format
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Public "found it" page</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            When enabled, a sticker's QR can point at a public page (no sign-in) showing the org name, the tag and a return contact - so a stranger who finds lost hardware knows where to send it.
+            The link is unguessable per asset; nothing else about the asset is exposed.
+          </p>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={cfg.found_page?.enabled ?? false} onCheckedChange={(v) => set({ found_page: { ...(cfg.found_page ?? {}), enabled: v === true } })} />
+            Enable the public found-it page
+          </label>
+          {cfg.found_page?.enabled && (
+            <>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Return contact" hint="Email or phone shown to the finder.">
+                  <Input maxLength={200} value={cfg.found_page?.contact ?? ""} onChange={(e) => set({ found_page: { ...(cfg.found_page ?? {}), contact: e.target.value } })} placeholder="hr@company.com" />
+                </Field>
+                <label className="flex items-center gap-2 self-end pb-2 text-sm">
+                  <Checkbox checked={cfg.found_page?.show_name ?? false} onCheckedChange={(v) => set({ found_page: { ...(cfg.found_page ?? {}), show_name: v === true } })} />
+                  Also show the asset's display name
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Deployments behind Cloudflare Access need a bypass rule for <span className="font-mono">/found/*</span> in the Access app config, or outsiders hit the login wall instead of the page.
+              </p>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Button onClick={save} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save asset tag settings</Button>
+    </div>
+  );
+}
+
 // Org-wide leave caps (settings/leave_caps): whether encashment + carry-forward caps are taken per leave type
 // or as one cumulative cap across all types, and what happens to carry-forward excess (auto-encash or forfeit).
 function LeaveCapsTab({ toast }: { toast: Toast }) {
@@ -2103,30 +2455,34 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   const [encDivisor, setEncDivisor] = useState("30");
   const [rounding, setRounding] = useState<"none" | "half" | "day">("half");
   const [allowBackdated, setAllowBackdated] = useState(true);
+  const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    get<{ value?: Record<string, unknown> }>("settings/leave_caps")
-      .then((s) => {
-        const v = s.value ?? {};
-        if (v.carry_forward_excess === "forfeit") setExcess("forfeit");
-        if (v.carry_forward_mode === "cumulative") setCfMode("cumulative");
-        if (typeof v.carry_forward_cumulative_cap_days === "number") setCfCap(String(v.carry_forward_cumulative_cap_days));
-        if (v.encashment_mode === "cumulative") setEncMode("cumulative");
-        if (typeof v.encashment_cumulative_cap_days === "number") setEncCap(String(v.encashment_cumulative_cap_days));
-      })
-      .catch(() => {});
-    get<{ value?: { rate_basis?: string; per_day_divisor?: number } }>("settings/leave_encashment")
-      .then((s) => { if (s.value?.rate_basis === "gross") setEncRateBasis("gross"); if (typeof s.value?.per_day_divisor === "number") setEncDivisor(String(s.value.per_day_divisor)); })
-      .catch(() => {});
-    get<{ value?: { rounding?: string } }>("settings/leave_accrual")
-      .then((s) => { const r = s.value?.rounding; if (r === "none" || r === "half" || r === "day") setRounding(r); })
-      .catch(() => {});
-    get<{ value?: { allow_backdated?: boolean } }>("settings/leave-requests")
-      .then((s) => { if (typeof s.value?.allow_backdated === "boolean") setAllowBackdated(s.value.allow_backdated); })
-      .catch(() => {});
+    Promise.allSettled([
+      get<{ value?: Record<string, unknown> }>("settings/leave_caps")
+        .then((s) => {
+          const v = s.value ?? {};
+          if (v.carry_forward_excess === "forfeit") setExcess("forfeit");
+          if (v.carry_forward_mode === "cumulative") setCfMode("cumulative");
+          if (typeof v.carry_forward_cumulative_cap_days === "number") setCfCap(String(v.carry_forward_cumulative_cap_days));
+          if (v.encashment_mode === "cumulative") setEncMode("cumulative");
+          if (typeof v.encashment_cumulative_cap_days === "number") setEncCap(String(v.encashment_cumulative_cap_days));
+        }),
+      get<{ value?: { rate_basis?: string; per_day_divisor?: number } }>("settings/leave_encashment")
+        .then((s) => { if (s.value?.rate_basis === "gross") setEncRateBasis("gross"); if (typeof s.value?.per_day_divisor === "number") setEncDivisor(String(s.value.per_day_divisor)); }),
+      get<{ value?: { rounding?: string } }>("settings/leave_accrual")
+        .then((s) => { const r = s.value?.rounding; if (r === "none" || r === "half" || r === "day") setRounding(r); }),
+      get<{ value?: { allow_backdated?: boolean } }>("settings/leave-requests")
+        .then((s) => { if (typeof s.value?.allow_backdated === "boolean") setAllowBackdated(s.value.allow_backdated); }),
+    ]).then(() => setReady(true));
   }, []);
 
+  const { markSaved } = useUnsaved(
+    { excess, cfMode, cfCap, encMode, encCap, encRateBasis, encDivisor, rounding, allowBackdated },
+    ready,
+    save,
+  );
   async function save() {
     setSaving(true);
     try {
@@ -2142,6 +2498,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
       await patch("settings/leave_encashment", { value: { rate_basis: encRateBasis, per_day_divisor: encDivisor.trim() === "" ? 30 : Number(encDivisor) } });
       await patch("settings/leave_accrual", { value: { rounding } });
       await patch("settings/leave-requests", { value: { allow_backdated: allowBackdated } });
+      markSaved();
       toast({ title: "Leave policy saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -2152,7 +2509,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
 
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base"><AccessAction objectPath="settings/leave_caps" label="Leave policy"><span>Policy</span></AccessAction></CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/leave_caps" label="Leave policy"><span>Policy</span></AccessAction></CardTitle></CardHeader>
       <CardContent className="space-y-4">
         <Tabs defaultValue="carry-forward">
           <TabsList variant="segmented">
@@ -2263,6 +2620,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
   const remove = (i: number) => setFields((fs) => fs.filter((_, idx) => idx !== i));
   const add = () => setFields((fs) => [...fs, { key: "", label: "", mandatory: false, sensitive: false, document: "none" }]);
 
+  const { markSaved } = useUnsaved(fields, loaded, save);
   async function save() {
     const cleaned = fields
       .filter((f) => f.label.trim())
@@ -2276,6 +2634,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
     try {
       await patch("settings/employee_fields", { value: { fields: cleaned } });
       setFields(cleaned);
+      markSaved();
       toast({ title: "Employee fields saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -2287,7 +2646,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base"><AccessAction objectPath="settings/employee_fields" label="Employee fields"><span>Employee identity fields</span></AccessAction></CardTitle>
+        <CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/employee_fields" label="Employee fields"><span>Employee identity fields</span></AccessAction></CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">

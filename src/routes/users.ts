@@ -31,7 +31,7 @@ export const users = new Hono<AppEnv>()
     // the UI offers the relevant scopes for each collection instead of a hardcoded "all").
     if (id === "me") {
       const u = c.get("user");
-      return c.json({ ...res, access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
+      return c.json({ ...res, caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
     }
     return c.json(res);
   })

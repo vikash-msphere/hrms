@@ -178,15 +178,15 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
                           </td>
                           <td className="px-3 py-2">
                             <div className="flex items-center gap-1">
-                              {d.has_proof && <Button variant="ghost" size="sm" className="h-7" onClick={() => download(`tax-declarations/${idOf(d.path)}`, `proof-${d.section}`)}><Download className="h-3.5 w-3.5" /> View</Button>}
+                              {d.has_proof && <AccessAction verb="download" objectPath={d.path} can={can} label="View proof"><Button variant="ghost" size="sm" className="h-7" onClick={() => download(`tax-declarations/${idOf(d.path)}`, `proof-${d.section}`)}><Download className="h-3.5 w-3.5" /> View</Button></AccessAction>}
                               {/* A declaration waiting on verification with no proof attached is stuck - make the missing attachment visible. */}
-                              {can.includes("upload") && d.status !== "VERIFIED" && <Button variant="ghost" size="sm" className={`h-7 ${!d.has_proof && d.status === "DECLARED" ? "text-warning hover:text-warning dark:text-warning" : "text-muted-foreground"}`} onClick={() => pickProof(d)}><Paperclip className="h-3.5 w-3.5" /> {d.has_proof ? "Replace" : "Attach proof"}</Button>}
+                              {can.includes("upload") && d.status !== "VERIFIED" && <AccessAction verb="upload" objectPath={d.path} can={can} label="Attach proof"><Button variant="ghost" size="sm" className={`h-7 ${!d.has_proof && d.status === "DECLARED" ? "text-warning hover:text-warning dark:text-warning" : "text-muted-foreground"}`} onClick={() => pickProof(d)}><Paperclip className="h-3.5 w-3.5" /> {d.has_proof ? "Replace" : "Attach proof"}</Button></AccessAction>}
                             </div>
                           </td>
                           <td className="px-3 py-2">
                             <div className="flex items-center justify-end gap-1">
-                              {can.includes("verify") && d.status !== "VERIFIED" && <Button size="sm" variant="outline" className="h-7" onClick={() => setVerifying(d)}><Check className="h-3.5 w-3.5" /> Verify</Button>}
-                              {can.includes("reject") && d.status === "DECLARED" && <Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => reject(d)} aria-label="Reject"><X className="h-3.5 w-3.5" /></Button>}
+                              {can.includes("verify") && d.status !== "VERIFIED" && <AccessAction verb="verify" objectPath={d.path} can={can} label="Verify declaration"><Button size="sm" variant="outline" className="h-7" onClick={() => setVerifying(d)}><Check className="h-3.5 w-3.5" /> Verify</Button></AccessAction>}
+                              {can.includes("reject") && d.status === "DECLARED" && <AccessAction verb="reject" objectPath={d.path} can={can} label="Reject declaration"><Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => reject(d)} aria-label="Reject"><X className="h-3.5 w-3.5" /></Button></AccessAction>}
                               {can.includes("update") && d.status !== "VERIFIED" && mine(d) && <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setDialog(d)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>}
                               {can.includes("delete") && d.status !== "VERIFIED" && mine(d) && <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-destructive" onClick={() => del(d)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>}
                             </div>

@@ -12,6 +12,7 @@ import { Field } from "@/components/common/Field";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
+import { useUnsaved } from "@/components/common/UnsavedChanges";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 const blankTask = (): TemplateTask => ({ title: "", assignee: { type: "employee" }, due_offset_days: 0 });
@@ -25,17 +26,20 @@ export function TransitionTemplatesEditor() {
   const { rows: employees } = useCollection<Employee>("employees");
   const [templates, setTemplates] = useState<TransitionTemplate[]>(DEFAULT_TRANSITION_TEMPLATES);
   const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     get<{ value?: { templates?: TransitionTemplate[] } }>("settings/transition-templates")
       .then((s) => { if (s.value?.templates?.length) setTemplates(s.value.templates); })
-      .catch(() => { /* not configured -> defaults */ });
+      .catch(() => { /* not configured -> defaults */ })
+      .finally(() => setReady(true));
   }, []);
 
   const setTpl = (i: number, patchTpl: Partial<TransitionTemplate>) => setTemplates((ts) => ts.map((t, j) => (j === i ? { ...t, ...patchTpl } : t)));
   const setTask = (i: number, k: number, patchTask: Partial<TemplateTask>) =>
     setTemplates((ts) => ts.map((t, j) => (j === i ? { ...t, tasks: t.tasks.map((tk, m) => (m === k ? { ...tk, ...patchTask } : tk)) } : t)));
 
+  const { markSaved } = useUnsaved(templates, ready, save);
   async function save() {
     // Drop blank-named templates and blank-title tasks; give new templates a stable id from their name.
     const seen = new Set<string>();
@@ -52,6 +56,7 @@ export function TransitionTemplatesEditor() {
     try {
       await patch("settings/transition-templates", { value: { templates: out } });
       setTemplates(out);
+      markSaved();
       toast({ title: "Templates saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -64,7 +69,7 @@ export function TransitionTemplatesEditor() {
     <Card>
       <CardHeader>
         <CardTitle>
-          <AccessAction objectPath="settings/transition-templates" label="Onboarding templates"><span>Onboarding & offboarding templates</span></AccessAction>
+          <AccessAction collection="settings" objectPath="settings/transition-templates" label="Onboarding templates"><span>Onboarding & offboarding templates</span></AccessAction>
         </CardTitle>
         <p className="text-sm text-muted-foreground">Reusable checklists. Starting a process from a template creates its tasks, with assignees and due dates resolved for the employee.</p>
       </CardHeader>

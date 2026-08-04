@@ -5,7 +5,8 @@ import { makeEncryptor } from "./lib/crypto";
 import { makeIdCodec, type IdCodec } from "./lib/idCodec";
 import { makeEmailSender, EMAIL_PROVIDERS, type EmailProvider } from "./lib/email";
 import { makeDocumentStore } from "./lib/docstore";
-import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender } from "./ports";
+import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender, PushSender } from "./ports";
+import { makePushSender } from "./lib/webPush";
 import type { EsignSecrets } from "./domain/esign";
 import { makeDispatch, type Dispatch } from "./services/internalDispatch";
 
@@ -18,7 +19,7 @@ export type DB = ReturnType<typeof drizzle<typeof schema>>;
 // `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
 // the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
 // reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
-export type Deps = { db: DB; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number }; trace?: string };
+export type Deps = { db: DB; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number }; trace?: string };
 
 // Route the request's reads to the nearest D1 read replica when the runtime supports Sessions
 // (production); fall back to the plain binding where it doesn't (miniflare, the local/test runtime,
@@ -44,8 +45,25 @@ function assertConfigured(env: Bindings): void {
   // Wire-id master feeds HKDF; require >=32 bytes of base64 entropy.
   if (b64len(env.WIRE_ID_KEY) < 32) throw new Error("WIRE_ID_KEY must be a base64-encoded key of at least 32 bytes");
   // Other required strings: absence here also produces opaque downstream failures.
-  for (const k of ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "EMAIL_API_KEY", "EMAIL_FROM"] as const) {
+  for (const k of ["EMAIL_API_KEY", "EMAIL_FROM"] as const) {
     if (!env[k]) throw new Error(`${k} is not configured`);
+  }
+  // One auth mode must be fully configured (see routes/authRoutes.ts for the mode split). The dev bypass
+  // (local/tests only - both flags, never set in production) needs neither.
+  if (env.GOOGLE_CLIENT_ID) {
+    if (!env.GOOGLE_CLIENT_SECRET) throw new Error("GOOGLE_CLIENT_SECRET is required with GOOGLE_CLIENT_ID");
+    if (b64len(env.AUTH_SESSION_KEY) < 32) throw new Error("AUTH_SESSION_KEY must be a base64-encoded key of at least 32 bytes (required in Google sign-in mode)");
+    // In Google mode there is no Access policy in front of the Worker, so the domain allow-list IS the org
+    // perimeter: unset, ANY Google account on the internet completes /auth/callback and is auto-provisioned
+    // as an `employee` (auth.ts). Both gates are `if (allowed.length)`, so an empty list is not a narrow
+    // perimeter - it is no perimeter. Require it here rather than fail open at sign-in.
+    if (!(env.ALLOWED_EMAIL_DOMAINS ?? "").split(",").some((d) => d.trim())) {
+      throw new Error("ALLOWED_EMAIL_DOMAINS must list at least one domain in Google sign-in mode (it is the org perimeter for who may sign in)");
+    }
+  } else if (!(env.DEV_FAKE_EMAIL && env.ALLOW_DEV_AUTH === "true")) {
+    for (const k of ["CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD"] as const) {
+      if (!env[k]) throw new Error(`${k} is not configured (or set GOOGLE_CLIENT_ID for Google sign-in)`);
+    }
   }
   if (env.EMAIL_PROVIDER && !EMAIL_PROVIDERS.includes(env.EMAIL_PROVIDER as EmailProvider)) {
     throw new Error(`EMAIL_PROVIDER must be one of ${EMAIL_PROVIDERS.join(", ")}`);
@@ -67,6 +85,10 @@ export function makeDeps(env: Bindings): Deps {
     esignSecrets: {
       cashfree: { apiKey: env.ESIGN_CASHFREE_CLIENT_ID, apiSecret: env.ESIGN_CASHFREE_CLIENT_SECRET, publicKey: env.ESIGN_CASHFREE_PUBLIC_KEY },
     },
+    // Browser push is opt-in per deployment: absent VAPID keys = no sender = notify() skips push entirely.
+    ...(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
+      ? { push: makePushSender(env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT || `mailto:${env.EMAIL_FROM}`) }
+      : {}),
   };
   // Internal API dispatch for automation `apiCall` actions (re-dispatches through app.fetch as system).
   deps.dispatch = makeDispatch(env, deps);

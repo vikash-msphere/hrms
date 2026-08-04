@@ -2,11 +2,26 @@ import { get, patch } from "@/api";
 
 // Saved per-table layout. Persisted per user via /v1/preferences, with a
 // localStorage cache for instant load and offline tolerance.
+// A named snapshot of everything that decides WHICH rows a table shows and in what shape
+// ("Active engineers", "Pending high-priority"). It covers the server-side search box and the
+// visible column set too - a view that restored only the column filters would appear to do
+// nothing on a page whose narrowing is done through the search box.
+export type SavedView = {
+  name: string;
+  sort?: string; // "columnId.asc" | "columnId.desc"
+  filters: Record<string, string>;
+  search?: string; // value of the page's server-side search box, when the table has one
+  hidden?: string[]; // hidden column ids; undefined leaves the current column layout alone
+  isDefault?: boolean; // applied on load when the URL carries no explicit table state
+};
+
 export type TablePrefs = {
   order?: string[];
   hidden?: string[];
   widths?: Record<string, number>;
   pageSize?: number; // 0 = show all
+  density?: "comfortable" | "compact";
+  views?: SavedView[];
 };
 
 // The server is the source of truth (rows are scoped per user). localStorage is just

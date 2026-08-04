@@ -52,13 +52,19 @@ export function compileGrant(grant: Grant): CompiledRule[] {
     const n = deriveNarrowing(pattern);
     let { scopeKind, scopeCode } = n;
     let matchCode = scopeKind === "exact" ? scopeCode : null;
-    // A collection-level custom-method allow ("batch.run", "employees.upcomingCelebrations") is a 2-token verb
+    // A collection-level custom-method rule ("batch.run", "announcements.markAllRead") is a 2-token verb
     // rule. deriveNarrowing reads token[1] (the verb) as an object code -> scopeKind "exact" -> match_code set,
     // which makes policyLoad treat it as a per-object exception (loaded only by object-ancestor-code, never for
     // a verb) and drop it from the broad role grant. It is NOT per-object: make it a broad rule (match_code
     // NULL) so the role actually gets the capability. Per-object verb grants are 3-token (col.<code>.verb) and
     // unaffected; per-object LEVEL grants (col.<code>) keep exact (level !== null).
-    if (effect !== "deny" && level === null && scopeKind === "exact" && pattern.split(".").length === 2) {
+    // This holds for DENY too, and a deny is where getting it wrong FAILS OPEN: a 2-token deny left on the
+    // per-object lane is never loaded (the verb name is not an object code), so the revoked capability keeps
+    // working - and loadObjectExceptionCodes would meanwhile pick the verb name up as a bogus list exclusion.
+    // Grant patterns never carry a literal code in the id position (only ACL-authored per-object rows do, and
+    // those are 3-token `col.<code>.**` built by accessRules.buildPattern), so no real per-object deny is
+    // caught by this rewrite.
+    if (level === null && scopeKind === "exact" && pattern.split(".").length === 2) {
       scopeKind = "all";
       scopeCode = "";
       matchCode = null;

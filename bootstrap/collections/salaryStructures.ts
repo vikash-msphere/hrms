@@ -1,7 +1,7 @@
 // Salary structures: a per-structure selection of EARNING components (deductions/statutory always apply).
 // linesJson is an ordered [{ component: <pay_components.uuid>, rate: null }]; rate null = use the component's
 // own rate. References resolve via the key->uuid map from payComponents().
-import { Ctx, T0, q, j, code2, rows } from "../lib";
+import { type Ctx, T0, q, j, code2, rows } from "../lib";
 
 type SalaryStructureSeed = { name: string; description: string; componentKeys: string[] };
 

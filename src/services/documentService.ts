@@ -15,7 +15,7 @@ import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
 import { genId } from "../lib/idCodec";
-import { VALID_DOC_TYPES, idFromPath, isAllowedUpload, isPdfUpload, assertUploadSize, type DocumentInput, type DocType } from "./documentsCommon";
+import { VALID_DOC_TYPES, idFromPath, isAllowedUpload, isPdfUpload, assertUploadSize, documentFileName, type DocumentInput, type DocType } from "./documentsCommon";
 import { notifyAudience, type Audience } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { getSettingValue } from "./settings";
@@ -244,6 +244,9 @@ export function makeDocumentService(cfg: Cfg) {
     const copyId = genId();
     const copyKey = `personal-documents/${copyId}`;
     const copyTitle = `${row.title} - signed (v${version})`;
+    // The copy is generated, not uploaded, so give it a file name explicitly (title + .pdf) - otherwise it
+    // downloads without an extension.
+    const copyFileName = documentFileName({ title: copyTitle, contentType: "application/pdf" });
 
     if (method === "internal") {
       // The on-file signature image is mandatory (it is what gets stamped). Employee uploads it on their profile.
@@ -253,7 +256,7 @@ export function makeDocumentService(cfg: Cfg) {
       await deps.docs.put(copyKey, stamped, "application/pdf");
       await deps.db.insert(schema.personalDocuments).values({
         uuid: copyId, code: await allocOwnedCode(deps, schema.personalDocuments, schema.personalDocuments.employeeId, employeeId),
-        employeeId, documentType: "POLICY", title: copyTitle, r2Key: copyKey, contentType: "application/pdf", sizeBytes: stamped.byteLength,
+        employeeId, documentType: "POLICY", title: copyTitle, fileName: copyFileName, r2Key: copyKey, contentType: "application/pdf", sizeBytes: stamped.byteLength,
         sourceDocId: id, published: true, signedTime: new Date(), signatureName: legalName, locked: true,
       });
       await deps.db.insert(schema.documentAcknowledgements).values({
@@ -283,14 +286,14 @@ export function makeDocumentService(cfg: Cfg) {
     }).returning() as any[])[0]!;
     await deps.db.insert(schema.personalDocuments).values({
       uuid: copyId, code: await allocOwnedCode(deps, schema.personalDocuments, schema.personalDocuments.employeeId, employeeId),
-      employeeId, documentType: "POLICY", title: copyTitle, r2Key: copyKey, contentType: "application/pdf", sizeBytes: orgBytes.byteLength,
+      employeeId, documentType: "POLICY", title: copyTitle, fileName: copyFileName, r2Key: copyKey, contentType: "application/pdf", sizeBytes: orgBytes.byteLength,
       sourceDocId: id, ackId: ack.uuid, requiresSignature: true, esignProvider: providerId, published: true,
     });
     await deps.db.update(schema.documentAcknowledgements).set({ signedDocId: copyId }).where(eq(schema.documentAcknowledgements.uuid, ack.uuid));
     let res;
     try {
       res = await provider.createRequest({
-        pdf: orgBytes, fileName: row.fileName ?? `${row.title}.pdf`, docId: copyId,
+        pdf: orgBytes, fileName: documentFileName({ ...row, contentType: "application/pdf" }), docId: copyId,
         signers: [signer], signAnchors: [anchor],
         cfg: cfg.providers?.[providerId] ?? {}, secrets: deps.esignSecrets?.[providerId] ?? {},
       });
@@ -317,7 +320,7 @@ export function makeDocumentService(cfg: Cfg) {
     if (!row || row.deleteTime) throw notFound(`${singular} not found`);
     const bytes = await deps.docs.get(row.r2Key);
     if (!bytes) throw notFound(`${singular} file not found in storage`);
-    return { bytes, contentType: row.contentType ?? "application/octet-stream" };
+    return { bytes, contentType: row.contentType ?? "application/octet-stream", fileName: documentFileName(row) };
   }
 
   return { list, get, create, update, del, restore, purge, upload, download, acknowledge };

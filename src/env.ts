@@ -22,8 +22,15 @@ export type AppUser = {
 export type Bindings = {
   DB: D1Database;
   DOCS: R2Bucket;
-  CF_ACCESS_TEAM_DOMAIN: string;
-  CF_ACCESS_AUD: string;
+  // Auth is one of two modes, selected by configuration (see routes/authRoutes.ts):
+  //  - Access mode (default): Cloudflare Access fronts the app; CF_ACCESS_* are required.
+  //  - Google mode: GOOGLE_CLIENT_ID set -> the Worker runs its own Google-OIDC sign-in (no per-seat Access
+  //    cost); GOOGLE_CLIENT_SECRET + AUTH_SESSION_KEY are then required and CF_ACCESS_* are not.
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  AUTH_SESSION_KEY?: string; // base64 >=32-byte HMAC key signing the stateless session cookie (lib/session.ts)
   FIELD_ENCRYPTION_KEY: string;
   WIRE_ID_KEY: string; // master key for the wire-id codec (encrypts the internal id -> opaque token)
   // Transactional email. EMAIL_PROVIDER selects the vendor (default "resend"); one of resend|brevo|sendgrid|
@@ -41,6 +48,12 @@ export type Bindings = {
   ESIGN_CASHFREE_CLIENT_ID?: string;
   ESIGN_CASHFREE_CLIENT_SECRET?: string; // also the webhook HMAC key (Cashfree has no separate webhook secret)
   ESIGN_CASHFREE_PUBLIC_KEY?: string; // Cashfree's RSA public key (base64 SPKI or PEM) for the production X-Cf-Signature 2FA header; absent = header not sent
+  // Web Push (browser notifications): a VAPID keypair (base64url, P-256). Optional - absent = push off, the
+  // app degrades to the in-app bell + email digest. Generate once per deployment (e.g. `npx web-push
+  // generate-vapid-keys`); the public key is also baked into the SPA as VITE_VAPID_PUBLIC_KEY.
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_SUBJECT?: string; // "mailto:ops@example.com"; defaults to mailto:EMAIL_FROM
   DEV_FAKE_EMAIL?: string; // local-only; never set in production
   ALLOW_DEV_AUTH?: string; // local-only gate ("true") that must accompany DEV_FAKE_EMAIL; never set in production
   // Internal, never a real Cloudflare binding: set ONLY by the /v1/batch:run handler when it re-dispatches
@@ -61,6 +74,9 @@ export type Variables = {
   // list request, so the search service binds scopes to columns and decides nothing. A collection missing
   // from the map is one the caller may not list, and is never queried.
   searchScopes: Map<string, import("./domain/access").ListScope>;
+  // Same idea for GET /v1/dashboard-summary: per-collection list scopes for the KPI aggregates, decided by
+  // the middleware; the summary service only binds them to COUNT/SUM queries.
+  summaryScopes: Map<string, import("./domain/access").ListScope>;
   // The grant the middleware decided this request with: the role grant merged with any per-object exceptions
   // for the resolved item (item paths) - set so a handler can compute a share-accurate `access.can` hint
   // without re-loading. Absent on collection/non-item paths (the role grant alone applies).

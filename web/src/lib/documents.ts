@@ -16,6 +16,37 @@ export function docCollection(d: Pick<DocumentResource, "path" | "employee">): D
   return d.employee ? "personal-documents" : "org-documents";
 }
 
+// Extension implied by a stored content type, for rows the app generated rather than someone uploading
+// (letters, signed policy copies) - those carry no file_name.
+const EXT_BY_TYPE: Record<string, string> = {
+  "application/pdf": "pdf",
+  "text/plain": "txt",
+  "text/csv": "csv",
+  "text/markdown": "md",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/heic": "heic",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.oasis.opendocument.text": "odt",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.oasis.opendocument.spreadsheet": "ods",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+};
+
+// The name to save a document under. Falls back to the display name when there is no uploaded file name, and
+// always appends the extension the content type implies - otherwise generated/signed PDFs save extensionless.
+export function documentFileName(d: Pick<DocumentResource, "file_name" | "display_name" | "content_type">): string {
+  const ext = EXT_BY_TYPE[(d.content_type ?? "").toLowerCase().split(";")[0]!.trim()];
+  const base = (d.file_name || d.display_name || "document").replace(/[/\\]/g, "-").trim();
+  const hasExt = /\.[a-z0-9]{1,5}$/i.test(base);
+  return hasExt || !ext ? base : `${base}.${ext}`;
+}
+
 export type DocumentBody = {
   display_name: string;
   document_type: string;

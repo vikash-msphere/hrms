@@ -1,4 +1,4 @@
-import { eq, and, inArray, isNull } from "drizzle-orm";
+import { eq, and, inArray, isNull, lte } from "drizzle-orm";
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -9,19 +9,29 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { runBatch, chunk } from "../lib/dbBatch";
 import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
 import { notify, notifyAudience } from "./notifications";
+import { emitEvent } from "./eventBus";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../domain/kudos";
 import { normalizeIllustration, normalizeIllustrationLayout, normalizeRecipientLayout, type RecipientLayout, type IllustrationLayout } from "../domain/illustration";
 import { richExcerpt, richToPlain } from "../domain/richText";
+import { notifyMentions } from "./mentions";
+import { postedTitle } from "../domain/board";
 
 export type AnnouncementInput = {
   title?: string;
   body?: string;
   kind?: "announcement" | "post" | "poll" | "kudos";
   author?: string | null;
+  // When the post goes (or went) live. On create it doubles as the SCHEDULE: a future time on an unpublished
+  // row is what publishDueAnnouncements waits for.
   publish_time?: string | null;
+  // Create only: `false` makes a draft - no notification, and invisible to everyone but the editors who can see
+  // restricted rows (see listAnnouncements). Going live is the `:publish` verb, which is where the broadcast
+  // lives, so a post can never notify twice or notify without being visible.
+  published?: boolean;
   // Poll creation (kind="poll"): the choices (>=2), whether multiple may be picked, and an optional deadline.
   options?: string[];
   multiple?: boolean;
@@ -88,11 +98,14 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
     if (recipientId && actor.employeeId && recipientId === actor.employeeId) throw invalidArgument("you can't give kudos to yourself");
   }
   // A poll's body (description) is optional; announcements and posts still require one (kudos use the message).
-  if (!input.body && kind !== "poll" && !isKudos) throw invalidArgument("body is required");
+  if (!input.body?.trim() && kind !== "poll" && !isKudos) throw invalidArgument("body is required");
   // Validate poll options up front (trimmed, non-empty, at least two) so we never persist a degenerate poll.
   const options = kind === "poll" ? (input.options ?? []).map((o) => o.trim()).filter(Boolean) : [];
   if (kind === "poll" && options.length < 2) throw invalidArgument("a poll needs at least two options");
   const publishTime = input.publish_time ? new Date(input.publish_time) : null;
+  // A draft: stored, not broadcast, not on anyone else's board until `:publish` (by hand, or by the cron once
+  // its `publish_time` arrives). Kudos are never drafted - recognition is sent, not staged.
+  const published = isKudos ? true : input.published !== false;
   const pollClosesAt = kind === "poll" && input.closes_time ? new Date(input.closes_time) : null;
   // Recognition points are resolved server-side from the configured level (never trusted from the client), so
   // a giver can't inflate their recognition. Blank/unknown level => 0 points.
@@ -102,7 +115,7 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   const code = authorId ? await allocOwnedCode(deps, schema.announcements, schema.announcements.authorEmployeeId, authorId) : await allocFlatCode(deps, schema.announcements);
   const row = (await deps.db
     .insert(schema.announcements)
-    .values({ code, ...(id ? { id } : {}), kind, title: isKudos ? "" : input.title!, body: isKudos ? message : (input.body ?? ""), bodyText: richToPlain(isKudos ? message : input.body), titleAlign: input.title_align ?? null, bodyValign: input.body_valign ?? null, authorEmployeeId: authorId, publishTime, pollMultiple: kind === "poll" ? !!input.multiple : false, pollClosesAt, recipientEmployeeId: recipientId ?? null, recipientDepartmentId: recipientDeptId ?? null, value: isKudos ? (input.value?.trim() || null) : null, category: isKudos ? (input.category?.trim() || null) : null, level, points, illustration: normalizeIllustration(input.illustration), illustrationLayout: normalizeIllustrationLayout(input.illustration_layout), recipientLayout: isKudos ? normalizeRecipientLayout(input.recipient_layout) : null })
+    .values({ code, ...(id ? { id } : {}), kind, published, title: isKudos ? "" : input.title!, body: isKudos ? message : (input.body ?? ""), bodyText: richToPlain(isKudos ? message : input.body), titleAlign: input.title_align ?? null, bodyValign: input.body_valign ?? null, authorEmployeeId: authorId, publishTime, pollMultiple: kind === "poll" ? !!input.multiple : false, pollClosesAt, recipientEmployeeId: recipientId ?? null, recipientDepartmentId: recipientDeptId ?? null, value: isKudos ? (input.value?.trim() || null) : null, category: isKudos ? (input.category?.trim() || null) : null, level, points, illustration: normalizeIllustration(input.illustration), illustrationLayout: normalizeIllustrationLayout(input.illustration_layout), recipientLayout: isKudos ? normalizeRecipientLayout(input.recipient_layout) : null })
     .returning())[0]!;
   if (kind === "poll") {
     await deps.db.insert(schema.announcementPollOptions).values(options.map((label, i) => ({ announcementId: row.uuid, label, position: i })));
@@ -114,8 +127,52 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   else if (isKudos && recipientDeptId) await notifyAudience(deps, { kind: "department", department: recipientDeptId }, { type: "kudos.received", title: "Your team received kudos", body: richExcerpt(message, 200), link: "announcements", subject: `announcements/${row.uuid}`, actorId: authorId }, authorId);
   // A plain board post (announcement / post / poll) notifies everyone (bar the author), so it surfaces in the
   // bell and lights the "New" marker on its card - the same recognition-board treatment, for every post type.
-  else await notifyAudience(deps, { kind: "everyone" }, { type: "announcement.posted", title: kind === "poll" ? "New poll" : kind === "post" ? "New post" : "New announcement", body: input.title!, link: "announcements", subject: `announcements/${row.uuid}` }, authorId);
+  // A draft notifies nobody: its broadcast happens once, when it is published.
+  else if (published) await notifyAudience(deps, { kind: "everyone" }, { type: "announcement.posted", title: postedTitle(kind), body: input.title!, link: "announcements", subject: `announcements/${row.uuid}` }, authorId);
+  // Anyone the body names hears about it directly, on top of whatever broadcast this kind does - being named
+  // is addressed at you, which a company-wide "new post" is not. A draft stays silent until it is published.
+  if (published) await notifyMentions(deps, actor, { announcementId: row.uuid, body: row.body, title: row.title });
   return row;
+}
+
+// The other half of scheduling: a draft whose `publish_time` has arrived goes live on the next 5-minute tick.
+// Run from cron.ts with no actor.
+//
+// The flip is a guarded update (published = 0 -> 1 in one conditional write) and the broadcast only happens for
+// rows this call actually claimed, so two overlapping ticks - or a tick racing an HR "Publish now" - can never
+// announce the same post twice.
+//
+// `publish_time` is deliberately left as the author set it: it is when the post says it went out, it is what the
+// feed sorts by, and rewriting it to "whenever the tick happened to fire" would move a 9:00 announcement to 9:03.
+export async function publishDueAnnouncements(deps: Deps): Promise<number> {
+  const now = deps.clock.now();
+  const due = await deps.db
+    .select()
+    .from(schema.announcements)
+    .where(and(eq(schema.announcements.published, false), isNull(schema.announcements.deleteTime), lte(schema.announcements.publishTime, now)));
+  let published = 0;
+  for (const row of due) {
+    if (row.disabled) continue;
+    const claimed = await deps.db
+      .update(schema.announcements)
+      .set({ published: true, updatedAt: new Date() })
+      .where(and(eq(schema.announcements.uuid, row.uuid), eq(schema.announcements.published, false)))
+      .returning();
+    if (!claimed.length) continue;
+    await audit(deps, "system", `${row.kind}.publish`, "announcements", row.uuid, { scheduled: true }, claimed[0]!);
+    await notifyAudience(
+      deps,
+      { kind: "everyone" },
+      { type: "announcement.posted", title: postedTitle(row.kind), body: row.title, link: "announcements", subject: `announcements/${row.uuid}` },
+      row.authorEmployeeId,
+    );
+    await emitEvent(deps, null, "announcement.published", { subject: `announcements/${row.uuid}`, payload: { title: row.title } });
+    // A scheduled post's mentions land when it does. The "actor" is the post's own author, not the tick: it
+    // is their words that named someone, and naming yourself still notifies nobody.
+    await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { announcementId: row.uuid, body: row.body, title: row.title });
+    published++;
+  }
+  return published;
 }
 
 export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string, patch: AnnouncementInput, ifMatch?: string) {
@@ -127,7 +184,11 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   const has = (k: keyof AnnouncementInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("title")) set.title = patch.title;
   // The stripped mirror is re-derived here rather than sent, so it can never disagree with the body itself.
+  // A poll's body is its optional description, so an edit may clear it; every other kind IS its body - a kudos
+  // has nothing else, and an announcement with only a heading is not an announcement - so emptying one is
+  // refused here rather than silently stored, the same rule create holds new rows to.
   if (has("body")) {
+    if (!patch.body?.trim() && row.kind !== "poll") throw invalidArgument("body is required");
     set.body = patch.body;
     set.bodyText = richToPlain(patch.body);
   }
@@ -168,6 +229,9 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   }
   const updated = (await deps.db.update(schema.announcements).set(set).where(eq(schema.announcements.uuid, id)).returning())[0]!;
   await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set), updated);
+  // An edit notifies the people it NEWLY names (the old body is the baseline, so nobody hears about the same
+  // mention twice). A draft stays silent - publishing is what tells anyone anything about it.
+  if (updated.published) await notifyMentions(deps, actor, { announcementId: id, body: updated.body, previousBody: row.body, title: updated.title });
   return updated;
 }
 
@@ -181,6 +245,22 @@ export async function restoreAnnouncement(deps: Deps, actor: AppUser, id: string
 
 export async function purgeAnnouncement(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   await purgeRow(deps, actor, schema.announcements, "announcement", "announcements", id, ifMatch);
+}
+
+// Pin a post to the top of the board, or take it back down. Who may pin is entirely the middleware's
+// :pin/:unpin verb grant (HR/moderation via announcements.**); this only flips the timestamp. Idempotent:
+// re-pinning a pinned post refreshes its pin time (moves it to the front of the pinned group), unpinning an
+// unpinned post is a no-op.
+export async function setPinned(deps: Deps, actor: AppUser, id: string, pinned: boolean) {
+  const row = await getAnnouncement(deps, actor, id);
+  if (pinned && !row.published) throw invalidArgument("a draft can't be pinned - publish it first");
+  const updated = (await deps.db
+    .update(schema.announcements)
+    .set({ pinnedAt: pinned ? new Date() : null, updatedAt: new Date() })
+    .where(eq(schema.announcements.uuid, id))
+    .returning())[0]!;
+  await audit(deps, actor, `announcement.${pinned ? "pin" : "unpin"}`, "announcements", id, undefined, updated);
+  return updated;
 }
 
 // Record that the caller opened a board item. Idempotent (no-op when a row already exists, or when the actor
@@ -197,6 +277,36 @@ export async function markAnnouncementRead(deps: Deps, actor: AppUser, id: strin
     if (!existing) await deps.db.insert(schema.announcementReads).values({ announcementId: id, employeeId: actor.employeeId });
   }
   return row;
+}
+
+// Mark every post the caller can see as read, in one pass - the "Mark all read" action behind the board's
+// Unread chip. `scope` is the SAME visibility the list endpoint binds (editors see drafts too), so this can
+// only touch posts the caller was already shown. Own posts are skipped like markAnnouncementRead skips them.
+//
+// Two reads and one batched write, whatever the board's size: the whole table, the caller's own receipts,
+// then the missing rows inserted as one atomic D1 batch (chunked for the bound-param cap).
+export async function markAllAnnouncementsRead(deps: Deps, actor: AppUser, scope: ListScope) {
+  if (!actor.employeeId) throw invalidArgument("a read receipt needs an employee identity");
+  const me = actor.employeeId;
+  const visible = visibleByDelete(await deps.db.select().from(schema.announcements), false)
+    .filter((a) => scope.seeRestricted || (a.published && !a.disabled))
+    .filter((a) => a.authorEmployeeId !== me);
+  const already = new Set(
+    (await deps.db
+      .select({ id: schema.announcementReads.announcementId })
+      .from(schema.announcementReads)
+      .where(eq(schema.announcementReads.employeeId, me))).map((r) => r.id),
+  );
+  const missing = visible.filter((a) => !already.has(a.uuid));
+  if (!missing.length) return { marked: 0 };
+  // Two bound params per row (announcement + employee), so ~8 rows a statement stays clear of D1's 100.
+  await runBatch(
+    deps.db,
+    chunk(missing, 8).map((rows) => deps.db.insert(schema.announcementReads).values(rows.map((a) => ({ announcementId: a.uuid, employeeId: me })))),
+  );
+  // No audit line, for the same reason markAnnouncementRead writes none: a read receipt is the caller's own
+  // state, not an accountability event (see NO_AUDIT_VERBS).
+  return { marked: missing.length };
 }
 
 // Set the caller's reaction on a post. One reaction per viewer: reacting with the emoji they already chose
@@ -221,28 +331,37 @@ export async function toggleReaction(deps: Deps, actor: AppUser, id: string, emo
   return row;
 }
 
-// Group raw reaction rows into { emoji, count, reacted } lists keyed by `key` (a post id or a reply id),
-// ordered by count desc then emoji so the chips render stably. `reacted` = the given viewer reacted.
+// How many reactors a group names. A reaction is a public act (the chip already says how many), so WHO
+// reacted is shown on hover - but a company-wide 👍 would otherwise put every employee id on the wire for
+// every card in the page. Past the cap the count carries the rest ("and 12 others").
+const MAX_REACTORS = 12;
+
+export type ReactionGroup = { emoji: string; count: number; reacted: boolean; reactors: string[] };
+
+// Group raw reaction rows into { emoji, count, reacted, reactors } lists keyed by `key` (a post id or a
+// reply id), ordered by count desc then emoji so the chips render stably. `reacted` = the given viewer
+// reacted; `reactors` = up to MAX_REACTORS employee ids behind the count, for the chip's hover list.
 function groupReactions(rows: { key: string; e: string; emoji: string }[], viewerEmployeeId: string | null) {
-  const byKey = new Map<string, Map<string, { count: number; reacted: boolean }>>();
+  const byKey = new Map<string, Map<string, { count: number; reacted: boolean; reactors: string[] }>>();
   for (const r of rows) {
     const perEmoji = byKey.get(r.key) ?? new Map();
-    const cur = perEmoji.get(r.emoji) ?? { count: 0, reacted: false };
+    const cur = perEmoji.get(r.emoji) ?? { count: 0, reacted: false, reactors: [] as string[] };
     cur.count += 1;
     if (viewerEmployeeId && r.e === viewerEmployeeId) cur.reacted = true;
+    if (cur.reactors.length < MAX_REACTORS) cur.reactors.push(r.e);
     perEmoji.set(r.emoji, cur);
     byKey.set(r.key, perEmoji);
   }
-  const out = new Map<string, { emoji: string; count: number; reacted: boolean }[]>();
+  const out = new Map<string, ReactionGroup[]>();
   for (const [k, perEmoji] of byKey) {
-    out.set(k, [...perEmoji.entries()].map(([emoji, v]) => ({ emoji, count: v.count, reacted: v.reacted })).sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji)));
+    out.set(k, [...perEmoji.entries()].map(([emoji, v]) => ({ emoji, count: v.count, reacted: v.reacted, reactors: v.reactors })).sort((a, b) => b.count - a.count || a.emoji.localeCompare(b.emoji)));
   }
   return out;
 }
 
 // Post-level reactions (reply_id IS NULL) for a set of announcements, grouped per post.
 export async function reactionsFor(deps: Deps, announcementIds: string[], viewerEmployeeId: string | null) {
-  if (!announcementIds.length) return new Map<string, { emoji: string; count: number; reacted: boolean }[]>();
+  if (!announcementIds.length) return new Map<string, ReactionGroup[]>();
   const rx = schema.announcementReactions;
   const rows = await deps.db
     .select({ key: rx.announcementId, e: rx.employeeId, emoji: rx.emoji })
@@ -262,6 +381,8 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   // Notify the post's author that someone replied (skip replying to your own post).
   if (row.authorEmployeeId && row.authorEmployeeId !== actor.employeeId)
     await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: "announcements", subject: `announcements/${id}`, actorId: actor.employeeId });
+  // Someone named in the reply hears about it too - that is how a thread pulls in the person who can answer.
+  await notifyMentions(deps, actor, { announcementId: id, body: text, title: row.title });
   return row;
 }
 

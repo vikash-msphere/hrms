@@ -13,12 +13,14 @@ import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { notify } from "./notifications";
 
 export type ActionItem = { text: string; done?: boolean };
+export type CheckInCadence = "weekly" | "biweekly" | "monthly";
 export type CheckInInput = {
   employee?: string | null;
   counterpart?: string | null;
   meeting_date?: string | null;
   notes?: string | null;
   action_items?: ActionItem[];
+  cadence?: CheckInCadence | null;
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
@@ -64,6 +66,7 @@ export async function createCheckIn(deps: Deps, actor: AppUser, input: CheckInIn
     meetingDate: input.meeting_date ? new Date(dayMs(input.meeting_date)) : null,
     notes: input.notes?.trim() || null,
     actionItemsJson: cleanItems(input.action_items),
+    cadence: input.cadence ?? null,
   }).returning())[0]!;
   await audit(deps, actor, "check-in.create", "check-ins", row.uuid, undefined, row);
   // Tell the other party (or both, if HR logged it) that a 1:1 was recorded.
@@ -85,6 +88,7 @@ export async function updateCheckIn(deps: Deps, actor: AppUser, id: string, patc
   }
   if (has("notes")) set.notes = patch.notes?.trim() || null;
   if (has("action_items")) set.actionItemsJson = cleanItems(patch.action_items);
+  if (has("cadence")) set.cadence = patch.cadence ?? null;
   const updated = (await deps.db.update(schema.checkIns).set(set).where(eq(schema.checkIns.uuid, id)).returning())[0]!;
   await audit(deps, actor, "check-in.update", "check-ins", id, diffMeta(row, updated, set), updated);
   return updated;

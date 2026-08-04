@@ -91,6 +91,7 @@ CREATE TABLE `announcements` (
 	`locked_by` text,
 	`poll_multiple` integer DEFAULT false NOT NULL,
 	`poll_closes_at` integer,
+	`pinned_at` integer,
 	`recipient_employee_id` text,
 	`recipient_department_id` text,
 	`value` text,
@@ -162,6 +163,8 @@ CREATE TABLE `assets` (
 	`assigned_to` text,
 	`assigned_on` integer,
 	`purchase_date` integer,
+	`tag_printed_at` integer,
+	`verified_at` integer,
 	`notes` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
@@ -463,6 +466,7 @@ CREATE TABLE `cards` (
 	`assignee_id` text,
 	`priority` text DEFAULT 'medium' NOT NULL,
 	`labels_json` text DEFAULT '[]' NOT NULL,
+	`documents_json` text DEFAULT '[]' NOT NULL,
 	`size` integer,
 	`due_date` integer,
 	`blocked` integer DEFAULT false NOT NULL,
@@ -498,6 +502,7 @@ CREATE TABLE `check_ins` (
 	`meeting_date` integer,
 	`notes` text,
 	`action_items_json` text,
+	`cadence` text,
 	`delete_time` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
@@ -532,6 +537,7 @@ CREATE TABLE `compensation` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `compensation_code_unique` ON `compensation` (`code`);--> statement-breakpoint
 CREATE INDEX `comp_emp_idx` ON `compensation` (`employee_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `comp_open_idx` ON `compensation` (`employee_id`) WHERE "compensation"."effective_to" is null;--> statement-breakpoint
 CREATE TABLE `compliance_events` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -651,6 +657,7 @@ CREATE TABLE `employees` (
 	`legal_name` text,
 	`work_email` text NOT NULL,
 	`job_title` text,
+	`bio` text,
 	`department_id` text,
 	`manager_id` text,
 	`start_date` integer,
@@ -799,6 +806,7 @@ CREATE TABLE `goals` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
 	`employee_id` text NOT NULL,
+	`parent_id` text,
 	`title` text NOT NULL,
 	`description` text,
 	`weight` integer DEFAULT 0 NOT NULL,
@@ -808,11 +816,13 @@ CREATE TABLE `goals` (
 	`delete_time` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
-	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`parent_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `goals_code_unique` ON `goals` (`code`);--> statement-breakpoint
 CREATE INDEX `goal_emp_idx` ON `goals` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `goal_parent_idx` ON `goals` (`parent_id`);--> statement-breakpoint
 CREATE TABLE `holiday_selections` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1268,6 +1278,7 @@ CREATE TABLE `payroll_runs` (
 	`approved_by` text,
 	`lock_time` integer,
 	`items_built_at` integer,
+	`bank_file_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`pay_period_id`) REFERENCES `pay_periods`(`uuid`) ON UPDATE no action ON DELETE no action,
@@ -1520,6 +1531,8 @@ CREATE TABLE `reviews` (
 	`employee_id` text NOT NULL,
 	`state` text DEFAULT 'SELF' NOT NULL,
 	`self_comment` text,
+	`self_ratings_json` text,
+	`ack_comment` text,
 	`manager_comment` text,
 	`overall_rating` integer,
 	`ratings_json` text,
@@ -1582,6 +1595,7 @@ CREATE TABLE `settlements` (
 	`total_earnings` real NOT NULL,
 	`total_deductions` real NOT NULL,
 	`net` real NOT NULL,
+	`settled_json` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action

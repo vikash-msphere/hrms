@@ -21,7 +21,7 @@ import { paginate } from "../http/pagination";
 // Build the verbatim pattern for a normalized rule. The id-position token encodes the scope (me / my-dept /
 // <code> / <code>-* / * for a field rule); a field rule inserts the field token; the tail is the verb for a
 // custom-method rule, else `**` (full subtree at that scope). This is the SINGLE pattern-derivation site.
-async function buildPattern(deps: Deps, r: AccessRuleInput): Promise<string> {
+export async function buildPattern(deps: Deps, r: AccessRuleInput): Promise<string> {
   // The create gate is the bare 1-token collection pattern (`<collection>`): it matches the collection-level
   // POST/list but no individual object - distinct from `<collection>.**` (every object). Short-circuit before
   // the id/field/verb assembly, which would otherwise append a `.**` tail.
@@ -35,7 +35,14 @@ async function buildPattern(deps: Deps, r: AccessRuleInput): Promise<string> {
     const code = await uuidToCode(deps, ref.slice(0, slash), ref.slice(slash + 1));
     if (!code) throw notFound("scope_ref object not found");
     idToken = r.scope === "subtree" ? `${code}-*` : code;
-  } else if (r.field || r.verb) idToken = "*"; // scope=all + field/verb -> any item (`collection.*.<field|verb>`)
+  } else if (r.field) idToken = "*"; // scope=all + field -> that field on any item (`collection.*.<field>`)
+  // scope=all + verb -> `collection.**.<verb>`, NOT `collection.*.<verb>`. A custom method is either
+  // COLLECTION-level (`POST /v1/announcements:markAllRead` -> the 2-token key `announcements.markAllRead`) or
+  // ITEM-level (`.../<code>:approve` -> 3 tokens); the ACL input does not distinguish them, and a `*` id token
+  // can only ever match the item form - so a grant for a collection-level verb was stored, displayed, and
+  // silently inert (every non-super caller kept getting 403). `**` matches zero-or-more tokens in the id
+  // position, so ONE all-scope rule covers both forms, which is exactly what "all" means for a verb.
+  else if (r.verb) idToken = "**";
   const toks = [r.collection];
   if (idToken) toks.push(idToken);
   if (r.field) toks.push(r.field);

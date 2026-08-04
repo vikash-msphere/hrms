@@ -1,5 +1,6 @@
 import * as React from "react";
 import { AccessAction } from "@/components/access/AccessAction";
+import { AccessScope } from "@/components/access/AccessScope";
 
 export function PageHeader({
   eyebrow,
@@ -26,7 +27,11 @@ export function PageHeader({
         )}
         <h1 className="text-2xl font-semibold leading-tight tracking-tight text-foreground">
           {accessCollection ? (
-            <AccessAction collection={accessCollection} label={title}><span>{title}</span></AccessAction>
+            /* The header icon manages the WHOLE collection. A fresh scope drops any ambient object pin (a
+               deep-link route like tickets/<id> sets one), so the icon never narrows to the opened row. */
+            <AccessScope collection={accessCollection}>
+              <AccessAction collection={accessCollection} label={title}><span>{title}</span></AccessAction>
+            </AccessScope>
           ) : (
             title
           )}

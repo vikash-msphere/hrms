@@ -187,7 +187,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
                     "relative min-h-[64px] border-b border-r p-1 text-left align-top transition-colors last:border-r-0 hover:bg-accent/50 sm:min-h-[92px] sm:p-1.5",
                     i % 7 === 6 && "border-r-0",
                     !inMonth && "bg-muted/20 text-muted-foreground/50",
-                    hol ? "bg-violet-100/60 dark:bg-violet-950/30" : nonWorking && inMonth && "bg-slate-100/60 dark:bg-slate-800/30",
+                    hol ? "bg-violet-100/60 dark:bg-violet-950/30" : nonWorking && inMonth && "bg-brand-neutral-100/60 dark:bg-brand-neutral-800/30",
                     isSel && "ring-2 ring-inset ring-primary",
                   )}
                 >
@@ -224,7 +224,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
               <span className="h-3 w-3 rounded bg-violet-100 ring-1 ring-inset ring-violet-300 dark:bg-violet-950/40 dark:ring-violet-800" /> Holiday
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="h-3 w-3 rounded bg-slate-100 ring-1 ring-inset ring-slate-300 dark:bg-slate-800/40 dark:ring-slate-600" /> Non-working day
+              <span className="h-3 w-3 rounded bg-brand-neutral-100 ring-1 ring-inset ring-brand-neutral-300 dark:bg-brand-neutral-800/40 dark:ring-brand-neutral-600" /> Non-working day
             </span>
             {distinctColors ? (
               usedTypes.map((t) => (

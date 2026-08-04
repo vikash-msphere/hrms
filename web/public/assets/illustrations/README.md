@@ -13,13 +13,16 @@ words), dimensions and a hash - so the folders below come from the ordered term 
 `CATEGORIES` in that script, first match winning. `misc` is where an illustration lands when no
 list claims it. Re-run after editing the lists to reshuffle.
 
-Colours are the Metasphere brand ramp, taken from the two ENDS of the logo gradient (Metasphere.svg) -
-the navy and the vivid teal, never the mid blue in between: #2a4b8c / #83a1b9 / #bedadf /
-#e2f1f3 for structure, #36c2c9 and #75d5d7 for accents. Skin tones, greens and reds are
-untouched (reds carry meaning in the errors-warnings art). The light rungs are what keep a piece legible
-on a dark card, since the navy itself is near-silhouette there. There is no per-theme variant on purpose
-- the app theme is a user preference, so a `prefers-color-scheme` block inside the file would be wrong
-for anyone forcing it against their OS.
+Colours are named steps of the brand ramps in `branding.json`, the same ones the app tokens use
+(`web/src/index.css`, `src/domain/brand.ts`) - nothing here is sampled or invented. Structure is
+#15396d (Blue 800 - bodies, hair, shoes and outlines, one colour in the unDraw source) /
+#d9e1e8 (Neutral 200, grey props) / #b8d4f2 (Blue 200) / #e0ecf8 (Blue 100);
+accents are #00dae5 / #5bfcff / #9efeff (Cyan 500/300/200) - shirts and
+highlights carry the primary accent. The accents stay off the ramp's #00F6FF anchor, which is
+perceptually near-white (1.34:1 on a white card) and would vanish on the ground illustrations sit on.
+Skin tones, greens and reds are untouched (reds carry meaning in the errors-warnings art).
+There is no per-theme variant on purpose - the app theme is a user preference, so a
+`prefers-color-scheme` block inside the file would be wrong for anyone forcing it against their OS.
 
 - `index.json` - slug, dir, title, keywords, aspect. For a picker to fetch on demand; not bundled.
 - `web/src/lib/illustrationPaths.ts` - generated path union, alias paths, category list.

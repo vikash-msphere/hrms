@@ -4,6 +4,7 @@ import type { Deps } from "../deps";
 import { computeAccrual, roundToIncrement } from "../domain/leave";
 import { allocOwnedCode } from "./codeAlloc";
 import { getSettingValue } from "./settings";
+import { runBatch, type BatchStmt } from "../lib/dbBatch";
 
 // How accrued balances are rounded (settings/leave_accrual). "half" keeps balances in 0.5-day steps (the
 // default - prorated joining months otherwise produce values like 2.41); "day" = whole days; "none" = exact.
@@ -23,6 +24,16 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   let credited = 0;
   const employees = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
   const leaveTypes = (await deps.db.select().from(schema.leaveTypes)).filter((lt) => !onlyLeaveTypeId || lt.uuid === onlyLeaveTypeId);
+  // One read for every balance row, keyed (employee, type) - the nightly walk over employees x types is then
+  // pure lookups, instead of one query per pair (which alone could blow the per-invocation subrequest budget).
+  const balances = await deps.db.select().from(schema.leaveBalances);
+  const balByKey = new Map(balances.map((b) => [`${b.employeeId}|${b.leaveTypeId}`, b]));
+  // Updates collect into one atomic batch. The batch costs one subrequest where a month-boundary night would
+  // cost one per balance row. New-balance inserts stay individual: each needs a code allocation (first accrual
+  // only - rare). Because the write is an ABSOLUTE balance derived from the snapshot above, and the snapshot
+  // is now taken once for the whole org rather than per row, each update is guarded on the balance it read
+  // (compare-and-set) - see the claim below.
+  const updates: BatchStmt[] = [];
   for (const emp of employees) {
     if (emp.deleteTime || !emp.startDate) continue;
     const startMs = +new Date(emp.startDate);
@@ -30,11 +41,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
     const probationEndMs = emp.probationEndDate ? +new Date(emp.probationEndDate) : null;
     for (const lt of leaveTypes) {
       if (!lt.accrualDaysPerYear || lt.deleteTime || lt.disabled) continue;
-      const existing = (await deps.db
-        .select()
-        .from(schema.leaveBalances)
-        .where(and(eq(schema.leaveBalances.employeeId, emp.uuid), eq(schema.leaveBalances.leaveTypeId, lt.uuid)))
-        .limit(1))[0];
+      const existing = balByKey.get(`${emp.uuid}|${lt.uuid}`);
       const { add, newLastYm } = computeAccrual({
         accrualDaysPerYear: lt.accrualDaysPerYear,
         probationAccrualDaysPerYear: lt.probationAccrualDaysPerYear,
@@ -50,10 +57,18 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         // balance even when no new month accrued, so a tidied policy fixes old values like 2.41 on the next run.
         const newBalance = roundToIncrement(existing.balanceDays + add, inc);
         if (newBalance === existing.balanceDays && newLastYm === existing.lastAccrualYm) continue; // nothing changed
-        await deps.db
-          .update(schema.leaveBalances)
-          .set({ balanceDays: newBalance, lastAccrualYm: newLastYm, updatedAt: new Date() })
-          .where(eq(schema.leaveBalances.uuid, existing.uuid));
+        // Compare-and-set on the balance we read: `newBalance` is absolute, so writing it blind would undo any
+        // debit/credit committed between the snapshot at the top of this function and the batch at the bottom
+        // (an approved leave request, an encashment) - restoring days the employee already spent, which is real
+        // money once those days are encashed. If the row moved, the claim matches nothing and the row is simply
+        // left for the next nightly tick: lastAccrualYm is unchanged, so the same month is still owed and
+        // accrues then off the fresh balance.
+        updates.push(
+          deps.db
+            .update(schema.leaveBalances)
+            .set({ balanceDays: newBalance, lastAccrualYm: newLastYm, updatedAt: new Date() })
+            .where(and(eq(schema.leaveBalances.uuid, existing.uuid), eq(schema.leaveBalances.balanceDays, existing.balanceDays))),
+        );
         credited++;
       } else {
         if (add === 0 && newLastYm === null) continue; // employee hasn't started yet
@@ -62,5 +77,6 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       }
     }
   }
+  await runBatch(deps.db, updates);
   return credited;
 }

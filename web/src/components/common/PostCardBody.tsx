@@ -29,7 +29,6 @@ export function PostCardBody({
   titleAlign,
   body,
   artUrl,
-  artIsSticker,
   stickerLayout,
   onStickerLayoutChange,
   bodyValign,
@@ -44,7 +43,6 @@ export function PostCardBody({
   titleAlign?: "left" | "center" | "right"; // the heading has no attribute line of its own - see the schema note
   body?: string | null;
   artUrl?: string; // "" / undefined = no sticker
-  artIsSticker?: boolean; // brand sticker (needs the dark-mode die-cut) rather than an illustration
   stickerLayout?: StickerLayout | null; // where the author put it; null = the card's default placement
   onStickerLayoutChange?: (layout: StickerLayout) => void; // set = the composer preview, where it can be dragged
   bodyValign?: BodyValign; // where the words ride in a card a sticker has made taller than they are
@@ -76,7 +74,7 @@ export function PostCardBody({
       label="sticker"
       artUrl={artUrl}
     >
-      <StickerImage url={artUrl} isSticker={artIsSticker} onAspect={setAspect} />
+      <StickerImage url={artUrl} onAspect={setAspect} />
     </PlacedElement>
   ) : null;
 
@@ -93,7 +91,9 @@ export function PostCardBody({
     // Room for a sticker floating clear of the text: its height is (size / aspect) of the card's width.
     <CardCanvas reserve={artUrl ? reserveFor(stickerLayout, POST_STICKER_LAYOUT, aspect) || undefined : undefined}>
       {!wrapAll && heading}
-      <div className={cn(!wrapAll && "mt-2", beside && "flex flex-col items-center gap-3 sm:flex-row sm:items-start sm:gap-5")}>
+      {/* A picture in its own column rides level with the words rather than at the top of them - the same
+          default as everything else on a card (see DEFAULT_VALIGN). */}
+      <div className={cn(!wrapAll && "mt-2", beside && "flex flex-col items-center gap-3 sm:flex-row sm:items-center sm:gap-5")}>
         {/* A column, and the two free-floating modes, render here: a floating sticker is out of flow anyway, so
             sharing this slot with the column is what lets a drag convert one into the other without React
             unmounting the element mid-gesture. A float and a band are placed further in, by the text itself. */}
@@ -120,10 +120,13 @@ export function PostCardBody({
           {/* A float has to precede the line boxes it displaces. */}
           {floated && art}
           {banded && !body && art}
-          {/* And it has to precede the heading, for the heading to flow around it at all. */}
-          {wrapAll && heading}
-          {/* Only the WORDS move for a vertical position - the picture keeps the spot it was placed in. */}
+          {/* Only the WORDS move for a vertical position - the picture keeps the spot it was placed in. For a
+              poll, "the words" is the question, its description and its options together: they are one block of
+              content, and centring only the middle of the three would slide it over the options, which stay
+              where they were laid out (the offset is a transform, not a layout change). */}
           <ValignBlock valign={bodyValign}>
+            {/* The heading has to come after the picture in the flow for it to wrap around it at all. */}
+            {wrapAll && heading}
             {text &&
               (!body ? (
                 <p className="text-sm text-muted-foreground/60">{text}</p>
@@ -142,13 +145,14 @@ export function PostCardBody({
                   insertAt={banded ? at.y : undefined}
                 />
               ))}
+            {/* `flow-root` is what makes the options step aside. They are block boxes, and a block box does not
+                avoid a float - it runs underneath it and only its LINE boxes shorten, which for a full-width
+                option bar means the bar slides under the picture. A formatting context of its own is placed clear
+                of the float instead, and the bars then fill that narrower space. Block-level avoidance uses the
+                float's box rather than its traced outline, so the poll keeps clear of the whole picture in every
+                mode. */}
+            {wrapAll && below && <div className="flow-root">{below}</div>}
           </ValignBlock>
-          {/* `flow-root` is what makes the options step aside. They are block boxes, and a block box does not
-              avoid a float - it runs underneath it and only its LINE boxes shorten, which for a full-width option
-              bar means the bar slides under the picture. A formatting context of its own is placed clear of the
-              float instead, and the bars then fill that narrower space. Block-level avoidance uses the float's
-              box rather than its traced outline, so the poll keeps clear of the whole picture in every mode. */}
-          {wrapAll && below && <div className="flow-root">{below}</div>}
         </div>
       </div>
       {!wrapAll && below}

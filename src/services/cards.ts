@@ -37,6 +37,7 @@ export type CardInput = {
   assignee?: string | null;
   priority?: CardPriority;
   labels?: unknown;
+  documents?: string[]; // org-document refs to link (link-only; replaces the whole set on patch)
   size?: number | null;
   due_date?: string | null;
   goal?: string | null;
@@ -189,6 +190,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       assigneeId: idFromPath(input.assignee) ?? null,
       priority: input.priority ?? "medium",
       labelsJson: JSON.stringify(normalizeLabelKeys(input.labels ?? [])),
+      documentsJson: JSON.stringify((input.documents ?? []).map((p) => idFromPath(p)).filter(Boolean)),
       size: input.size ?? null,
       dueDate: input.due_date ? new Date(due) : null,
       goalId: idFromPath(input.goal) ?? null,
@@ -225,6 +227,7 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
     set.priority = patch.priority;
   }
   if (has("labels")) set.labelsJson = JSON.stringify(normalizeLabelKeys(patch.labels ?? []));
+  if (has("documents")) set.documentsJson = JSON.stringify((patch.documents ?? []).map((p) => idFromPath(p)).filter(Boolean));
   if (has("size")) set.size = patch.size ?? null;
   if (has("due_date")) {
     const due = dayMs(patch.due_date);
@@ -257,6 +260,7 @@ export async function moveCard(
   toGoal?: string | null,
   toPriority?: string | null,
   toDepartment?: string | null,
+  toSprint?: string | null,
 ) {
   const row = await getCard(deps, actor, id);
   if (row.deleteTime) throw notFound("card not found");
@@ -296,6 +300,8 @@ export async function moveCard(
     set.priority = toPriority;
   }
   if (toDepartment !== undefined) set.departmentId = idFromPath(toDepartment) ?? null;
+  // Backlog <-> sprint in the same atomic move (null = backlog), same semantics as PATCH `sprint`.
+  if (toSprint !== undefined) set.sprintId = idFromPath(toSprint) ?? null;
   if (rank != null) set.rank = rank;
   else if (changingColumn) set.rank = (await columnCards(deps, row.boardId, toColumn)).reduce((m, r) => Math.max(m, r.rank), 0) + 1024;
 
@@ -309,7 +315,7 @@ export async function moveCard(
     justCommitted = true;
   }
   if (!row.startedAt && commitIdx >= 0 && destIdx > commitIdx) set.startedAt = now;
-  if (!row.deliveredAt && dest.isDelivery) {
+  if (!row.deliveredAt && dest.delivery) {
     set.deliveredAt = now;
     justDelivered = true;
   }

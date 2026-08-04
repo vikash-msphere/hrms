@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
+import { useUnsaved } from "@/components/common/UnsavedChanges";
 
 // HR editor for the kudos config (settings/kudos): the recognition LEVELS (weighted tiers feeding the
 // leaderboard) and the CATEGORIES (a flat, optional taxonomy for tagging recognition), each with optional
@@ -22,6 +23,7 @@ export function KudosLevelsTab() {
   const [levels, setLevels] = useState<KudosLevel[]>(DEFAULT_KUDOS_LEVELS);
   const [categories, setCategories] = useState<KudosCategory[]>([]);
   const [promptsOpen, setPromptsOpen] = useState<number | null>(null); // index of the category whose prompts are unfolded
+  const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -30,13 +32,15 @@ export function KudosLevelsTab() {
         if (s.value?.levels?.length) setLevels(s.value.levels);
         if (Array.isArray(s.value?.categories)) setCategories(s.value!.categories!);
       })
-      .catch(() => { /* keep defaults */ });
+      .catch(() => { /* keep defaults */ })
+      .finally(() => setReady(true));
   }, []);
 
   const setRow = (i: number, p: Partial<KudosLevel>) => setLevels((ls) => ls.map((l, j) => (j === i ? { ...l, ...p } : l)));
   const setCat = (i: number, p: Partial<KudosCategory>) => setCategories((cs) => cs.map((c, j) => (j === i ? { ...c, ...p } : c)));
   const setPrompts = (i: number, fn: (ps: string[]) => string[]) => setCat(i, { prompts: fn(categories[i]?.prompts ?? []) });
 
+  const { markSaved } = useUnsaved({ levels, categories }, ready, save);
   async function save() {
     const cleanedLevels = levels.map((l) => ({ name: l.name.trim(), points: Number(l.points) || 0 })).filter((l) => l.name);
     if (!cleanedLevels.length) { toast({ title: "Add at least one level", variant: "destructive" }); return; }
@@ -55,6 +59,7 @@ export function KudosLevelsTab() {
       await patch("settings/kudos", { value: { levels: cleanedLevels, categories: cleanedCats } });
       setLevels(cleanedLevels);
       setCategories(cleanedCats);
+      markSaved();
       toast({ title: "Kudos config saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -67,7 +72,7 @@ export function KudosLevelsTab() {
     <Card>
       <CardHeader>
         <CardTitle className="text-base">
-          <AccessAction objectPath="settings/kudos" label="Kudos config"><span className="flex items-center gap-2"><Award className="h-4 w-4 text-primary" /> Kudos recognition</span></AccessAction>
+          <AccessAction collection="settings" objectPath="settings/kudos" label="Kudos config"><span className="flex items-center gap-2"><Award className="h-4 w-4 text-primary" /> Kudos recognition</span></AccessAction>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">

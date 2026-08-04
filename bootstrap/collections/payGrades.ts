@@ -1,5 +1,5 @@
 // Pay grades: annual CTC bands (INR). level orders them; band_min/mid/max bound the range for compa-ratio.
-import { Ctx, T0, q, code2, rows } from "../lib";
+import { type Ctx, T0, q, code2, rows } from "../lib";
 
 type PayGradeSeed = { name: string; level: number; min: number; mid: number; max: number; description: string };
 

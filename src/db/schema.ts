@@ -143,6 +143,9 @@ export const employees = sqliteTable("employees", {
   legalName: text("legal_name"),
   workEmail: text("work_email").notNull().unique(),
   jobTitle: text("job_title"),
+  // Short public "about me" (plain text, self-written via employees/<id>/bio). Not PII - readable by
+  // anyone who can read the employee record; shown on profile heroes and the directory.
+  bio: text("bio"),
   departmentId: text("department_id").references(() => departments.uuid),
   managerId: text("manager_id").references((): AnySQLiteColumn => employees.uuid),
   startDate: integer("start_date", { mode: "timestamp_ms" }),
@@ -464,6 +467,9 @@ export const announcements = sqliteTable("announcements", {
   // after which voting is locked. A poll is "closed" when locked or past this time.
   pollMultiple: integer("poll_multiple", { mode: "boolean" }).notNull().default(false),
   pollClosesAt: integer("poll_closes_at", { mode: "timestamp_ms" }),
+  // Pinned to the top of the board (HR/moderation - the :pin/:unpin verbs). The timestamp rather than a flag
+  // so several pinned posts keep a stable order (most recently pinned first). Null = not pinned.
+  pinnedAt: integer("pinned_at", { mode: "timestamp_ms" }),
   // Kudos (kind="kudos"): the recognized employee + recognition meta. The kudo message lives in `body`; `title`
   // is unused (""). `points` is snapshotted server-side from `level` via the kudos config so a giver can't
   // inflate their recognition. Null for every non-kudos kind. The author (board column) is the giver.
@@ -492,7 +498,8 @@ export const announcements = sqliteTable("announcements", {
   titleAlign: text("title_align", { enum: ["left", "center", "right"] }),
   // Where the words sit VERTICALLY in the card. It only shows when a card is taller than its text, which is what a
   // placed sticker does to one (see reserveFor in web/src/components/common/CardSticker.tsx) - and then whether the
-  // words ride at the top of that space or sit in the middle of it is a real design choice. Null = top.
+  // words ride at the top of that space or sit in the middle of it is a real design choice. Null = middle, the
+  // card's own default - "top" is a choice that has to be stored to be had.
   bodyValign: text("body_valign", { enum: ["top", "middle", "bottom"] }),
   illustration: text("illustration"),
   // Where that art sits on the card, as JSON `{x,y,size,opacity}` - see normalizeIllustrationLayout. All four are
@@ -574,6 +581,9 @@ export const goals = sqliteTable("goals", {
   uuid: pk(),
   code: codeCol(),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  // Alignment: an optional parent goal this one rolls up under (a manager's/leader's goal). Link-only - the
+  // parent's "aligned progress" is derived client-side from the children a viewer can see, never persisted.
+  parentId: text("parent_id").references((): AnySQLiteColumn => goals.uuid),
   title: text("title").notNull(),
   description: text("description"),
   weight: integer("weight").notNull().default(0),
@@ -583,7 +593,7 @@ export const goals = sqliteTable("goals", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("goal_emp_idx").on(t.employeeId) }));
+}, (t) => ({ empIdx: index("goal_emp_idx").on(t.employeeId), parentIdx: index("goal_parent_idx").on(t.parentId) }));
 
 // ---- Performance: review cycles + reviews ----
 // A review cycle (e.g. "H1 2026"): an HR-managed container, flat-coded like pay-periods. DRAFT while being set
@@ -614,6 +624,8 @@ export const reviews = sqliteTable("reviews", {
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   state: text("state", { enum: ["SELF", "MANAGER", "SHARED", "ACKNOWLEDGED"] }).notNull().default("SELF"),
   selfComment: text("self_comment"),
+  selfRatingsJson: text("self_ratings_json"), // {[competencyKey]: number} - the employee's optional self ratings
+  ackComment: text("ack_comment"), // optional employee note recorded on acknowledge
   managerComment: text("manager_comment"),
   overallRating: integer("overall_rating"),
   ratingsJson: text("ratings_json"), // {[competencyKey]: number}
@@ -713,6 +725,7 @@ export const cards = sqliteTable("cards", {
   assigneeId: text("assignee_id").references(() => employees.uuid),
   priority: text("priority", { enum: ["low", "medium", "high", "urgent"] }).notNull().default("medium"),
   labelsJson: text("labels_json").notNull().default("[]"), // string[] of board label-catalog keys
+  documentsJson: text("documents_json").notNull().default("[]"), // string[] of org-document uuids linked to this card (link-only; no card-owned storage)
   size: integer("size"), // estimate / story points
   dueDate: integer("due_date", { mode: "timestamp_ms" }),
   blocked: integer("blocked", { mode: "boolean" }).notNull().default(false),
@@ -824,6 +837,9 @@ export const checkIns = sqliteTable("check_ins", {
   meetingDate: integer("meeting_date", { mode: "timestamp_ms" }),
   notes: text("notes"),
   actionItemsJson: text("action_items_json"), // [{ text, done }]
+  // Recurring 1:1s: when set and meetingDate passes, the nightly cron creates the next one (carrying open
+  // action items forward) and MOVES the cadence onto it - so exactly one row per pair carries the cadence.
+  cadence: text("cadence", { enum: ["weekly", "biweekly", "monthly"] }),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -973,7 +989,7 @@ export const loanRepayments = sqliteTable("loan_repayments", {
   uuid: pk(),
   loanId: text("loan_id").notNull().references((): AnySQLiteColumn => loans.uuid),
   // Nullable: a payroll-driven repayment links its run; a MANUAL repayment (recordLoanRepayment) has no run,
-  // so runId is null. resetLoanRepaymentsByRun matches a specific runId, so null (manual) rows are never
+  // so runId is null. resetLoanRepaymentStmts matches a specific runId, so null (manual) rows are never
   // reversed by a run delete - which is correct, a manual repayment isn't undone by deleting a payroll run.
   runId: text("run_id").references((): AnySQLiteColumn => payrollRuns.uuid),
   amount: real("amount").notNull(),
@@ -1177,7 +1193,13 @@ export const compensation = sqliteTable("compensation", {
   arrearsPaidAt: integer("arrears_paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("comp_emp_idx").on(t.employeeId) }));
+  // At most ONE open (current) row per employee, enforced by the DB. A revision closes the open row and inserts
+  // a new one in two statements; two concurrent revisions would otherwise both close the same row and leave TWO
+  // open rows - an ambiguous current salary, and arrears computed (and paid) twice off the same delta.
+}, (t) => ({
+  empIdx: index("comp_emp_idx").on(t.employeeId),
+  openUniq: uniqueIndex("comp_open_idx").on(t.employeeId).where(sql`${t.effectiveTo} is null`),
+}));
 
 // Effective-dated role history (designation + department + location). A promotion or transfer is a NEW row
 // effective from a chosen date; the previously-current row is closed (effective_to set). The employee's
@@ -1379,6 +1401,8 @@ export const assets = sqliteTable("assets", {
   assignedTo: text("assigned_to").references(() => employees.uuid),
   assignedOn: integer("assigned_on", { mode: "timestamp_ms" }),
   purchaseDate: integer("purchase_date", { mode: "timestamp_ms" }),
+  tagPrintedAt: integer("tag_printed_at", { mode: "timestamp_ms" }), // last time a physical sticker tag was printed for this asset
+  verifiedAt: integer("verified_at", { mode: "timestamp_ms" }), // last time the physical asset was sighted (stocktake scan)
   notes: text("notes"),
   createdAt: created(),
   updatedAt: updated(),
@@ -1399,6 +1423,12 @@ export const settlements = sqliteTable("settlements", {
   totalEarnings: real("total_earnings").notNull(),
   totalDeductions: real("total_deductions").notNull(),
   net: real("net").notNull(),
+  // Exactly which payables this FnF consumed: {reimbursements,bonuses,encashments,overtime,arrears,loans[],
+  // leaveDebits[]} by id. The FnF is the leaver's terminal payout, so it takes those rows OUT of the payroll
+  // queues (they would otherwise never be paid - a terminated employee is in no run). Recording the ids is
+  // what makes a recompute safe: POSTing a corrected settlement releases exactly what the previous one took
+  // before re-pricing, the same release-then-rebuild contract a payroll run has.
+  settledJson: text("settled_json"),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ empIdx: index("settle_emp_idx").on(t.employeeId) }));
@@ -1509,6 +1539,10 @@ export const payrollRuns = sqliteTable("payroll_runs", {
   // overtime, loans, tax verifications, settings, new joiners, holidays, and - with LOP on - approved leave
   // and attendance punches) touched after this timestamp = rebuild needed.
   itemsBuiltAt: integer("items_built_at", { mode: "timestamp_ms" }),
+  // When a bank payout file was first generated for this run. Downloading it is the point where the money
+  // leaves the company, and deleting a run RELEASES every payable it paid back into the queue - so once this
+  // is stamped the run can no longer be deleted, otherwise the next run would pay the same one-offs again.
+  bankFileAt: integer("bank_file_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
   // At most ONE committed (APPROVED/PUBLISHED) run per pay period, enforced by the DB. Drafts are unrestricted

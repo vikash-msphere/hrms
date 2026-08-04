@@ -4,7 +4,7 @@
 // (counter-based); timestamps are anchored to generation time (demo.sql is regenerated on every `--demo` run)
 // so the feed always reads as just-happened and recent kudos light the "New" badge. Not production data.
 //
-//   Run:    npx tsx bootstrap/genDemo.ts > bootstrap/demo.sql
+//   Run:    node --import ./scripts/tsResolve.mjs bootstrap/genDemo.ts > bootstrap/demo.sql
 //   Apply:  scripts/start.sh --demo   (resets, bootstraps, then applies this)
 import { bytesToBase32 } from "../src/lib/idCodec";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../src/domain/kudos";

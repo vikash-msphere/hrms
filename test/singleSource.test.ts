@@ -30,6 +30,20 @@ const FORBIDDEN: { re: RegExp; name: string }[] = [
 // `${relpath}::${pattern}` entries that are knowingly, documentedly allowed.
 const ALLOW = new Set<string>([
   "src/routes/users.ts::capabilitiesOf", // /users/me affordance payload - emits a response, never gates
+  // Effective-access preview (:preview): REPORTS the engine's verdict for arbitrary subjects (the ACL
+  // modal's view-as). It runs decide() to describe, never to gate - the route itself is authorized by the
+  // middleware like any custom method.
+  "src/services/accessPreview.ts::authz-engine import",
+  // include_capabilities: emits the subject's capability payload (same as /users/me), for view-as - never gates.
+  "src/services/accessPreview.ts::capabilitiesOf",
+  // Access requests (:requestAccess): computes WHO the access admins are (capabilitiesOf over role grants)
+  // to address a notification - recipient selection, not an access decision on the caller.
+  "src/services/accessRequest.ts::hasCapability",
+  "src/services/accessRequest.ts::capabilitiesOf",
+  // profile_completeness enrichment on GET /employees/{id}: owner-private flags also shared with HR as a
+  // record-quality signal. Shapes the RESPONSE payload (field visibility), never gates the request - the
+  // route is authorized by the middleware like any other.
+  "src/routes/employees.ts::actorCan",
 ]);
 
 describe("single-source access control (DoD #1)", () => {

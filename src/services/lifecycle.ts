@@ -5,13 +5,15 @@
 // :publish/:unpublish grant, code-scoped). This service only performs the state transition and writes
 // audit - it makes NO access decision. `assertNotLocked` is a WORKFLOW precondition (a locked row rejects
 // edits for everyone alike, regardless of who they are), not access control, so it stays here.
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { notifyMany, activeEmployeeIds } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { notFound, failedPrecondition } from "../lib/errors";
+import { postedTitle } from "../domain/board";
+import { notifyMentions } from "./mentions";
 
 type Table = any;
 type Row = {
@@ -69,16 +71,30 @@ export async function setPublished(
   const row = await fetchRow(deps, table, id);
   if (!row) throw notFound(`${singular} not found`);
   assertNotLocked(row);
-  const fields: Record<string, unknown> = { published };
+  const fields: Record<string, unknown> = { published, updatedAt: new Date() };
   if (withPublishTime) fields.publishTime = published ? new Date() : null;
-  const out = await set(deps, table, id, fields);
-  await audit(deps, actor, `${singular}.${published ? "publish" : "unpublish"}`, collection, id, undefined, out ?? row);
+  // Guarded flip: only the call that actually changes the state gets to audit + broadcast. A double-clicked
+  // Publish, or one racing the scheduler's own claim, must not notify the whole company twice - and a
+  // re-publish of a live post must not rewrite its publishTime (which the feed sorts by). The loser is a
+  // clean idempotent no-op: the row is already where the caller asked it to be.
+  const claimed = (await deps.db
+    .update(table)
+    .set(fields)
+    .where(and(eq(table.uuid, id), eq(table.published, !published)))
+    .returning()) as Row[];
+  if (!claimed.length) return row;
+  const out = claimed[0]!;
+  await audit(deps, actor, `${singular}.${published ? "publish" : "unpublish"}`, collection, id, undefined, out);
   // Publishing an announcement broadcasts an in-app notification to every active employee (except the author).
   if (collection === "announcements" && published) {
     const author = (row as { authorEmployeeId?: string | null }).authorEmployeeId ?? null;
     const recipients = (await activeEmployeeIds(deps)).filter((eid) => eid !== author);
-    await notifyMany(deps, recipients, { type: "announcement.published", title: "New announcement", body: (row as { title?: string }).title ?? undefined, link: "announcements" });
+    // The bell names what actually landed: a published poll is a poll, not "a new announcement".
+    await notifyMany(deps, recipients, { type: "announcement.published", title: postedTitle((row as { kind?: string }).kind ?? "announcement"), body: (row as { title?: string }).title ?? undefined, link: "announcements" });
     await emitEvent(deps, actor, "announcement.published", { subject: `announcements/${id}`, payload: { title: (row as { title?: string }).title ?? null } });
+    // The post's @mentions have been silent while it was a draft (edits to a draft notify nobody); going live
+    // is when the people it names hear about it.
+    await notifyMentions(deps, actor, { announcementId: id, body: (row as { body?: string | null }).body ?? null, title: (row as { title?: string }).title ?? "" });
   }
   return out;
 }

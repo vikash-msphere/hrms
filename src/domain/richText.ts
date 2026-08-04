@@ -6,7 +6,7 @@
 // document STRUCTURE, because it makes no structural claims - it removes markers and returns the words. If the
 // renderer grows a construct this does not know, the worst case is a stray character in a search snippet.
 //
-// The one construct it must handle exactly is the attribute line (`{center xl serif}`): those tokens are real
+// The one construct it must handle exactly is the attribute line (`{center lg serif}`): those tokens are real
 // words, so leaving them in would mean every centred post matches a search for "center".
 
 const ATTR_LINE = /^\{[a-z0-9 _-]*\}$/i;
@@ -31,8 +31,13 @@ export function richToPlain(src?: string | null): string {
     .join("\n")
     // Links keep their text, not their target: nobody searches a post for the URL it happened to link to.
     .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, "$1")
-    .replace(/(\*\*|__)([\s\S]+?)\1/g, "$2")
-    .replace(/(\*|_)([\s\S]+?)\1/g, "$2")
+    // Emphasis is a run of one character, longest first - `***both***` has to lose all three, not two and a half.
+    .replace(/\*\*\*([\s\S]+?)\*\*\*/g, "$1")
+    .replace(/\*\*([\s\S]+?)\*\*/g, "$1")
+    .replace(/\*([\s\S]+?)\*/g, "$1")
+    // The underscore spelling, word-bounded exactly as the renderer bounds it, so `first_name` and `EMP_0042`
+    // reach the search index whole rather than as `firstname`.
+    .replace(/(?<![\p{L}\p{N}])(_{1,3})([\s\S]+?)\1(?![\p{L}\p{N}])/gu, "$2")
     .replace(/~~([\s\S]+?)~~/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .trim();

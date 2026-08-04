@@ -85,6 +85,7 @@ describe("internal acknowledgement stamps the signature and completes synchronou
     const copy = (await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, ack.signedDocId!)))[0]!;
     expect(copy.sourceDocId).toBe(docId);
     expect(copy.signedTime).toBeTruthy();
+    expect(copy.fileName).toMatch(/\.pdf$/); // generated copies still download with an extension
     const bytes = await deps.docs.get(copy.r2Key);
     expect(bytes).toBeTruthy();
     expect(new TextDecoder().decode(new Uint8Array(bytes!).slice(0, 5))).toBe("%PDF-"); // a real stamped PDF

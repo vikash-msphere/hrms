@@ -94,11 +94,11 @@ export function SignatureField({ employeeId, signature, canEdit, onChanged }: { 
           </div>
         </div>
 
-        <div className="flex min-h-[96px] items-center justify-center rounded-lg border bg-white p-4 dark:bg-zinc-100">
+        <div className="flex min-h-[96px] items-center justify-center rounded-lg border bg-white p-4 dark:bg-brand-neutral-100">
           {src ? (
             <img src={src} alt="Your signature" className="max-h-24 max-w-full object-contain" />
           ) : (
-            <span className="text-sm text-muted-foreground dark:text-zinc-500">No signature uploaded yet.</span>
+            <span className="text-sm text-muted-foreground dark:text-brand-neutral-500">No signature uploaded yet.</span>
           )}
         </div>
 

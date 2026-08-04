@@ -12,6 +12,12 @@ export type SettlementFacts = {
   noticeShortfallDays: number; // notice days not served (recovery)
   reimbursements: number; // approved-unpaid reimbursements
   perDayDivisor?: number; // per-day rate basis (default 30)
+  // Everything else the leaver is owed or owes at exit, priced by the caller: unpaid bonuses, approved-unpaid
+  // encashments and overtime, unpaid salary arrears (earnings), and outstanding loan/advance balances
+  // (deductions). A terminated employee is in no payroll run, so if the FnF doesn't carry these they are never
+  // paid - and an outstanding loan is never recovered.
+  extraEarnings?: SettlementLine[];
+  extraDeductions?: SettlementLine[];
 };
 
 export type Settlement = {
@@ -37,8 +43,14 @@ export function computeSettlement(f: SettlementFacts): Settlement {
 
   if (f.reimbursements > 0) lines.push({ name: "Pending reimbursements", kind: "earning", amount: round2(f.reimbursements) });
 
+  for (const l of f.extraEarnings ?? []) if (l.amount > 0) lines.push({ ...l, kind: "earning", amount: round2(l.amount) });
+
   const notice = round2((f.noticeShortfallDays * f.basePay) / div);
   if (notice > 0) lines.push({ name: `Notice period recovery (${f.noticeShortfallDays} day(s))`, kind: "deduction", amount: notice });
+
+  // Recoveries are NOT capped at the earnings: a leaver whose loan outstanding exceeds their dues owes the
+  // company the difference, and the settlement must state that (a negative net) rather than quietly write it off.
+  for (const l of f.extraDeductions ?? []) if (l.amount > 0) lines.push({ ...l, kind: "deduction", amount: round2(l.amount) });
 
   const totalEarnings = round2(lines.filter((l) => l.kind === "earning").reduce((s, l) => s + l.amount, 0));
   const totalDeductions = round2(lines.filter((l) => l.kind === "deduction").reduce((s, l) => s + l.amount, 0));

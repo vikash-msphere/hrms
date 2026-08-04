@@ -80,11 +80,62 @@ export default {
           DEFAULT: "hsl(var(--warning))",
           foreground: "hsl(var(--warning-foreground))",
         },
+        // The raw brand ramps, for the few places that need a specific step rather than a semantic role
+        // (chart series, illustration fills, decorative washes). Prefer the semantic names above: those
+        // re-skin with the theme, these do not. Defined in web/src/index.css - see the palette block there.
+        brand: {
+          blue: {
+            50: "hsl(var(--blue-50))",
+            100: "hsl(var(--blue-100))",
+            200: "hsl(var(--blue-200))",
+            300: "hsl(var(--blue-300))",
+            400: "hsl(var(--blue-400))",
+            500: "hsl(var(--blue-500))",
+            600: "hsl(var(--blue-600))",
+            700: "hsl(var(--blue-700))",
+            800: "hsl(var(--blue-800))",
+            900: "hsl(var(--blue-900))",
+            950: "hsl(var(--blue-950))",
+          },
+          cyan: {
+            50: "hsl(var(--cyan-50))",
+            100: "hsl(var(--cyan-100))",
+            200: "hsl(var(--cyan-200))",
+            300: "hsl(var(--cyan-300))",
+            400: "hsl(var(--cyan-400))",
+            500: "hsl(var(--cyan-500))",
+            600: "hsl(var(--cyan-600))",
+            700: "hsl(var(--cyan-700))",
+            800: "hsl(var(--cyan-800))",
+            900: "hsl(var(--cyan-900))",
+            950: "hsl(var(--cyan-950))",
+          },
+          neutral: {
+            50: "hsl(var(--neutral-50))",
+            100: "hsl(var(--neutral-100))",
+            200: "hsl(var(--neutral-200))",
+            300: "hsl(var(--neutral-300))",
+            400: "hsl(var(--neutral-400))",
+            500: "hsl(var(--neutral-500))",
+            600: "hsl(var(--neutral-600))",
+            700: "hsl(var(--neutral-700))",
+            800: "hsl(var(--neutral-800))",
+            900: "hsl(var(--neutral-900))",
+            950: "hsl(var(--neutral-950))",
+          },
+        },
       },
+      // Corner radii from branding.json (Primitive.Radius 8/16/24/32), all derived from the single
+      // --radius knob in index.css. md (8) is the control radius - buttons, inputs, badges; xl (16) is
+      // the card radius; 2xl (24) covers dialogs/sheets; 3xl (32) is the pill-ish feature surface.
+      // lg sits between md and xl for the small inline panels that 16px would over-round.
       borderRadius: {
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        sm: "calc(var(--radius) - 2px)",
+        md: "var(--radius)",
+        lg: "calc(var(--radius) + 4px)",
+        xl: "calc(var(--radius) + 8px)",
+        "2xl": "calc(var(--radius) + 16px)",
+        "3xl": "calc(var(--radius) + 24px)",
       },
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "Roboto", "sans-serif"],

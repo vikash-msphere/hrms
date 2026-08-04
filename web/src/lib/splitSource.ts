@@ -1,12 +1,12 @@
+// An attribute line - `{center lg serif}` - belongs to the block BELOW it and must never be separated from it.
+// Recognised by the one grammar the toolbar and the renderer also use, so there is nothing here to drift.
+import { isAttrLine } from "./richTextEdit";
+
 // Cutting a markdown-lite body in two, so a card can lay it out as two columns with a picture standing between
 // them (see SplitRichText, and the wrap-mode note in components/common/CardSticker.tsx).
 //
-// Deliberately dependency-free - no React, no path aliases - so it can be unit-tested directly. Where the cut
-// lands is the whole job, and it has edge cases worth pinning down.
-
-// The same shape as parseAttrLine in richText.tsx: a line of nothing but `{center xl serif}` tokens, which
-// belongs to the block BELOW it and must never be separated from it.
-const ATTR_LINE = /^\{[a-z0-9 _-]*\}$/i;
+// No React and no path aliases, so it can be unit-tested directly. Where the cut lands is the whole job, and it
+// has edge cases worth pinning down.
 
 export function splitSource(src: string): [string, string] {
   const text = (src ?? "").replace(/\r\n?/g, "\n");
@@ -42,7 +42,7 @@ export function splitSource(src: string): [string, string] {
   if (blank > 0) return [lines.slice(0, blank).join("\n").trimEnd(), lines.slice(blank + 1).join("\n").trimStart()];
 
   // Failing that, between two lines - but never straight after an attribute line, which belongs to what follows.
-  const boundary = nearest((_l, i) => !ATTR_LINE.test((lines[i - 1] ?? "").trim()));
+  const boundary = nearest((_l, i) => !isAttrLine(lines[i - 1] ?? ""));
   if (boundary > 0 && lines.length > 1) return [lines.slice(0, boundary).join("\n"), lines.slice(boundary).join("\n")];
 
   // No usable boundary, so the cut has to fall between two words of the line that straddles the middle. Every
@@ -54,12 +54,12 @@ export function splitSource(src: string): [string, string] {
   // Only prose can be cut mid-line. A list item or a heading would lose its marker, and an attribute line governs
   // what comes after it rather than carrying words of its own - so when the middle lands on one of those there is
   // nothing safe to cut, and the body stays whole in the first column.
-  const unsplittable = /^\s*(?:[-*]\s|\d+[.)]\s|>|#{1,3}\s)/.test(line) || ATTR_LINE.test(line.trim());
+  const unsplittable = /^\s*(?:[-*]\s|\d+[.)]\s|>|#{1,3}\s)/.test(line) || isAttrLine(line);
   const space = unsplittable ? -1 : line.lastIndexOf(" ", Math.round(line.length / 2));
   if (space <= 0) return [text, ""];
   // The second half starts mid-sentence, so it needs the attribute line that was governing the first half - the
   // two columns are one paragraph and must be set the same way.
-  const governing = at > 0 && ATTR_LINE.test((lines[at - 1] ?? "").trim()) ? [lines[at - 1]!] : [];
+  const governing = at > 0 && isAttrLine(lines[at - 1] ?? "") ? [lines[at - 1]!] : [];
   return [
     [...lines.slice(0, at), line.slice(0, space)].join("\n"),
     [...governing, line.slice(space + 1), ...lines.slice(at + 1)].join("\n"),

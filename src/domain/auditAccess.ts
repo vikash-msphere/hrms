@@ -96,10 +96,11 @@ const NO_AUDIT_COLLECTIONS = new Set(["notifications", "preferences", "attendanc
 // Custom methods that mutate but are self-referential engagement, never an accountability event. Keyed
 // `collection:verb` like READ_VERBS. The tallies live in the target row / vote table, which is the record.
 //   announcements:markRead        — the caller's own read receipt on a board post
+//   announcements:markAllRead     — the same receipt, for every post they can see (the "Mark all read" action)
 //   announcements:react / :vote   — an emoji reaction / a poll answer (poll answers are deliberately private)
 //   suggestions:upvote/:downvote  — a vote on a suggestion (the box may be anonymous)
 const NO_AUDIT_VERBS = new Set([
-  "announcements:markRead", "announcements:react", "announcements:vote",
+  "announcements:markRead", "announcements:markAllRead", "announcements:react", "announcements:vote",
   "suggestions:upvote", "suggestions:downvote",
 ]);
 

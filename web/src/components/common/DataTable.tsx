@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, ChevronsUpDown, Filter, X, SlidersHorizontal, GripVertical, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, Bookmark, Check, ChevronsUpDown, Filter, X, SlidersHorizontal, GripVertical, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Search, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,13 +10,15 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { loadLocalPrefs, fetchServerPrefs, savePrefs } from "@/lib/tablePrefs";
+import { loadLocalPrefs, fetchServerPrefs, savePrefs, type SavedView } from "@/lib/tablePrefs";
+import { useConfirm } from "@/components/common/confirm";
 import { useAccessMode, type AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { AccessAction } from "@/components/access/AccessAction";
 import { usePermission } from "@/lib/perm";
 import { exportTable } from "@/lib/exportTable";
 import { useCollectionHasMore } from "@/hooks/useCollection";
+import { useMedia } from "@/hooks/useMedia";
 
 const PAGE_SIZES = [10, 25, 50, 100, 0]; // 0 = All
 
@@ -35,9 +37,54 @@ export type Column<T> = {
   defaultHidden?: boolean; // hidden until the user enables it in the column selector
   defaultFilter?: string; // seed an initial filter value (e.g. Status = "Active")
   hideValueByDefault?: string; // exclude rows with this accessor value unless filtered (e.g. "Deleted")
+  // Phone card layout: rank for inclusion (lower = more important; the best-ranked column becomes the card
+  // title, the next three its metadata lines). Unranked columns keep their visible order after ranked ones.
+  mobilePriority?: number;
 };
 
 type SortState = { id: string; dir: "asc" | "desc" } | null;
+
+/** An action offered on the bulk bar when rows are selected. Passing any bulk actions to DataTable turns on
+ *  row multi-select (leading checkbox column + header select-all over the filtered set). */
+export type BulkAction<T> = {
+  label: string;
+  icon?: React.ReactNode;
+  destructive?: boolean;
+  /** Ask before running (rendered through the shared confirm dialog). */
+  confirm?: { title: string; description?: string };
+  /** Return a reason to disable the action for this selection, or null to allow it. */
+  disabled?: (rows: T[]) => string | null;
+  /** Runs with the selected rows. Selection clears only on success; throw to keep it for a retry. */
+  run: (rows: T[]) => void | Promise<void>;
+};
+
+// --- Deep-linkable table state (sort + filters), carried in the hash query as one param per table ---------
+// Encoded as t.<key>={"s":"col.dir","f":{col:value}}. `f` is present only when the filters differ from the
+// columns' defaultFilter seed, so an untouched table adds nothing to the URL; an explicitly cleared default
+// round-trips as {"f":{}}. Written with history.replaceState (no history entry per keystroke, and the
+// unsaved-changes guard in router.ts ignores query-only changes).
+type UrlTableState = { s?: string; f?: Record<string, string> };
+
+function readUrlTableState(key: string | undefined): UrlTableState | null {
+  if (!key) return null;
+  try {
+    const qs = window.location.hash.split("?")[1] ?? "";
+    const raw = new URLSearchParams(qs).get(`t.${key}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as UrlTableState;
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseUrlSort(s: string | undefined): SortState {
+  if (!s) return null;
+  const at = s.lastIndexOf(".");
+  if (at <= 0) return null;
+  const dir = s.slice(at + 1);
+  return dir === "asc" || dir === "desc" ? { id: s.slice(0, at), dir } : null;
+}
 
 // Reconcile a saved hidden-set with the current columns. Columns the saved prefs never
 // knew about (not in savedOrder) fall back to their defaultHidden, so newly-added fields
@@ -78,6 +125,8 @@ export function DataTable<T>({
   getSubRows,
   hasMore,
   search,
+  bulkActions,
+  onLoadMore,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -109,6 +158,11 @@ export function DataTable<T>({
   // as `q` to useCollection, so the rows this table receives are already server-filtered across the whole
   // collection - the only way to reach a record beyond the first page.
   search?: { value: string; onChange: (v: string) => void; placeholder?: string };
+  // Bulk operations over selected rows. Presence enables multi-select; see BulkAction.
+  bulkActions?: BulkAction<T>[];
+  // Follow the server cursor and append the next page (useCollection's loadMore). When set and the rows are
+  // truncated, the footer grows a "Load more" button - the way past the server's page cap without search.
+  onLoadMore?: () => Promise<void> | void;
 }) {
   const am = useAccessMode();
   const autoHasMore = useCollectionHasMore(accessCollection);
@@ -135,8 +189,13 @@ export function DataTable<T>({
   );
   const [widths, setWidths] = React.useState<Record<string, number>>(initial.current.widths ?? {});
   const [pageSize, setPageSize] = React.useState<number>(initial.current.pageSize ?? 25);
+  const [density, setDensity] = React.useState<"comfortable" | "compact">(initial.current.density ?? "comfortable");
+  const [views, setViews] = React.useState<SavedView[]>(initial.current.views ?? []);
+  const [pickedView, setPickedView] = React.useState<string | null>(null); // saved view the user last applied, by name
   const [page, setPage] = React.useState(0);
   const [hydrated, setHydrated] = React.useState(false);
+  const savedBaseline = React.useRef<string | null>(null); // serialized layout we last loaded or saved
+  const defaultApplied = React.useRef<string | null>(null); // tableId whose pinned default view we've applied
 
   // Pull this user's saved layout from the server (source of truth across devices). Fetch ONCE per tableId:
   // `managed` derives from the caller's `columns`, which is usually a fresh array each render, so depending
@@ -144,8 +203,24 @@ export function DataTable<T>({
   // `managed` through a ref instead of listing it as a dependency.
   const managedRef = React.useRef(managed);
   managedRef.current = managed;
+  const loadedFor = React.useRef<string | undefined>(tableId);
   React.useEffect(() => {
     let active = true;
+    // A tabbed page swaps tableId (e.g. "leaves-mine" -> "leaves-all"). Re-seed from that table's own
+    // cached prefs so the previous tab's layout and saved views never bleed into this one.
+    if (loadedFor.current !== tableId) {
+      const local = loadLocalPrefs(tableId);
+      setOrder(local.order ?? managedRef.current.map((c) => c.id));
+      setHidden(computeHidden(local.hidden, local.order, managedRef.current));
+      setWidths(local.widths ?? {});
+      setPageSize(local.pageSize ?? 25);
+      setDensity(local.density ?? "comfortable");
+      setViews(local.views ?? []);
+      setPickedView(null);
+      setHydrated(false);
+      savedBaseline.current = null;
+      loadedFor.current = tableId;
+    }
     fetchServerPrefs(tableId).then((sp) => {
       if (!active) return;
       if (sp) {
@@ -153,6 +228,8 @@ export function DataTable<T>({
         setHidden(computeHidden(sp.hidden, sp.order, managedRef.current));
         setWidths(sp.widths ?? {});
         if (typeof sp.pageSize === "number") setPageSize(sp.pageSize);
+        if (sp.density) setDensity(sp.density);
+        if (sp.views) setViews(sp.views);
       }
       setHydrated(true);
     });
@@ -160,12 +237,46 @@ export function DataTable<T>({
       active = false;
     };
   }, [tableId]);
-  const [sort, setSort] = React.useState<SortState>(null);
+  // The key this table's sort/filter state travels under in the URL. tableId wins (unique per table);
+  // accessCollection is the fallback so most collection pages deep-link without extra wiring. Tables with
+  // neither simply skip URL sync.
+  const urlKey = tableId ?? accessCollection;
+  const urlInitial = React.useRef(readUrlTableState(urlKey));
+  const [sort, setSort] = React.useState<SortState>(() => parseUrlSort(urlInitial.current?.s));
   const [filters, setFilters] = React.useState<Record<string, string>>(() => {
+    // A URL-carried filter set replaces the defaults wholesale (an empty {} means "defaults cleared").
+    if (urlInitial.current?.f) return urlInitial.current.f;
     const seed: Record<string, string> = {};
     for (const c of columns) if (c.defaultFilter) seed[c.id] = c.defaultFilter;
     return seed;
   });
+
+  // Mirror sort + filters back into the hash query (debounced) so the current view is shareable and survives
+  // navigation. Skipped entirely without a urlKey; the param is dropped when the state matches the defaults.
+  React.useEffect(() => {
+    if (!urlKey) return;
+    const t = setTimeout(() => {
+      const defaults: Record<string, string> = {};
+      for (const c of columns) if (c.defaultFilter) defaults[c.id] = c.defaultFilter;
+      const active = Object.fromEntries(Object.entries(filters).filter(([, v]) => v));
+      const payload: UrlTableState = {};
+      if (sort) payload.s = `${sort.id}.${sort.dir}`;
+      if (JSON.stringify(active) !== JSON.stringify(defaults)) payload.f = active;
+      const value = Object.keys(payload).length > 0 ? JSON.stringify(payload) : null;
+
+      const raw = window.location.hash.replace(/^#\/?/, "");
+      const [path, qs = ""] = raw.split("?");
+      const params = new URLSearchParams(qs);
+      if (params.get(`t.${urlKey}`) === value || (!params.has(`t.${urlKey}`) && value === null)) return;
+      if (value === null) params.delete(`t.${urlKey}`);
+      else params.set(`t.${urlKey}`, value);
+      const q = params.toString();
+      history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
+    }, 250);
+    return () => clearTimeout(t);
+    // `columns` is usually a fresh array per render; reading defaults inside the debounce keeps it out of deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlKey, sort, filters]);
 
   // Reconcile saved order with the current columns (append new, drop stale).
   const orderedManaged = React.useMemo(() => {
@@ -225,17 +336,21 @@ export function DataTable<T>({
       };
       cols = [expandCol, ...cols];
     }
+    // Selection checkboxes are the leftmost column; the cell itself renders in renderRow (it needs to know
+    // child rows from parents - children ride with their parent and are not independently selectable).
+    if (bulkActions) {
+      cols = [{ id: "__select__", header: "", className: "w-px pr-0", headClassName: "w-px pr-0" } as Column<T>, ...cols];
+    }
     return cols;
-  }, [visibleColumns, am.enabled, accessCollection, accessTargetOf, getSubRows, expanded, getRowId, toggleExpand]);
+  }, [visibleColumns, am.enabled, accessCollection, accessTargetOf, getSubRows, expanded, getRowId, toggleExpand, bulkActions]);
 
   // Persist layout changes - but ONLY genuine user edits, never the initial load. The first run after
   // hydration just records the loaded layout as a baseline (no save); subsequent runs save only when the
   // serialized prefs actually differ. Without this, flipping `hydrated` true would re-PATCH the prefs we
   // just GET'd on every page load.
-  const savedBaseline = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!hydrated) return; // don't overwrite server prefs before we've loaded them
-    const payload = { order: orderedManaged, hidden: [...hidden], widths, pageSize };
+    const payload = { order: orderedManaged, hidden: [...hidden], widths, pageSize, density, views };
     const serialized = JSON.stringify(payload);
     if (savedBaseline.current === null) {
       savedBaseline.current = serialized; // first post-hydration run = the loaded layout; don't save it back
@@ -244,7 +359,7 @@ export function DataTable<T>({
     if (serialized === savedBaseline.current) return; // no real change
     savedBaseline.current = serialized;
     savePrefs(tableId, payload);
-  }, [hydrated, tableId, orderedManaged, hidden, widths, pageSize]);
+  }, [hydrated, tableId, orderedManaged, hidden, widths, pageSize, density, views]);
 
   const filtered = React.useMemo(() => {
     let out = rows;
@@ -275,6 +390,58 @@ export function DataTable<T>({
     }
     return out;
   }, [rows, filters, sort, colById]);
+
+  // --- bulk selection (only when the caller passes bulkActions) --------------------------------------------
+  const confirmDialog = useConfirm();
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = React.useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = React.useState(false);
+  // Selection tracks the FILTERED set: rows that filter out (or vanish on reload) silently drop out of it,
+  // so a bulk action can never touch a row the user no longer sees.
+  React.useEffect(() => {
+    if (!bulkActions) return;
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(filtered.map(getRowId));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, !!bulkActions]);
+  const selectedRows = React.useMemo(
+    () => (selected.size === 0 ? [] : filtered.filter((r) => selected.has(getRowId(r)))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filtered, selected]
+  );
+  const allSelected = filtered.length > 0 && selectedRows.length === filtered.length;
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(filtered.map(getRowId)));
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  async function runBulk(action: BulkAction<T>) {
+    if (action.confirm) {
+      const ok = await confirmDialog({
+        title: action.confirm.title,
+        description: action.confirm.description,
+        destructive: action.destructive,
+        confirmLabel: action.label,
+      });
+      if (!ok) return;
+    }
+    setBulkBusy(action.label);
+    try {
+      await action.run(selectedRows);
+      setSelected(new Set()); // success: the selection's job is done
+    } catch {
+      // the caller's run() surfaces its own error toast; keep the selection so the user can retry
+    } finally {
+      setBulkBusy(null);
+    }
+  }
 
   const anyFilter = Object.values(filters).some(Boolean);
   const total = filtered.length;
@@ -345,6 +512,75 @@ export function DataTable<T>({
   const widthStyle = (id: string): React.CSSProperties | undefined =>
     widths[id] ? { width: widths[id], minWidth: widths[id], maxWidth: widths[id] } : undefined;
 
+  // --- phone card layout ------------------------------------------------------------------------------------
+  // Below sm, a wide table degrades to horizontal-scroll hunting; render each row as a card instead: best-
+  // ranked column as the title, the next three as labelled lines, trailing (header-less) columns as actions.
+  const isPhone = useMedia("(max-width: 639px)");
+  const mobileLayout = React.useMemo(() => {
+    const dataCols = visibleColumns.filter((c) => c.header !== "");
+    const ranked = [...dataCols].sort((a, b) => (a.mobilePriority ?? 99) - (b.mobilePriority ?? 99));
+    return { title: ranked[0], meta: ranked.slice(1, 4) };
+  }, [visibleColumns]);
+
+  const renderMobileCard = (r: T, isChild: boolean) => {
+    const id = getRowId(r);
+    const { title, meta } = mobileLayout;
+    return (
+      <Card
+        key={id}
+        className={cn("p-3", isChild && "ml-6", onRowClick && "cursor-pointer transition-colors active:bg-muted/50", rowClassName?.(r))}
+        onClick={onRowClick ? () => onRowClick(r) : undefined}
+        role={onRowClick ? "button" : undefined}
+        tabIndex={onRowClick ? 0 : undefined}
+        onKeyDown={
+          onRowClick
+            ? (e: React.KeyboardEvent) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onRowClick(r);
+                }
+              }
+            : undefined
+        }
+      >
+        <div className="flex items-start gap-3">
+          {bulkActions && !isChild && (
+            <Checkbox
+              checked={selected.has(id)}
+              onCheckedChange={() => toggleOne(id)}
+              onClick={(e) => e.stopPropagation()}
+              aria-label="Select row"
+              className="mt-0.5"
+            />
+          )}
+          <div className="min-w-0 flex-1">
+            {title && <div className="text-sm font-medium">{title.cell ? title.cell(r) : String(title.accessor?.(r) ?? "")}</div>}
+            <dl className="mt-1 space-y-0.5">
+              {meta.map((c) => {
+                const content = c.cell ? c.cell(r) : c.accessor ? String(c.accessor(r) ?? "") : null;
+                if (content == null || content === "") return null;
+                return (
+                  <div key={c.id} className="flex items-baseline gap-2 text-xs">
+                    <dt className="shrink-0 text-muted-foreground">{c.header}</dt>
+                    <dd className="min-w-0 flex-1 truncate text-right">{content}</dd>
+                  </div>
+                );
+              })}
+            </dl>
+          </div>
+          {trailing.length > 0 && (
+            <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+              {trailing.map((c) => (
+                <React.Fragment key={c.id}>{c.cell?.(r)}</React.Fragment>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
+    );
+  };
+
   const activeFilters = Object.entries(filters).filter(([, v]) => v);
   const hideableCount = orderedManaged.length;
   const hiddenCount = orderedManaged.filter((id) => hidden.has(id)).length;
@@ -389,6 +625,184 @@ export function DataTable<T>({
       )}
     </>
   );
+  // --- saved views: named snapshots of what the table shows, persisted with its other prefs ---------------
+  // Only offered on tables with a tableId (nothing to persist under otherwise). A view captures the whole
+  // "which rows, which columns" state - column filters, sort, the server-side search box and the visible
+  // column set - so applying one always produces a visible change, whichever control the narrowing came from.
+  const [viewName, setViewName] = React.useState("");
+  const [viewsOpen, setViewsOpen] = React.useState(false);
+  // The table's built-in baseline, i.e. what "Default" restores: the columns' own defaults, no sort,
+  // no search. Read from `columns` at call time (a fresh array each render, so never a dependency).
+  const baseline = () => ({
+    filters: Object.fromEntries(columns.filter((c) => c.defaultFilter).map((c) => [c.id, c.defaultFilter!])),
+    hidden: computeHidden(undefined, undefined, managedRef.current),
+  });
+  const nonEmpty = (f: Record<string, string>) =>
+    Object.fromEntries(Object.entries(f).filter(([, v]) => v).sort(([a], [b]) => a.localeCompare(b)));
+  const sortKey = sort ? `${sort.id}.${sort.dir}` : "";
+  const hiddenKey = [...hidden].sort().join(",");
+  const filtersKey = JSON.stringify(nonEmpty(filters));
+
+  function saveCurrentView() {
+    const name = viewName.trim();
+    if (!name) return;
+    const snap: SavedView = {
+      name,
+      sort: sort ? `${sort.id}.${sort.dir}` : undefined,
+      filters: nonEmpty(filters),
+      hidden: [...hidden],
+      // Keep the pin when overwriting a view that was the default.
+      ...(views.find((v) => v.name === name)?.isDefault ? { isDefault: true as const } : {}),
+      ...(search ? { search: search.value } : {}),
+    };
+    setViews((vs) => [...vs.filter((v) => v.name !== name), snap]); // same name = overwrite
+    setViewName("");
+  }
+  // `null` applies the built-in default view.
+  const applyView = (v: SavedView | null) => {
+    setViewsOpen(false);
+    setPage(0);
+    setPickedView(v?.name ?? null);
+    const base = baseline();
+    setSort(parseUrlSort(v?.sort));
+    setFilters(v ? { ...v.filters } : base.filters);
+    // Legacy views saved before column visibility was captured leave the current layout alone.
+    setHidden(v ? (v.hidden ? new Set(v.hidden) : hidden) : base.hidden);
+    search?.onChange(v?.search ?? "");
+  };
+  const toggleDefaultView = (name: string) =>
+    setViews((vs) => vs.map((v) => (v.name === name ? { ...v, isDefault: !v.isDefault } : { ...v, isDefault: false })));
+
+  // Which view the table is currently showing. The one the user picked wins as long as the live state still
+  // matches its snapshot, so it clears itself the moment they tweak a filter away from it - and two views
+  // that happen to capture the same state stay distinguishable (matching alone would always name the first).
+  const viewMatches = (v: SavedView) =>
+    JSON.stringify(nonEmpty(v.filters)) === filtersKey &&
+    (v.sort ?? "") === sortKey &&
+    (!v.hidden || [...v.hidden].sort().join(",") === hiddenKey) &&
+    (!search || (v.search ?? "") === search.value);
+  const picked = views.find((v) => v.name === pickedView) ?? null;
+  const activeView = picked && viewMatches(picked) ? picked : (views.find(viewMatches) ?? null);
+  const onBaseline =
+    !activeView &&
+    !sort &&
+    filtersKey === JSON.stringify(nonEmpty(baseline().filters)) &&
+    hiddenKey === [...baseline().hidden].sort().join(",") &&
+    (!search || !search.value);
+
+  // Open the table on its pinned default view. Runs once, after prefs land, and yields to a deep link:
+  // a URL that carries explicit table state is a more specific request than the saved default.
+  React.useEffect(() => {
+    if (!tableId || !hydrated || defaultApplied.current === tableId) return;
+    defaultApplied.current = tableId;
+    if (readUrlTableState(urlKey)) return;
+    const pinned = views.find((v) => v.isDefault);
+    if (pinned) applyView(pinned);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableId, hydrated, views]);
+
+  const viewRow = (key: string, label: string, active: boolean, onApply: () => void, extras?: React.ReactNode) => (
+    <div key={key} className="group/view flex items-center gap-1">
+      <button
+        type="button"
+        onClick={onApply}
+        aria-current={active ? "true" : undefined}
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent",
+          active && "bg-accent/60 font-medium"
+        )}
+      >
+        <Check className={cn("h-3.5 w-3.5 shrink-0", active ? "text-primary" : "opacity-0")} />
+        <span className="truncate">{label}</span>
+      </button>
+      {extras}
+    </div>
+  );
+
+  const viewsControl = tableId ? (
+    <TooltipProvider>
+      <Popover open={viewsOpen} onOpenChange={setViewsOpen}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size={activeView ? "sm" : "icon"}
+                className={cn("relative h-9 gap-1.5", activeView ? "max-w-40 px-2.5" : "w-9")}
+                aria-label="Saved views"
+              >
+                <Bookmark className={cn("h-4 w-4 shrink-0", activeView && "fill-current text-primary")} />
+                {activeView ? (
+                  <span className="truncate text-xs">{activeView.name}</span>
+                ) : (
+                  views.length > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />
+                )}
+              </Button>
+            </PopoverTrigger>
+          </TooltipTrigger>
+          <TooltipContent>{activeView ? `View: ${activeView.name}` : "Saved views"}</TooltipContent>
+        </Tooltip>
+        <PopoverContent align="end" className="w-60">
+          <p className="mb-2 text-xs font-semibold text-muted-foreground">Views</p>
+          <div className="max-h-64 space-y-0.5 overflow-y-auto">
+            {viewRow("__default", "Default", onBaseline, () => applyView(null))}
+            {views.map((v) =>
+              viewRow(
+                v.name,
+                v.name,
+                activeView?.name === v.name,
+                () => applyView(v),
+                <>
+                  <button
+                    type="button"
+                    aria-label={v.isDefault ? `Unpin ${v.name} as the default view` : `Open ${v.name} by default`}
+                    onClick={() => toggleDefaultView(v.name)}
+                    className={cn(
+                      "rounded p-1 transition-opacity hover:text-primary",
+                      v.isDefault ? "text-primary" : "text-muted-foreground opacity-0 group-hover/view:opacity-100"
+                    )}
+                  >
+                    <Star className={cn("h-3.5 w-3.5", v.isDefault && "fill-current")} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Delete view ${v.name}`}
+                    onClick={() => setViews((vs) => vs.filter((x) => x.name !== v.name))}
+                    className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover/view:opacity-100"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )
+            )}
+          </div>
+          <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
+            {views.length === 0
+              ? "Set up filters, a sort or a search, then save them here as a named view."
+              : "A view restores its filters, sort, search and columns. Star one to open the table with it."}
+          </p>
+          <div className="mt-2 flex items-center gap-1.5 border-t pt-2">
+            <Input
+              value={viewName}
+              onChange={(e) => setViewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  saveCurrentView();
+                }
+              }}
+              placeholder="Name this view"
+              className="h-8 min-w-0"
+            />
+            <Button size="sm" className="h-8" disabled={!viewName.trim()} onClick={saveCurrentView}>
+              Save
+            </Button>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </TooltipProvider>
+  ) : null;
+
   const columnsControl = (
     <TooltipProvider>
       <Popover>
@@ -429,6 +843,24 @@ export function DataTable<T>({
             })}
           </div>
           <Button variant="ghost" size="sm" className="mt-2 h-7 w-full text-xs" onClick={() => setHidden(new Set())}>Show all</Button>
+          <div className="mt-2 flex items-center justify-between border-t pt-2">
+            <span className="text-xs font-semibold text-muted-foreground">Density</span>
+            <div className="inline-flex rounded-md border p-0.5">
+              {(["comfortable", "compact"] as const).map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setDensity(d)}
+                  className={cn(
+                    "rounded px-2 py-0.5 text-xs capitalize transition-colors",
+                    density === d ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
+          </div>
         </PopoverContent>
       </Popover>
     </TooltipProvider>
@@ -476,7 +908,7 @@ export function DataTable<T>({
     <div className="space-y-3">
       {/* Controls: portaled into a parent bar (tabs/toggles) when a slot is given, else their own row. */}
       {controlsSlot !== undefined ? (
-        controlsSlot ? createPortal(<div className="flex flex-wrap items-center justify-end gap-2">{searchControl}{chipsControl}{toolbar}{exportControl}{columnsControl}</div>, controlsSlot) : null
+        controlsSlot ? createPortal(<div className="flex flex-wrap items-center justify-end gap-2">{searchControl}{chipsControl}{toolbar}{exportControl}{viewsControl}{columnsControl}</div>, controlsSlot) : null
       ) : (
         <div className="flex items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -487,13 +919,71 @@ export function DataTable<T>({
           <div className="flex items-center gap-2">
             {toolbar}
             {exportControl}
+            {viewsControl}
             {columnsControl}
           </div>
         </div>
       )}
 
+      {/* Bulk bar: appears with the first selected row, sticky so it stays reachable over a long table. */}
+      {bulkActions && selected.size > 0 && (
+        <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop">
+          <span className="text-sm font-medium tabular-nums">{selectedRows.length} selected</span>
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSelected(new Set())}>
+            Clear
+          </Button>
+          <div className="min-w-4 flex-1" />
+          {bulkActions.map((a) => {
+            const reason = a.disabled?.(selectedRows) ?? null;
+            return (
+              <Button
+                key={a.label}
+                size="sm"
+                variant={a.destructive ? "destructive" : "outline"}
+                disabled={!!reason || (!!bulkBusy && bulkBusy !== a.label)}
+                loading={bulkBusy === a.label}
+                title={reason ?? undefined}
+                onClick={() => void runBulk(a)}
+              >
+                {a.icon} {a.label}
+              </Button>
+            );
+          })}
+        </div>
+      )}
+
+      {isPhone ? (
+        filtered.length === 0 ? (
+          <Card className="flex flex-col items-center gap-3 p-8 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              <Inbox className="h-6 w-6" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-foreground">
+                {truncated && anyFilter ? `No matches in the ${rows.length} loaded records` : emptyTitle}
+              </p>
+              {(truncated && anyFilter) ? (
+                <p className="mt-1 text-sm text-muted-foreground">Filters apply to the loaded records only - use search to look across everything.</p>
+              ) : (
+                emptyDescription && <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
+              )}
+            </div>
+          </Card>
+        ) : (
+          <div className="space-y-2">
+            {paged.flatMap((row) => [
+              renderMobileCard(row, false),
+              // Children are always visible on phone: cards carry no fold chevron.
+              ...(getSubRows?.(row) ?? []).map((k) => renderMobileCard(k, true)),
+            ])}
+          </div>
+        )
+      ) : (
       <Card className="overflow-hidden">
-        <Table containerClassName="max-h-[68vh]">
+        <Table
+          containerClassName="max-h-[68vh]"
+          className={density === "compact" ? "[&_tbody_td]:py-1.5 [&_thead_th]:h-9" : undefined}
+        >
           {/* Sticky, opaque header so column labels stay visible while scrolling a long list (the container
               above bounds the height; short tables never reach it, so they're unchanged). */}
           <TableHeader className="sticky top-0 z-10 bg-muted">
@@ -517,6 +1007,14 @@ export function DataTable<T>({
                       col.headClassName
                     )}
                   >
+                    {col.id === "__select__" ? (
+                      <Checkbox
+                        checked={allSelected ? true : selected.size > 0 ? "indeterminate" : false}
+                        onCheckedChange={toggleAll}
+                        aria-label={allSelected ? "Deselect all rows" : "Select all rows"}
+                        disabled={filtered.length === 0}
+                      />
+                    ) : (
                     <div
                       className={cn(
                         "flex items-center gap-1",
@@ -596,6 +1094,7 @@ export function DataTable<T>({
                         </Popover>
                       )}
                     </div>
+                    )}
                     {reorderable && (
                       <span
                         onPointerDown={(e) => startResize(e, col.id)}
@@ -682,7 +1181,20 @@ export function DataTable<T>({
                           col.className
                         )}
                       >
-                        {col.cell ? col.cell(r) : String(col.accessor?.(r) ?? "")}
+                        {col.id === "__select__" ? (
+                          !isChild && (
+                            <Checkbox
+                              checked={selected.has(getRowId(r))}
+                              onCheckedChange={() => toggleOne(getRowId(r))}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label="Select row"
+                            />
+                          )
+                        ) : col.cell ? (
+                          col.cell(r)
+                        ) : (
+                          String(col.accessor?.(r) ?? "")
+                        )}
                       </TableCell>
                     ))}
                   </TableRow>
@@ -695,11 +1207,28 @@ export function DataTable<T>({
           </TableBody>
         </Table>
       </Card>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-xs text-muted-foreground">
-        <span>
-          {total === 0 ? "No records" : `Showing ${from}-${to} of ${truncated ? `${total}+` : total}`}
-          {total !== rows.length ? ` (filtered from ${truncated ? `${rows.length}+` : rows.length})` : ""}
-          {truncated ? " — first page only" : ""}
+        <span className="flex items-center gap-2">
+          <span>
+            {total === 0 ? "No records" : `Showing ${from}-${to} of ${truncated ? `${total}+` : total}`}
+            {total !== rows.length ? ` (filtered from ${truncated ? `${rows.length}+` : rows.length})` : ""}
+            {truncated && !onLoadMore ? " — first page only" : ""}
+          </span>
+          {truncated && onLoadMore && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              loading={loadingMore}
+              onClick={() => {
+                setLoadingMore(true);
+                void Promise.resolve(onLoadMore()).finally(() => setLoadingMore(false));
+              }}
+            >
+              Load more
+            </Button>
+          )}
         </span>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">

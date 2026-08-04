@@ -14,20 +14,25 @@ enabled = true
 [assets]
 directory = "./web/dist"
 not_found_handling = "single-page-application"
-run_worker_first = ["/v1/*", "/esign/*"]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*"]
 
 # Explicit CPU ceiling: PDF / Form-16 / letter rendering is CPU-heavy. Bounded so a runaway render can't run
 # away, with headroom above a normal request.
+#
+# FREE-PLAN NOTE: `[limits]` is a PAID-plan (Workers Standard) feature - on the free plan, deploy with this
+# block commented out (the free cap is a fixed 10ms CPU, which PDF rendering exceeds; every data flow fits).
+# The app's DB access is shaped for the free plan's 50-subrequests-per-invocation budget: whole-table
+# prefetch + one atomic db.batch write group (see src/lib/dbBatch.ts), so payroll builds and the nightly
+# cron stay well under it at any headcount.
 [limits]
 cpu_ms = 60000
 
 [vars]
-CF_ACCESS_TEAM_DOMAIN = "https://msphere.cloudflareaccess.com"
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
 EMAIL_PROVIDER = "resend"
 EMAIL_FROM = "hr@msphere.io"
-# Second perimeter (Cloudflare Access is primary): only these email domains may auto-provision on first login.
-# Comma-separated; unset = no restriction. Keep in sync with the Access application's allowed identities.
+# The org perimeter under Google sign-in: only these email domains may sign in / auto-provision on first
+# login. Comma-separated. Never deploy unset - that would let ANY Google account in.
 ALLOWED_EMAIL_DOMAINS = "msphere.io"
 
 [[d1_databases]]
@@ -60,10 +65,9 @@ enabled = true
 [env.staging.assets]
 directory = "./web/dist"
 not_found_handling = "single-page-application"
-run_worker_first = ["/v1/*", "/esign/*"]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*"]
 
 [env.staging.vars]
-CF_ACCESS_TEAM_DOMAIN = "https://msphere.cloudflareaccess.com"
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
 EMAIL_PROVIDER = "resend"
 EMAIL_FROM = "hr@msphere.io"

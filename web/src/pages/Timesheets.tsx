@@ -7,6 +7,8 @@ import { cn, formatDate, idOf } from "@/lib/utils";
 import type { Employee, Me, Project, TimeEntry, TimeEntryStatus } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
+import { AccessScope } from "@/components/access/AccessScope";
+import { AccessAction } from "@/components/access/AccessAction";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
@@ -121,8 +123,11 @@ export default function Timesheets({ me }: { me: Me }) {
   }
 
   return (
+    // The route key ("timesheets") is not a collection; the grid's data is time-entries. Rebind the ambient
+    // scope so the header icon and the verb affordances manage the right resource.
+    <AccessScope collection="time-entries">
     <div>
-      <PageHeader title="Timesheets" actions={<PageSettings me={me} host="timesheets" />} />
+      <PageHeader accessCollection="time-entries" title="Timesheets" actions={<PageSettings me={me} host="timesheets" />} />
 
       {canApprove && pending.length > 0 && (
         <Card className="mb-6 p-4">
@@ -132,8 +137,12 @@ export default function Timesheets({ me }: { me: Me }) {
               <div key={e.path} className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
                 <span><span className="font-medium">{empName(e.employee)}</span> · {projectById.get(idOf(e.project ?? ""))?.name ?? "Project"} · <span className="tabular-nums">{fmt(e.hours)}h</span> · {formatDate(e.date)}{e.description ? ` · ${e.description}` : ""}</span>
                 <span className="flex gap-1">
-                  <Button size="sm" variant="outline" loading={deciding === `${e.path}|approve`} disabled={deciding === `${e.path}|reject`} onClick={() => decide(e, "approve")}><Check className="h-3.5 w-3.5" /> Approve</Button>
-                  <Button size="sm" variant="ghost" className="text-destructive" loading={deciding === `${e.path}|reject`} disabled={deciding === `${e.path}|approve`} onClick={() => decide(e, "reject")}><X className="h-3.5 w-3.5" /> Reject</Button>
+                  <AccessAction verb="approve" objectPath={e.path} can={e.access?.can} label="Approve time entry">
+                    <Button size="sm" variant="outline" loading={deciding === `${e.path}|approve`} disabled={deciding === `${e.path}|reject`} onClick={() => decide(e, "approve")}><Check className="h-3.5 w-3.5" /> Approve</Button>
+                  </AccessAction>
+                  <AccessAction verb="reject" objectPath={e.path} can={e.access?.can} label="Reject time entry">
+                    <Button size="sm" variant="ghost" className="text-destructive" loading={deciding === `${e.path}|reject`} disabled={deciding === `${e.path}|approve`} onClick={() => decide(e, "reject")}><X className="h-3.5 w-3.5" /> Reject</Button>
+                  </AccessAction>
                   <RowActivityButton resource={e.path} />
                 </span>
               </div>
@@ -148,7 +157,11 @@ export default function Timesheets({ me }: { me: Me }) {
         <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w + 7 * DAY))} aria-label="Next week"><ChevronRight className="h-4 w-4" /></Button>
         <Button variant="ghost" size="sm" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</Button>
         <span className="ml-auto text-sm text-muted-foreground">Week total <span className="font-semibold tabular-nums text-foreground">{fmt(weekTotal)}h</span></span>
-        {draftCount > 0 && <Button size="sm" onClick={submitWeek} loading={submitting}><Send className="h-3.5 w-3.5" /> Submit week ({draftCount})</Button>}
+        {draftCount > 0 && (
+          <AccessAction verb="submit" label="Submit time entries">
+            <Button size="sm" onClick={submitWeek} loading={submitting}><Send className="h-3.5 w-3.5" /> Submit week ({draftCount})</Button>
+          </AccessAction>
+        )}
       </div>
 
       {!weekLoaded || projectsState === "loading" ? (
@@ -232,6 +245,7 @@ export default function Timesheets({ me }: { me: Me }) {
         />
       )}
     </div>
+    </AccessScope>
   );
 }
 

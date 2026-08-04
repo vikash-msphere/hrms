@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Move, Scaling } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { KUDOS_ART_DIECUT } from "@/lib/kudosArt";
+import { ART_DIECUT } from "@/lib/kudosArt";
 import { contourFromAlpha, halfPolygon, hasContour, rasterSize, silhouettePolygon, type Contour } from "@/lib/silhouette";
 import type { RecipientLayout, StickerLayout, WrapMode } from "@/types";
 
@@ -199,6 +199,10 @@ export const VALIGN_LABELS: { value: BodyValign; label: string }[] = [
   { value: "middle", label: "Text centred" },
   { value: "bottom", label: "Text at bottom" },
 ];
+// Where the words ride when nobody has said: the middle. A card is a poster, not a document - it is as tall as
+// its tallest element, and words pinned to the top of the space that leaves read as a mistake rather than as a
+// decision. Everything placed on a card starts centred for the same reason (see PlacedElement).
+export const DEFAULT_VALIGN: BodyValign = "middle";
 
 /**
  * Slide a block of text down the room its card has to spare.
@@ -209,7 +213,9 @@ export const VALIGN_LABELS: { value: BodyValign; label: string }[] = [
  * ends and where the CARD ends, so that is what gets measured.
  *
  * The offset is a `transform`, deliberately: it moves the words without changing layout, so nothing it was measured
- * from shifts underneath it.
+ * from shifts underneath it. Which is also why the room has a FLOOR that is not always the card: anything that
+ * follows in the flow (a poll's options) keeps the place it was laid out in, so measuring past it would slide the
+ * words straight over the top of it. The room ends wherever the next thing begins - see `flowFloor`.
  *
  * Both edges are read with getBoundingClientRect, which is the whole trick. `offsetTop` is relative to whichever
  * ancestor happens to be positioned, while the card's height is the card's own - mixing the two silently loses
@@ -218,11 +224,40 @@ export const VALIGN_LABELS: { value: BodyValign; label: string }[] = [
  * the untranslated position, and the card's on-screen scale is divided out because the composer previews a card
  * inside a scaled frame - a translation there is in the card's own pixels, not the screen's.
  */
+/**
+ * The lowest a block may be slid to: the top of whatever comes NEXT below it, or the card's own bottom when
+ * nothing does.
+ *
+ * "Next" is not just the element's own sibling - the thing that follows it may be a sibling of an ancestor (a
+ * poll's options sit outside the text block but inside the card), so the walk climbs to the card box looking for
+ * the first one. Two kinds of neighbour are not floors:
+ *
+ *   Out of flow. A floated or absolutely positioned sticker was placed on the card deliberately, and letting the
+ *   words pass it is the whole point of wrapping it.
+ *
+ *   Beside rather than below. A kudos card's recipient column is the next sibling of the remark's column, but it
+ *   sits alongside it in a flex row - clamping to its top would pin the remark to the top of the card. So a
+ *   neighbour only counts once it actually starts at or below where this block ends.
+ */
+function flowFloor(el: HTMLElement, box: HTMLElement, naturalBottom: number): number {
+  for (let node: HTMLElement | null = el; node && node !== box; node = node.parentElement) {
+    for (let sib = node.nextElementSibling; sib; sib = sib.nextElementSibling) {
+      const cs = getComputedStyle(sib);
+      if (cs.display === "none" || cs.position === "absolute" || cs.position === "fixed" || cs.float !== "none") continue;
+      const top = sib.getBoundingClientRect().top;
+      if (top >= naturalBottom - 1) return top;
+    }
+  }
+  return box.getBoundingClientRect().bottom;
+}
+
 export function ValignBlock({ valign, className, children }: { valign?: BodyValign; className?: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [offset, setOffset] = useState(0);
   const applied = useRef(0); // what the transform is currently worth, so a measurement can undo it
-  const active = !!valign && valign !== "top";
+  // Absent means centred, not top - see DEFAULT_VALIGN. Only "top" is a no-op, and it has to be stored to be had.
+  const mode = valign ?? DEFAULT_VALIGN;
+  const active = mode !== "top";
   applied.current = active ? offset : 0;
 
   useLayoutEffect(() => {
@@ -238,10 +273,11 @@ export function ValignBlock({ valign, className, children }: { valign?: BodyVali
       const elRect = el.getBoundingClientRect();
       const scale = box.offsetHeight > 0 ? boxRect.height / box.offsetHeight : 1;
       if (!scale) return;
-      // Where the text's bottom edge would sit with no offset at all, and how much card is left underneath it.
+      // Where the text's bottom edge would sit with no offset at all, and how much room is left underneath it
+      // before the next thing in the flow (or the card's own floor).
       const naturalBottom = elRect.bottom - applied.current * scale;
-      const room = (boxRect.bottom - naturalBottom) / scale;
-      const next = Math.max(0, Math.round(room * (valign === "middle" ? 0.5 : 1)));
+      const room = (flowFloor(el, box, naturalBottom) - naturalBottom) / scale;
+      const next = Math.max(0, Math.round(room * (mode === "middle" ? 0.5 : 1)));
       setOffset((cur) => (cur === next ? cur : next));
     };
     measure();
@@ -249,7 +285,7 @@ export function ValignBlock({ valign, className, children }: { valign?: BodyVali
     ro.observe(box);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [active, valign]);
+  }, [active, mode]);
 
   return (
     <div ref={ref} className={className} style={offset ? { transform: `translateY(${offset}px)` } : undefined}>
@@ -353,9 +389,10 @@ export function HalfSpacer({
   );
 }
 
-// Where each thing starts. A post's sticker sits behind the words, bottom-right, out of the way of the opening
-// lines. A kudos keeps its art and its recipient in the card's own columns - that trio IS the kudos card - so
-// theirs are inline, and their size only matters once someone resizes them.
+// Where each thing starts: beside the words, wrapped, on its own side of the card - the post's sticker to the
+// right, a kudos card's art to the left and its recipient to the right. `y: 0` is the placement these carry once
+// someone picks them up FROM the top; until then nobody has, and an untouched element is centred in the card's
+// height by measurement (see PlacedElement), because how far down "the middle" is depends on the card.
 export const POST_STICKER_LAYOUT: StickerLayout = { x: 1, y: 0, size: 0.28, opacity: 1, wrap: DEFAULT_WRAP };
 export const KUDOS_STICKER_LAYOUT: StickerLayout = { x: 0, y: 0, size: 0.22, opacity: 1, wrap: DEFAULT_WRAP };
 export const KUDOS_RECIPIENT_LAYOUT: RecipientLayout = { x: 1, y: 0, size: 0.13, wrap: DEFAULT_WRAP };
@@ -419,6 +456,56 @@ export function PlacedElement<T extends Placement>({
   const editable = !!onChange;
   const eff = at ?? template;
   const wrap = eff.wrap ?? DEFAULT_WRAP;
+
+  // Untouched, a wrapped element rides in the MIDDLE of the card's height rather than at its top - the same
+  // decision ValignBlock makes for the words, for the same reason: the card is as tall as its tallest element,
+  // and everything else hugging the ceiling of the space that leaves looks like a bug.
+  //
+  // It is measured rather than authored because a float's `y` is a top MARGIN in card-widths, and centring
+  // depends on the card's height, which nothing here knows in advance. Measured, so the offset is dropped the
+  // moment the author places the element themselves (`at` set) - and the handover is seamless, because the drag
+  // converts this exact offset into the `y` it stands for.
+  //
+  // Unlike a ValignBlock's transform, this offset is LAYOUT: pushing a float down can push the content that
+  // avoids it (a poll's options) down too, which makes the card taller, which would leave more room to centre in,
+  // which would push it further - a loop that never settles. So the geometry is always read with the offset
+  // momentarily removed. The result is then a pure function of the un-offset layout: measuring again returns the
+  // same number and the loop stops on its first pass.
+  const centred = !at && isWrapped(wrap);
+  const [centreOffset, setCentreOffset] = useState(0);
+  const appliedCentre = useRef(0); // what the margin is currently worth, so a drag can turn it into a `y`
+  appliedCentre.current = centred ? centreOffset : 0;
+  // Which property carries it: the gutter placement is absolutely positioned, everything else floats.
+  const centreProp: "top" | "marginTop" = isWrapped(wrap) && wrapSide(eff.x) === "middle" ? "top" : "marginTop";
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !centred) {
+      setCentreOffset(0);
+      return;
+    }
+    const box = el.closest("[data-card-box]") as HTMLElement | null;
+    if (!box) return;
+    const measure = () => {
+      // Read the card as it would be with this element at the top of it, then put the offset back. Both writes
+      // land inside one callback, so the observer sees no net change and does not re-fire.
+      const restore = el.style[centreProp];
+      el.style[centreProp] = "0px";
+      const boxRect = box.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      el.style[centreProp] = restore;
+      // The composer previews a card inside a scaled frame; the offset is in the card's own pixels.
+      const scale = box.offsetHeight > 0 ? boxRect.height / box.offsetHeight : 1;
+      if (!scale) return;
+      const room = (boxRect.bottom - elRect.bottom) / scale;
+      const next = Math.max(0, Math.round(room / 2));
+      setCentreOffset((cur) => (cur === next ? cur : next));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [centred, wrap, centreProp]);
   // Only the two modes that ask for it pay for a trace, and only when the picture is actually floated beside the
   // words - a band or a free-floating one displaces nothing.
   const wantsOutline = (wrap === "tight" || wrap === "through") && wrapSide(eff.x) !== "middle";
@@ -442,7 +529,14 @@ export function PlacedElement<T extends Placement>({
       ...template,
       size: parent0.width > 0 ? start.width / parent0.width : template.size,
       x: parent0.width - start.width > 1 ? clamp01((start.left - parent0.left) / (parent0.width - start.width)) : 0,
-      y: parent0.height - start.height > 1 ? clamp01((start.top - parent0.top) / (parent0.height - start.height)) : 0,
+      // y means two different things, so it is measured two different ways. In the flow it is a top MARGIN in
+      // card-widths - and an untouched element's margin is exactly the centring offset it is sitting on, so
+      // picking it up leaves it where it looks. Out of the flow it is a fraction of the free space instead.
+      // `offsetWidth` rather than the rect: the offset was measured in the card's own pixels, and the composer
+      // previews the card inside a scaled frame, so the rect would divide by the wrong width.
+      y: isWrapped(wrap)
+        ? (box.offsetWidth > 0 ? clamp(appliedCentre.current / box.offsetWidth, 0, 1) : 0)
+        : parent0.height - start.height > 1 ? clamp01((start.top - parent0.top) / (parent0.height - start.height)) : 0,
     };
     // Dragging the element out of the card's own column means "I'll position this myself", so it becomes a
     // floating one - unless the card's default is already floating (a post's sticker lives behind the words), in
@@ -548,7 +642,7 @@ export function PlacedElement<T extends Placement>({
       position: "absolute",
       left: "50%",
       transform: "translateX(-50%)",
-      top: `${(Math.max(0, eff.y) * 100).toFixed(2)}cqw`,
+      top: centred ? `${centreOffset}px` : `${(Math.max(0, eff.y) * 100).toFixed(2)}cqw`,
     });
   } else if (isWrapped(wrap)) {
     Object.assign(style, {
@@ -562,7 +656,9 @@ export function PlacedElement<T extends Placement>({
       // so growing the margin cannot slide the outline out of register with the drawing it traces.
       [side === "left" ? "marginRight" : "marginLeft"]: `${air}rem`,
       marginBottom: `${air}rem`,
-      marginTop: `${(Math.max(0, eff.y) * 100).toFixed(2)}cqw`,
+      // Untouched, the measured centring offset; placed, the author's own top margin. Both are "how far down the
+      // card this starts", which is why the first drag can convert one into the other without it moving.
+      marginTop: centred ? `${centreOffset}px` : `${(Math.max(0, eff.y) * 100).toFixed(2)}cqw`,
       // No outline yet (still tracing, or nothing traceable) means no shape, and the mode wraps the box - which is
       // exactly what square does, so the picture reads right at every moment rather than jumping when it resolves.
       ...(outline ? { shapeOutside: `content-box ${outline}`, shapeMargin: `${air}rem` } : null),
@@ -661,14 +757,14 @@ export function CardCanvas({ reserve, children, className }: { reserve?: number;
 }
 
 /** The artwork itself, sized by whatever placement holds it. */
-export function StickerImage({ url, isSticker, onAspect }: { url: string; isSticker?: boolean; onAspect?: (a: number) => void }) {
+export function StickerImage({ url, onAspect }: { url: string; onAspect?: (a: number) => void }) {
   return (
     <img
       src={url}
       alt=""
       aria-hidden
       draggable={false}
-      className={cn("h-auto w-full select-none object-contain", isSticker && KUDOS_ART_DIECUT)}
+      className={cn("h-auto w-full select-none object-contain", ART_DIECUT)}
       onLoad={(e) => {
         const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
         if (w > 0 && h > 0) onAspect?.(w / h);

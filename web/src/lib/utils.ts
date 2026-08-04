@@ -32,6 +32,18 @@ export function formatDate(value?: string | null): string {
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+/** Compact phrase for a moment still to come: "in 20m", "in 3h", "in 5d", then "on 4 Aug 2026". */
+export function relativeFuture(iso: string): string {
+  const min = Math.round((+new Date(iso) - Date.now()) / 60000);
+  if (min < 1) return "any moment";
+  if (min < 60) return `in ${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `in ${hr}h`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `in ${day}d`;
+  return `on ${formatDate(iso)}`;
+}
+
 /** "Joined Mar 2023 · 2y 4m" - tenure at a glance for profile headers. */
 export function tenureLabel(startDate: string): string {
   const start = new Date(startDate);
@@ -41,6 +53,13 @@ export function tenureLabel(startDate: string): string {
   const months = Math.max(0, (now.getFullYear() - start.getFullYear()) * 12 + now.getMonth() - start.getMonth());
   const dur = months < 1 ? "new joiner" : months < 12 ? `${months}m` : `${Math.floor(months / 12)}y ${months % 12}m`;
   return `Joined ${joined} · ${dur}`;
+}
+
+/** "On probation · 12d left" (or "· ends today") for an end date that's today or later; "" once past. */
+export function probationLabel(endDate: string): string {
+  const days = Math.ceil((Date.parse(endDate) - Date.now()) / 86400000);
+  if (isNaN(days) || days < 0) return "";
+  return days === 0 ? "On probation · ends today" : `On probation · ${days}d left`;
 }
 
 // Format an amount in a currency. `decimals` sets the shown precision (both min and max fraction digits) so

@@ -1,21 +1,15 @@
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import type { Wire } from "../http/wire";
 
 // Company-wide "who's celebrating soon" feed for the dashboard. Birthdays come from the ENCRYPTED personal
 // details blob (date_of_birth) and are returned as day+month ONLY - never the year, so no age is exposed.
 // Work anniversaries come from the (non-encrypted) start_date. Both are org-wide by design: this is the
 // celebratory widget every employee sees. The route is gated by the authz middleware like any other.
-export type Celebration = {
-  employee: string; // "employees/<id>" ref (the outbound edge tokenizes the id)
-  name: string;
-  photo?: string; // "employees/<id>:getPhoto" ref when a photo exists
-  kind: "birthday" | "anniversary";
-  month: number; // 1-12
-  day: number; // 1-31
-  in_days: number; // 0 = today
-  years?: number; // anniversary only: years completed on this occurrence
-};
+// Shape comes from the contract (openapi.yaml `celebration`), like every other wire type - this feed has no
+// serializer in src/http/serialize.ts, so annotating here is what keeps it checked against the spec.
+export type Celebration = Wire<"celebration">;
 
 const DAY_MS = 86_400_000;
 

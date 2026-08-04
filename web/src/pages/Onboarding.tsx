@@ -122,8 +122,8 @@ export default function Onboarding({ me }: { me: Me }) {
                     <p className="text-xs text-muted-foreground">for {empName(t.subject)}{t.due_date && <span className={cn("tabular-nums", overdue && "font-medium text-destructive")}> · due {formatDate(t.due_date)}{overdue ? " · overdue" : ""}</span>}</p>
                   </div>
                   {t.doc_type
-                    ? <UploadButton label="Upload file" busy={acting === t.path} onPick={(f) => uploadTaskDoc(t, f)} />
-                    : <Button size="sm" loading={acting === t.path} onClick={() => taskAct(t, "complete")}><Check className="h-3.5 w-3.5" /> Mark done</Button>}
+                    ? <AccessAction collection="transition-tasks" objectPath={t.path} verb="upload" label="Upload task document"><UploadButton label="Upload file" busy={acting === t.path} onPick={(f) => uploadTaskDoc(t, f)} /></AccessAction>
+                    : <AccessAction collection="transition-tasks" objectPath={t.path} verb="complete" label="Complete task"><Button size="sm" loading={acting === t.path} onClick={() => taskAct(t, "complete")}><Check className="h-3.5 w-3.5" /> Mark done</Button></AccessAction>}
                 </Card>
               );
             })}
@@ -230,9 +230,9 @@ function TransitionCard({ transition: tr, subjectName, empName, acting, onTask, 
 
           {canManage && (
             <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
-              {tr.state === "ACTIVE" && can.includes("complete") && <Button size="sm" variant="outline" loading={acting === `${tr.path}:complete`} onClick={() => onTransition(tr, "complete")}><Check className="h-3.5 w-3.5" /> Complete</Button>}
-              {tr.state === "ACTIVE" && can.includes("cancel") && <Button size="sm" variant="outline" loading={acting === `${tr.path}:cancel`} onClick={() => onTransition(tr, "cancel")}><Ban className="h-3.5 w-3.5" /> Cancel</Button>}
-              {tr.state !== "ACTIVE" && can.includes("reopen") && <Button size="sm" variant="outline" loading={acting === `${tr.path}:reopen`} onClick={() => onTransition(tr, "reopen")}><RotateCcw className="h-3.5 w-3.5" /> Reopen</Button>}
+              {tr.state === "ACTIVE" && can.includes("complete") && <AccessAction collection="transitions" objectPath={tr.path} verb="complete" can={can} label="Complete process"><Button size="sm" variant="outline" loading={acting === `${tr.path}:complete`} onClick={() => onTransition(tr, "complete")}><Check className="h-3.5 w-3.5" /> Complete</Button></AccessAction>}
+              {tr.state === "ACTIVE" && can.includes("cancel") && <AccessAction collection="transitions" objectPath={tr.path} verb="cancel" can={can} label="Cancel process"><Button size="sm" variant="outline" loading={acting === `${tr.path}:cancel`} onClick={() => onTransition(tr, "cancel")}><Ban className="h-3.5 w-3.5" /> Cancel</Button></AccessAction>}
+              {tr.state !== "ACTIVE" && can.includes("reopen") && <AccessAction collection="transitions" objectPath={tr.path} verb="reopen" can={can} label="Reopen process"><Button size="sm" variant="outline" loading={acting === `${tr.path}:reopen`} onClick={() => onTransition(tr, "reopen")}><RotateCcw className="h-3.5 w-3.5" /> Reopen</Button></AccessAction>}
               {can.includes("delete") && <Button size="sm" variant="ghost" className="text-destructive" loading={acting === `${tr.path}:delete`} onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>}
             </div>
           )}

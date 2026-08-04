@@ -11,7 +11,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
+import { invalidArgument, notFound, failedPrecondition, aborted } from "../lib/errors";
 import { notify } from "./notifications";
 
 // Effective-dated base pay. A salary revision (increment/appraisal) is a NEW row effective from a chosen date;
@@ -122,9 +122,17 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
   if (current && +new Date(current.effectiveFrom) >= from) {
     throw failedPrecondition("the effective date must be after the current compensation's start");
   }
-  // Half-open intervals: the prior row ends where the new one begins.
+  // Half-open intervals: the prior row ends where the new one begins. Guarded on the row still being OPEN, so
+  // closing it is EXACTLY-ONCE: two concurrent revisions both read the same current row, and the loser must
+  // stop here rather than insert a second open row - which would leave an ambiguous current salary and pay the
+  // arrears delta twice. (`comp_open_idx`, the partial unique index on the open row, is the DB backstop.)
   if (current) {
-    await deps.db.update(schema.compensation).set({ effectiveTo: new Date(from), updatedAt: new Date() }).where(eq(schema.compensation.uuid, current.uuid));
+    const [closed] = await deps.db
+      .update(schema.compensation)
+      .set({ effectiveTo: new Date(from), updatedAt: new Date() })
+      .where(and(eq(schema.compensation.uuid, current.uuid), isNull(schema.compensation.effectiveTo)))
+      .returning();
+    if (!closed) throw aborted("this employee's compensation was revised concurrently; reload and try again");
   }
   // Retro arrears for a BACKDATED increment: the rise in MONTHLY RECURRING GROSS (basic + recurring earnings +
   // the Special Allowance plug) x the number of PERIODS THIS EMPLOYEE WAS ALREADY PAID (a published run) in the
@@ -216,10 +224,25 @@ export async function reapplySplitCurrent(deps: Deps, actor: AppUser): Promise<{
 }
 
 // Arrears paid-by-run markers (the next payroll run pays a backdated revision's stored arrears as a taxable
-// earning, idempotently). Mirrors the bonus/overtime paid-by-run pattern.
-export async function markCompArrearsPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
-  if (ids.length) await deps.db.update(schema.compensation).set({ arrearsPaidRunId: runId, arrearsPaidAt: at }).where(inArray(schema.compensation.uuid, ids));
+// earning, idempotently). Mirrors the bonus/overtime paid-by-run pattern. Both return UNEXECUTED statements
+// so the build can batch them (a direct await still executes).
+// Guarded on the arrears still being unclaimed, so two runs building concurrently cannot both pay them.
+export function markCompArrearsPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
+  return deps.db
+    .update(schema.compensation)
+    .set({ arrearsPaidRunId: runId, arrearsPaidAt: at })
+    .where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
 }
-export async function resetCompArrearsPaidByRun(deps: Deps, runId: string) {
-  await deps.db.update(schema.compensation).set({ arrearsPaidRunId: null, arrearsPaidAt: null }).where(eq(schema.compensation.arrearsPaidRunId, runId));
+// Arrears paid by a full-and-final settlement rather than a run (arrearsPaidAt set, no run), and the release
+// a recomputed settlement uses. The build treats either marker as paid, so this takes them out of the queue.
+export async function markCompArrearsSettled(deps: Deps, ids: string[], at: Date) {
+  if (!ids.length) return;
+  await deps.db.update(schema.compensation).set({ arrearsPaidAt: at }).where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
+}
+export async function releaseCompArrearsSettled(deps: Deps, ids: string[]) {
+  if (!ids.length) return;
+  await deps.db.update(schema.compensation).set({ arrearsPaidAt: null }).where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
+}
+export function resetCompArrearsPaidByRun(deps: Deps, runId: string) {
+  return deps.db.update(schema.compensation).set({ arrearsPaidRunId: null, arrearsPaidAt: null }).where(eq(schema.compensation.arrearsPaidRunId, runId));
 }

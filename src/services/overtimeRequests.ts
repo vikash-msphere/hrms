@@ -89,13 +89,35 @@ export const cancelOvertimeRequest = (deps: Deps, actor: AppUser, id: string) =>
 // Approved overtime not yet paid by any run, optionally only up to a period-end (so future-dated OT isn't
 // paid early). The next payroll run pays it as a taxable earning. Mirrors unpaidBonuses.
 export async function approvedUnpaidOvertime(deps: Deps, employeeId: string, throughMs?: number) {
-  const conds = [eq(schema.overtimeRequests.employeeId, employeeId), eq(schema.overtimeRequests.state, "APPROVED"), isNull(schema.overtimeRequests.paidRunId)];
+  const conds = [eq(schema.overtimeRequests.employeeId, employeeId), eq(schema.overtimeRequests.state, "APPROVED"), isNull(schema.overtimeRequests.paidRunId), isNull(schema.overtimeRequests.paidAt)];
   if (throughMs != null) conds.push(lte(schema.overtimeRequests.date, new Date(throughMs)));
   return deps.db.select().from(schema.overtimeRequests).where(and(...conds));
 }
-export async function markOvertimePaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
-  if (ids.length) await deps.db.update(schema.overtimeRequests).set({ paidRunId: runId, paidAt: at }).where(inArray(schema.overtimeRequests.uuid, ids));
+// The whole approved-unpaid queue in one read - the run build groups by employee (subrequest-budget shape).
+// `paidAt` with no run = paid by an FnF settlement; both markers gate the queue (see bonuses).
+export async function approvedUnpaidOvertimeAll(deps: Deps, throughMs?: number) {
+  const conds = [eq(schema.overtimeRequests.state, "APPROVED"), isNull(schema.overtimeRequests.paidRunId), isNull(schema.overtimeRequests.paidAt)];
+  if (throughMs != null) conds.push(lte(schema.overtimeRequests.date, new Date(throughMs)));
+  return deps.db.select().from(schema.overtimeRequests).where(and(...conds));
 }
-export async function resetOvertimePaidByRun(deps: Deps, runId: string) {
-  await deps.db.update(schema.overtimeRequests).set({ paidRunId: null, paidAt: null }).where(eq(schema.overtimeRequests.paidRunId, runId));
+// The two below return UNEXECUTED statements so the build can batch them (a direct await still executes).
+// Guarded on still being approved-and-unpaid, so a row that left the queue between the build's read and its
+// commit (another run claiming it, a decision reversal) can never be flipped to paid (mirrors bonuses).
+export function markOvertimePaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
+  return deps.db
+    .update(schema.overtimeRequests)
+    .set({ paidRunId: runId, paidAt: at })
+    .where(and(inArray(schema.overtimeRequests.uuid, ids), eq(schema.overtimeRequests.state, "APPROVED"), isNull(schema.overtimeRequests.paidRunId)));
+}
+// Paid by a full-and-final settlement rather than a run, and the release a recomputed settlement uses.
+export async function markOvertimeSettled(deps: Deps, ids: string[], at: Date) {
+  if (!ids.length) return;
+  await deps.db.update(schema.overtimeRequests).set({ paidAt: at }).where(and(inArray(schema.overtimeRequests.uuid, ids), isNull(schema.overtimeRequests.paidRunId)));
+}
+export async function releaseOvertimeSettled(deps: Deps, ids: string[]) {
+  if (!ids.length) return;
+  await deps.db.update(schema.overtimeRequests).set({ paidAt: null }).where(and(inArray(schema.overtimeRequests.uuid, ids), isNull(schema.overtimeRequests.paidRunId)));
+}
+export function resetOvertimePaidByRun(deps: Deps, runId: string) {
+  return deps.db.update(schema.overtimeRequests).set({ paidRunId: null, paidAt: null }).where(eq(schema.overtimeRequests.paidRunId, runId));
 }

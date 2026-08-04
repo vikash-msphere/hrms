@@ -132,6 +132,16 @@ export async function createApprovedReimbursementForExpense(
   return row;
 }
 
+// Undo markReimbursementsSettled for a recomputed settlement. Restricted to the ids that settlement recorded
+// and to rows with no run, so a claim genuinely paid out of band (payReimbursement) is never re-queued.
+export async function releaseReimbursementsSettled(deps: Deps, ids: string[]) {
+  if (!ids.length) return;
+  await deps.db
+    .update(schema.reimbursements)
+    .set({ state: "APPROVED", paidAt: null, updatedAt: new Date() })
+    .where(and(inArray(schema.reimbursements.uuid, ids), eq(schema.reimbursements.state, "PAID"), isNull(schema.reimbursements.paidRunId)));
+}
+
 // ---- Payout ---------------------------------------------------------------------------------------------
 export type PayoutMode = "payroll" | "separate";
 
@@ -150,21 +160,32 @@ export async function approvedUnpaidReimbursements(deps: Deps, employeeId: strin
     .where(and(eq(schema.reimbursements.employeeId, employeeId), eq(schema.reimbursements.state, "APPROVED"), isNull(schema.reimbursements.paidRunId)));
 }
 
+// The whole payout queue in one read - the run build groups by employee (subrequest-budget shape).
+export async function approvedUnpaidReimbursementsAll(deps: Deps) {
+  return deps.db
+    .select()
+    .from(schema.reimbursements)
+    .where(and(eq(schema.reimbursements.state, "APPROVED"), isNull(schema.reimbursements.paidRunId)));
+}
+
+// The two below return UNEXECUTED statements so the build can batch them (a direct await still executes).
+
 // Idempotent rebuild: un-pay any claims previously paid by THIS run (back to APPROVED) before re-picking.
-export async function resetReimbursementsPaidByRun(deps: Deps, runId: string) {
-  await deps.db
+export function resetReimbursementsPaidByRun(deps: Deps, runId: string) {
+  return deps.db
     .update(schema.reimbursements)
     .set({ state: "APPROVED", paidRunId: null, paidAt: null, updatedAt: new Date() })
     .where(eq(schema.reimbursements.paidRunId, runId));
 }
 
-// Mark a set of claims paid by a payroll run (called during the build).
-export async function markReimbursementsPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
-  if (!ids.length) return;
-  await deps.db
+// Mark a set of claims paid by a payroll run (called during the build). Guarded on still being
+// approved-and-unpaid: a claim paid separately (payReimbursement) or settled in an FnF between the build's
+// read and its commit must not also be flipped to paid-by-this-run, which would hide the double payout.
+export function markReimbursementsPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
+  return deps.db
     .update(schema.reimbursements)
     .set({ state: "PAID", paidRunId: runId, paidAt: at, updatedAt: at })
-    .where(inArray(schema.reimbursements.uuid, ids));
+    .where(and(inArray(schema.reimbursements.uuid, ids), eq(schema.reimbursements.state, "APPROVED"), isNull(schema.reimbursements.paidRunId)));
 }
 
 // Mark approved claims settled by a FnF settlement (terminal payout, no payroll run). Reuses the PAID marker

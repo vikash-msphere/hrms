@@ -18,3 +18,15 @@ ALLOW_DEV_AUTH="true"
 # The client secret also signs the webhook (Cashfree has no separate webhook secret). See docs/05-add-esign-provider.md.
 #ESIGN_CASHFREE_CLIENT_ID="..."
 #ESIGN_CASHFREE_CLIENT_SECRET="..."
+
+# E-sign (Cashfree) - OPTIONAL: leave unset to run with e-signature disabled.
+# ESIGN_CASHFREE_CLIENT_ID=
+# ESIGN_CASHFREE_CLIENT_SECRET= # also the webhook HMAC key
+# ESIGN_CASHFREE_PUBLIC_KEY= # RSA public key for the production X-Cf-Signature 2FA header; absent = header not sent
+
+# Direct Google sign-in (OPTIONAL alternative to Cloudflare Access - no per-seat cost, unlimited users).
+# Setting GOOGLE_CLIENT_ID switches auth to Google mode; CF_ACCESS_* are then unused. Local dev normally
+# uses DEV_FAKE_EMAIL instead of either mode.
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+# AUTH_SESSION_KEY= # base64 32+ bytes (openssl rand -base64 32); signs the stateless session cookie

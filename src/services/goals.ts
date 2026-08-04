@@ -33,8 +33,29 @@ export type GoalInput = {
   progress?: number;
   status?: "not_started" | "in_progress" | "completed" | "cancelled";
   due_date?: string | null;
+  parent?: string | null;
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
+
+// Validate an alignment target: the parent must exist (not deleted), not be the goal itself, and not sit
+// anywhere below it (walking the candidate's ancestor chain must never reach `selfId`). Depth-capped: a chain
+// deeper than the cap is already degenerate and gets rejected as a cycle rather than walked forever.
+async function resolveParentId(deps: Deps, selfId: string | null, parent?: string | null): Promise<string | null> {
+  const pid = idFromPath(parent);
+  if (!pid) return null;
+  if (selfId && pid === selfId) throw invalidArgument("a goal cannot align to itself");
+  const cols = { uuid: schema.goals.uuid, parentId: schema.goals.parentId, deleteTime: schema.goals.deleteTime };
+  const p = (await deps.db.select(cols).from(schema.goals).where(eq(schema.goals.uuid, pid)).limit(1))[0];
+  if (!p || p.deleteTime) throw invalidArgument("parent goal not found");
+  let cur = p.parentId;
+  for (let hops = 0; cur; hops++) {
+    if (hops >= 25) throw invalidArgument("alignment chain is too deep");
+    if (selfId && cur === selfId) throw invalidArgument("alignment would create a cycle");
+    const row = (await deps.db.select(cols).from(schema.goals).where(eq(schema.goals.uuid, cur)).limit(1))[0];
+    cur = row?.parentId ?? null;
+  }
+  return pid;
+}
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const clampPct = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 type Status = typeof schema.goals.$inferSelect.status;
@@ -62,12 +83,14 @@ export async function createGoal(deps: Deps, actor: AppUser, input: GoalInput, i
   if (!employeeId) throw invalidArgument("employee is required");
   const due = dayMs(input.due_date);
   if (input.due_date && Number.isNaN(due)) throw invalidArgument("due_date is invalid");
+  const parentId = await resolveParentId(deps, id ?? null, input.parent);
   const code = await allocOwnedCode(deps, schema.goals, schema.goals.employeeId, employeeId);
   const row = (await deps.db
     .insert(schema.goals)
     .values({
       code,
       ...(id ? { uuid: id } : {}),
+      parentId,
       employeeId,
       title: input.title.trim(),
       description: input.description?.trim() || null,
@@ -103,6 +126,7 @@ export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: 
     if (patch.due_date && Number.isNaN(due)) throw invalidArgument("due_date is invalid");
     set.dueDate = patch.due_date ? new Date(due) : null;
   }
+  if (has("parent")) set.parentId = await resolveParentId(deps, id, patch.parent);
   const updated = (await deps.db.update(schema.goals).set(set).where(eq(schema.goals.uuid, id)).returning())[0]!;
   await audit(deps, actor, "goal.update", "goals", id, diffMeta(row, updated, set), updated);
   if (has("progress") || has("status")) await emitGoalProgress(deps, actor, updated);
@@ -111,14 +135,15 @@ export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: 
 
 // The `updateProgress` verb: move just a goal's progress (and optionally its status), so the org can grant an
 // employee progress-only rights on goals whose definition a manager owns - without full edit access.
-export async function updateGoalProgress(deps: Deps, actor: AppUser, id: string, progress: number, status?: Status) {
+export async function updateGoalProgress(deps: Deps, actor: AppUser, id: string, progress: number, status?: Status, note?: string) {
   const row = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("goal not found");
   if (progress == null || Number.isNaN(Number(progress))) throw invalidArgument("progress is required");
   const set: Record<string, unknown> = { progress: clampPct(Number(progress)), updatedAt: new Date() };
   if (status) set.status = status;
   const updated = (await deps.db.update(schema.goals).set(set).where(eq(schema.goals.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "goal.updateProgress", "goals", id);
+  // from/to (+ optional note) land in the audit meta so the activity feed can render a progress history.
+  await audit(deps, actor, "goal.updateProgress", "goals", id, { from: row.progress, to: updated.progress, ...(note?.trim() ? { note: note.trim() } : {}) }, updated);
   await emitGoalProgress(deps, actor, updated);
   return updated;
 }

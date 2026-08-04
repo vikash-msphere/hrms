@@ -10,6 +10,19 @@ import type { Me } from "@/types";
 // The signed-in user's avatar + menu, anchored in the top bar. Opens (downward) with the profile link, sign-out,
 // and - for those who may manage access - the access-management mode toggle and a shortcut to manage WHO can
 // manage access. Avatar-only trigger to stay compact next to the rest of the top-bar chrome.
+
+// Sign-out is mode-agnostic: the server clears its own session (a no-op cookie delete under Cloudflare
+// Access) and says where signing in again happens - the Google login route, or Access's edge logout. If the
+// call itself fails, still leave the app; landing on "/" unauthenticated shows the sign-in screen.
+async function signOut() {
+  try {
+    const res = await fetch("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa" } });
+    const { signin_url } = (await res.json()) as { signin_url?: string };
+    window.location.href = signin_url || "/";
+  } catch {
+    window.location.href = "/";
+  }
+}
 export function UserMenu({ me }: { me: Me }) {
   const am = useAccessMode();
   // Prefer the real employee name + photo over the raw email handle ("write2vkas"); fall back to a tidied
@@ -62,7 +75,7 @@ export function UserMenu({ me }: { me: Me }) {
         <DropdownMenuItem asChild>
           <a href="#/profile">View my profile</a>
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => (window.location.href = "/cdn-cgi/access/logout")}>
+        <DropdownMenuItem onClick={signOut}>
           <LogOut className="h-4 w-4" />
           Sign out
         </DropdownMenuItem>

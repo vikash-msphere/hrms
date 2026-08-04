@@ -32,7 +32,7 @@ const TONE_CLS: Record<ActionTone, string> = {
   remove: "bg-destructive/15 text-destructive",
   positive: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
   comment: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
-  read: "bg-slate-500/15 text-slate-700 dark:text-slate-300",
+  read: "bg-brand-neutral-500/15 text-brand-neutral-700 dark:text-brand-neutral-300",
   denied: "bg-red-500/20 text-red-700 dark:text-red-400 ring-1 ring-red-500/30",
   other: "bg-muted text-muted-foreground",
 };
@@ -153,6 +153,8 @@ export function ActivityFeed({ resource, global = false }: { resource?: string; 
     if (m.diff && Object.keys(m.diff).length) Object.entries(m.diff).forEach(([k, v], i) => bits.push(fromTo(v.from, v.to, i, `${fieldLabel(k)}:`)));
     else if ("from" in m || "to" in m) bits.push(fromTo((m as Record<string, unknown>).from, (m as Record<string, unknown>).to, 0));
     if (typeof m.reason === "string" && m.reason) bits.push(<span key="r" className="text-muted-foreground">— {m.reason}</span>);
+    // Progress-update notes (goal.updateProgress meta): same dash treatment as reasons.
+    if (typeof m.note === "string" && m.note) bits.push(<span key="n" className="text-muted-foreground">— {m.note}</span>);
     if (typeof m.blockedBy === "string") bits.push(<span key="b" className="text-muted-foreground">by {fmt(m.blockedBy)}</span>);
     if (Array.isArray(m.changed) && m.changed.length) bits.push(<span key="c" className="text-muted-foreground">{m.changed.map((k) => fieldLabel(String(k))).join(", ")}</span>);
     // Write-backstop rows (services with no inline diff): the touched field NAMES, so a bare update/create still

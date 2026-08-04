@@ -192,3 +192,16 @@ export async function restoreEmployee(deps: Deps, actor: AppUser, id: string) {
 export async function purgeEmployee(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   await purgeRow(deps, actor, schema.employees, "employee", "employees", id, ifMatch);
 }
+
+/** Public "about me" one-liner shown on profile heroes and the directory. Plain text on the base
+ *  record (not PII, no encryption) so display rides every employee read for free. Access (owner /
+ *  HR / super) is enforced by the middleware on employees/<code>/bio. */
+export async function setBio(deps: Deps, actor: AppUser, id: string, bio: string | null | undefined) {
+  const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
+  if (!row || row.deleteTime) throw notFound("employee not found");
+  const v = (bio ?? "").trim();
+  if (v.length > 280) throw invalidArgument("bio is too long (max 280 characters)");
+  await deps.db.update(schema.employees).set({ bio: v || null, updatedAt: new Date() }).where(eq(schema.employees.uuid, id));
+  await audit(deps, actor, "employee.bio.update", "employees", id);
+  return { bio: v || undefined };
+}

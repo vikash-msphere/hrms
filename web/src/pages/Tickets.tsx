@@ -9,7 +9,8 @@ import type { Employee, Department, Ticket, TicketCategory, TicketChecklist, Me 
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
-import { DataTable, type Column } from "@/components/common/DataTable";
+import { DataTable, type BulkAction, type Column } from "@/components/common/DataTable";
+import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { metaColumns } from "@/components/common/metaColumns";
@@ -69,13 +70,13 @@ const byUrgency = (a: Ticket, b: Ticket) => {
 };
 
 export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Ticket>("tickets");
+  const { rows, state, error, reload, loadMore } = useCollection<Ticket>("tickets");
   // Server-side search across the whole collection - a list page caps at 100 rows, so filtering the cached
   // rows could never reach a record past the first page. Below two characters it stays off.
   const [search, setSearch] = useState("");
   const debouncedQ = useDebounced(search.trim(), 250);
   const searching = debouncedQ.length >= 2;
-  const { rows: searchRows, hasMore: searchHasMore } = useCollection<Ticket>("tickets", { q: debouncedQ, enabled: searching });
+  const { rows: searchRows, hasMore: searchHasMore, loadMore: loadMoreSearch } = useCollection<Ticket>("tickets", { q: debouncedQ, enabled: searching });
   const source = searching ? searchRows : rows;
   const { rows: employees } = useCollection<Employee>("employees");
   const { rows: departments } = useCollection<Department>("departments");
@@ -235,19 +236,57 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     </AccessAction>
   );
 
-  const renderTable = (data: Ticket[], columns: Column<Ticket>[], tableId: string, emptyTitle: string, emptyDescription?: string) => (
+  // Bulk state transitions for the servicing queues (assigned/team/all): resolve a batch of worked tickets,
+  // close a batch of resolved ones. Enabled only when EVERY selected row supports the verb, so the action's
+  // scope is never a surprise; per-row ACLs still enforce server-side.
+  const ticketBulkActions: BulkAction<Ticket>[] = [
+    {
+      label: "Resolve",
+      icon: <Check className="h-4 w-4" />,
+      confirm: { title: "Resolve the selected tickets?", description: "Requesters confirm-and-close (or reopen) from their side." },
+      disabled: (sel) =>
+        sel.every((t) => (t.access?.can ?? []).includes("resolve") && ["OPEN", "IN_PROGRESS"].includes(upper(t.state)))
+          ? null
+          : "Only open or in-progress tickets you may resolve",
+      run: async (sel) => {
+        const r = await bulkInvoke("tickets", "resolve", sel);
+        toast(bulkSummary("Resolved", r));
+        reload();
+        if (r.failed > 0) throw new Error("partial"); // keep the failed rows selected for a retry
+      },
+    },
+    {
+      label: "Close",
+      icon: <X className="h-4 w-4" />,
+      confirm: { title: "Close the selected tickets?" },
+      disabled: (sel) =>
+        sel.every((t) => (t.access?.can ?? []).includes("close") && upper(t.state) === "RESOLVED")
+          ? null
+          : "Only resolved tickets you may close",
+      run: async (sel) => {
+        const r = await bulkInvoke("tickets", "close", sel);
+        toast(bulkSummary("Closed", r));
+        reload();
+        if (r.failed > 0) throw new Error("partial");
+      },
+    },
+  ];
+
+  const renderTable = (data: Ticket[], columns: Column<Ticket>[], tableId: string, emptyTitle: string, emptyDescription?: string, withBulk?: boolean) => (
     <DataTable
       tableId={tableId}
       columns={columns}
       rows={data}
       search={{ value: search, onChange: setSearch, placeholder: "Search all tickets…" }}
       hasMore={searching ? searchHasMore : undefined}
+      onLoadMore={searching ? loadMoreSearch : loadMore}
       getRowId={(t) => t.path}
       onRowClick={(t) => openTicket(t)}
       emptyTitle={emptyTitle}
       emptyDescription={emptyDescription}
       accessCollection="tickets"
       accessTargetOf={(t) => ({ objectPath: t.path, label: t.subject, can: t.access?.can })}
+      bulkActions={withBulk ? ticketBulkActions : undefined}
     />
   );
 
@@ -290,15 +329,15 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
               : renderTable(mine, mineCols, "tickets-mine", "No tickets match", "Adjust the filters to see your tickets.")}
           </TabsContent>
           <TabsContent value="assigned">
-            {renderTable(assigned, allCols, "tickets-assigned", "Nothing assigned to you", "Tickets routed to you appear here.")}
+            {renderTable(assigned, allCols, "tickets-assigned", "Nothing assigned to you", "Tickets routed to you appear here.", true)}
           </TabsContent>
           {hasTeam && (
             <TabsContent value="team">
-              {renderTable(team, allCols, "tickets-team", "No tickets in your categories", "Tickets in the categories you handle appear here.")}
+              {renderTable(team, allCols, "tickets-team", "No tickets in your categories", "Tickets in the categories you handle appear here.", true)}
             </TabsContent>
           )}
           <TabsContent value="all">
-            {renderTable(all, allCols, "tickets-all", "No tickets", "Tickets you can see appear here.")}
+            {renderTable(all, allCols, "tickets-all", "No tickets", "Tickets you can see appear here.", true)}
           </TabsContent>
         </Tabs>
       </DataState>

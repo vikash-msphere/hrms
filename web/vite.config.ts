@@ -1,15 +1,49 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
 
-export default defineConfig({
+// Emit the PWA manifest at build/serve time so its name follows VITE_APP_NAME (public/ files are copied
+// verbatim - a static manifest there could not carry the configured app name).
+function pwaManifest(mode: string): Plugin {
+  const env = loadEnv(mode, fileURLToPath(new URL("./", import.meta.url)), "VITE_");
+  const name = env.VITE_APP_NAME || "Meridian";
+  const manifest = JSON.stringify(
+    {
+      name,
+      short_name: name,
+      description: "HR self-service: leave, payslips, attendance, approvals and more.",
+      start_url: "/",
+      scope: "/",
+      display: "standalone",
+      background_color: "#F7F9FB", // --neutral-50, the app's light page ground
+      theme_color: "#1D4C91", // Brand Blue 700 (--primary)
+      icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
+    },
+    null,
+    2
+  );
+  return {
+    name: "pwa-manifest",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "manifest.webmanifest", source: manifest });
+    },
+    configureServer(server) {
+      server.middlewares.use("/manifest.webmanifest", (_req, res) => {
+        res.setHeader("Content-Type", "application/manifest+json");
+        res.end(manifest);
+      });
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => ({
   root: "./web",
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
-  plugins: [react()],
+  plugins: [react(), pwaManifest(mode)],
   build: {
     outDir: "../web/dist",
     emptyOutDir: true,
@@ -41,4 +75,4 @@ export default defineConfig({
       "/v1": "http://localhost:4010",
     },
   },
-});
+}));

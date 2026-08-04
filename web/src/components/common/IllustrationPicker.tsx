@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { illustrationScore, illustrationUrl, loadIllustrationIndex, type IllustrationMeta } from "@/lib/illustrations";
+import { ART_DIECUT_SM } from "@/lib/kudosArt";
 
 // Browse/search the bundled unDraw set (see web/public/assets/illustrations/README.md) and pick one.
 // index.json is fetched the first time any picker opens and cached module-wide by loadIllustrationIndex, so the
@@ -33,7 +34,6 @@ export function IllustrationPicker({
   pinned,
   pinnedLabel = "Stickers",
   pinnedHint,
-  pinnedClassName,
 }: {
   value?: string | null; // current selection, highlighted in whichever group holds it
   onPick: (path: string | null) => void; // null = cleared
@@ -48,7 +48,6 @@ export function IllustrationPicker({
   pinned?: PinnedArt[];
   pinnedLabel?: string;
   pinnedHint?: string;
-  pinnedClassName?: string; // extra classes for pinned thumbnails (the kudos stickers want their dark-mode backing)
 }) {
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState<IllustrationMeta[] | null>(null);
@@ -228,7 +227,7 @@ export function IllustrationPicker({
                           aria-pressed={selected}
                           className={cn(tileClass, "relative", selected ? "border-primary ring-2 ring-primary" : "border-transparent")}
                         >
-                          <img src={pin.url} alt="" aria-hidden loading="lazy" className={cn("h-20 w-full select-none object-contain", pinnedClassName)} />
+                          <img src={pin.url} alt="" aria-hidden loading="lazy" className={cn("h-20 w-full select-none object-contain", ART_DIECUT_SM)} />
                           <span className="w-full truncate text-xs font-medium">{pin.label}</span>
                           {selected && (
                             <span className="absolute right-1 top-1 rounded-full bg-primary p-0.5 text-primary-foreground">
@@ -274,7 +273,7 @@ export function IllustrationPicker({
                       aria-pressed={selected}
                       className={cn(tileClass, "relative", selected ? "border-primary ring-2 ring-primary" : "border-transparent")}
                     >
-                      <img src={illustrationUrl(path)} alt="" aria-hidden loading="lazy" className="h-20 w-full select-none object-contain" />
+                      <img src={illustrationUrl(path)} alt="" aria-hidden loading="lazy" className={cn("h-20 w-full select-none object-contain", ART_DIECUT_SM)} />
                       <span className="w-full truncate text-xs font-medium">{m.title}</span>
                       <span className="w-full truncate text-[11px] text-muted-foreground">{humanise(m.dir)}</span>
                       {selected && (

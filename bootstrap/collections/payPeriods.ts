@@ -1,6 +1,6 @@
 // Pay periods: 12 monthly periods for the financial year FY_START_YEAR (Apr..Mar). period end + pay date =
 // the last calendar day of the month.
-import { Ctx, T0, DAY, FY_START_YEAR, q, code2, rows } from "../lib";
+import { type Ctx, T0, DAY, FY_START_YEAR, q, code2, rows } from "../lib";
 
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 

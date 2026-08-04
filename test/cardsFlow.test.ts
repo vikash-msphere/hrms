@@ -54,9 +54,9 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const board = await createBoard(deps, actor, { name: "WIP board" });
     await configureBoard(deps, actor, board.uuid, {
       columns: [
-        { key: "todo", label: "To do", wipLimit: null, policy: "", isCommitment: false, isDelivery: false },
-        { key: "doing", label: "Doing", wipLimit: 1, policy: "", isCommitment: true, isDelivery: false },
-        { key: "done", label: "Done", wipLimit: null, policy: "", isCommitment: false, isDelivery: true },
+        { key: "todo", label: "To do", wipLimit: null, policy: "", commitment: false, delivery: false },
+        { key: "doing", label: "Doing", wipLimit: 1, policy: "", commitment: true, delivery: false },
+        { key: "done", label: "Done", wipLimit: null, policy: "", commitment: false, delivery: true },
       ],
     });
     const c1 = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "One", column_key: "todo" });
@@ -74,9 +74,9 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const board = await createBoard(deps, actor, { name: "Per-assignee WIP" });
     await configureBoard(deps, actor, board.uuid, {
       columns: [
-        { key: "todo", label: "To do", wipLimit: null, policy: "", isCommitment: false, isDelivery: false },
-        { key: "doing", label: "Doing", wipLimit: 1, limitScope: "assignee", policy: "", isCommitment: true, isDelivery: false },
-        { key: "done", label: "Done", wipLimit: null, policy: "", isCommitment: false, isDelivery: true },
+        { key: "todo", label: "To do", wipLimit: null, policy: "", commitment: false, delivery: false },
+        { key: "doing", label: "Doing", wipLimit: 1, limitScope: "assignee", policy: "", commitment: true, delivery: false },
+        { key: "done", label: "Done", wipLimit: null, policy: "", commitment: false, delivery: true },
       ],
     });
     const a1 = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "A1", column_key: "todo", assignee: `employees/${emp}` });
@@ -323,5 +323,30 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const wipRow = await cardRow(wip.uuid);
     expect(doneRow.sprintId).toBe(s1.uuid); // delivered card stays in the completed sprint (for velocity)
     expect(wipRow.sprintId).toBeNull(); // unfinished card swept back to the product backlog
+  });
+
+  it("move: to_sprint reassigns backlog <-> sprint atomically with column + rank", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Scrum board", mode: "scrum" });
+    const s1 = await createSprint(deps, actor, { board: `boards/${board.uuid}`, name: "Sprint 1" });
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Backlog item" });
+    expect((await cardRow(card.uuid)).sprintId).toBeNull();
+
+    // Pull into the sprint: one move call sets sprint + column + rank.
+    await moveCard(deps, actor, card.uuid, "in_progress", undefined, 512, undefined, undefined, undefined, undefined, `sprints/${s1.uuid}`);
+    let row = await cardRow(card.uuid);
+    expect(row.sprintId).toBe(s1.uuid);
+    expect(row.columnKey).toBe("in_progress");
+    expect(row.rank).toBe(512);
+
+    // Send back to the backlog (to_sprint null) with a reorder rank; column unchanged.
+    await moveCard(deps, actor, card.uuid, "in_progress", undefined, 256, undefined, undefined, undefined, undefined, null);
+    row = await cardRow(card.uuid);
+    expect(row.sprintId).toBeNull();
+    expect(row.rank).toBe(256);
+
+    // A move that says nothing about sprints leaves the assignment alone.
+    await moveCard(deps, actor, card.uuid, "review");
+    expect((await cardRow(card.uuid)).sprintId).toBeNull();
   });
 });

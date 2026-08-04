@@ -7,6 +7,7 @@
 // don't reliably honour <head> CSS - Gmail strips it), a system font stack, a 600px card, and a
 // prefers-color-scheme block for the clients that do support it. No external assets except an optional https logo.
 import type { Deps } from "../deps";
+import { BRAND, BRAND_RADIUS } from "../domain/brand";
 import { getSettingValue } from "../services/settings";
 
 export type EmailBrand = {
@@ -23,11 +24,11 @@ export type EmailContent = {
   preheader?: string; // hidden inbox-preview snippet
 };
 
-// Metasphere brand: a navy -> teal gradient (from Metasphere.svg). The accent (links / buttons) is the deep
-// navy end for legible contrast; the header uses the full gradient (clients that don't support it fall back to
-// the solid accent).
-const DEFAULT_ACCENT = "#1A2980";
-const BRAND_GRADIENT = "linear-gradient(135deg,#1A2980 0%,#1F699E 50%,#26D0CE 100%)";
+// Brand: a navy -> cyan gradient. The accent (links / buttons) is the deep navy end for legible contrast; the
+// header uses the full gradient (clients that don't support it fall back to the solid accent). Both come from
+// src/domain/brand.ts, the single palette file - an org can still override the accent in its settings.
+const DEFAULT_ACCENT = BRAND.primary;
+const BRAND_GRADIENT = BRAND.gradient;
 const isHttpUrl = (s: string | undefined): s is string => !!s && /^https?:\/\//i.test(s);
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -55,13 +56,13 @@ export function renderEmail(content: EmailContent, brand: EmailBrand): string {
     : `<span style="font-size:18px;font-weight:700;letter-spacing:-0.01em;color:#ffffff;">${orgName}</span>`;
 
   const headingHtml = content.heading
-    ? `<h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;font-weight:700;color:#0f172a;">${esc(content.heading)}</h1>`
+    ? `<h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;font-weight:700;color:${BRAND.ink};">${esc(content.heading)}</h1>`
     : "";
 
   const ctaHtml = isHttpUrl(content.cta?.url)
     ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
-         <tr><td style="border-radius:8px;background:${accent};">
-           <a href="${esc(content.cta!.url)}" style="display:inline-block;padding:11px 22px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">${esc(content.cta!.label)}</a>
+         <tr><td style="border-radius:${BRAND_RADIUS.control}px;background:${accent};">
+           <a href="${esc(content.cta!.url)}" style="display:inline-block;padding:11px 22px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:${BRAND_RADIUS.control}px;">${esc(content.cta!.label)}</a>
          </td></tr>
        </table>`
     : "";
@@ -81,33 +82,33 @@ export function renderEmail(content: EmailContent, brand: EmailBrand): string {
 <meta name="supported-color-schemes" content="light dark">
 <title>${orgName}</title>
 <style>
-  body { margin:0; padding:0; background:#f1f5f9; -webkit-font-smoothing:antialiased; }
+  body { margin:0; padding:0; background:${BRAND.pageBg}; -webkit-font-smoothing:antialiased; }
   a { color:${accent}; }
   .email-body p { margin:0 0 14px; }
   .email-body p:last-child { margin-bottom:0; }
   .email-body ul, .email-body ol { margin:0 0 14px; padding-left:20px; }
-  .email-body strong { color:#0f172a; }
+  .email-body strong { color:${BRAND.ink}; }
   @media (max-width:620px){ .email-card { width:100% !important; border-radius:0 !important; } .email-pad { padding:24px !important; } }
   @media (prefers-color-scheme: dark){
-    body, .email-bg { background:#0b1120 !important; }
-    .email-card { background:#111827 !important; border-color:#1f2937 !important; }
-    .email-body, .email-body p { color:#cbd5e1 !important; }
-    .email-body h1 { color:#f8fafc !important; }
-    .email-body strong { color:#f8fafc !important; }
-    .email-footer, .email-footer a { color:#64748b !important; }
+    body, .email-bg { background:${BRAND.dark.pageBg} !important; }
+    .email-card { background:${BRAND.dark.cardBg} !important; border-color:${BRAND.dark.cardBorder} !important; }
+    .email-body, .email-body p { color:${BRAND.dark.body} !important; }
+    .email-body h1 { color:${BRAND.dark.ink} !important; }
+    .email-body strong { color:${BRAND.dark.ink} !important; }
+    .email-footer, .email-footer a { color:${BRAND.dark.muted} !important; }
   }
 </style>
 </head>
-<body style="margin:0;padding:0;background:#f1f5f9;">
+<body style="margin:0;padding:0;background:${BRAND.pageBg};">
 ${preheader}
-<table role="presentation" class="email-bg" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;">
+<table role="presentation" class="email-bg" width="100%" cellpadding="0" cellspacing="0" style="background:${BRAND.pageBg};">
   <tr><td align="center" style="padding:32px 16px;">
-    <table role="presentation" class="email-card" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;">
+    <table role="presentation" class="email-card" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:${BRAND.cardBg};border:1px solid ${BRAND.cardBorder};border-radius:${BRAND_RADIUS.card}px;overflow:hidden;">
       <tr><td style="background:${accent};background:${BRAND_GRADIENT};padding:22px 32px;">${header}</td></tr>
-      <tr><td class="email-pad email-body" style="padding:32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#334155;">
+      <tr><td class="email-pad email-body" style="padding:32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:${BRAND.body};">
         ${headingHtml}${content.bodyHtml}${ctaHtml}
       </td></tr>
-      <tr><td class="email-footer" style="padding:20px 32px 28px;border-top:1px solid #e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;color:#94a3b8;">
+      <tr><td class="email-footer" style="padding:20px 32px 28px;border-top:1px solid ${BRAND.cardBorder};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;color:${BRAND.label};">
         <div>This is an automated message from ${orgName}. Please do not reply to this email.</div>
         <div style="margin-top:6px;">&copy; ${year} ${orgName}.${footerAddress ? "" : ""}</div>
         ${footerAddress}

@@ -159,8 +159,8 @@ export default function Candidates({ me }: { me: Me }) {
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-1">
-                          {c.has_resume && <Button variant="ghost" size="sm" className="h-7" onClick={() => download(`candidates/${idOf(c.path)}`, `resume-${c.name}`)}><Download className="h-3.5 w-3.5" /> View</Button>}
-                          {can.includes("upload") && <Button variant="ghost" size="sm" className="h-7 text-muted-foreground" loading={uploading === c.path} onClick={() => pickResume(c)}><Paperclip className="h-3.5 w-3.5" /> {c.has_resume ? "Replace" : "Attach"}</Button>}
+                          {c.has_resume && <AccessAction verb="download" objectPath={c.path} can={can} label="Download resume"><Button variant="ghost" size="sm" className="h-7" onClick={() => download(`candidates/${idOf(c.path)}`, `resume-${c.name}`)}><Download className="h-3.5 w-3.5" /> View</Button></AccessAction>}
+                          {can.includes("upload") && <AccessAction verb="upload" objectPath={c.path} can={can} label="Attach resume"><Button variant="ghost" size="sm" className="h-7 text-muted-foreground" loading={uploading === c.path} onClick={() => pickResume(c)}><Paperclip className="h-3.5 w-3.5" /> {c.has_resume ? "Replace" : "Attach"}</Button></AccessAction>}
                         </div>
                       </td>
                       <td className="px-3 py-2">

@@ -45,6 +45,17 @@ overrides:
       aep-158-page-token-parameter: off
       aep-132-operation-id: off
       aep-132-required-params: off
+  # /v1/dashboard-summary is the same shape as /v1/search: a virtual aggregate surface (no table, no items,
+  # no item path) returning one keyed map of KPI counts. The AEP linter classifies its GET as a List, so the
+  # pagination rules, the array-response rule and the List* operation id can't apply.
+  - files:
+      - 'openapi.yaml#/paths/~1v1~1dashboard-summary'
+    rules:
+      aep-158-response-next-page-token-property: off
+      aep-158-response-array-property: off
+      aep-158-max-page-size-parameter: off
+      aep-158-page-token-parameter: off
+      aep-132-operation-id: off
   # personal-document.esign_url mirrors the e-sign vendor's signing URL; the service uses `_url` for
   # actual URLs elsewhere, so this deliberately departs from the AEP `uri` naming advisory.
   - files:

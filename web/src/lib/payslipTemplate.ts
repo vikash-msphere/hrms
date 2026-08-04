@@ -88,8 +88,10 @@ export type PayslipTemplate = {
   blocks: PayslipBlock[];
 };
 
-/** Stock values the renderer falls back to, shown as placeholders so an empty field reads as "unchanged". */
-export const STOCK_DEFAULTS = { ink: "#0f172a", muted: "#56657a", hairline: "#cbd5e1", margin: 48, scale: 1 } as const;
+/** Stock values the renderer falls back to, shown as placeholders so an empty field reads as "unchanged".
+ *  The three colours mirror DARK / MUTED / HAIR in src/lib/pdfPrimitives.ts, i.e. the brand Neutral ramp at
+ *  950 / 600 / 300 (src/domain/brand.ts) - keep them in step or the placeholders lie about what the PDF does. */
+export const STOCK_DEFAULTS = { ink: "#071326", muted: "#48586A", hairline: "#B7C4D1", margin: 48, scale: 1 } as const;
 
 /** Which blocks honour `style.align` (the rest are two-sided layouts where alignment has no meaning). */
 export const ALIGNABLE_KINDS: PayslipBlockKind[] = ["orgHeader", "note"];

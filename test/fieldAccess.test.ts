@@ -43,9 +43,9 @@ describe("per-field WRITE is gated by the same deny (mirrors bodyDecision)", () 
 describe("redactIdentity - keeps the row, withholds the value, flags denied", () => {
   const view = {
     fields: [
-      { key: "pan", label: "PAN", mandatory: false, sensitive: true, value: "•••• 1234", has_value: true },
-      { key: "aadhaar", label: "Aadhaar", mandatory: false, sensitive: true, value: "•••• 5678", has_value: true },
-      { key: "uan", label: "UAN", mandatory: false, sensitive: false, value: "100200300", has_value: true },
+      { key: "pan", label: "PAN", mandatory: false, sensitive: true, value: "•••• 1234", has_value: true, has_doc: false },
+      { key: "aadhaar", label: "Aadhaar", mandatory: false, sensitive: true, value: "•••• 5678", has_value: true, has_doc: false },
+      { key: "uan", label: "UAN", mandatory: false, sensitive: false, value: "100200300", has_value: true, has_doc: false },
     ],
   };
   it("blanks only the denied field's value and marks it denied", () => {

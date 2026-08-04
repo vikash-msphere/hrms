@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Plus, Pencil, Trash2, UserCheck, Undo2 } from "lucide-react";
+import { Plus, Pencil, Trash2, UserCheck, Undo2, Printer, ScanLine } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatDate, idOf } from "@/lib/utils";
@@ -22,6 +22,9 @@ import { Combobox } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+import { AssetTagPrinter } from "@/components/assets/AssetTagPrinter";
+import { Stocktake } from "@/components/assets/Stocktake";
+import { PageSettings } from "@/components/common/SettingsButton";
 
 const CATEGORIES = ["Laptop", "Phone", "Monitor", "Peripheral", "Furniture", "Other"];
 const STATUSES: { value: Asset["status"]; label: string }[] = [
@@ -41,7 +44,7 @@ const STATUS_TONE: Record<Asset["status"], string> = {
 const EMPTY = { asset_tag: "", name: "", category: "", serial_number: "", status: "in_stock" as Asset["status"], assigned_to: "", assigned_on: "", purchase_date: "", notes: "" };
 type Form = typeof EMPTY;
 
-export default function Assets({ me: _me, openId }: { me: Me; openId?: string }) {
+export default function Assets({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Asset>("assets");
   useDeepOpen(openId, rows, openEdit);
   const { rows: employees } = useCollection<Employee>("employees");
@@ -49,6 +52,8 @@ export default function Assets({ me: _me, openId }: { me: Me; openId?: string })
   const confirm = useConfirm();
 
   const [open, setOpen] = useState(false);
+  const [printer, setPrinter] = useState<{ initialAssetId?: string } | null>(null);
+  const [stocktake, setStocktake] = useState(false);
   const [editing, setEditing] = useState<Asset | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
   const [busy, setBusy] = useState(false);
@@ -161,11 +166,14 @@ export default function Assets({ me: _me, openId }: { me: Me; openId?: string })
     { id: "assigned_to", header: "Assigned to", filter: "select", accessor: (r) => (r.assigned_to ? empName(r.assigned_to) : ""), cell: (r) => (r.assigned_to ? empName(r.assigned_to) : <span className="text-muted-foreground">-</span>) },
     { id: "assigned_on", header: "Assigned", defaultHidden: true, accessor: (r) => r.assigned_on ?? "", cell: (r) => (r.assigned_on ? formatDate(r.assigned_on) : "-") },
     { id: "purchase_date", header: "Purchased", defaultHidden: true, accessor: (r) => r.purchase_date ?? "", cell: (r) => (r.purchase_date ? formatDate(r.purchase_date) : "-") },
+    { id: "tag_printed", header: "Tag printed", defaultHidden: true, accessor: (r) => r.tag_printed_time ?? "", cell: (r) => (r.tag_printed_time ? formatDate(r.tag_printed_time.slice(0, 10)) : "-") },
+    { id: "last_verified", header: "Last verified", defaultHidden: true, accessor: (r) => r.last_verified_time ?? "", cell: (r) => (r.last_verified_time ? formatDate(r.last_verified_time.slice(0, 10)) : "-") },
     ...metaColumns<Asset>(),
     {
       id: "actions", header: "", sortable: false, filter: "none", align: "right",
       cell: (r) => (
         <div className="flex justify-end gap-1">
+          <Button size="sm" variant="ghost" title="Print sticker tag" onClick={() => setPrinter({ initialAssetId: idOf(r.path) })}><Printer className="h-4 w-4" /></Button>
           {r.assigned_to && (
             <AccessAction collection="assets" objectPath={r.path} can={r.access?.can} label="Return to stock">
               <Button size="sm" variant="ghost" loading={returning === r.path} onClick={() => returnToStock(r)}><Undo2 className="h-4 w-4" /> Return</Button>
@@ -183,9 +191,18 @@ export default function Assets({ me: _me, openId }: { me: Me; openId?: string })
   ];
 
   const addBtn = (
-    <AccessAction collection="assets" create label="Add asset">
-      <Button onClick={openCreate}><Plus className="h-4 w-4" /> Add asset</Button>
-    </AccessAction>
+    <div className="flex gap-2">
+      {rows.length > 0 && (
+        <>
+          <Button variant="outline" onClick={() => setStocktake(true)}><ScanLine className="h-4 w-4" /> Stocktake</Button>
+          <Button variant="outline" onClick={() => setPrinter({})}><Printer className="h-4 w-4" /> Print tags</Button>
+        </>
+      )}
+      <AccessAction collection="assets" create label="Add asset">
+        <Button onClick={openCreate}><Plus className="h-4 w-4" /> Add asset</Button>
+      </AccessAction>
+      <PageSettings me={me} host="assets" />
+    </div>
   );
 
   return (
@@ -258,6 +275,9 @@ export default function Assets({ me: _me, openId }: { me: Me; openId?: string })
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {printer && <AssetTagPrinter me={me} assets={rows} onClose={() => setPrinter(null)} onReload={reload} initialAssetId={printer.initialAssetId} />}
+      {stocktake && <Stocktake assets={rows} onClose={() => setStocktake(false)} onReload={reload} />}
     </div>
   );
 }

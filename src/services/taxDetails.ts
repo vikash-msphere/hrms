@@ -6,6 +6,7 @@ import { audit } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getEmployeeTaxProjection, readDeclarations, readRawTaxDetails, type TaxDeclarations, type TaxProjection } from "./taxProjection";
+import type { Wire } from "../http/wire";
 
 // Income-tax (TDS) sub-resource: stores only the employee's manual DECLARATIONS (prior-employer income + TDS
 // for mid-year joiners) as an encrypted blob - everything else (the year's tax, the monthly schedule, the
@@ -34,7 +35,10 @@ async function loadEmployee(deps: Deps, employeeId: string) {
 // `decl` is the RAW blob (declared figures + verification state); `p` is the projection, whose prior-employer
 // figures already reflect the VERIFIED-only gate. So the view shows what was declared, what was verified, and
 // the status - and every downstream number (annual_gross/tax) uses verified-only.
-function toView(p: TaxProjection, decl: TaxDeclarations) {
+// The wire shape comes from the contract (openapi.yaml `tax`), so this projection view is checked against it
+// the same way the serializers are - there is no to*Resource for it to go through.
+// `path` is stamped by the route (it owns the employee id), so the view is everything else.
+function toView(p: TaxProjection, decl: TaxDeclarations): Omit<Wire<"tax">, "path"> {
   const b = p.breakdown;
   const declared = decl.priorEmployerIncome != null || decl.priorEmployerTds != null;
   return {

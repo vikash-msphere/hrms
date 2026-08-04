@@ -33,14 +33,14 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo"],
   sprints: ["update", "delete", "activate", "complete"],
   "review-cycles": ["update", "delete", "launch", "enroll", "close", "reopen"],
-  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate"],
+  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "nudge", "pdf"],
   "review-feedback": ["submitFeedback", "decline"],
   "time-entries": ["update", "delete", "submit", "approve", "reject"],
   loans: ["update", "delete", "approve", "reject", "disburse", "recordRepayment"],
   "tax-declarations": ["update", "delete", "verify", "reject", "upload", "download"],
   transitions: ["update", "delete", "complete", "cancel", "reopen", "appendTask"],
   "transition-tasks": ["complete", "reopen", "upload"],
-  announcements: ["update", "delete", "post", "giveKudos", "markRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock"],
+  announcements: ["update", "delete", "post", "giveKudos", "markRead", "markAllRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock", "pin", "unpin"],
   holidays: ["update", "delete"],
   "leave-types": ["update", "delete"],
   "letter-templates": ["update", "delete"],
@@ -71,6 +71,9 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   interviews: ["update", "delete", "complete", "cancel"],
   "interview-feedback": ["update", "delete"],
   offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind"],
+  expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
+  automations: ["update", "delete", "enable", "disable", "test"],
+  "access-rules": ["update", "delete", "preview", "requestAccess"],
 };
 const DEFAULT_VERBS = ["update", "delete"];
 
@@ -82,16 +85,18 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "post", // create a generic board post (announcements)
   "giveKudos", // give a kudo (a board post about a recipient; announcements, kind="kudos")
   "markRead", // record the caller's read receipt on a board post (announcements)
+  "markAllRead", // record that receipt for every post the caller can see (announcements, notifications)
   "react", // toggle the caller's emoji reaction on a board post (announcements)
   "reply", // append a reply to a board post (announcements)
   "vote", // cast the caller's vote on a board poll (announcements)
+  "pin", "unpin", // pin a board post to the top of the feed / take it down (announcements, moderation)
   "updateProgress", // move a goal's progress without full edit rights (goals)
   "configure", "metrics", // kanban board config (columns/WIP/policies/lanes) + flow analytics (boards)
   "move", "block", "unblock", "assign", "prioritize", "comment", // kanban card actions (cards)
   "addTodos", "toggleTodo", "removeTodo", // card checklist (cards; tickets use the same verbs)
   "activate", // start a sprint (sprints) - complete reuses the existing verb
   "launch", "enroll", "close", "reopen", // review-cycle lifecycle (review-cycles)
-  "submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", // review workflow stages + 360 nomination (reviews)
+  "submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "nudge", "pdf", // review workflow stages + 360 nomination + stall reminder + record copy (reviews)
   "submitFeedback", "decline", // 360 peer feedback (review-feedback)
   "complete", "appendTask", // onboarding/offboarding transitions + tasks (transitions, transition-tasks)
   "disburse", "recordRepayment", // loan lifecycle (loans)
@@ -100,7 +105,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "bankFile", // download a payroll run as a bank's bulk-payment .xlsx
   "statutoryReport", // download a payroll run's PF/ESI/PT/TDS statutory report (.xlsx)
   "previewPayslip", // render one employee's payslip for an unpublished run, inline, nothing persisted (payroll-runs)
-  "preview", // view a stored document inline in the app, without the right to keep a copy (payslips)
+  "preview", // view a stored document inline, without the right to keep a copy (payslips); effective-access view-as (access-rules)
   "clockIn", "clockOut", // attendance punches (self-service)
   "sign", // in-place e-signature of a generated letter/contract (personal-documents, owner-only)
   "refreshEsign", // poll an e-sign vendor for a pending document's status and apply it (personal-documents)
@@ -112,6 +117,8 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "advance", // ATS: move an application one stage forward in the configured pipeline (applications)
   "extend", "accept", "rescind", // ATS: offer workflow (offers) - decline/approve reuse existing verbs
   "enrollDefaultBenefits", // auto-enrol a new hire in default benefit plans (employees; wired via automation)
+  "test", // dry-run an automation rule against a sample event (automations)
+  "requestAccess", // ask access admins for a missing grant (access-rules)
 ]);
 
 // The verbs this caller may perform on the object with internal `code`, decided by the engine over `grant`

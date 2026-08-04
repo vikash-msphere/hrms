@@ -28,6 +28,7 @@ const createSchema = z.object({
   assignee: z.string().nullable().optional(),
   priority: priorityEnum.optional(),
   labels: z.array(z.string()).optional(),
+  documents: z.array(z.string()).optional(),
   size: z.number().nullable().optional(),
   due_date: z.string().nullable().optional(),
   goal: z.string().nullable().optional(),
@@ -42,11 +43,12 @@ const updateSchema = z.object({
   assignee: z.string().nullable().optional(),
   priority: priorityEnum.optional(),
   labels: z.array(z.string()).optional(),
+  documents: z.array(z.string()).optional(),
   size: z.number().nullable().optional(),
   due_date: z.string().nullable().optional(),
   goal: z.string().nullable().optional(),
 }).strict();
-const moveSchema = z.object({ to_column: z.string().min(1), to_swimlane: z.string().nullable().optional(), rank: z.number().optional(), to_assignee: z.string().nullable().optional(), to_goal: z.string().nullable().optional(), to_priority: z.string().nullable().optional(), to_department: z.string().nullable().optional() }).strict();
+const moveSchema = z.object({ to_column: z.string().min(1), to_swimlane: z.string().nullable().optional(), rank: z.number().optional(), to_assignee: z.string().nullable().optional(), to_goal: z.string().nullable().optional(), to_priority: z.string().nullable().optional(), to_department: z.string().nullable().optional(), to_sprint: z.string().nullable().optional() }).strict();
 const blockSchema = z.object({ reason: z.string().nullable().optional(), blocked_by: z.string().nullable().optional() }).strict();
 const assignSchema = z.object({ assignee: z.string().nullable().optional() }).strict();
 const prioritizeSchema = z.object({ priority: priorityEnum }).strict();
@@ -88,8 +90,8 @@ export const cards = new Hono<AppEnv>()
     const user = c.get("user");
     const hint = (row: any) => withAccess(toCardResource(row), user, COL, row?.code, c.get("objectGrant"));
     if (verb === "move") {
-      const { to_column, to_swimlane, rank, to_assignee, to_goal, to_priority, to_department } = moveSchema.parse(await c.req.json().catch(() => ({})));
-      return c.json(hint(await moveCard(deps, user, id, to_column, to_swimlane, rank, to_assignee, to_goal, to_priority, to_department)));
+      const { to_column, to_swimlane, rank, to_assignee, to_goal, to_priority, to_department, to_sprint } = moveSchema.parse(await c.req.json().catch(() => ({})));
+      return c.json(hint(await moveCard(deps, user, id, to_column, to_swimlane, rank, to_assignee, to_goal, to_priority, to_department, to_sprint)));
     }
     if (verb === "block") {
       const { reason, blocked_by } = blockSchema.parse(await c.req.json().catch(() => ({})));

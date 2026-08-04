@@ -10,7 +10,7 @@
 // Which ones exist and at what rate is pure data - add/remove a row here, no code changes. epf/esi rows gate
 // the same way as the employee side (PF on opt-in, ESI while within the ceiling); gratuity is % of basic.
 // Returns the SQL block AND a key->uuid map so salary structures can reference the earning components.
-import { Ctx, T0, q, n, code2, rows } from "../lib";
+import { type Ctx, T0, q, n, code2, rows } from "../lib";
 
 type PayComponentSeed = {
   key: string;

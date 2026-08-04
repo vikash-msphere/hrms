@@ -19,6 +19,7 @@ import { settings } from "./routes/settings";
 import { roles } from "./routes/roles";
 import { policy } from "./routes/policy";
 import { accessRules } from "./routes/accessRules";
+import { accessPreviewRoute, accessRequestRoute } from "./routes/accessPreview";
 import { employees } from "./routes/employees";
 import { departments } from "./routes/departments";
 import { leaveRequests } from "./routes/leaveRequests";
@@ -53,7 +54,7 @@ import { holidaySelections } from "./routes/holidaySelections";
 import { complianceEvents } from "./routes/complianceEvents";
 import { complianceRules } from "./routes/complianceRules";
 import { backgroundChecks } from "./routes/backgroundChecks";
-import { announcements, announcementPost, announcementGiveKudos } from "./routes/announcements";
+import { announcements, announcementPost, announcementGiveKudos, announcementMarkAllRead } from "./routes/announcements";
 import { letterTemplates } from "./routes/letterTemplatesRoutes";
 import { leaveTypes } from "./routes/leaveTypes";
 import { payComponents } from "./routes/payComponents";
@@ -86,11 +87,13 @@ import { celebrations } from "./routes/celebrations";
 import { employeePhotosBatch } from "./routes/employeePhotosBatch";
 import { batch } from "./routes/batch";
 import { search } from "./routes/search";
+import { dashboardSummaryRoute } from "./routes/dashboardSummary";
 import { bankFormats } from "./routes/bankFormats";
 import { payrollDebit } from "./routes/payrollDebit";
 import { compensation } from "./routes/compensation";
 import { compensationReapply } from "./routes/compensationReapply";
 import { esignCallback } from "./routes/esignCallback";
+import { found } from "./routes/found";
 import { positions } from "./routes/positions";
 import { bonuses, bonusAward } from "./routes/bonuses";
 import { assets } from "./routes/assets";
@@ -113,6 +116,7 @@ import { automationRuns } from "./routes/automationRuns";
 import { workflowInstances } from "./routes/workflowInstances";
 import { workflowMeta } from "./routes/workflowMeta";
 import { esignProviders } from "./routes/esignProviders";
+import { authRoutes } from "./routes/authRoutes";
 
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
@@ -129,6 +133,19 @@ app.get("/readyz", async (c) => {
     return c.json({ status: "unavailable" }, 503);
   }
 });
+
+// Direct Google sign-in (mode-selected by GOOGLE_CLIENT_ID - see routes/authRoutes.ts). Outside /v1: login
+// and callback are by nature unauthenticated, and they touch no DB (provisioning happens on the first /v1
+// request through the auth middleware). Security headers still apply.
+app.use("/auth/*", securityHeaders);
+app.route("/auth", authRoutes);
+
+// Public lost-and-found page for printed asset tags (opt-in via settings/asset-tags found_page; the QR on a
+// sticker can encode /found/<wire-id>). OUTSIDE /v1: no session - a stranger returning hardware has none. The
+// wire-id token is HMAC-authenticated (unguessable) and the route serves only org name/tag/contact. It sets
+// its own security headers (needs inline-style CSP for the HTML). Needs only Deps for the two reads.
+app.use("/found/*", dbContext);
+app.route("/found", found);
 
 // Security headers on the public webhook responses too (the /v1 middleware below doesn't cover /esign).
 app.use("/esign/*", securityHeaders);
@@ -148,9 +165,12 @@ app.route("/v1/preferences", preferences);
 app.route("/v1/settings", settings);
 app.route("/v1/roles", roles);
 app.route("/v1/policy", policy);
+app.route("/v1/access-rules:preview", accessPreviewRoute); // effective-access preview (collection verb, before the collection mount)
+app.route("/v1/access-rules:requestAccess", accessRequestRoute); // ask access admins for a missing grant
 app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
+app.route("/v1/dashboard-summary", dashboardSummaryRoute); // aggregated KPI counts: same per-collection gating as search
 app.route("/v1/employees:upcomingCelebrations", celebrations); // collection custom method, before the employees mount
 app.route("/v1/employees:batchGetPhotos", employeePhotosBatch); // batched photo fetch (per-id scope in the service)
 app.route("/v1/employees", employees);
@@ -189,6 +209,7 @@ app.route("/v1/compliance-rules", complianceRules);
 app.route("/v1/background-checks", backgroundChecks);
 app.route("/v1/announcements:post", announcementPost); // collection custom method, before the announcements mount
 app.route("/v1/announcements:giveKudos", announcementGiveKudos); // open recognition wall (kind="kudos")
+app.route("/v1/announcements:markAllRead", announcementMarkAllRead); // clear the board's unread state in one call
 app.route("/v1/announcements", announcements);
 app.route("/v1/letter-templates", letterTemplates);
 app.route("/v1/leave-types", leaveTypes);

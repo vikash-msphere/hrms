@@ -18,6 +18,7 @@ export function Combobox({
   emptyText = "No matches.",
   className,
   disabled,
+  autoFocus,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -27,6 +28,10 @@ export function Combobox({
   emptyText?: string;
   className?: string;
   disabled?: boolean;
+  // Focus the trigger on mount, so a dialog whose first decision is a person can be opened straight into. It
+  // focuses the trigger, not the list - opening the popover for the author would be a decision they didn't ask
+  // for yet.
+  autoFocus?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -59,6 +64,7 @@ export function Combobox({
         <button
           type="button"
           disabled={disabled}
+          autoFocus={autoFocus}
           className={cn(
             "flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50",
             !selected && "text-muted-foreground",

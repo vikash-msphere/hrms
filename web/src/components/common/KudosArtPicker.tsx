@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Check, ImageOff } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { KUDOS_ART_DIECUT_SM, KUDOS_ART_FILES, kudosArtFiles, kudosArtLabel, kudosArtUrl } from "@/lib/kudosArt";
+import { ART_DIECUT_SM, KUDOS_ART_FILES, kudosArtFiles, kudosArtLabel, kudosArtUrl } from "@/lib/kudosArt";
 
 // Pick the stickers a kudos category offers (settings/kudos `art`). Multi-select: choosing that category while
 // writing a kudos puts one of them on the card, picked at random from the set, so a category's cards vary instead
@@ -37,7 +37,7 @@ export function KudosArtPicker({
         <button
           type="button"
           aria-label={selected.length ? `Stickers: ${selected.map(kudosArtLabel).join(", ")}` : "Pick stickers"}
-          title={selected.length ? selected.map(kudosArtLabel).join(" · ") : "No stickers - cards in this category show no image"}
+          title={selected.length ? selected.map(kudosArtLabel).join(" · ") : "No stickers - a new kudos in this category starts with no image"}
           className={cn("flex h-9 min-w-12 shrink-0 items-center justify-center gap-0.5 rounded-md border bg-background px-1 hover:bg-accent", className)}
         >
           {selected.length === 0 ? (
@@ -45,7 +45,7 @@ export function KudosArtPicker({
           ) : (
             <>
               {selected.slice(0, MAX_PREVIEW).map((f) => (
-                <img key={f} src={kudosArtUrl(f)} alt="" aria-hidden className={cn("h-7 w-6 object-contain", KUDOS_ART_DIECUT_SM)} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
+                <img key={f} src={kudosArtUrl(f)} alt="" aria-hidden className={cn("h-7 w-6 object-contain", ART_DIECUT_SM)} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
               ))}
               {selected.length > MAX_PREVIEW && <span className="text-[10px] tabular-nums text-muted-foreground">+{selected.length - MAX_PREVIEW}</span>}
             </>
@@ -73,7 +73,7 @@ export function KudosArtPicker({
                 aria-pressed={on}
                 className={cn("relative rounded-md border p-1 hover:bg-accent", on ? "border-primary ring-1 ring-primary" : "border-transparent")}
               >
-                <img src={kudosArtUrl(f)} alt={kudosArtLabel(f)} loading="lazy" className={cn("h-16 w-full object-contain", KUDOS_ART_DIECUT_SM)} />
+                <img src={kudosArtUrl(f)} alt={kudosArtLabel(f)} loading="lazy" className={cn("h-16 w-full object-contain", ART_DIECUT_SM)} />
                 {on && (
                   <span className="absolute right-0.5 top-0.5 rounded-full bg-primary p-0.5 text-primary-foreground">
                     <Check className="h-2.5 w-2.5" />
@@ -85,8 +85,8 @@ export function KudosArtPicker({
         </div>
         <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
           {selected.length > 1
-            ? `${selected.length} picked - each card in this category shows one of them, the same one every time.`
-            : "Shown on cards in this category when the giver picks no illustration. Pick more than one to vary them."}
+            ? `${selected.length} picked - a new kudos in this category starts with one of them at random.`
+            : "A new kudos in this category starts with this sticker; the giver can swap or remove it. Pick more than one to vary them."}
         </p>
       </PopoverContent>
     </Popover>

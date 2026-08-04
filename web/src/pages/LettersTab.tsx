@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { useConfirm } from "@/components/common/confirm";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
 
 type Toast = (t: { title: string; description?: string; variant?: "success" | "destructive" }) => void;
 
@@ -186,6 +187,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
 
   const selected = useMemo(() => templates.find((t) => t.id === selId), [templates, selId]);
+  useUnsavedTracker(dirty, () => save());
   const categories = useMemo(() => Array.from(new Set(templates.map((t) => t.category?.trim()).filter(Boolean))) as string[], [templates]);
 
   function mutateSelected(fn: (t: Template) => Template) {

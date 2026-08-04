@@ -7,7 +7,7 @@
 // customer provisions their org and first admin out-of-band. This is the difference from scripts/seed.sql,
 // the DEV/demo seed (100 fake employees + activity + 5 role logins).
 //
-//   Run:    npx tsx bootstrap/genBootstrap.ts > bootstrap/bootstrap.sql
+//   Run:    node --import ./scripts/tsResolve.mjs bootstrap/genBootstrap.ts > bootstrap/bootstrap.sql
 //   Apply:  npx wrangler d1 execute hrms --local --file=bootstrap/bootstrap.sql      (drop --local for remote)
 import { createCtx, HOLIDAY_YEAR, FY_START_YEAR } from "./lib";
 import { authz } from "./collections/authz";

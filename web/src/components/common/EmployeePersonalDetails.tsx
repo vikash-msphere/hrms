@@ -17,7 +17,7 @@ import { useToast } from "@/components/ui/use-toast";
 
 /** An employee's contact details. Stored encrypted (with emergency info, edited via the
  *  emergency modal); visible to the owner, HR and super_admin. */
-export function EmployeePersonalDetails({ employeeId, canEdit }: { employeeId: string; canEdit: boolean }) {
+export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { employeeId: string; canEdit: boolean; onSaved?: () => void }) {
   const { toast } = useToast();
   const [data, setData] = useState<PersonalDetails | null>(null);
   const [denied, setDenied] = useState(false);
@@ -49,6 +49,7 @@ export function EmployeePersonalDetails({ employeeId, canEdit }: { employeeId: s
       const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
       setData(updated);
       toast({ title: "Contact details saved", variant: "success" });
+      onSaved?.();
       setOpen(false);
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });

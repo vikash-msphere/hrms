@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   KanbanSquare, Plus, BarChart3, Ban, X, ChevronUp, ChevronDown, ChevronsUp, ChevronLeft, ChevronRight,
-  AlertTriangle, Trash2, Flag, Target, Search, Tag, Info, MessageSquare, CalendarDays, History, Building2, ListChecks,
+  AlertTriangle, Trash2, Flag, Target, Search, Tag, Info, MessageSquare, CalendarDays, History, Building2, ListChecks, AlignLeft,
+  MoreHorizontal, List as ListIcon, UserRound, FileText, ExternalLink,
 } from "lucide-react";
 import { create, get, invoke, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
+import { useRefetchOnFocus } from "@/hooks/useRefetchOnFocus";
+import { useRoute, setQueryParam } from "@/router";
+import { DataTable, type Column } from "@/components/common/DataTable";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from "@/components/ui/dropdown-menu";
 import { idOf, cn } from "@/lib/utils";
 import { useCanSeeActivity } from "@/lib/perm";
 import type { Me, Board, BoardMode, Card as CardT, CardComment, CardTodo, TicketChecklist, BoardColumn, WipScope, SwimlaneMode, Employee, Goal, Department, BoardMetrics, Sprint } from "@/types";
+import type { Wire } from "@/wire";
+import { resourceRoute } from "@/lib/resourceRoute";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SettingsButton } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
@@ -29,6 +36,8 @@ import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/comp
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import type { Label as BoardLabel } from "@/types";
+import { RichTextToolbar } from "@/components/common/RichTextToolbar";
+import { RichText } from "@/lib/richText";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessScope } from "@/components/access/AccessScope";
 import { AccessTarget } from "@/components/access/AccessTarget";
@@ -111,15 +120,31 @@ const rankAt = (items: CardT[], idx: number) => {
 
 // Client-side board filtering, shared by Kanban + Scrum. Filters the already-fetched, access-scoped rows.
 // Department filter matches on the card's own department (NONE when unset).
-function useCardFilter(meId?: string | null) {
+// With a `storageKey` the chip filters (not the search text) persist per board in localStorage, so a curated
+// view survives navigation. Initialized once per mount - the views are keyed by board, so switching boards
+// remounts and picks up that board's saved filter.
+type SavedFilter = { assignees?: string[]; priorities?: string[]; labels?: string[]; departments?: string[]; mine?: boolean };
+function useCardFilter(meId?: string | null, storageKey?: string) {
+  const [saved] = useState((): SavedFilter => {
+    if (!storageKey) return {};
+    try { return JSON.parse(localStorage.getItem(storageKey) ?? "{}") as SavedFilter; } catch { return {}; }
+  });
   const [q, setQ] = useState("");
-  const [assignees, setAssignees] = useState<Set<string>>(new Set());
-  const [priorities, setPriorities] = useState<Set<string>>(new Set());
-  const [labels, setLabels] = useState<Set<string>>(new Set());
-  const [departments, setDepartments] = useState<Set<string>>(new Set());
-  const [mine, setMine] = useState(false);
+  const [assignees, setAssignees] = useState<Set<string>>(new Set(saved.assignees));
+  const [priorities, setPriorities] = useState<Set<string>>(new Set(saved.priorities));
+  const [labels, setLabels] = useState<Set<string>>(new Set(saved.labels));
+  const [departments, setDepartments] = useState<Set<string>>(new Set(saved.departments));
+  const [mine, setMine] = useState(!!saved.mine);
   const active = !!q || assignees.size > 0 || priorities.size > 0 || labels.size > 0 || departments.size > 0 || mine;
   const clear = () => { setQ(""); setAssignees(new Set()); setPriorities(new Set()); setLabels(new Set()); setDepartments(new Set()); setMine(false); };
+  useEffect(() => {
+    if (!storageKey) return;
+    if (assignees.size || priorities.size || labels.size || departments.size || mine) {
+      localStorage.setItem(storageKey, JSON.stringify({ assignees: [...assignees], priorities: [...priorities], labels: [...labels], departments: [...departments], mine } satisfies SavedFilter));
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+  }, [assignees, priorities, labels, departments, mine, storageKey]);
   const effDept = (c: CardT) => (c.department ? idOf(c.department) : NONE);
   const match = (c: CardT) => {
     if (q && !`${c.title} ${c.description ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false;
@@ -142,6 +167,7 @@ type CardFilter = ReturnType<typeof useCardFilter>;
 
 // The board toolbar: search + assignee/priority/label filters + "My tasks". Options come from the cards present.
 function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: CardFilter; board: Board; cards: CardT[]; empName: (ref?: string) => string; deptName: (ref?: string) => string }) {
+  const shown = useMemo(() => cards.filter(filter.match).length, [cards, filter]);
   const assigneeOpts = useMemo(() => {
     const ids = new Set<string>();
     let hasUnassigned = false;
@@ -158,6 +184,12 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
     return { list: [...ids].map((id) => ({ id, name: deptName(`departments/${id}`) })), hasNone };
   }, [cards, deptName, filter]);
   const labelByKey = new Map(board.labels.map((l) => [l.key, l]));
+  // One-click assignee filter: the busiest assignees as a compact avatar row (full list stays in the popover).
+  const avatarStrip = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of cards) if (c.assignee && !c.deliver_time) counts.set(idOf(c.assignee), (counts.get(idOf(c.assignee)) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([id, n]) => ({ id, n, name: empName(`employees/${id}`) }));
+  }, [cards, empName]);
 
   const FilterPopover = ({ label, count, children }: { label: string; count: number; children: ReactNode }) => (
     <Popover>
@@ -179,6 +211,25 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
         <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input value={filter.q} onChange={(e) => filter.setQ(e.target.value)} placeholder="Search tasks…" className="h-8 w-52 pl-7" />
       </div>
+      {avatarStrip.length > 1 && (
+        <div className="flex items-center -space-x-1.5">
+          {avatarStrip.map((a) => (
+            <Tooltip key={a.id}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => filter.toggleAssignee(a.id)}
+                  aria-pressed={filter.assignees.has(a.id)}
+                  className={cn("rounded-full transition-transform hover:z-10 hover:-translate-y-0.5", filter.assignees.has(a.id) && "z-10 ring-2 ring-primary")}
+                >
+                  <PhotoAvatar employeeId={a.id} name={a.name} className="h-7 w-7 border-2 border-background text-[10px]" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>{a.name} · {a.n} open task{a.n === 1 ? "" : "s"}</TooltipContent>
+            </Tooltip>
+          ))}
+        </div>
+      )}
       <FilterPopover label="Assignee" count={filter.assignees.size}>
         {assigneeOpts.hasUnassigned && <Row on={filter.assignees.has(NONE)} onClick={() => filter.toggleAssignee(NONE)}>Unassigned</Row>}
         {assigneeOpts.list.map((a) => (
@@ -214,24 +265,53 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
         </FilterPopover>
       )}
       <Button variant={filter.mine ? "secondary" : "outline"} size="sm" className="h-8" onClick={() => filter.setMine(!filter.mine)}>My tasks</Button>
-      {filter.active && <Button variant="ghost" size="sm" className="h-8 text-muted-foreground" onClick={filter.clear}><X className="h-3.5 w-3.5" /> Clear</Button>}
+      {filter.active && (
+        <>
+          <Button variant="ghost" size="sm" className="h-8 text-muted-foreground" onClick={filter.clear}><X className="h-3.5 w-3.5" /> Clear</Button>
+          <span className="text-xs text-muted-foreground">{shown} of {cards.length} task{cards.length === 1 ? "" : "s"}</span>
+        </>
+      )}
     </div>
   );
 }
 
+const LAST_BOARD_KEY = "boards:last";
+const CARD_FETCH_CAP = 500; // follow the cards cursor up to here; past it the TruncationNotice takes over
+
 export default function Boards({ me, openId }: { me: Me; openId?: string }) {
   const { rows: boards, state, error, reload } = useCollection<Board>("boards");
   // Shared cache with the view below (no extra read) — used only to map a deep-linked card id to its board.
-  const { rows: navCards } = useCollection<CardT>("cards");
+  const { rows: navCards, hasMore: cardsHasMore, loadMore: loadMoreCards } = useCollection<CardT>("cards");
+  const route = useRoute();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newBoard, setNewBoard] = useState(false);
   const [tab, setTab] = useState("board");
 
-  // Default to the first board once loaded; keep the selection valid as the list changes.
+  // The server caps a list page at 100 rows; boards are the likeliest collection to exceed it. Follow the
+  // cursor (one page per response, the store dedups in-flight) until the board data is complete or the cap is
+  // hit - reads stay proportional to actual board size and only happen while this page is open.
+  useEffect(() => {
+    if (cardsHasMore && navCards.length < CARD_FETCH_CAP) void loadMoreCards();
+  }, [cardsHasMore, navCards.length, loadMoreCards]);
+
+  // Which board to show: `?board=` in the URL (shareable deep link) > last viewed (localStorage) > first.
+  // Falls back to the first board whenever the current choice stops being valid (deleted, access lost).
   useEffect(() => {
     if (!boards.length) { setSelectedId(null); return; }
-    if (!selectedId || !boards.some((b) => idOf(b.path) === selectedId)) setSelectedId(idOf(boards[0]!.path));
-  }, [boards, selectedId]);
+    const valid = (id: string | null | undefined) => (id && boards.some((b) => idOf(b.path) === id) ? id : null);
+    const fromUrl = valid(route.query.board);
+    if (fromUrl && fromUrl !== selectedId) { setSelectedId(fromUrl); return; }
+    if (valid(selectedId)) return;
+    setSelectedId(fromUrl ?? valid(localStorage.getItem(LAST_BOARD_KEY)) ?? idOf(boards[0]!.path));
+  }, [boards, selectedId, route.query.board]);
+
+  // Remember the selection and keep the URL shareable. Query-only hash writes don't add history entries here
+  // (setQueryParam preserves the path), and the unsaved-changes guard ignores them.
+  function selectBoard(id: string) {
+    setSelectedId(id);
+    localStorage.setItem(LAST_BOARD_KEY, id);
+    setQueryParam("board", id);
+  }
 
   // Deep link `#/boards/<cardId>` (from the activity feed): select that card's board so the view can open it.
   useEffect(() => {
@@ -256,7 +336,7 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
         actions={
           <div className="flex items-center gap-2">
             {boards.length > 0 && (
-              <Select value={selectedId ?? undefined} onValueChange={setSelectedId}>
+              <Select value={selectedId ?? undefined} onValueChange={selectBoard}>
                 <SelectTrigger className="w-56"><SelectValue placeholder="Pick a board" /></SelectTrigger>
                 <SelectContent>
                   {boards.map((b) => <SelectItem key={b.path} value={idOf(b.path)}>{b.name}</SelectItem>)}
@@ -280,13 +360,15 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
                 <div className="flex items-center justify-between gap-2">
                   <TabsList>
                     <TabsTrigger value="board"><KanbanSquare className="mr-1.5 h-4 w-4" /> Board</TabsTrigger>
+                    <TabsTrigger value="list"><ListIcon className="mr-1.5 h-4 w-4" /> List</TabsTrigger>
                     <TabsTrigger value="analytics"><BarChart3 className="mr-1.5 h-4 w-4" /> Analytics</TabsTrigger>
                   </TabsList>
                   <SettingsButton me={me} settingKey="board-config" objectPath={board.path} can={board.access?.can} />
                 </div>
                 <TabsContent value="board">
-                  {board.mode === "scrum" ? <ScrumView board={board} me={me} openId={openId} /> : <BoardView board={board} me={me} openId={openId} />}
+                  {board.mode === "scrum" ? <ScrumView key={board.path} board={board} me={me} openId={openId} /> : <BoardView key={board.path} board={board} me={me} openId={openId} />}
                 </TabsContent>
+                <TabsContent value="list"><BoardListTab key={board.path} board={board} /></TabsContent>
                 <TabsContent value="analytics"><AnalyticsTab board={board} /></TabsContent>
               </Tabs>
             )}
@@ -309,14 +391,26 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const { toast } = useToast();
   const boardId = idOf(board.path);
   const [editing, setEditing] = useState<CardT | null>(null);
-  const [addTo, setAddTo] = useState<string | null>(null); // column key for the quick "add card"
-  // "+ New → Create a task" quick action: open the composer on this board's first column.
+  const [addTo, setAddTo] = useState<string | null>(null); // column key for the full "add card" dialog
+  const [quick, setQuick] = useState<string | null>(null); // column key with the inline title composer open
+  // "+ New → Create a task" quick action: open the full composer on this board's first column.
   useIntent("new-card", () => { const k = board.columns[0]?.key; if (k) setAddTo(k); });
   const dragId = useRef<string | null>(null);
   const { ref: fillRef, height: fillH } = useFillHeight();
   const pendingRank = useRef<number | null>(null); // rank computed from the hovered gap, for precise insertion
   const [overCell, setOverCell] = useState<string | null>(null); // `${col}::${lane}` currently hovered while dragging
   const [lineAt, setLineAt] = useState<string | null>(null); // `${cardPath}:t|b` — where to draw the insertion line
+  // Catch up on what teammates moved while this tab was in the background (throttled; no polling).
+  useRefetchOnFocus(reload);
+  // Folded-away columns (per board, sticky). A collapsed column stays a drop target (drop = append).
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(`boards:collapsed:${boardId}`) ?? "[]") as string[]); } catch { return new Set(); }
+  });
+  const toggleCollapse = (k: string) => setCollapsed((s) => {
+    const n = toggleSet(s, k);
+    localStorage.setItem(`boards:collapsed:${boardId}`, JSON.stringify([...n]));
+    return n;
+  });
 
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
   useDeepOpen(openId, cards, setEditing);
@@ -372,7 +466,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     return [...seen.entries()].map(([key, label]) => ({ key, label }));
   }, [board, cards, empName, goalTitle, deptName, noneLabel]);
 
-  const filter = useCardFilter(me.employee_id);
+  const filter = useCardFilter(me.employee_id, `boards:filter:${boardId}`);
   const visible = cards.filter(filter.match);
   const cardsIn = (colKey: string, laneKey: string) =>
     visible
@@ -400,13 +494,14 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     return `${colKey}::${card ? dropLane(card, colKey, laneKey) : laneKey}`;
   }
 
-  async function onDrop(colKey: string, laneKey: string, explicitRank?: number) {
+  // `laneKeyIn === null` = keep the card's own lane (drops on a collapsed column, which has no lane cells).
+  async function onDrop(colKey: string, laneKeyIn: string | null, explicitRank?: number) {
     const id = dragId.current;
     dragId.current = null;
     if (!id) return;
     const card = cards.find((c) => idOf(c.path) === id);
     if (!card) return;
-    laneKey = dropLane(card, colKey, laneKey);
+    const laneKey = dropLane(card, colKey, laneKeyIn ?? laneKeyOf(card));
     const laneChanged = board.swimlane_mode !== "none" && laneKeyOf(card) !== laneKey;
     const sameCell = card.column_key === colKey && !laneChanged;
     if (sameCell && explicitRank == null) return; // dropped back on its own cell with no position → no-op
@@ -435,6 +530,30 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     }
   }
 
+  // Menu-driven equivalents of drag/dialog edits, so cards are workable without a mouse drag (touch included).
+  async function menuMove(card: CardT, toCol: string) {
+    const dest = cardsIn(toCol, laneKeyOf(card));
+    const rank = (dest.length ? Math.max(...dest.map((c) => c.rank ?? 0)) : 0) + RANK_STEP;
+    setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, column_key: toCol, rank } : c)));
+    try { await invoke<CardT>(`cards/${idOf(card.path)}`, "move", card.etag, { to_column: toCol, rank }); }
+    catch (e) { reload(); toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" }); }
+  }
+  async function menuPatch(card: CardT, body: Partial<CardT>) {
+    setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, ...body } : c)));
+    try { await patch<CardT>(`cards/${idOf(card.path)}`, body as Record<string, unknown>, card.etag); }
+    catch (e) { reload(); toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
+  }
+  const tileMenu = (c: CardT) => (
+    <CardActionsMenu
+      card={c}
+      meId={me.employee_id}
+      columns={board.columns}
+      onMove={(k) => void menuMove(c, k)}
+      onAssignMe={() => void menuPatch(c, { assignee: `employees/${me.employee_id}` })}
+      onPriority={(p) => void menuPatch(c, { priority: p })}
+    />
+  );
+
   return (
     <TooltipProvider delayDuration={150}>
       <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} deptName={deptName} />
@@ -445,26 +564,61 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
           const perAssignee = col.limitScope === "assignee";
           const overWip = col.wipLimit != null && !perAssignee && count > col.wipLimit;
           const atWip = col.wipLimit != null && !perAssignee && count >= col.wipLimit;
+          // Per-assignee WIP: surface WHO is over (board-wide limits already color the count badge).
+          const wipOffenders = perAssignee && col.wipLimit != null
+            ? (() => {
+                const byAssignee = new Map<string, number>();
+                for (const c of cards) if (c.column_key === col.key && c.assignee) { const a = idOf(c.assignee); byAssignee.set(a, (byAssignee.get(a) ?? 0) + 1); }
+                return [...byAssignee.entries()].filter(([, n]) => n > col.wipLimit!);
+              })()
+            : [];
+          if (collapsed.has(col.key)) {
+            return (
+              <div
+                key={col.key}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverCell(`${col.key}::__collapsed`); }}
+                onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverCell((p) => (p === `${col.key}::__collapsed` ? null : p)); }}
+                onDrop={(e) => { e.preventDefault(); setOverCell(null); setLineAt(null); void onDrop(col.key, null); }}
+                className={cn("flex min-h-0 w-10 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20 transition-colors", overCell === `${col.key}::__collapsed` && "bg-primary/10 outline-dashed outline-1 outline-primary/40")}
+              >
+                <button type="button" onClick={() => toggleCollapse(col.key)} className="flex h-full w-full flex-col items-center gap-2 py-2 hover:bg-accent/40" title={`Expand ${col.label}`}>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                  <Badge variant={overWip ? "destructive" : "secondary"}>{count}</Badge>
+                  <span className="text-xs font-medium text-muted-foreground [writing-mode:vertical-rl]">{col.label}</span>
+                </button>
+              </div>
+            );
+          }
           return (
             <div key={col.key} className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20">
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="truncate text-sm font-medium">{col.label}</span>
-                  {col.isCommitment && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
-                  {col.isDelivery && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
+                  {col.commitment && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
+                  {col.delivery && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
                   {col.policy && <Tooltip><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  {wipOffenders.map(([id, n]) => (
+                    <Tooltip key={id}>
+                      <TooltipTrigger asChild>
+                        <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
+                      </TooltipTrigger>
+                      <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
+                    </Tooltip>
+                  ))}
                   <Badge variant={overWip ? "destructive" : "secondary"} className={atWip && !overWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
                     {count}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
                   </Badge>
                   <AccessAction collection="cards" create label="Add a task">
-                    <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => setAddTo(col.key)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
+                    <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => setQuick((k) => (k === col.key ? null : col.key))}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
                   </AccessAction>
+                  <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => toggleCollapse(col.key)}><ChevronLeft className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Collapse</TooltipContent></Tooltip>
                 </div>
               </div>
 
               <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
+                {quick === col.key && <QuickAddCard board={board} column={col.key} onClose={() => setQuick(null)} onCreated={reload} />}
                 {visibleLanes.map((lane) => {
                   const items = cardsIn(col.key, lane.key);
                   const cellId = `${col.key}::${lane.key}`;
@@ -477,7 +631,10 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                       className={`flex flex-1 flex-col gap-2 rounded-md p-1 transition-colors min-h-[44px] ${overCell === cellId ? "bg-primary/10 outline-dashed outline-1 outline-primary/40" : ""}`}
                     >
                       {board.swimlane_mode !== "none" && (
-                        <div className="px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{lane.label}</div>
+                        <div className="px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          {lane.label}
+                          {items.length > 0 && <span className="ml-1.5 font-normal normal-case text-muted-foreground/70">{items.length}</span>}
+                        </div>
                       )}
                       {items.map((c, idx) => (
                         <div
@@ -497,11 +654,14 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                           }}
                         >
                           <span className={`pointer-events-none absolute inset-x-1 -top-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:t` ? "" : "hidden"}`} />
-                          <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
+                          <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
                           <span className={`pointer-events-none absolute inset-x-1 -bottom-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:b` ? "" : "hidden"}`} />
                         </div>
                       ))}
                       {items.length === 0 && board.swimlane_mode !== "none" && <p className="px-1 text-[11px] text-muted-foreground/60">—</p>}
+                      {items.length === 0 && board.swimlane_mode === "none" && quick !== col.key && (
+                        <p className="m-auto py-6 text-center text-xs text-muted-foreground/50">No tasks — drag one here</p>
+                      )}
                     </div>
                   );
                 })}
@@ -517,8 +677,15 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   );
 }
 
-function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string } | null; catalog: BoardLabel[]; goalName?: string; blockerKey?: string; deptLabel?: string; onDragStart: () => void; onClick: () => void }) {
-  const overdue = card.due_date && !card.deliver_time && new Date(card.due_date) < new Date();
+const STALE_AFTER_DAYS = 7; // aging signal: card untouched this long (and not delivered) gets a quiet dot
+
+function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, menu, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string } | null; catalog: BoardLabel[]; goalName?: string; blockerKey?: string; deptLabel?: string; menu?: ReactNode; onDragStart: () => void; onClick: () => void }) {
+  // Due chip: red when overdue, amber when due within 3 days, quiet otherwise. Hidden once delivered.
+  const due = card.due_date && !card.deliver_time ? new Date(card.due_date) : null;
+  const overdue = !!due && due < new Date();
+  const dueSoon = !!due && !overdue && due.getTime() - Date.now() < 3 * 86400e3;
+  const ageDays = card.update_time ? Math.floor((Date.now() - new Date(card.update_time).getTime()) / 86400e3) : 0;
+  const stale = ageDays >= STALE_AFTER_DAYS && !card.deliver_time;
   return (
     <div
       draggable
@@ -527,13 +694,15 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, on
       className="group relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
     >
       {card.blocked && <span className="absolute inset-y-0 left-0 w-1 bg-destructive" aria-hidden />}
-      <div className="absolute right-1 top-1 z-10" onClick={(e) => e.stopPropagation()}>
+      <div className="absolute right-1 top-1 z-10 flex items-center" onClick={(e) => e.stopPropagation()}>
+        {menu}
         <AccessTarget target={{ collection: "cards", objectPath: card.path, can: card.access?.can, label: "Manage task access" }} />
       </div>
       {card.labels?.length ? <div className="mb-1.5 flex flex-wrap gap-1"><LabelChips keys={card.labels} catalog={catalog} max={3} /></div> : null}
       <p className="text-sm font-medium leading-snug">{card.title}</p>
       <div className="mt-2 flex items-center gap-1.5">
         <span className="font-mono text-[10px] text-muted-foreground">{taskKey(card)}</span>
+        {stale && <Tooltip><TooltipTrigger asChild><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" /></TooltipTrigger><TooltipContent>No activity for {ageDays} days</TooltipContent></Tooltip>}
         <Tooltip><TooltipTrigger asChild><span><PriorityIcon p={card.priority} /></span></TooltipTrigger><TooltipContent className="capitalize">{card.priority} priority</TooltipContent></Tooltip>
         {card.size != null && <span className="rounded bg-muted px-1.5 text-[11px] font-medium tabular-nums text-muted-foreground">{card.size}</span>}
         {(card.todo_total ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className={cn("inline-flex items-center gap-0.5 rounded px-1.5 text-[10px] font-medium tabular-nums", card.todo_done === card.todo_total ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400" : "bg-muted text-muted-foreground")}><ListChecks className="h-3 w-3" />{card.todo_done}/{card.todo_total}</span></TooltipTrigger><TooltipContent>Checklist: {card.todo_done}/{card.todo_total} done</TooltipContent></Tooltip>}
@@ -544,11 +713,18 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, on
             ? <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-destructive"><Ban className="h-3 w-3" />{blockerKey}</span>
             : <Ban className="h-3.5 w-3.5 text-destructive" />
         )}
-        {overdue && (
-          <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-warning">
-            <CalendarDays className="h-3 w-3" />{new Date(card.due_date!).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-          </span>
+        {due && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className={cn("inline-flex items-center gap-0.5 text-[10px] font-medium", overdue ? "text-destructive" : dueSoon ? "text-warning" : "text-muted-foreground")}>
+                <CalendarDays className="h-3 w-3" />{due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{overdue ? "Overdue — was due" : "Due"} {due.toLocaleDateString()}</TooltipContent>
+          </Tooltip>
         )}
+        {card.description && <Tooltip><TooltipTrigger asChild><AlignLeft className="h-3 w-3 text-muted-foreground/70" /></TooltipTrigger><TooltipContent>Has a description</TooltipContent></Tooltip>}
+        {(card.documents?.length ?? 0) > 0 && <Tooltip><TooltipTrigger asChild><span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-muted-foreground"><FileText className="h-3 w-3" />{card.documents!.length}</span></TooltipTrigger><TooltipContent>{card.documents!.length} linked document{card.documents!.length === 1 ? "" : "s"}</TooltipContent></Tooltip>}
         <span className="ml-auto">
           {assignee ? (
             <Tooltip><TooltipTrigger asChild><span><PhotoAvatar employeeId={assignee.id} name={assignee.name} className="h-6 w-6 text-[10px]" /></span></TooltipTrigger><TooltipContent>{assignee.name}</TooltipContent></Tooltip>
@@ -556,6 +732,109 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, on
             <span className="block h-6 w-6 rounded-full border border-dashed border-muted-foreground/40" title="Unassigned" />
           )}
         </span>
+      </div>
+    </div>
+  );
+}
+
+// "..." on every tile: the no-drag path for the common one-off actions (and the ONLY move path on touch, where
+// HTML5 drag-and-drop does not fire). Entries are gated on the card's `access.can`; with nothing allowed the
+// button doesn't render at all. Hidden until hover on fine pointers, always visible on coarse ones.
+function CardActionsMenu({ card, meId, columns, sprintExtras, onMove, onAssignMe, onPriority }: {
+  card: CardT;
+  meId?: string | null;
+  columns: BoardColumn[];
+  sprintExtras?: ReactNode; // scrum-only entries (move to sprint / send to backlog), pre-gated by the caller
+  onMove: (colKey: string) => void;
+  onAssignMe: () => void;
+  onPriority: (p: CardT["priority"]) => void;
+}) {
+  const can = card.access?.can ?? [];
+  const canMove = can.includes("move");
+  const canEdit = can.includes("update");
+  const showAssignMe = canEdit && !!meId && (!card.assignee || idOf(card.assignee) !== meId);
+  if (!canEdit && !(canMove && (columns.length > 0 || sprintExtras))) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Task actions"
+          className="h-6 w-6 text-muted-foreground opacity-0 focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100"
+        >
+          <MoreHorizontal className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-44">
+        {canMove && columns.length > 0 && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {columns.filter((c) => c.key !== card.column_key).map((c) => (
+                <DropdownMenuItem key={c.key} onClick={() => onMove(c.key)}>{c.label}</DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
+        {canMove && sprintExtras}
+        {showAssignMe && <DropdownMenuItem className="gap-2" onClick={onAssignMe}><UserRound className="h-4 w-4" /> Assign to me</DropdownMenuItem>}
+        {canEdit && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>Priority</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {PRIORITIES.map((p) => (
+                <DropdownMenuItem key={p} disabled={p === card.priority} onClick={() => onPriority(p)} className="gap-2 capitalize">
+                  <PriorityIcon p={p} /> {p}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// Trello-style inline composer: type a title, Enter adds the card right into the column (server defaults fill
+// the rest); stays open so several cards can be added in a row. Esc or ✕ closes. The full dialog remains the
+// path for anything richer (open the card after, or use "+ New → Create a task").
+function QuickAddCard({ board, column, onClose, onCreated }: { board: Board; column: string; onClose: () => void; onCreated: () => void }) {
+  const { toast } = useToast();
+  const [title, setTitle] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function add() {
+    const t = title.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    try {
+      await create<CardT>("cards", { board: board.path, column_key: column, title: t });
+      setTitle("");
+      onCreated();
+    } catch (e) {
+      toast({ title: "Couldn't add", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="rounded-lg border bg-card p-2 shadow-sm">
+      <Textarea
+        autoFocus
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void add(); }
+          if (e.key === "Escape") onClose();
+        }}
+        rows={2}
+        placeholder="What needs doing?"
+        className="min-h-0 resize-none border-0 p-1 text-sm shadow-none focus-visible:ring-0"
+      />
+      <div className="mt-1.5 flex items-center gap-1">
+        <Button size="sm" className="h-7" onClick={add} loading={busy} disabled={!title.trim()}>Add</Button>
+        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={onClose} aria-label="Close"><X className="h-4 w-4" /></Button>
+        <span className="ml-auto text-[10px] text-muted-foreground">Enter to add</span>
       </div>
     </div>
   );
@@ -602,10 +881,19 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   // Predefined checklist templates (shared catalog); the picker only shows those the caller can read.
   const { rows: checklists } = useCollection<TicketChecklist>("ticket-checklists");
   const [labels, setLabels] = useState<string[]>(card?.labels ?? []);
+  // Linked documents: org-document ids (link-only). Fetched lazily - the list loads only while a dialog is
+  // open, and only for callers who can read org-documents at all (useCollection's capability gate).
+  const [docs, setDocs] = useState<string[]>((card?.documents ?? []).map((p) => idOf(p)));
+  const { rows: orgDocs } = useCollection<Wire<"org-document">>("org-documents");
+  const docTitle = useMemo(() => {
+    const m = new Map(orgDocs.map((d) => [idOf(d.path), d.display_name || d.file_name || "Document"]));
+    return (id: string) => m.get(id) ?? "Document";
+  }, [orgDocs]);
   const [curColumn, setCurColumn] = useState(card?.column_key ?? column ?? board.columns[0]?.key ?? "");
   const [showActivity, setShowActivity] = useState(false);
   const canCardActivity = useCanSeeActivity("cards"); // gates the card Activity affordance (server ANDs with card read)
   const canEdit = !editing || (card!.access?.can ?? []).includes("update");
+  const descRef = useRef<HTMLTextAreaElement>(null); // the formatting bar edits this textarea's source
 
   // Comments arrive only on the item Get (not the list), so load them when opening an existing card.
   useEffect(() => {
@@ -665,6 +953,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       assignee: assignee ? `employees/${assignee}` : null,
       goal: goal ? `goals/${goal}` : null,
       labels,
+      documents: docs.map((id) => `org-documents/${id}`),
       size: size ? Number(size) : null,
       due_date: due || null,
       ...(board.swimlane_mode === "custom" ? { swimlane_key: swimlane || null } : {}),
@@ -729,8 +1018,20 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
         <Field label="Title">
           <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing?" disabled={!canEdit} />
         </Field>
+        {/* Markdown-lite source in a plain textarea (same contract as board posts): the bar transforms the
+            text, storage is exactly what's shown, and richToPlain-free rendering via <RichText>. Readers who
+            can't edit get the rendered description, not a disabled box of markup. */}
         <Field label="Description">
-          <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} disabled={!canEdit} />
+          {canEdit ? (
+            <div>
+              <RichTextToolbar textareaRef={descRef} value={description} onChange={setDescription} />
+              <Textarea ref={descRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="rounded-t-none" />
+            </div>
+          ) : description ? (
+            <RichText source={description} className="space-y-1.5 text-sm" />
+          ) : (
+            <p className="text-sm text-muted-foreground">No description.</p>
+          )}
         </Field>
         {/* Two-column field grid. When an odd number of fields is visible (Status is edit-only; Labels/Swimlane
             are board-conditional), the lone trailing field spans both columns so no half-width orphan is left. */}
@@ -801,6 +1102,41 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             </Field>
           )}
         </div>
+
+        {/* Linked documents: references into the org library (specs, policies) - the card owns no files.
+            Saved with the card (part of the PATCH/create body), like every other field. */}
+        {(docs.length > 0 || (canEdit && orgDocs.length > 0)) && (
+          <div className="space-y-2 border-t pt-3">
+            <p className="flex items-center gap-1.5 text-sm font-medium">
+              <FileText className="h-4 w-4" /> Linked documents
+              {docs.length > 0 && <span className="text-xs font-normal text-muted-foreground">{docs.length}</span>}
+            </p>
+            {docs.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {docs.map((id) => (
+                  <span key={id} className="inline-flex items-center gap-1 rounded-md border bg-muted/30 py-1 pl-2 pr-1 text-sm">
+                    <a href={`#/${resourceRoute("org-documents", `org-documents/${id}`) ?? "documents"}`} className="inline-flex items-center gap-1 hover:underline">
+                      {docTitle(id)} <ExternalLink className="h-3 w-3 text-muted-foreground" />
+                    </a>
+                    {canEdit && (
+                      <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setDocs((s) => s.filter((x) => x !== id))} aria-label="Unlink">
+                        <X className="h-3 w-3" />
+                      </Button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+            {canEdit && (
+              <Combobox
+                value=""
+                onValueChange={(v) => { if (v) setDocs((s) => (s.includes(v) ? s : [...s, v])); }}
+                options={orgDocs.filter((d) => !docs.includes(idOf(d.path))).map((d) => ({ value: idOf(d.path), label: d.display_name || d.file_name || "Document" }))}
+                placeholder="Link a document…"
+              />
+            )}
+          </div>
+        )}
 
         {editing && (
           <div className="space-y-2 border-t pt-3">
@@ -920,6 +1256,19 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 </div>
               )
             )}
+            {(() => {
+              // The reverse edge: cards waiting on THIS one. Computed from the already-loaded board cards.
+              const blocks = boardCards.filter((x) => x.blocked_by && idOf(x.blocked_by) === idOf(card!.path) && !x.delete_time);
+              if (!blocks.length) return null;
+              return (
+                <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-muted-foreground">
+                  <Ban className="h-4 w-4" /> Blocks
+                  {blocks.map((b) => onOpenCard
+                    ? <button key={b.path} type="button" className="font-medium text-foreground underline hover:no-underline" onClick={() => onOpenCard(b)}>{taskKey(b)} {b.title}</button>
+                    : <span key={b.path} className="font-medium text-foreground">{taskKey(b)} {b.title}</span>)}
+                </p>
+              );
+            })()}
           </div>
         )}
 
@@ -1022,7 +1371,8 @@ function AnalyticsTab({ board }: { board: Board }) {
   useEffect(() => {
     let live = true;
     setLoading(true);
-    invoke<BoardMetrics>(`boards/${idOf(board.path)}`, "metrics", undefined)
+    // `days` rides the query string (the metrics verb reads it there); invoke() itself has no params arg.
+    invoke<BoardMetrics>(`boards/${idOf(board.path)}`, `metrics?days=${days}`, undefined)
       .then((m) => { if (live) setMetrics(m); })
       .catch((e) => toast({ title: "Couldn't load analytics", description: (e as Error).message, variant: "destructive" }))
       .finally(() => { if (live) setLoading(false); });
@@ -1139,6 +1489,57 @@ function CfdChart({ metrics }: { metrics: BoardMetrics }) {
   );
 }
 
+// ---- List view: the board's tasks as a flat DataTable ------------------------------------------------------
+// Everything DataTable brings comes free: sort, per-column filters, column chooser, CSV/Excel export, saved
+// views, URL state, mobile cards, and cursor-following "Load more". Row click opens the same task dialog.
+
+function BoardListTab({ board }: { board: Board }) {
+  const { rows: allCards, reload, hasMore, loadMore } = useCollection<CardT>("cards");
+  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: goals } = useCollection<Goal>("goals");
+  const { rows: departments } = useCollection<Department>("departments");
+  const boardId = idOf(board.path);
+  const [editing, setEditing] = useState<CardT | null>(null);
+  const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
+  const empName = useMemo(() => {
+    const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
+    return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "");
+  }, [employees]);
+  const colLabel = useMemo(() => new Map(board.columns.map((c) => [c.key, c.label])), [board.columns]);
+
+  const columns: Column<CardT>[] = useMemo(() => [
+    { id: "key", header: "Key", accessor: (c) => taskKey(c), cell: (c) => <span className="font-mono text-xs text-muted-foreground">{taskKey(c)}</span>, mobilePriority: 2 },
+    { id: "title", header: "Title", accessor: (c) => c.title, mobilePriority: 1 },
+    { id: "status", header: "Status", accessor: (c) => colLabel.get(c.column_key) ?? c.column_key, filter: "select", mobilePriority: 3 },
+    { id: "assignee", header: "Assignee", accessor: (c) => (c.assignee ? empName(c.assignee) : "Unassigned"), filter: "select", mobilePriority: 4 },
+    { id: "priority", header: "Priority", accessor: (c) => c.priority, filter: "select", cell: (c) => <span className="flex items-center gap-1 capitalize"><PriorityIcon p={c.priority} /> {c.priority}</span> },
+    { id: "points", header: "Points", accessor: (c) => c.size ?? null, align: "right", filter: "none" },
+    { id: "due", header: "Due", accessor: (c) => c.due_date ?? null, filter: "none" },
+    { id: "labels", header: "Labels", accessor: (c) => (c.labels ?? []).map((k) => board.labels.find((l) => l.key === k)?.label ?? k).join(", "), cell: (c) => <span className="flex flex-wrap gap-1"><LabelChips keys={c.labels} catalog={board.labels} max={3} /></span>, defaultHidden: board.labels.length === 0 },
+    { id: "blocked", header: "Blocked", accessor: (c) => (c.blocked ? "Blocked" : ""), filter: "select", cell: (c) => (c.blocked ? <span className="inline-flex items-center gap-1 text-destructive"><Ban className="h-3.5 w-3.5" /> Blocked</span> : null), defaultHidden: true },
+    { id: "updated", header: "Updated", accessor: (c) => c.update_time ?? "", cell: (c) => (c.update_time ? new Date(c.update_time).toLocaleDateString() : ""), defaultHidden: true },
+  ], [colLabel, empName, board.labels]);
+
+  return (
+    <TooltipProvider delayDuration={150}>
+      <DataTable
+        columns={columns}
+        rows={cards}
+        getRowId={(c) => c.path}
+        onRowClick={setEditing}
+        tableId="board-list"
+        accessCollection="cards"
+        accessTargetOf={(c) => ({ objectPath: c.path, can: c.access?.can, label: "Manage task access" })}
+        hasMore={hasMore}
+        onLoadMore={loadMore}
+        emptyTitle="No tasks on this board"
+        emptyDescription="Tasks you add on the Board tab show up here as a sortable, exportable list."
+      />
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} onOpenCard={(c) => setEditing(c)} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); }} />}
+    </TooltipProvider>
+  );
+}
+
 // ---- Scrum view: product backlog + the sprint board + burndown/velocity ------------------------------------
 
 function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: string }) {
@@ -1153,8 +1554,12 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const dragId = useRef<string | null>(null);
   const { ref: fillRef, height: fillH } = useFillHeight();
   const [overZone, setOverZone] = useState<string | null>(null);
+  const pendingRank = useRef<number | null>(null); // backlog insertion rank from the hovered gap
+  const [lineAt, setLineAt] = useState<string | null>(null); // `${cardPath}:t|b` — backlog insertion line
   const [editing, setEditing] = useState<CardT | null>(null);
+  useRefetchOnFocus(() => { reload(); reloadSprints(); });
   const [addBacklog, setAddBacklog] = useState(false);
+  const [quickBacklog, setQuickBacklog] = useState(false); // inline title composer on the backlog column
   // "+ New → Create a task" quick action: open the backlog composer (scrum boards).
   useIntent("new-card", () => setAddBacklog(true));
   const [newSprint, setNewSprint] = useState(false);
@@ -1191,7 +1596,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const cardById = useMemo(() => new Map(cards.map((c) => [idOf(c.path), c])), [cards]);
   const blockerKeyOf = (c: CardT) => (c.blocked_by ? (cardById.get(idOf(c.blocked_by)) && taskKey(cardById.get(idOf(c.blocked_by))!)) || undefined : undefined);
 
-  const filter = useCardFilter(me.employee_id);
+  const filter = useCardFilter(me.employee_id, `boards:filter:${boardId}`);
   const backlog = useMemo(() => cards.filter((c) => !c.sprint).sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0)), [cards]);
   const sprintCards = useMemo(() => (sprint ? cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(sprint.path)) : []), [cards, sprint]);
   const pts = (list: CardT[]) => list.reduce((s, c) => s + (c.size ?? 0), 0);
@@ -1207,27 +1612,70 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     const rank = (dest.length ? Math.max(...dest.map((c) => c.rank ?? 0)) : 0) + RANK_STEP;
     setRows((prev) => prev.map((c) => (idOf(c.path) === id ? { ...c, sprint: sprint.path, column_key: colKey, rank } : c)));
     try {
-      if (!inSprint) await patch(`cards/${id}`, { sprint: sprint.path }, card.etag);
-      await invoke<CardT>(`cards/${id}`, "move", undefined, { to_column: colKey, rank });
+      // One atomic op: the move verb also reassigns the sprint (no separate PATCH, one event).
+      await invoke<CardT>(`cards/${id}`, "move", card.etag, { to_column: colKey, rank, ...(inSprint ? {} : { to_sprint: sprint.path }) });
     } catch (e) {
       reload();
       toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" });
     }
   }
 
-  async function dropOnBacklog() {
+  // Drop on the backlog: leave the sprint (if any) AND land at the hovered position - backlog order IS the
+  // plan, so reordering within the backlog is the same drop with a rank from the gap under the cursor.
+  async function dropOnBacklog(rank?: number) {
     const id = dragId.current; dragId.current = null; setOverZone(null);
     if (!id) return;
     const card = cards.find((c) => idOf(c.path) === id);
-    if (!card || !card.sprint) return;
-    setRows((prev) => prev.map((c) => (idOf(c.path) === id ? { ...c, sprint: undefined } : c)));
+    if (!card) return;
+    if (!card.sprint && rank == null) return; // already in the backlog, dropped on no particular gap
+    setRows((prev) => prev.map((c) => (idOf(c.path) === id ? { ...c, sprint: undefined, ...(rank != null ? { rank } : {}) } : c)));
     try {
-      await patch(`cards/${id}`, { sprint: null }, card.etag);
+      await invoke<CardT>(`cards/${id}`, "move", card.etag, { to_column: card.column_key, to_sprint: null, ...(rank != null ? { rank } : {}) });
     } catch (e) {
       reload();
       toast({ title: "Couldn't move to backlog", description: (e as Error).message, variant: "destructive" });
     }
   }
+
+  // Menu-driven moves (the touch path). `menuAct` = move verb with optimistic apply; `menuPatch` = field edit.
+  async function menuAct(card: CardT, body: Record<string, unknown>, optimistic: Partial<CardT>) {
+    setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, ...optimistic } : c)));
+    try { await invoke<CardT>(`cards/${idOf(card.path)}`, "move", card.etag, body); }
+    catch (e) { reload(); toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" }); }
+  }
+  async function menuPatch(card: CardT, body: Partial<CardT>) {
+    setRows((prev) => prev.map((c) => (c.path === card.path ? { ...c, ...body } : c)));
+    try { await patch<CardT>(`cards/${idOf(card.path)}`, body as Record<string, unknown>, card.etag); }
+    catch (e) { reload(); toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
+  }
+  const tileMenu = (c: CardT) => {
+    const inBacklog = !c.sprint;
+    const appendRank = (dest: CardT[]) => (dest.length ? Math.max(...dest.map((x) => x.rank ?? 0)) : 0) + RANK_STEP;
+    return (
+      <CardActionsMenu
+        card={c}
+        meId={me.employee_id}
+        columns={inBacklog ? [] : board.columns} // a backlog card has no visible column to move within
+        onMove={(k) => {
+          const container = cards.filter((x) => x.sprint && c.sprint && idOf(x.sprint!) === idOf(c.sprint!));
+          const rank = appendRank(container.filter((x) => x.column_key === k));
+          void menuAct(c, { to_column: k, rank }, { column_key: k, rank });
+        }}
+        onAssignMe={() => void menuPatch(c, { assignee: `employees/${me.employee_id}` })}
+        onPriority={(p) => void menuPatch(c, { priority: p })}
+        sprintExtras={
+          inBacklog
+            ? (sprint && sprint.state !== "completed" ? (
+                <DropdownMenuItem onClick={() => {
+                  const rank = appendRank(sprintCards.filter((x) => x.column_key === c.column_key));
+                  void menuAct(c, { to_column: c.column_key, rank, to_sprint: sprint.path }, { sprint: sprint.path, rank });
+                }}>Move to {sprint.name}</DropdownMenuItem>
+              ) : undefined)
+            : <DropdownMenuItem onClick={() => void menuAct(c, { to_column: c.column_key, to_sprint: null }, { sprint: undefined })}>Send to backlog</DropdownMenuItem>
+        }
+      />
+    );
+  };
 
   async function sprintAct(verb: "activate" | "complete") {
     if (!sprint) return;
@@ -1269,13 +1717,26 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
           <Button size="sm" variant="outline" onClick={() => setNewSprint(true)}><Plus className="h-4 w-4" /> New sprint</Button>
         </AccessAction>
       </div>
-      {sprint && (sprint.goal || sprint.start_date) && (
-        <p className="mb-3 text-sm text-muted-foreground">
-          {sprint.goal && <span className="font-medium text-foreground">{sprint.goal}</span>}
-          {sprint.start_date && <span> · {sprint.start_date}{sprint.end_date ? ` → ${sprint.end_date}` : ""}</span>}
-          {" · "}{pts(sprintCards)} pts
-        </p>
-      )}
+      {sprint && (() => {
+        const total = pts(sprintCards);
+        const done = pts(sprintCards.filter((c) => c.deliver_time));
+        // Days remaining, counting the end date itself as a working day. Only meaningful mid-sprint.
+        const daysLeft = sprint.state === "active" && sprint.end_date
+          ? Math.floor((new Date(sprint.end_date + "T23:59:59").getTime() - Date.now()) / 86400e3)
+          : null;
+        return (
+          <p className="mb-3 flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground">
+            {sprint.goal && <span className="font-medium text-foreground">{sprint.goal} ·</span>}
+            {sprint.start_date && <span>{sprint.start_date}{sprint.end_date ? ` → ${sprint.end_date}` : ""} ·</span>}
+            <span>{total > 0 ? `${done}/${total} pts done` : "no points estimated"}</span>
+            {daysLeft != null && (
+              <span className={cn("rounded px-1.5 py-0.5 text-xs font-medium", daysLeft < 0 ? "bg-destructive/10 text-destructive" : daysLeft <= 1 ? "bg-warning/10 text-warning" : "bg-muted")}>
+                {daysLeft < 0 ? "past end date" : daysLeft === 0 ? "ends today" : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left`}
+              </span>
+            )}
+          </p>
+        );
+      })()}
 
       <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} deptName={deptName} />
 
@@ -1283,20 +1744,43 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         {/* Product backlog */}
         <div
           className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20"
-          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOverZone("backlog"); }}
-          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setOverZone((p) => (p === "backlog" ? null : p)); }}
-          onDrop={(e) => { e.preventDefault(); void dropOnBacklog(); }}
+          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; pendingRank.current = null; setOverZone("backlog"); setLineAt(null); }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) { setOverZone((p) => (p === "backlog" ? null : p)); setLineAt(null); } }}
+          onDrop={(e) => { e.preventDefault(); const r = pendingRank.current ?? undefined; pendingRank.current = null; setLineAt(null); void dropOnBacklog(r); }}
         >
           <div className="flex items-center justify-between border-b px-3 py-2">
-            <span className="text-sm font-medium">Backlog</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-medium">Backlog</span>
+              <Badge variant="secondary">{backlog.length}</Badge>
+            </div>
             <AccessAction collection="cards" create label="Add a task">
-              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => setAddBacklog(true)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
+              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => setQuickBacklog((v) => !v)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
             </AccessAction>
           </div>
           <div className={zoneCls("backlog")}>
-            {backlog.filter(filter.match).map((c) => (
-              <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
-            ))}
+            {quickBacklog && <QuickAddCard board={board} column={board.columns[0]?.key ?? ""} onClose={() => setQuickBacklog(false)} onCreated={reload} />}
+            {(() => {
+              const items = backlog.filter(filter.match);
+              return items.map((c, idx) => (
+                <div
+                  key={c.path}
+                  className="relative"
+                  onDragOver={(e) => {
+                    // Insertion line + rank from the hovered gap - backlog order is the plan, position matters.
+                    e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move";
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    const before = e.clientY - rect.top < rect.height / 2;
+                    pendingRank.current = rankAt(items, before ? idx : idx + 1);
+                    setLineAt(`${c.path}:${before ? "t" : "b"}`);
+                    setOverZone("backlog");
+                  }}
+                >
+                  <span className={`pointer-events-none absolute inset-x-1 -top-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:t` ? "" : "hidden"}`} />
+                  <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
+                  <span className={`pointer-events-none absolute inset-x-1 -bottom-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:b` ? "" : "hidden"}`} />
+                </div>
+              ));
+            })()}
           </div>
         </div>
 
@@ -1307,15 +1791,37 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             const zid = `col:${col.key}`;
             return (
               <div key={col.key} className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20">
-                <div className="flex items-center justify-between border-b px-3 py-2" title={col.policy || undefined}>
-                  <span className="truncate text-sm font-medium">{col.label}{col.isCommitment ? " ⚑" : ""}{col.isDelivery ? " ✓" : ""}</span>
+                <div className="flex items-center justify-between border-b px-3 py-2">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm font-medium">{col.label}</span>
+                    {col.commitment && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
+                    {col.delivery && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
+                    {col.policy && <Tooltip><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
+                  </div>
                   {(() => {
                     const perAssignee = col.limitScope === "assignee";
                     const atWip = col.wipLimit != null && !perAssignee && items.length >= col.wipLimit;
+                    const offenders = perAssignee && col.wipLimit != null
+                      ? (() => {
+                          const byAssignee = new Map<string, number>();
+                          for (const c of sprintCards) if (c.column_key === col.key && c.assignee) { const a = idOf(c.assignee); byAssignee.set(a, (byAssignee.get(a) ?? 0) + 1); }
+                          return [...byAssignee.entries()].filter(([, n]) => n > col.wipLimit!);
+                        })()
+                      : [];
                     return (
-                      <Badge variant="secondary" className={atWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
-                        {items.length}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
-                      </Badge>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {offenders.map(([id, n]) => (
+                          <Tooltip key={id}>
+                            <TooltipTrigger asChild>
+                              <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
+                            </TooltipTrigger>
+                            <TooltipContent>{empName(`employees/${id}`)}: {n} here — over the {col.wipLimit}-per-person limit</TooltipContent>
+                          </Tooltip>
+                        ))}
+                        <Badge variant="secondary" className={atWip ? "border-warning text-warning" : ""} title={perAssignee && col.wipLimit != null ? `Max ${col.wipLimit} per assignee` : undefined}>
+                          {items.length}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
+                        </Badge>
+                      </div>
                     );
                   })()}
                 </div>
@@ -1326,7 +1832,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   onDrop={(e) => { e.preventDefault(); void dropOnColumn(col.key); }}
                 >
                   {items.map((c) => (
-                    <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
+                    <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
                   ))}
                 </div>
               </div>

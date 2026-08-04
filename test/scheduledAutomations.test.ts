@@ -30,7 +30,7 @@ beforeAll(async () => {
 
 const TABLES = [
   schema.notificationDigestQueue, schema.notifications, schema.overtimeRequests, schema.approvalDelegations,
-  schema.automationRuns, schema.automations, schema.employees,
+  schema.automationRuns, schema.automations, schema.goals, schema.employees,
 ];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
@@ -90,6 +90,34 @@ describe("scheduled automations", () => {
     expect((await notifsFor(busyMgr)).length).toBe(1);
     expect((await notifsFor(idleMgr)).length).toBe(0);
     expect((await notifsFor(report)).length).toBe(0);
+  });
+
+  it("perEmployee goal metrics: overdue and due-soon goals fire only for their owner", async () => {
+    const slipping = await seedEmployee({ code: "04-110" });
+    const onTrack = await seedEmployee({ code: "04-111" });
+    const day = 86_400_000;
+    const now = +deps.clock.now();
+    const goal = (employeeId: string, dueOffsetDays: number | null, status: "not_started" | "in_progress" | "completed" = "in_progress") =>
+      deps.db.insert(schema.goals).values({
+        uuid: genId(), code: `g-${genId().slice(0, 4)}`, employeeId, title: "g", status,
+        dueDate: dueOffsetDays == null ? null : new Date(now + dueOffsetDays * day),
+      });
+    await goal(slipping, -3); // overdue
+    await goal(slipping, 2); // due soon
+    await goal(onTrack, 30); // comfortably out
+    await goal(onTrack, -10, "completed"); // closed goals never count
+    await goal(onTrack, null); // undated never counts
+
+    await seedScheduledRule({
+      schedule: { freq: "daily", scope: "perEmployee" },
+      condition: { field: "goalsOverdue", op: "gte", value: 1 },
+      actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Overdue goals" }],
+    });
+
+    const fired = await runScheduledAutomations(deps);
+    expect(fired).toBe(1);
+    expect((await notifsFor(slipping)).length).toBe(1);
+    expect((await notifsFor(onTrack)).length).toBe(0);
   });
 
   it("does not fire a weekly rule on the wrong weekday", async () => {

@@ -4,6 +4,7 @@ import { download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatDate, humanize, idOf } from "@/lib/utils";
 import type { DocumentResource } from "@/types";
+import { documentFileName } from "@/lib/documents";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,7 +34,7 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
 
   async function onDownload(d: DocumentResource) {
     try {
-      await download(d.path, d.file_name || d.display_name);
+      await download(d.path, documentFileName(d));
     } catch (e) {
       toast({ title: "Download failed", description: (e as Error).message, variant: "destructive" });
     }

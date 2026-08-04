@@ -93,6 +93,9 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { type: "schedule.workAnniversary", label: "Work anniversary", module: "Lifecycle", subjectCollection: "employees", fields: [{ name: "years", type: "number" }] },
   { type: "document.expiring", label: "Document expiring", module: "Compliance", subjectCollection: "personal-documents", fields: [{ name: "daysLeft", type: "number" }] },
 
+  // Assets & inventory
+  { type: "asset.created", label: "Asset added to inventory", module: "Assets", subjectCollection: "assets", fields: [{ name: "category", type: "string" }, { name: "hasTag", type: "boolean", label: "Has an asset tag" }] },
+
   // ATS / recruiting
   { type: "offer.accepted", label: "Offer accepted", module: "Recruiting", subjectCollection: "offers", fields: [{ name: "candidateId", type: "ref" }, { name: "applicationId", type: "ref" }, { name: "requisitionId", type: "ref" }, { name: "openings", type: "number" }, { name: "startDate", type: "date" }] },
   { type: "application.stageChanged", label: "Application stage changed", module: "Recruiting", subjectCollection: "applications", fields: [{ name: "stage", type: "string" }, { name: "status", type: "string" }] },
@@ -127,7 +130,7 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // Scheduled (time-driven) trigger. Not emitted by a service - a daily cron scanner synthesizes it when a
   // rule's recurrence matches today (see domain/automations.ts SCHEDULE_TRIGGER). The fields below are what a
   // "perEmployee" firing carries: `weekday`/`dayOfMonth` place the firing in time, and the derived metrics
-  // (pendingApprovals/daysSinceLastLeave/leaveBalanceDays) let conditions be genuinely smart - e.g. "every
+  // (pendingApprovals/daysSinceLastLeave/leaveBalanceDays/goalsDueSoon/goalsOverdue) let conditions be genuinely smart - e.g. "every
   // Monday, per employee, if pendingApprovals > 0 -> nudge" - without the pure evaluator learning to query.
   { type: "schedule.recurring", label: "On a schedule", module: "Scheduled", fields: [
     { name: "weekday", type: "number", label: "Weekday (0=Sun)" },
@@ -135,6 +138,8 @@ export const EVENT_TYPES: EventTypeDef[] = [
     { name: "pendingApprovals", type: "number", label: "Pending approvals (as approver)" },
     { name: "daysSinceLastLeave", type: "number", label: "Days since last leave" },
     { name: "leaveBalanceDays", type: "number", label: "Total leave balance (days)" },
+    { name: "goalsDueSoon", type: "number", label: "Open goals due within 7 days" },
+    { name: "goalsOverdue", type: "number", label: "Open goals past due" },
   ] },
 ];
 

@@ -87,7 +87,12 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
         return c.json(serialize(row));
       }
       if (verb !== "download") return c.notFound();
-      const { bytes } = await svc.download(c.get("deps"), c.get("user"), id);
-      return c.body(bytes, 200, { "Content-Type": "application/octet-stream" });
+      const { bytes, fileName } = await svc.download(c.get("deps"), c.get("user"), id);
+      // Name the attachment (quotes/backslashes stripped so the header can't be broken out of). Generated rows
+      // carry no uploaded name, so the service derives one from the title + content type - always with an
+      // extension.
+      const safeName = fileName.replace(/["\\\r\n]/g, "");
+      const disposition = `attachment; filename="${safeName.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+      return c.body(bytes, 200, { "Content-Type": "application/octet-stream", "Content-Disposition": disposition });
     });
 }

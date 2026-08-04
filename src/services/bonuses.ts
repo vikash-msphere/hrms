@@ -163,13 +163,33 @@ export async function awardBonus(deps: Deps, actor: AppUser, input: AwardInput) 
 }
 
 // Bonuses awarded to an employee but not yet paid by any run (the next run pays them as a taxable earning).
+// `paidAt` with no run means an FnF settlement already paid it (the leaver is in no run), so both markers gate
+// the queue - checking paidRunId alone would re-pay an award the final settlement already covered.
+const BONUS_UNPAID = and(isNull(schema.bonuses.paidRunId), isNull(schema.bonuses.paidAt));
 export async function unpaidBonuses(deps: Deps, employeeId: string) {
-  return deps.db.select().from(schema.bonuses).where(and(eq(schema.bonuses.employeeId, employeeId), isNull(schema.bonuses.paidRunId)));
+  return deps.db.select().from(schema.bonuses).where(and(eq(schema.bonuses.employeeId, employeeId), BONUS_UNPAID));
 }
-export async function markBonusesPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
-  if (ids.length) await deps.db.update(schema.bonuses).set({ paidRunId: runId, paidAt: at }).where(inArray(schema.bonuses.uuid, ids));
+// Every unpaid bonus in one read - the run build groups by employee (subrequest-budget shape, see dbBatch).
+export async function unpaidBonusesAll(deps: Deps) {
+  return deps.db.select().from(schema.bonuses).where(BONUS_UNPAID);
+}
+// Paid by a full-and-final settlement rather than a run (paidAt set, paidRunId left null), and the release a
+// recomputed settlement uses to put them back in the queue. Guarded so neither can touch a run-paid award.
+export async function markBonusesSettled(deps: Deps, ids: string[], at: Date) {
+  if (!ids.length) return;
+  await deps.db.update(schema.bonuses).set({ paidAt: at }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
+}
+export async function releaseBonusesSettled(deps: Deps, ids: string[]) {
+  if (!ids.length) return;
+  await deps.db.update(schema.bonuses).set({ paidAt: null }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
+}
+// Returns the UNEXECUTED statement so the build can batch it (thenable - a direct await still executes).
+// Guarded on still being unpaid: the build reads the queue up front and flips it at the end, so two runs
+// building concurrently would otherwise both claim the same bonus and pay it twice (mirrors encashments).
+export function markBonusesPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
+  return deps.db.update(schema.bonuses).set({ paidRunId: runId, paidAt: at }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
 }
 // Undo a prior build's bonus payments on this run, so a rebuild is idempotent (mirrors encashments).
-export async function resetBonusesPaidByRun(deps: Deps, runId: string) {
-  await deps.db.update(schema.bonuses).set({ paidRunId: null, paidAt: null }).where(eq(schema.bonuses.paidRunId, runId));
+export function resetBonusesPaidByRun(deps: Deps, runId: string) {
+  return deps.db.update(schema.bonuses).set({ paidRunId: null, paidAt: null }).where(eq(schema.bonuses.paidRunId, runId));
 }

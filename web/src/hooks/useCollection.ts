@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
-import { ensureFetch, subscribe, getSnapshot, patchRows, subscribeAny, collectionHasMore } from "@/lib/resourceStore";
+import { ensureFetch, subscribe, getSnapshot, patchRows, subscribeAny, collectionHasMore, loadMoreRows } from "@/lib/resourceStore";
+import { usePermission } from "@/lib/perm";
 
 export type LoadState = "loading" | "ready" | "error";
 
@@ -9,6 +10,12 @@ export type LoadState = "loading" | "ready" | "error";
 // subscriber of this exact key; `reload` forces a refetch (bypasses the TTL).
 export function useCollection<T>(collection: string, opts: { showDeleted?: boolean; max?: number; enabled?: boolean; q?: string } = {}) {
   const { showDeleted = false, max, enabled = true, q } = opts;
+  // Central capability gate: a caller without `<collection>.read` at ANY scope never fires the request -
+  // the server would only 403 it. The read returns empty+ready, so data-driven UI collapses to its empty
+  // state instead of skeleton-ing forever or spraying denials. This is also what makes "view as" honest for
+  // collections the simulated user cannot read at all. (A self-scoped grant still strips to
+  // `<collection>.read`, so ordinary self-service pages keep fetching; the server narrows the rows.)
+  const canRead = usePermission(`${collection}.read`);
   // Stable opts object so the store key + effect identity don't churn each render. `enabled` is deliberately
   // NOT part of the key (it gates the fetch, not the cached data) - a disabled reader just never fetches and
   // sees whatever rows the store already holds ([] until some enabled reader loads it).
@@ -23,12 +30,12 @@ export function useCollection<T>(collection: string, opts: { showDeleted?: boole
   // when `enabled` is false so a component can hold off a read it may not need (e.g. a private-by-default
   // dashboard KPI the viewer can't see - no wasted D1 read).
   useEffect(() => {
-    if (enabled) void ensureFetch(collection, stableOpts);
-  }, [collection, stableOpts, enabled]);
+    if (enabled && canRead) void ensureFetch(collection, stableOpts);
+  }, [collection, stableOpts, enabled, canRead]);
 
   const reload = useCallback(() => {
-    void ensureFetch(collection, stableOpts, true);
-  }, [collection, stableOpts]);
+    if (canRead) void ensureFetch(collection, stableOpts, true);
+  }, [collection, stableOpts, canRead]);
 
   const setRows = useCallback(
     (updater: T[] | ((prev: T[]) => T[])) => {
@@ -45,7 +52,13 @@ export function useCollection<T>(collection: string, opts: { showDeleted?: boole
   // presenting the window as the total. Client-side filtering/sorting/export only ever sees `rows`.
   const hasMore = Boolean((snap.meta as { next_page_token?: string } | undefined)?.next_page_token);
 
-  return { rows: snap.rows as T[], setRows, state: snap.state as LoadState, error: snap.error, reload, meta: snap.meta, hasMore };
+  // Follow the cursor: appends the next server page to the cached rows (no-op when exhausted). Explicit --
+  // wired to a "Load more" affordance, never automatic, to keep D1 reads user-driven.
+  const loadMore = useCallback(() => loadMoreRows(collection, stableOpts), [collection, stableOpts]);
+
+  // No read capability -> a settled empty view (never a stuck skeleton, never a request).
+  if (!canRead) return { rows: [] as T[], setRows, state: "ready" as LoadState, error: undefined, reload, meta: undefined, hasMore: false, loadMore: () => {} };
+  return { rows: snap.rows as T[], setRows, state: snap.state as LoadState, error: snap.error, reload, meta: snap.meta, hasMore, loadMore };
 }
 
 /** Whether the cached rows for a collection are only its FIRST PAGE (the list response returned a cursor).

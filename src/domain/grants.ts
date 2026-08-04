@@ -46,6 +46,9 @@ const OWN_PII: Record<string, Level> = {
   // Not PII, but the same "always self-service, own record only" tier: everyone manages their own in-app
   // notification mute prefs, like their own profile - never an org-toggled policy.
   "employees.me.notification-prefs.**": "write",
+  // Public "about me" one-liner: self-expression, so always self-writable (HR can also tidy it via its
+  // own employees.*.bio grant). Display rides the base employee record read.
+  "employees.me.bio.**": "write",
 };
 
 // Attendance self-service - EVERY role is an employee who clocks in/out and can file/cancel their own
@@ -65,6 +68,7 @@ const OWN_ATTENDANCE_ALLOW = ["attendance.me.clockIn", "attendance.me.clockOut",
 // delete their OWN posts/kudos (owner-coded; HR still moderates all via `announcements.**`).
 const BOARD_SOCIAL_ALLOW = [
   "announcements.giveKudos",
+  "announcements.markAllRead", // clear own unread state across the board (collection verb, like giveKudos)
   "announcements.*.react",
   "announcements.*.reply",
   "announcements.*.markRead",
@@ -154,6 +158,7 @@ const employee: Grant = {
     "transition-tasks.me.upload",
     "reviews.me.submitSelf",
     "reviews.me.acknowledge",
+    "reviews.me.pdf", // record copy of own finished review
     "review-feedback.me.submitFeedback", // answer (or decline) a 360 nomination
     "review-feedback.me.decline",
     "employees.me.getPhoto",
@@ -223,6 +228,8 @@ const manager: Grant = {
     "time-entries.my-dept.reject",
     "reviews.my-dept.submitManager", // manager assessment + 360 nominations for the team's reviews
     "reviews.my-dept.nominate",
+    "reviews.my-dept.nudge", // remind the current stage's owner on a stalled team review
+    "reviews.my-dept.pdf", // record copy of a report's finished review
     "expenses.my-dept.approve", // decide the dept's operational expenses (my-dept keeps it owned, not cross-dept)
     "expenses.my-dept.reject",
   ],
@@ -244,6 +251,7 @@ const hr_admin: Grant = {
     "employees.*": "write",
     "employees.*.department.**": "write",
     "employees.*.manager.**": "write",
+    "employees.*.bio.**": "write", // moderate/tidy anyone's public about-me (not PII)
     "employees.*.tax.**": "write", // income-tax (TDS) projection for everyone - HR/payroll manage it (unlike bank/identity PII)
     "departments.**": "write",
     "positions.**": "write", // HR records promotions/transfers (effective-dated role history)
@@ -347,6 +355,8 @@ const hr_admin: Grant = {
     "compliance-rules.**",
     "review-cycles.**", // launch/enroll/close/reopen
     "reviews.*.skipStage", // unblock a stuck review (stage owners keep their own verbs)
+    "reviews.*.nudge", // remind the current stage's owner on any stalled review
+    "reviews.*.pdf", // record copy of any finished review
     "shifts.**",
     "shift-assignments.**",
     "projects.**",

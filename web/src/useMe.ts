@@ -21,7 +21,7 @@ export function fetchMeRaw(): Promise<User | null> {
 }
 function fetchMe(): Promise<Me | null> {
   return fetchMeRaw().then((u) =>
-    u ? { email: u.email, role: u.role, employee_id: u.employee ? idOf(u.employee) : null, capabilities: u.access?.capabilities ?? [] } : null,
+    u ? { email: u.email, role: u.role, employee_id: u.employee ? idOf(u.employee) : null, capabilities: u.caller_access?.capabilities ?? [] } : null,
   );
 }
 

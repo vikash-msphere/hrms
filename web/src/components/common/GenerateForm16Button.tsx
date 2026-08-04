@@ -3,6 +3,7 @@ import { FileText } from "lucide-react";
 import { api, download } from "@/api";
 import { usePermission } from "@/lib/perm";
 import type { DocumentResource } from "@/types";
+import { documentFileName } from "@/lib/documents";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field } from "@/components/common/Field";
@@ -38,7 +39,7 @@ export function GenerateForm16Button({ employeeId, onGenerated }: { employeeId: 
       toast({ title: "Form 16 generated", description: doc.display_name, variant: "success" });
       setOpen(false);
       onGenerated?.();
-      try { await download(doc.path, doc.file_name || `${doc.display_name}.pdf`); } catch { /* filed under the employee's documents */ }
+      try { await download(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" })); } catch { /* filed under the employee's documents */ }
     } catch (e) {
       toast({ title: "Couldn't generate Form 16", description: (e as Error).message, variant: "destructive" });
     } finally {

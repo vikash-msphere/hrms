@@ -39,10 +39,13 @@ export function AccessItem({
   const col = collection ?? scope?.collection;
   if (!col) return <>{children}</>; // nothing to scope to -> no affordance (server still enforces)
 
-  const target: AccessTargetRef = { collection: col, objectPath: objectPath ?? scope?.objectPath, field, verb, can, why, label };
+  // Same cross-collection guard as AccessAction: an item re-collectioned away from the ambient scope never
+  // inherits the ambient object (a foreign scope_ref would corrupt the authored rule).
+  const ambientObject = collection && scope && collection !== scope.collection ? undefined : scope?.objectPath;
+  const target: AccessTargetRef = { collection: col, objectPath: objectPath ?? ambientObject, field, verb, can, why, label };
 
   return (
-    <AccessScope collection={col} objectPath={objectPath ?? scope?.objectPath}>
+    <AccessScope collection={col} objectPath={objectPath ?? ambientObject}>
       <div className={className ? `relative ${className}` : "relative"}>
         <AccessItemCorner target={target} iconClassName={iconClassName} />
         {children}

@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
@@ -123,6 +123,13 @@ export async function buildBankFile(deps: Deps, runId: string, bank: string): Pr
   range.e.r = Math.max((fmt.header_row ?? 1) - 1, start0 + rows.length - 1);
   range.e.c = Math.max(range.e.c, ...fmt.columns.map((c) => c.col - 1));
   ws["!ref"] = XLSX.utils.encode_range(range);
+
+  // Stamp the first generation. Handing the file to the bank is where the money actually leaves, and deleting
+  // a run RELEASES every payable it paid back into the queue - so this stamp is what stops a delete-after-payout
+  // from paying the same bonuses, encashments and claims all over again on the next run.
+  if (!run.bankFileAt) {
+    await deps.db.update(schema.payrollRuns).set({ bankFileAt: new Date() }).where(and(eq(schema.payrollRuns.uuid, runId), isNull(schema.payrollRuns.bankFileAt)));
+  }
 
   const out = XLSX.write(wb, { type: "array", bookType: "xlsx" }) as ArrayBuffer;
   const slug = bank.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");

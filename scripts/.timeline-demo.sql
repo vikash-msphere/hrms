@@ -1,0 +1,13 @@
+DELETE FROM leave_requests WHERE reason = '__demo__';
+DELETE FROM holidays WHERE name LIKE 'Demo %';
+INSERT INTO holidays (uuid, code, date, name, kind, disabled, locked, created_at, updated_at) VALUES ('dhk6gtvk96gww', NULL, 1781654400000, 'Demo Festival', 'fixed', 0, 0, 1781433609992, 1781433609992);
+INSERT INTO holidays (uuid, code, date, name, kind, disabled, locked, created_at, updated_at) VALUES ('sdpmch0ekzed4', NULL, 1782259200000, 'Demo Holiday', 'fixed', 0, 0, 1781433609992, 1781433609992);
+INSERT INTO leave_requests (uuid, code, employee_id, leave_type_id, start_date, end_date, days, start_session, end_session, state, reason, created_at, updated_at) VALUES ('115gw3kvtr6nc', '008-d0', '0zzkawfncfcmg', '3gn4ek39dszrr', 1781481600000, 1781568000000, 2, 1, 2, 'APPROVED', '__demo__', 1781433609992, 1781433609992);
+INSERT INTO leave_requests (uuid, code, employee_id, leave_type_id, start_date, end_date, days, start_session, end_session, state, reason, created_at, updated_at) VALUES ('ck4850xzd9pmt', '04-001-d1', '28n3tk2zdszr4', 'dj2bzew03grp8', 1781740800000, 1781913600000, 2.5, 2, 2, 'APPROVED', '__demo__', 1781433609992, 1781433609992);
+INSERT INTO leave_requests (uuid, code, employee_id, leave_type_id, start_date, end_date, days, start_session, end_session, state, reason, created_at, updated_at) VALUES ('m4rscwf9af7m2', '04-001-d2', '28n3tk2zdszr4', '3gn4ek39dszrr', 1782172800000, 1782172800000, 1, 1, 2, 'PENDING', '__demo__', 1781433609992, 1781433609992);
+INSERT INTO leave_requests (uuid, code, employee_id, leave_type_id, start_date, end_date, days, start_session, end_session, state, reason, created_at, updated_at) VALUES ('a5t87zak33r30', '04-002-d3', '2cn3wk30dszr6', '3gn4ek39dszrr', 1781827200000, 1782086400000, 3.5, 1, 1, 'APPROVED', '__demo__', 1781433609992, 1781433609992);
+INSERT INTO leave_requests (uuid, code, employee_id, leave_type_id, start_date, end_date, days, start_session, end_session, state, reason, created_at, updated_at) VALUES ('1btvd6wm4pv90', '07-001-d4', '2gn3yk31dszr8', 'dj2bzew03grp8', 1782432000000, 1782432000000, 0.5, 2, 2, 'APPROVED', '__demo__', 1781433609992, 1781433609992);
+INSERT INTO leave_requests (uuid, code, employee_id, leave_type_id, start_date, end_date, days, start_session, end_session, state, reason, created_at, updated_at) VALUES ('tp2nrtrdp8782', '07-002-d5', '2mn40k32dszra', '3gn4ek39dszrr', 1782086400000, 1782172800000, 2, 1, 2, 'APPROVED', '__demo__', 1781433609992, 1781433609992);
+UPDATE employees SET start_date = 1781568000000 WHERE uuid = '2cn3wk30dszr6';
+UPDATE employees SET probation_end_date = 1782000000000 WHERE uuid = '2gn3yk31dszr8';
+UPDATE employees SET start_date = 1687737600000 WHERE uuid = '0zzkawfncfcmg';

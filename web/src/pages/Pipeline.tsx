@@ -17,6 +17,7 @@ import { Combobox } from "@/components/ui/combobox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AccessAction } from "@/components/access/AccessAction";
+import { AccessScope } from "@/components/access/AccessScope";
 import { useToast } from "@/components/ui/use-toast";
 import { useAtsConfig, sourceLabel } from "./Candidates";
 
@@ -87,8 +88,12 @@ export default function Pipeline({ me }: { me: Me }) {
   const openReqs = reqs.filter((r) => r.status === "open" || r.status === "draft" || r.status === "on_hold");
 
   return (
+    // The route key ("pipeline") is not a collection; the board's data is applications. Rebind the ambient
+    // scope so every affordance inside manages the right resource.
+    <AccessScope collection="applications">
     <div>
       <PageHeader
+        accessCollection="applications"
         title="Pipeline"
         description="Applications by stage. Advance or reject candidates as they move through hiring."
         actions={<>{newBtn}<PageSettings me={me} host="pipeline" /></>}
@@ -159,11 +164,13 @@ export default function Pipeline({ me }: { me: Me }) {
                           {!closed && (
                             <div className="mt-2 flex items-center gap-1">
                               {!hired && can.includes("advance") && (
-                                <Button size="sm" variant="outline" className="h-7" loading={advancing === a.path} onClick={() => advance(a)}>
-                                  {nextStageLabel(a.stage) ? `Advance to ${nextStageLabel(a.stage)}` : "Advance"} <ChevronRight className="h-3.5 w-3.5" />
-                                </Button>
+                                <AccessAction verb="advance" collection="applications" objectPath={a.path} can={can} label="Advance application">
+                                  <Button size="sm" variant="outline" className="h-7" loading={advancing === a.path} onClick={() => advance(a)}>
+                                    {nextStageLabel(a.stage) ? `Advance to ${nextStageLabel(a.stage)}` : "Advance"} <ChevronRight className="h-3.5 w-3.5" />
+                                  </Button>
+                                </AccessAction>
                               )}
-                              {can.includes("reject") && <Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => setRejecting(a)}><X className="h-3.5 w-3.5" /> Reject</Button>}
+                              {can.includes("reject") && <AccessAction verb="reject" collection="applications" objectPath={a.path} can={can} label="Reject application"><Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => setRejecting(a)}><X className="h-3.5 w-3.5" /> Reject</Button></AccessAction>}
                             </div>
                           )}
                         </div>
@@ -198,6 +205,7 @@ export default function Pipeline({ me }: { me: Me }) {
         />
       )}
     </div>
+    </AccessScope>
   );
 }
 

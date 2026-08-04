@@ -1,5 +1,6 @@
 // Row -> AEP wire resource boundary. Emits `path`, snake_case fields, and standard fields.
 // NEVER emit *Enc columns or other DB-only fields.
+import type { Wire } from "./wire";
 import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
 import { round2 } from "../domain/money";
 import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
@@ -39,7 +40,7 @@ function baseResource(row: BaseRow, collection: string) {
 }
 const ref = (collection: string, id: string | null) => (id ? `${collection}/${id}` : undefined);
 
-export function toPreferenceResource(r: any) {
+export function toPreferenceResource(r: any): Wire<"preference"> {
   return {
     path: `preferences/${r.key}`,
     create_time: iso(r.createdAt),
@@ -50,7 +51,7 @@ export function toPreferenceResource(r: any) {
   };
 }
 
-export function toUserResource(r: any) {
+export function toUserResource(r: any): Wire<"user"> {
   return {
     ...baseResource(r, "users"),
     email: r.email,
@@ -60,7 +61,7 @@ export function toUserResource(r: any) {
   };
 }
 
-export function toEmployeeResource(r: any) {
+export function toEmployeeResource(r: any): Wire<"employee"> {
   return {
     ...baseResource(r, "employees"),
     first_name: r.firstName,
@@ -69,6 +70,7 @@ export function toEmployeeResource(r: any) {
     employee_number: r.employeeNumber ?? undefined,
     work_email: r.workEmail,
     job_title: r.jobTitle ?? undefined,
+    bio: r.bio ?? undefined,
     department: ref("departments", r.departmentId),
     manager: ref("employees", r.managerId),
     start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
@@ -80,7 +82,7 @@ export function toEmployeeResource(r: any) {
   };
 }
 
-export function toDepartmentResource(r: any) {
+export function toDepartmentResource(r: any): Wire<"department"> {
   let managerIds: string[] = [];
   try {
     const a = JSON.parse(r.managerIds ?? "[]");
@@ -96,7 +98,7 @@ export function toDepartmentResource(r: any) {
   };
 }
 
-export function toHolidayResource(r: any) {
+export function toHolidayResource(r: any): Wire<"holiday"> {
   return {
     ...baseResource(r, "holidays"),
     display_name: r.name,
@@ -107,7 +109,7 @@ export function toHolidayResource(r: any) {
   };
 }
 
-export function toComplianceEventResource(r: any) {
+export function toComplianceEventResource(r: any): Wire<"compliance-event"> {
   const overdue = r.status === "pending" && r.dueDate ? +new Date(r.dueDate) < Date.now() : false;
   return {
     ...baseResource(r, "compliance-events"),
@@ -126,7 +128,7 @@ export function toComplianceEventResource(r: any) {
   };
 }
 
-export function toBackgroundCheckResource(r: any) {
+export function toBackgroundCheckResource(r: any): Wire<"background-check"> {
   return {
     ...baseResource(r, "background-checks"),
     employee: ref("employees", r.employeeId),
@@ -141,7 +143,7 @@ export function toBackgroundCheckResource(r: any) {
   };
 }
 
-export function toComplianceRuleResource(r: any) {
+export function toComplianceRuleResource(r: any): Wire<"compliance-rule"> {
   return {
     ...baseResource(r, "compliance-rules"),
     title: r.title,
@@ -155,7 +157,7 @@ export function toComplianceRuleResource(r: any) {
   };
 }
 
-export function toEventResource(r: any) {
+export function toEventResource(r: any): Wire<"event"> {
   return {
     ...baseResource(r, "events"),
     title: r.title,
@@ -173,7 +175,7 @@ export function toEventResource(r: any) {
   };
 }
 
-export function toHolidaySelectionResource(r: any) {
+export function toHolidaySelectionResource(r: any): Wire<"holiday-selection"> {
   return {
     path: `holiday-selections/${r.uuid}`,
     create_time: iso(r.createdAt),
@@ -183,7 +185,7 @@ export function toHolidaySelectionResource(r: any) {
   };
 }
 
-export function toSettingResource(r: any) {
+export function toSettingResource(r: any): Wire<"setting"> {
   return {
     path: `settings/${r.key}`,
     update_time: iso(r.updatedAt),
@@ -193,7 +195,7 @@ export function toSettingResource(r: any) {
   };
 }
 
-export function toRoleResource(r: any) {
+export function toRoleResource(r: any): Wire<"role"> {
   return {
     path: `roles/${r.name}`,
     create_time: iso(r.createdAt),
@@ -210,7 +212,7 @@ export function toRoleResource(r: any) {
 // and effect. `field` and `verb` are read back from the verbatim pattern (tokens after the id position); for
 // an exact rule, `scope_ref` is rebuilt as `<collection>/<objectUuid>` (resolved by the caller). The outbound
 // edge encodes the `users/<uuid>` and `<col>/<uuid>` refs to wire tokens.
-export function toAccessRuleResource(r: any, objectUuid: string | null) {
+export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"access-rule"> {
   const toks = String(r.pattern).split(".");
   const tail = toks[toks.length - 1];
   // A custom-method rule (allow OR deny) has no level and a non-`**` tail (the verb). Deny rules carry the verb
@@ -236,7 +238,7 @@ export function toAccessRuleResource(r: any, objectUuid: string | null) {
   };
 }
 
-export function toPolicyResource(r: any) {
+export function toPolicyResource(r: any): Wire<"policy"> {
   return {
     path: `policy/${r.key}`,
     update_time: iso(r.updatedAt),
@@ -246,7 +248,18 @@ export function toPolicyResource(r: any) {
   };
 }
 
-export function toAnnouncementResource(r: any) {
+// A board item's grouped emoji reactions, as the route attached them (`_reactions`). The reactor ids become
+// employee refs on the wire, like every other id the client resolves to a name.
+function reactionGroups(groups: unknown) {
+  return ((groups as { emoji: string; count: number; reacted: boolean; reactors?: string[] }[] | undefined) ?? []).map((g) => ({
+    emoji: g.emoji,
+    count: g.count,
+    reacted: g.reacted,
+    reactors: (g.reactors ?? []).map((id) => `employees/${id}`),
+  }));
+}
+
+export function toAnnouncementResource(r: any): Wire<"announcement"> {
   return {
     ...baseResource(r, "announcements"),
     kind: r.kind ?? "announcement",
@@ -259,12 +272,16 @@ export function toAnnouncementResource(r: any) {
     body_valign: r.bodyValign ?? undefined,
     author: ref("employees", r.authorEmployeeId),
     publish_time: r.publishTime ? iso(r.publishTime) : undefined,
+    // When the post was pinned to the top of the board (:pin verb); absent = not pinned. The feed shows
+    // pinned posts first, most recently pinned leading.
+    pin_time: r.pinnedAt ? iso(r.pinnedAt) : undefined,
     // Whether the calling viewer has a read receipt for this post (drives the dashboard "unread" widget).
     // Attached by the route from the caller's read rows; absent = treat as unread. The author/HR-only
     // "Read by" list (read_by / read_count) is attached by the route, gated on the access affordance.
     read: !!r._read,
-    // Grouped reactions [{ emoji, count, reacted }], attached by the route. `reacted` = the calling viewer.
-    reactions: (r._reactions as { emoji: string; count: number; reacted: boolean }[] | undefined) ?? [],
+    // Grouped reactions [{ emoji, count, reacted, reactors }], attached by the route. `reacted` = the
+    // calling viewer; `reactors` names who is behind the count (capped - see MAX_REACTORS).
+    reactions: reactionGroups(r._reactions),
     // The reply thread (oldest-first) + its count, attached by the route.
     replies: (r._replies as any[] | undefined)?.map(toAnnouncementReplyResource) ?? [],
     reply_count: (r._replies as any[] | undefined)?.length ?? 0,
@@ -306,11 +323,11 @@ export function toAnnouncementReplyResource(r: any) {
     author_email: r.authorEmail ?? undefined,
     body: r.body,
     create_time: iso(r.createdAt),
-    reactions: (r._reactions as { emoji: string; count: number; reacted: boolean }[] | undefined) ?? [],
+    reactions: reactionGroups(r._reactions),
   };
 }
 
-export function toLeaveTypeResource(r: any) {
+export function toLeaveTypeResource(r: any): Wire<"leave-type"> {
   return {
     ...baseResource(r, "leave-types"),
     display_name: r.name,
@@ -329,10 +346,11 @@ export function toLeaveTypeResource(r: any) {
   };
 }
 
-export function toGoalResource(r: any) {
+export function toGoalResource(r: any): Wire<"goal"> {
   return {
     ...baseResource(r, "goals"),
     employee: ref("employees", r.employeeId),
+    parent: ref("goals", r.parentId),
     title: r.title,
     description: r.description ?? undefined,
     weight: r.weight ?? 0,
@@ -342,7 +360,7 @@ export function toGoalResource(r: any) {
   };
 }
 
-export function toBoardResource(r: any) {
+export function toBoardResource(r: any): Wire<"board"> {
   const parse = (s: string | null | undefined) => {
     try {
       return s ? JSON.parse(s) : [];
@@ -367,7 +385,7 @@ export function toBoardResource(r: any) {
   };
 }
 
-export function toCardResource(r: any) {
+export function toCardResource(r: any): Wire<"card"> {
   return {
     ...baseResource(r, "cards"),
     board: ref("boards", r.boardId),
@@ -383,6 +401,7 @@ export function toCardResource(r: any) {
     description: r.description ?? undefined,
     priority: r.priority,
     labels: (() => { try { return r.labelsJson ? JSON.parse(r.labelsJson) : []; } catch { return []; } })(),
+    documents: (() => { try { return (r.documentsJson ? (JSON.parse(r.documentsJson) as string[]) : []).map((id) => ref("org-documents", id)).filter((x): x is string => !!x); } catch { return []; } })(),
     size: r.size ?? undefined,
     due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
     blocked: !!r.blocked,
@@ -445,7 +464,7 @@ export function toActivityResource(r: any) {
   };
 }
 
-export function toSprintResource(r: any) {
+export function toSprintResource(r: any): Wire<"sprint"> {
   return {
     ...baseResource(r, "sprints"),
     board: ref("boards", r.boardId),
@@ -457,7 +476,7 @@ export function toSprintResource(r: any) {
   };
 }
 
-export function toReviewCycleResource(r: any) {
+export function toReviewCycleResource(r: any): Wire<"review-cycle"> {
   return {
     ...baseResource(r, "review-cycles"),
     name: r.name,
@@ -473,13 +492,15 @@ export function toReviewCycleResource(r: any) {
 // A review. The manager's assessment (ratings / overall / manager comment) is withheld from the owner-employee
 // until the review is SHARED; the route sets `_managerVisible` from the access affordance (an editor - manager
 // or HR - always sees it). The self-assessment is always visible to the owner + editors.
-export function toReviewResource(r: any) {
-  const out: Record<string, unknown> = {
+export function toReviewResource(r: any): Wire<"review"> {
+  const out: Wire<"review"> = {
     ...baseResource(r, "reviews"),
     cycle: ref("review-cycles", r.cycleId),
     employee: ref("employees", r.employeeId),
     state: r.state,
     self_comment: r.selfComment ?? undefined,
+    self_ratings: r.selfRatingsJson ? JSON.parse(r.selfRatingsJson) : undefined,
+    ack_comment: r.ackComment ?? undefined,
   };
   if (r._managerVisible) {
     out.manager_comment = r.managerComment ?? undefined;
@@ -507,7 +528,7 @@ function reviewFeedbackEntry(f: any, named: boolean) {
 }
 
 // The nominee's own view of a feedback request (review-feedback collection): who to give feedback on + their draft.
-export function toReviewFeedbackResource(r: any) {
+export function toReviewFeedbackResource(r: any): Wire<"review-feedback"> {
   return {
     ...baseResource(r, "review-feedback"),
     review: ref("reviews", r.reviewId),
@@ -519,8 +540,8 @@ export function toReviewFeedbackResource(r: any) {
   };
 }
 
-export function toTransitionResource(r: any) {
-  const out: Record<string, unknown> = {
+export function toTransitionResource(r: any): Wire<"transition"> {
+  const out: Wire<"transition"> = {
     ...baseResource(r, "transitions"),
     employee: ref("employees", r.employeeId),
     kind: r.kind,
@@ -538,7 +559,7 @@ export function toTransitionResource(r: any) {
   return out;
 }
 
-export function toTransitionTaskResource(r: any) {
+export function toTransitionTaskResource(r: any): Wire<"transition-task"> {
   return {
     ...baseResource(r, "transition-tasks"),
     transition: ref("transitions", r.transitionId),
@@ -555,7 +576,7 @@ export function toTransitionTaskResource(r: any) {
   };
 }
 
-export function toCheckInResource(r: any) {
+export function toCheckInResource(r: any): Wire<"check-in"> {
   return {
     ...baseResource(r, "check-ins"),
     employee: ref("employees", r.employeeId),
@@ -563,10 +584,11 @@ export function toCheckInResource(r: any) {
     meeting_date: r.meetingDate ? iso(r.meetingDate).slice(0, 10) : undefined,
     notes: r.notes ?? undefined,
     action_items: r.actionItemsJson ? JSON.parse(r.actionItemsJson) : [],
+    cadence: r.cadence ?? undefined,
   };
 }
 
-export function toBenefitPlanResource(r: any) {
+export function toBenefitPlanResource(r: any): Wire<"benefit-plan"> {
   return {
     ...baseResource(r, "benefit-plans"),
     name: r.name,
@@ -581,7 +603,7 @@ export function toBenefitPlanResource(r: any) {
   };
 }
 
-export function toDependentResource(r: any) {
+export function toDependentResource(r: any): Wire<"dependent"> {
   return {
     ...baseResource(r, "dependents"),
     employee: ref("employees", r.employeeId),
@@ -591,18 +613,21 @@ export function toDependentResource(r: any) {
   };
 }
 
-export function toBenefitEnrollmentResource(r: any) {
+export function toBenefitEnrollmentResource(r: any): Wire<"benefit-enrollment"> {
   return {
     ...baseResource(r, "benefit-enrollments"),
     employee: ref("employees", r.employeeId),
     plan: ref("benefit-plans", r.planId),
     status: r.status,
     effective_date: r.effectiveDate ? iso(r.effectiveDate).slice(0, 10) : undefined,
-    dependents: (r.dependentsJson ? (JSON.parse(r.dependentsJson) as string[]) : []).map((id) => ref("dependents", id)),
+    // Drop any blank id rather than emitting an undefined hole in the array.
+    dependents: (r.dependentsJson ? (JSON.parse(r.dependentsJson) as string[]) : [])
+      .map((id) => ref("dependents", id))
+      .filter((p): p is string => !!p),
   };
 }
 
-export function toShiftResource(r: any) {
+export function toShiftResource(r: any): Wire<"shift"> {
   return {
     ...baseResource(r, "shifts"),
     name: r.name,
@@ -613,7 +638,7 @@ export function toShiftResource(r: any) {
   };
 }
 
-export function toShiftAssignmentResource(r: any) {
+export function toShiftAssignmentResource(r: any): Wire<"shift-assignment"> {
   return {
     ...baseResource(r, "shift-assignments"),
     employee: ref("employees", r.employeeId),
@@ -623,7 +648,7 @@ export function toShiftAssignmentResource(r: any) {
   };
 }
 
-export function toProjectResource(r: any) {
+export function toProjectResource(r: any): Wire<"project"> {
   return {
     ...baseResource(r, "projects"),
     name: r.name,
@@ -634,7 +659,7 @@ export function toProjectResource(r: any) {
   };
 }
 
-export function toTimeEntryResource(r: any) {
+export function toTimeEntryResource(r: any): Wire<"time-entry"> {
   return {
     ...baseResource(r, "time-entries"),
     employee: ref("employees", r.employeeId),
@@ -647,7 +672,7 @@ export function toTimeEntryResource(r: any) {
   };
 }
 
-export function toLoanResource(r: any) {
+export function toLoanResource(r: any): Wire<"loan"> {
   const principal = r.principal ?? 0;
   const repaid = r.repaid ?? 0;
   return {
@@ -665,7 +690,7 @@ export function toLoanResource(r: any) {
   };
 }
 
-export function toTaxDeclarationResource(r: any) {
+export function toTaxDeclarationResource(r: any): Wire<"tax-declaration"> {
   return {
     ...baseResource(r, "tax-declarations"),
     employee: ref("employees", r.employeeId),
@@ -680,7 +705,7 @@ export function toTaxDeclarationResource(r: any) {
   };
 }
 
-export function toLeaveRequestResource(r: any) {
+export function toLeaveRequestResource(r: any): Wire<"leave-request"> {
   return {
     ...baseResource(r, "leave-requests"),
     employee: ref("employees", r.employeeId),
@@ -695,7 +720,7 @@ export function toLeaveRequestResource(r: any) {
   };
 }
 
-export function toCompensationResource(r: any) {
+export function toCompensationResource(r: any): Wire<"compensation"> {
   // The grade's band (when attached by the service via `r.grade`) yields two derived signals: the
   // compa-ratio (base / band midpoint, 2dp) and whether base sits below / within / above the band. Bands
   // are guardrails - "below"/"above" is informational, never an error.
@@ -728,7 +753,7 @@ export function toCompensationResource(r: any) {
   };
 }
 
-export function toSalaryStructureResource(r: any) {
+export function toSalaryStructureResource(r: any): Wire<"salary-structure"> {
   // Stored lines hold internal component ids; render each as a `pay-components/<id>` ref (the outbound edge
   // tokenizes it). `lines` is an ordered array of { component, rate }.
   let lines: { component: string; rate: number | null }[] = [];
@@ -744,7 +769,7 @@ export function toSalaryStructureResource(r: any) {
   };
 }
 
-export function toPayGradeResource(r: any) {
+export function toPayGradeResource(r: any): Wire<"pay-grade"> {
   return {
     ...baseResource(r, "pay-grades"),
     display_name: r.name,
@@ -757,7 +782,7 @@ export function toPayGradeResource(r: any) {
   };
 }
 
-export function toSettlementResource(r: any) {
+export function toSettlementResource(r: any): Wire<"settlement"> {
   return {
     ...baseResource(r, "settlements"),
     employee: ref("employees", r.employeeId),
@@ -772,7 +797,7 @@ export function toSettlementResource(r: any) {
   };
 }
 
-export function toBonusResource(r: any) {
+export function toBonusResource(r: any): Wire<"bonus"> {
   return {
     ...baseResource(r, "bonuses"),
     employee: ref("employees", r.employeeId),
@@ -789,7 +814,7 @@ export function toBonusResource(r: any) {
   };
 }
 
-export function toAssetResource(r: any) {
+export function toAssetResource(r: any): Wire<"asset"> {
   return {
     ...baseResource(r, "assets"),
     asset_tag: r.assetTag ?? undefined,
@@ -800,11 +825,13 @@ export function toAssetResource(r: any) {
     assigned_to: r.assignedTo ? ref("employees", r.assignedTo) : undefined,
     assigned_on: r.assignedOn ? iso(r.assignedOn).slice(0, 10) : undefined,
     purchase_date: r.purchaseDate ? iso(r.purchaseDate).slice(0, 10) : undefined,
+    tag_printed_time: r.tagPrintedAt ? iso(r.tagPrintedAt) : undefined,
+    last_verified_time: r.verifiedAt ? iso(r.verifiedAt) : undefined,
     notes: r.notes ?? undefined,
   };
 }
 
-export function toPositionResource(r: any) {
+export function toPositionResource(r: any): Wire<"position"> {
   return {
     ...baseResource(r, "positions"),
     employee: ref("employees", r.employeeId),
@@ -818,7 +845,7 @@ export function toPositionResource(r: any) {
   };
 }
 
-export function toAttendanceSessionResource(r: any) {
+export function toAttendanceSessionResource(r: any): Wire<"attendance"> {
   return {
     ...baseResource(r, "attendance"),
     employee: ref("employees", r.employeeId),
@@ -830,7 +857,7 @@ export function toAttendanceSessionResource(r: any) {
   };
 }
 
-export function toAttendanceRegularizationResource(r: any) {
+export function toAttendanceRegularizationResource(r: any): Wire<"attendance-regularization"> {
   return {
     ...baseResource(r, "attendance-regularizations"),
     employee: ref("employees", r.employeeId),
@@ -842,7 +869,7 @@ export function toAttendanceRegularizationResource(r: any) {
   };
 }
 
-export function toOvertimeRequestResource(r: any) {
+export function toOvertimeRequestResource(r: any): Wire<"overtime-request"> {
   const minutes = Math.max(0, Math.round((+new Date(r.endTime) - +new Date(r.startTime)) / 60000));
   return {
     ...baseResource(r, "overtime-requests"),
@@ -860,7 +887,7 @@ export function toOvertimeRequestResource(r: any) {
   };
 }
 
-export function toApprovalDelegationResource(r: any) {
+export function toApprovalDelegationResource(r: any): Wire<"approval-delegation"> {
   return {
     ...baseResource(r, "approval-delegations"),
     delegator: ref("employees", r.delegatorId),
@@ -871,7 +898,7 @@ export function toApprovalDelegationResource(r: any) {
   };
 }
 
-export function toRemoteWorkRequestResource(r: any) {
+export function toRemoteWorkRequestResource(r: any): Wire<"remote-work-request"> {
   // Inclusive calendar days, less a half for a leading PM start (startSession=2) or trailing AM end (endSession=1).
   const cal = Math.round((+new Date(r.endDate) - +new Date(r.startDate)) / 86400000) + 1;
   const days = Math.max(0.5, cal - (r.startSession === 2 ? 0.5 : 0) - (r.endSession === 1 ? 0.5 : 0));
@@ -891,7 +918,7 @@ export function toRemoteWorkRequestResource(r: any) {
   };
 }
 
-export function toNoticePeriodResource(r: any) {
+export function toNoticePeriodResource(r: any): Wire<"notice-period"> {
   const lwd = +new Date(r.lastWorkingDay);
   const totalDays = Math.max(0, Math.round((lwd - +new Date(r.noticeDate)) / 86400000));
   const now = new Date();
@@ -912,7 +939,7 @@ export function toNoticePeriodResource(r: any) {
   };
 }
 
-export function toSuggestionResource(r: any) {
+export function toSuggestionResource(r: any): Wire<"suggestion"> {
   return {
     ...baseResource(r, "suggestions"),
     // Hidden when anonymous (still owned by the submitter for their own view + scope).
@@ -931,7 +958,7 @@ export function toSuggestionResource(r: any) {
   };
 }
 
-export function toLetterTemplateResource(r: any) {
+export function toLetterTemplateResource(r: any): Wire<"letter-template"> {
   return {
     ...baseResource(r, "letter-templates"),
     label: r.label,
@@ -942,7 +969,7 @@ export function toLetterTemplateResource(r: any) {
   };
 }
 
-export function toNotificationResource(r: any) {
+export function toNotificationResource(r: any): Wire<"notification"> {
   return {
     ...baseResource(r, "notifications"),
     recipient: ref("employees", r.recipientId),
@@ -965,7 +992,7 @@ export function toNotificationResource(r: any) {
   };
 }
 
-export function toReimbursementCategoryResource(r: any) {
+export function toReimbursementCategoryResource(r: any): Wire<"reimbursement-category"> {
   return {
     ...baseResource(r, "reimbursement-categories"),
     display_name: r.name,
@@ -973,7 +1000,7 @@ export function toReimbursementCategoryResource(r: any) {
   };
 }
 
-export function toTicketChecklistResource(r: any) {
+export function toTicketChecklistResource(r: any): Wire<"ticket-checklist"> {
   let items: string[] = [];
   try { items = Array.isArray(r.items) ? r.items : JSON.parse(r.items ?? "[]"); } catch { items = []; }
   return {
@@ -983,7 +1010,7 @@ export function toTicketChecklistResource(r: any) {
   };
 }
 
-export function toReimbursementResource(r: any) {
+export function toReimbursementResource(r: any): Wire<"reimbursement"> {
   return {
     ...baseResource(r, "reimbursements"),
     employee: ref("employees", r.employeeId),
@@ -998,7 +1025,7 @@ export function toReimbursementResource(r: any) {
   };
 }
 
-export function toExpenseCategoryResource(r: any) {
+export function toExpenseCategoryResource(r: any): Wire<"expense-category"> {
   return {
     ...baseResource(r, "expense-categories"),
     display_name: r.name,
@@ -1007,7 +1034,7 @@ export function toExpenseCategoryResource(r: any) {
   };
 }
 
-export function toVendorResource(r: any) {
+export function toVendorResource(r: any): Wire<"vendor"> {
   return {
     ...baseResource(r, "vendors"),
     display_name: r.name,
@@ -1021,7 +1048,7 @@ export function toVendorResource(r: any) {
   };
 }
 
-export function toExpenseResource(r: any) {
+export function toExpenseResource(r: any): Wire<"expense"> {
   return {
     ...baseResource(r, "expenses"),
     employee: ref("employees", r.employeeId),
@@ -1047,7 +1074,7 @@ export function toExpenseResource(r: any) {
   };
 }
 
-export function toExpenseBudgetResource(r: any) {
+export function toExpenseBudgetResource(r: any): Wire<"expense-budget"> {
   return {
     ...baseResource(r, "expense-budgets"),
     department: ref("departments", r.departmentId),
@@ -1061,7 +1088,7 @@ export function toExpenseBudgetResource(r: any) {
   };
 }
 
-export function toReferralResource(r: any) {
+export function toReferralResource(r: any): Wire<"referral"> {
   return {
     ...baseResource(r, "referrals"),
     referrer: ref("employees", r.referrerId),
@@ -1083,7 +1110,7 @@ export function toReferralResource(r: any) {
 }
 
 // ATS - a job requisition (role to fill).
-export function toRequisitionResource(r: any) {
+export function toRequisitionResource(r: any): Wire<"job-requisition"> {
   return {
     ...baseResource(r, "job-requisitions"),
     title: r.title,
@@ -1101,7 +1128,7 @@ export function toRequisitionResource(r: any) {
 }
 
 // ATS - a candidate (talent-pool person). Resume presence via `has_resume` (set by the route).
-export function toCandidateResource(r: any) {
+export function toCandidateResource(r: any): Wire<"candidate"> {
   return {
     ...baseResource(r, "candidates"),
     name: r.name,
@@ -1117,7 +1144,7 @@ export function toCandidateResource(r: any) {
 }
 
 // ATS - an application (candidate x requisition; the pipeline entity).
-export function toApplicationResource(r: any) {
+export function toApplicationResource(r: any): Wire<"application"> {
   return {
     ...baseResource(r, "applications"),
     candidate: ref("candidates", r.candidateId),
@@ -1133,7 +1160,7 @@ export function toApplicationResource(r: any) {
 }
 
 // ATS - a scheduled interview. `interviewers` is emitted as employee refs (tokenized on the wire).
-export function toInterviewResource(r: any) {
+export function toInterviewResource(r: any): Wire<"interview"> {
   return {
     ...baseResource(r, "interviews"),
     application: ref("applications", r.applicationId),
@@ -1148,7 +1175,7 @@ export function toInterviewResource(r: any) {
 }
 
 // ATS - an interview scorecard (one interviewer's evaluation).
-export function toInterviewFeedbackResource(r: any) {
+export function toInterviewFeedbackResource(r: any): Wire<"interview-feedback"> {
   return {
     ...baseResource(r, "interview-feedback"),
     interview: ref("interviews", r.interviewId),
@@ -1161,7 +1188,7 @@ export function toInterviewFeedbackResource(r: any) {
 }
 
 // ATS - an offer on an application.
-export function toOfferResource(r: any) {
+export function toOfferResource(r: any): Wire<"offer"> {
   return {
     ...baseResource(r, "offers"),
     application: ref("applications", r.applicationId),
@@ -1180,7 +1207,7 @@ export function toOfferResource(r: any) {
 
 // A ticket's threaded comment. Not a directly-addressable resource (no `path`); emitted only inline on the
 // ticket Get. `author` is an employees ref (tokenized on the wire); `author_email` is the admin fallback.
-export function toTicketCommentResource(r: any) {
+export function toTicketCommentResource(r: any): Wire<"ticket-comment"> {
   return {
     author: ref("employees", r.authorId),
     author_email: r.authorEmail ?? undefined,
@@ -1189,7 +1216,7 @@ export function toTicketCommentResource(r: any) {
   };
 }
 
-export function toTicketTodoResource(r: any) {
+export function toTicketTodoResource(r: any): Wire<"ticket-todo"> {
   // `id` is the item's random pk - the handle :toggleTodo/:removeTodo address it by (sub-resource, not a wire
   // collection, so it isn't wire-id encoded - matching the pk's own random, non-sequential form).
   return {
@@ -1200,7 +1227,7 @@ export function toTicketTodoResource(r: any) {
   };
 }
 
-export function toTicketResource(r: any) {
+export function toTicketResource(r: any): Wire<"ticket"> {
   return {
     ...baseResource(r, "tickets"),
     employee: ref("employees", r.employeeId), // the requester
@@ -1221,7 +1248,7 @@ export function toTicketResource(r: any) {
   };
 }
 
-export function toLeaveEncashmentResource(r: any) {
+export function toLeaveEncashmentResource(r: any): Wire<"leave-encashment"> {
   return {
     ...baseResource(r, "leave-encashments"),
     employee: ref("employees", r.employeeId),
@@ -1236,7 +1263,7 @@ export function toLeaveEncashmentResource(r: any) {
   };
 }
 
-export function toLeaveBalanceResource(r: any) {
+export function toLeaveBalanceResource(r: any): Wire<"leave-balance"> {
   return {
     ...baseResource(r, "leave-balances"),
     employee: ref("employees", r.employeeId),
@@ -1246,7 +1273,9 @@ export function toLeaveBalanceResource(r: any) {
 }
 
 // Shared document fields (both resources). No `visibility` - audience is grant policy, not data.
-function docFields(r: any) {
+// Fields common to both document collections. Typed against the contract so the two schemas' `required`
+// lists stay honest - this helper is spread into both serializers, where a bare object would hide it.
+function docFields(r: any): Pick<Wire<"org-document">, "display_name" | "document_type" | "file_name" | "content_type" | "size_bytes" | "expire_time"> {
   return {
     display_name: r.title,
     document_type: r.documentType,
@@ -1257,7 +1286,7 @@ function docFields(r: any) {
   };
 }
 
-export function toOrgDocumentResource(r: any) {
+export function toOrgDocumentResource(r: any): Wire<"org-document"> {
   // `acknowledged` (per caller) needs the row decorated with the caller's signed version (`ackedVersion`).
   const requiresAck = !!r.requiresAck;
   return {
@@ -1274,11 +1303,17 @@ export function toOrgDocumentResource(r: any) {
   };
 }
 
-function safeParse(s: string): unknown {
-  try { return JSON.parse(s); } catch { return undefined; }
+// The stored sign-anchor blob. Parsed defensively: a malformed row must not take the whole response down,
+// and the shape is the contract's own so a schema change lands here.
+function safeParse(s: string): NonNullable<Wire<"org-document">["sign_anchor"]> | undefined {
+  try {
+    return JSON.parse(s) as NonNullable<Wire<"org-document">["sign_anchor"]>;
+  } catch {
+    return undefined;
+  }
 }
 
-export function toPersonalDocumentResource(r: any) {
+export function toPersonalDocumentResource(r: any): Wire<"personal-document"> {
   return {
     ...baseResource(r, "personal-documents"),
     employee: ref("employees", r.employeeId),
@@ -1295,7 +1330,7 @@ export function toPersonalDocumentResource(r: any) {
   };
 }
 
-export function toDocumentAcknowledgementResource(r: any) {
+export function toDocumentAcknowledgementResource(r: any): Wire<"document-acknowledgement"> {
   return {
     ...baseResource(r, "document-acknowledgements"),
     employee: ref("employees", r.employeeId),
@@ -1307,7 +1342,7 @@ export function toDocumentAcknowledgementResource(r: any) {
   };
 }
 
-export function toPayComponentResource(r: any) {
+export function toPayComponentResource(r: any): Wire<"pay-component"> {
   return {
     ...baseResource(r, "pay-components"),
     display_name: r.name,
@@ -1320,7 +1355,7 @@ export function toPayComponentResource(r: any) {
   };
 }
 
-export function toPayPeriodResource(r: any) {
+export function toPayPeriodResource(r: any): Wire<"pay-period"> {
   return {
     ...baseResource(r, "pay-periods"),
     display_name: r.label,
@@ -1330,7 +1365,7 @@ export function toPayPeriodResource(r: any) {
   };
 }
 
-export function toPayrollRunResource(r: any) {
+export function toPayrollRunResource(r: any): Wire<"payroll-run"> {
   return {
     ...baseResource(r, "payroll-runs"),
     pay_period: ref("pay-periods", r.payPeriodId),
@@ -1339,10 +1374,13 @@ export function toPayrollRunResource(r: any) {
     submitted_by_name: r.submittedByName ?? undefined,
     approved_by: r.approvedBy ?? undefined,
     approved_by_name: r.approvedByName ?? undefined,
+    // Set = a payout file has been handed to a bank, so the run is no longer deletable (deleteRun would
+    // release the one-off payables it already paid). The UI drops the delete action on the strength of this.
+    bank_file_time: r.bankFileAt ? new Date(r.bankFileAt).toISOString() : undefined,
   };
 }
 
-export function toPayslipResource(r: any) {
+export function toPayslipResource(r: any): Wire<"payslip"> {
   return {
     ...baseResource(r, "payslips"),
     payroll_run: ref("payroll-runs", r.runId),
@@ -1363,7 +1401,7 @@ export function toOperationResource(job: {
   resultJson: string | null;
   createdAt?: Date | number;
   updatedAt?: Date | number;
-}) {
+}): Wire<"operation"> {
   const done = job.status === "done" || job.status === "error";
   return {
     path: `operations/${job.uuid}`,
@@ -1407,7 +1445,7 @@ export function toEventLogResource(r: {
   occurredAt: Date | number;
   createdAt: Date | number;
   updatedAt: Date | number;
-}, redactPayload = false) {
+}, redactPayload = false): Wire<"event_log_entry"> {
   const payload = r.payloadJson ? JSON.parse(r.payloadJson) : {};
   return {
     path: `event-log/${r.uuid}`,
@@ -1440,7 +1478,7 @@ export function toAutomationResource(r: {
   lockedBy: string | null;
   createdAt: Date | number;
   updatedAt: Date | number;
-}) {
+}): Wire<"automation"> {
   return {
     ...baseResource(r, "automations"),
     name: r.name,
@@ -1469,7 +1507,7 @@ export function toAutomationRunResource(r: {
   finishedAt: Date | number | null;
   createdAt: Date | number;
   updatedAt: Date | number;
-}, redactResult = false) {
+}, redactResult = false): Wire<"automation_run"> {
   // Non-super viewers get action kind + status only (the `detail` string can carry ids/paths from the run).
   const result = r.resultJson ? JSON.parse(r.resultJson) : undefined;
   const shown = redactResult && Array.isArray(result) ? result.map((o) => ({ kind: o?.kind, status: o?.status })) : result;
@@ -1505,7 +1543,7 @@ export function toWorkflowInstanceResource(r: {
   resumedAt: Date | number | null;
   createdAt: Date | number;
   updatedAt: Date | number;
-}) {
+}): Wire<"workflow_instance"> {
   return {
     path: `workflow-instances/${r.uuid}`,
     create_time: iso(r.createdAt),
@@ -1535,7 +1573,7 @@ export function toCronRunResource(r: {
   summaryJson: string | null;
   createdAt: Date | number;
   updatedAt: Date | number;
-}) {
+}): Wire<"cron_run"> {
   return {
     path: `cron-runs/${r.uuid}`,
     create_time: iso(r.createdAt),

@@ -2,7 +2,7 @@
 // WORK TYPE (Feature / Bug / Chore / Tech debt) — the lanes are the useful default the team asked for.
 // Columns are the shared kanban defaults. Private-by-default (no seeded grant; super sees it via **, admins
 // widen via the ACL like any board). No cards seeded (those are employee-owned, created in-app).
-import { Ctx, T0, q, j, code2, rows } from "../lib";
+import { type Ctx, T0, q, j, code2, rows } from "../lib";
 import { DEFAULT_BOARD_COLUMNS } from "../../src/domain/boards";
 
 // Work-type swimlanes. Keys are lowercase slugs (KEY_RE: [a-z0-9][a-z0-9_]*), so "tech_debt" not "tech-debt".

@@ -7,6 +7,7 @@ import { CODE_WIDTH } from "./codeAlloc";
 import { nextChildCode } from "../domain/codes";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import { runBatch, chunk } from "../lib/dbBatch";
 
 // Park one notification for later digest delivery (best-effort; never throws - a failed park must not break the
 // action that triggered it). Called by notify() when the recipient has digest on and the item is digestible.
@@ -65,11 +66,14 @@ export async function flushDigests(deps: Deps): Promise<number> {
       };
     });
 
-    const CHUNK = 8; // D1 bound-parameter cap (see notifyMany).
-    for (let i = 0; i < rows.length; i += CHUNK) await deps.db.insert(schema.notifications).values(rows.slice(i, i + CHUNK));
-    // Clear the flushed rows.
+    // Insert the digests AND clear the queue in one atomic batch (one subrequest): a crash between the two
+    // used to leave the queue uncleared and re-digest the same items the next night. Chunked per statement
+    // under the D1 bound-parameter cap (see notifyMany).
     const ids = queued.map((q) => q.uuid);
-    for (let i = 0; i < ids.length; i += 90) await deps.db.delete(schema.notificationDigestQueue).where(inArray(schema.notificationDigestQueue.uuid, ids.slice(i, i + 90)));
+    await runBatch(deps.db, [
+      ...chunk(rows, 8).map((c) => deps.db.insert(schema.notifications).values(c)),
+      ...chunk(ids, 90).map((c) => deps.db.delete(schema.notificationDigestQueue).where(inArray(schema.notificationDigestQueue.uuid, c))),
+    ]);
     return rows.length;
   } catch (e) {
     console.error("[digest] flush failed (non-fatal)", e);

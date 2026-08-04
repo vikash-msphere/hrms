@@ -8,7 +8,7 @@ import { DEFAULT_POLICY } from "../src/domain/manifests";
 // protected fields, reference gates, supported scopes) as one JSON blob. If the manifest changes in code and a
 // snapshot is not regenerated, a local/bootstrapped DB would run on stale policy - e.g. a new sensitive verb
 // would not be audited. Companion to seedDrift.test.ts, which pins the access_rules block the same way.
-// To fix a failure: `npx tsx scripts/genSeed.ts` / `npx tsx bootstrap/genBootstrap.ts` and replace the file.
+// To fix a failure: `node --import ./scripts/tsResolve.mjs scripts/genSeed.ts` / `node --import ./scripts/tsResolve.mjs bootstrap/genBootstrap.ts` and replace the file.
 const expected = `('manifest','${JSON.stringify(DEFAULT_POLICY).replace(/'/g, "''")}'`;
 
 describe("policy manifest seed drift", () => {

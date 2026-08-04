@@ -43,10 +43,17 @@ import {
   Repeat,
   ListTodo,
   Gauge,
+  CircleUser,
 } from "lucide-react";
 import type { KpiCategory } from "@/lib/dashboardConfig";
 
 export const KPI_ICONS: Record<string, LucideIcon> = {
+  // For you
+  docs_to_ack: FileSignature,
+  letters_to_sign: PenLine,
+  timesheets_draft: FileUp,
+  my_open_cards: ListChecks,
+  timesheet_week: Timer,
   // Needs attention
   pending: CalendarCheck,
   open_tickets: LifeBuoy,
@@ -58,7 +65,6 @@ export const KPI_ICONS: Record<string, LucideIcon> = {
   tax_verify: FileSearch,
   bgchecks_open: ShieldCheck,
   suggestions_open: Lightbulb,
-  docs_to_ack: FileSignature,
   docs_expiring: FileClock,
   probation_ending: Hourglass,
   notice_serving: DoorOpen,
@@ -69,9 +75,7 @@ export const KPI_ICONS: Record<string, LucideIcon> = {
   reviews_due_soon: ClipboardList,
   interviews_upcoming: CalendarClock,
   onboarding_tasks_pending: ListTodo,
-  letters_to_sign: PenLine,
   offers_pending: Send,
-  timesheets_draft: FileUp,
   recurring_expenses_due: Repeat,
   // At a glance
   on_leave: Plane,
@@ -90,11 +94,11 @@ export const KPI_ICONS: Record<string, LucideIcon> = {
   goals_active: Target,
   loans_outstanding: Landmark,
   benefits_enrolled: HeartPulse,
-  my_open_cards: ListChecks,
-  timesheet_week: Timer,
+  team_hours_week: Timer,
 };
 
 export const CATEGORY_ICONS: Record<KpiCategory, LucideIcon> = {
+  personal: CircleUser,
   attention: AlertTriangle,
   upcoming: CalendarClock,
   snapshot: Gauge,

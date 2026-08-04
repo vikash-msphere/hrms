@@ -1,10 +1,16 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Skeleton } from "./components/ui/skeleton";
+import { Button } from "./components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/ui/dialog";
+import { api, setSessionExpiredHandler, setForbiddenHandler } from "./api";
+import { useToast } from "./components/ui/use-toast";
+import { useViewAs } from "./lib/viewAsStore";
 import { useMe } from "./useMe";
 import { useRoute } from "./router";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
 import { CommandPalette } from "./components/layout/CommandPalette";
+import { ShortcutLayer } from "./components/layout/ShortcutLayer";
 import { Toaster } from "./components/ui/toaster";
 import { ConfirmProvider } from "./components/common/confirm";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
@@ -18,9 +24,47 @@ import { syncTabSeenFromServer } from "./lib/tabActivity";
 import { Workspace } from "./components/layout/Workspace";
 import { ApprovalsProvider } from "./lib/approvals";
 import { NotificationsProvider, NotificationClearOnLeave } from "./lib/notifications";
-import { workspaceForKey, APPROVAL_CAPS } from "./nav";
+import { workspaceForKey, navPerm, APPROVAL_CAPS } from "./nav";
 import { Building } from "lucide-react";
 import { APP_NAME } from "./lib/brand";
+
+// Route keys that are NOT 1:1 wire collections. A string rebinds the page-wide ambient access scope to the
+// collection that page's content manages; null means the page has no single collection (cross-collection
+// surfaces - dashboard, approvals, the settings hub - whose affordances all carry explicit targets), so NO
+// ambient scope is provided: a forgotten explicit target then shows no icon rather than authoring rules on
+// a phantom collection. Keys absent here match their collection already.
+const ROUTE_SCOPE: Record<string, string | null> = {
+  dashboard: null,
+  approvals: null,
+  documents: null, // org-documents + personal-documents tabs, each explicitly targeted
+  settings: null, // hub of many collections; its :id is a tab name, not an object
+  profile: null, // the page rebinds to the caller's own employees/<id>
+  "org-chart": "employees",
+  "leave-calendar": "leave-requests",
+  benefits: "benefit-enrollments",
+  schedule: "shift-assignments",
+  timesheets: "time-entries",
+  overtime: "overtime-requests",
+  "remote-work": "remote-work-requests",
+  delegations: "approval-delegations",
+  kudos: "announcements",
+  pipeline: "applications",
+  compliance: "compliance-events",
+  workflows: "automations",
+  "recruiting-analytics": "applications",
+  activity: "audit",
+};
+// Routes whose :id segment is a TAB name, not an object id - never pin the ambient scope to it.
+const TAB_ID_ROUTES = new Set(["payroll-runs"]);
+
+function RouteAccessScope({ page, id, children }: { page: string; id?: string | null; children: React.ReactNode }) {
+  const collection = page in ROUTE_SCOPE ? ROUTE_SCOPE[page] : page;
+  if (!collection) return <>{children}</>;
+  // An object pin only makes sense when the ambient collection IS the route's own collection (a rebound
+  // scope's object would belong to a different resource) and the id is a real object.
+  const objectPath = id && collection === page && !TAB_ID_ROUTES.has(page) ? `${page}/${id}` : undefined;
+  return <AccessScope collection={collection} objectPath={objectPath}>{children}</AccessScope>;
+}
 
 // Dashboard is the landing page - keep it in the main chunk so first paint needs no extra roundtrip.
 // Every other page is its own chunk, fetched on first visit (route-level code splitting).
@@ -123,6 +167,50 @@ function PageLoading() {
   );
 }
 
+// Shown when the session expires MID-use: the app (and any half-typed form) stays mounted underneath while
+// the user re-authenticates in a separate tab, then continues right where they were. Deliberately not
+// dismissable - every request would just 401 again.
+function SessionExpiredDialog({ open, onSignedIn }: { open: boolean; onSignedIn: () => void }) {
+  const [checking, setChecking] = useState(false);
+  const [stillDead, setStillDead] = useState(false);
+  async function checkSignedIn() {
+    setChecking(true);
+    setStillDead(false);
+    try {
+      // Raw fetch on purpose: api()'s own 401 handling would re-fire the expired-session flow.
+      const res = await fetch("/v1/users/me", { credentials: "include", headers: { "X-Requested-By": "hrms-spa" } });
+      if (res.ok) onSignedIn();
+      else setStillDead(true);
+    } catch {
+      setStillDead(true);
+    } finally {
+      setChecking(false);
+    }
+  }
+  return (
+    <Dialog open={open} onOpenChange={() => {}}>
+      <DialogContent className="max-w-md" onInteractOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
+        <DialogHeader>
+          <DialogTitle>Signed out</DialogTitle>
+          <DialogDescription>
+            Your session expired. Anything you were typing is still here - sign in again in a new tab, then
+            come back and continue.
+          </DialogDescription>
+        </DialogHeader>
+        {stillDead && <p className="text-sm text-destructive">Still signed out - finish signing in first, then try again.</p>}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => window.open("/auth/login", "_blank", "noopener")}>
+            Open sign-in
+          </Button>
+          <Button loading={checking} onClick={() => void checkSignedIn()}>
+            I've signed in - continue
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function FullScreen({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background text-center">
@@ -137,8 +225,11 @@ function FullScreen({ children }: { children: React.ReactNode }) {
 export default function App() {
   const { me, loaded, error, retry } = useMe();
   const route = useRoute();
+  const { toast } = useToast();
+  const viewAs = useViewAs();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const [chunkReady, setChunkReady] = useState(false);
   const booted = useRef(false); // flips true after the first full render; after that, nav uses <Suspense>
 
@@ -152,6 +243,39 @@ export default function App() {
       syncTabSeenFromServer();
     }
   }, [me]);
+
+  // With a signed-in shell on screen there is work worth preserving: a mid-session 401 overlays the
+  // re-auth dialog instead of navigating away (see setSessionExpiredHandler in api.ts).
+  useEffect(() => {
+    if (!me) return;
+    setSessionExpiredHandler(() => setSessionExpired(true));
+    return () => setSessionExpiredHandler(null);
+  }, [me]);
+
+  // A 403 wall offers "Request access": one toast per collection per session, whose action notifies the
+  // access admins (access-rules:requestAccess - itself permission-gated, so the offer quietly apologises
+  // when the org hasn't enabled the flow). The probe opts out of the handler to avoid a toast loop.
+  const asked = useRef(new Set<string>());
+  useEffect(() => {
+    if (!me) return;
+    setForbiddenHandler((collection) => {
+      if (asked.current.has(collection)) return;
+      asked.current.add(collection);
+      toast({
+        title: "You don't have access to that",
+        description: `Ask the access admins for ${collection.replace(/-/g, " ")}?`,
+        action: {
+          label: "Request access",
+          onClick: () => {
+            api("/access-rules:requestAccess", { method: "POST", body: JSON.stringify({ collection }), skipForbiddenHandler: true })
+              .then(() => toast({ title: "Request sent", description: "The access admins have been notified.", variant: "success" }))
+              .catch(() => toast({ title: "Couldn't send the request", description: "Access requests aren't enabled here yet - ask an admin directly.", variant: "destructive" }));
+          },
+        },
+      });
+    });
+    return () => setForbiddenHandler(null);
+  }, [me, toast]);
 
   // The code chunk that WILL render this route (detail pages differ from their list page).
   const routeChunk = () => {
@@ -208,7 +332,7 @@ export default function App() {
           <p className="mt-1 text-sm text-muted-foreground">Please sign in again to continue.</p>
         </div>
         <a
-          href="/"
+          href="/auth/login"
           className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           Sign in
@@ -229,120 +353,127 @@ export default function App() {
   }
   booted.current = true;
 
+  // Access-mode "view as": when active, the WHOLE shell (nav, pages, gated buttons - everything this
+  // component prop-drills `me` into) gates on the simulated user's capability set and role (role feeds
+  // audience-style UX branches like dashboard KPI visibility). Identity (email/employee_id) stays the
+  // admin's, so every data query still runs as the admin. The access-mode chrome re-provides the REAL
+  // capabilities for itself inside AccessModeProvider.
+  const gme = viewAs ? { ...me!, capabilities: viewAs.capabilities, role: viewAs.role } : me!;
+
   function renderPage() {
     switch (route.page) {
       case "dashboard":
-        return <Dashboard me={me!} />;
+        return <Dashboard me={gme} />;
       case "approvals":
-        return <Approvals me={me!} />;
+        return <Approvals me={gme} />;
       case "notifications":
-        return <Notifications me={me!} />;
+        return <Notifications me={gme} />;
       case "profile":
-        return <Profile me={me!} />;
+        return <Profile me={gme} />;
       case "employees":
-        return route.id ? <EmployeeProfile id={route.id} me={me!} /> : <Directory me={me!} />;
+        return route.id ? <EmployeeProfile id={route.id} me={gme} sub={route.sub ?? undefined} /> : <Directory me={gme} />;
       case "org-chart":
-        return <OrgChart me={me!} />;
+        return <OrgChart me={gme} focusId={route.id ?? undefined} />;
       case "departments": // moved into Settings; deep-link to its tab
-        return <Settings me={me!} tab="departments" />;
+        return <Settings me={gme} tab="departments" />;
       case "attendance":
-        return <Attendance me={me!} />;
+        return <Attendance me={gme} />;
       case "leave-requests":
-        return <Leaves me={me!} />;
+        return <Leaves me={gme} />;
       case "leave-calendar":
-        return <LeaveCalendar me={me!} />;
+        return <LeaveCalendar me={gme} />;
       case "goals":
-        return <Goals me={me!} openId={route.id ?? undefined} />;
+        return <Goals me={gme} openId={route.id ?? undefined} />;
       case "boards":
-        return <Boards me={me!} openId={route.id ?? undefined} />;
+        return <Boards me={gme} openId={route.id ?? undefined} />;
       case "reviews":
-        return <Reviews me={me!} />;
+        return <Reviews me={gme} />;
       case "transitions":
-        return <Onboarding me={me!} />;
+        return <Onboarding me={gme} />;
       case "check-ins":
-        return <CheckIns me={me!} />;
+        return <CheckIns me={gme} />;
       case "benefits":
-        return <Benefits me={me!} />;
+        return <Benefits me={gme} />;
       case "schedule":
-        return <Schedule me={me!} />;
+        return <Schedule me={gme} />;
       case "timesheets":
-        return <Timesheets me={me!} />;
+        return <Timesheets me={gme} />;
       case "loans":
-        return <Loans me={me!} />;
+        return <Loans me={gme} />;
       case "tax-declarations":
-        return <TaxDeclarations me={me!} openId={route.id ?? undefined} />;
+        return <TaxDeclarations me={gme} openId={route.id ?? undefined} />;
       case "leave-types": // moved into Settings; deep-link to its tab
-        return <Settings me={me!} tab="leave-types" />;
+        return <Settings me={gme} tab="leave-types" />;
       case "announcements":
-        return <Announcements me={me!} openId={route.id ?? undefined} />;
+        return <Announcements me={gme} openId={route.id ?? undefined} />;
       case "holidays":
-        return <Holidays me={me!} openId={route.id ?? undefined} />;
+        return <Holidays me={gme} openId={route.id ?? undefined} />;
       case "events":
-        return <Events me={me!} openId={route.id ?? undefined} />;
+        return <Events me={gme} openId={route.id ?? undefined} />;
       case "documents":
-        return <Documents me={me!} />;
+        return <Documents me={gme} />;
       case "compliance":
-        return <Compliance me={me!} openId={route.id ?? undefined} />;
+        return <Compliance me={gme} openId={route.id ?? undefined} />;
       case "background-checks":
-        return <BackgroundChecks me={me!} openId={route.id ?? undefined} />;
+        return <BackgroundChecks me={gme} openId={route.id ?? undefined} />;
       case "overtime":
-        return <Overtime me={me!} />;
+        return <Overtime me={gme} />;
       case "remote-work":
-        return <RemoteWork me={me!} />;
+        return <RemoteWork me={gme} />;
       case "delegations":
-        return <Delegations me={me!} />;
+        return <Delegations me={gme} />;
       case "notice-periods":
-        return <NoticePeriods me={me!} openId={route.id ?? undefined} />;
+        return <NoticePeriods me={gme} openId={route.id ?? undefined} />;
       case "kudos": // merged into the board
-        return <Announcements me={me!} />;
+        return <Announcements me={gme} />;
       case "suggestions":
-        return <Suggestions me={me!} openId={route.id ?? undefined} />;
+        return <Suggestions me={gme} openId={route.id ?? undefined} />;
       case "payslips":
-        return <Payslips me={me!} />;
+        return <Payslips me={gme} />;
       case "reimbursements":
-        return <Reimbursements me={me!} />;
+        return <Reimbursements me={gme} />;
       case "expenses":
-        return <Expenses me={me!} />;
+        return <Expenses me={gme} />;
       case "vendors":
-        return <Vendors me={me!} />;
+        return <Vendors me={gme} />;
       case "expense-budgets":
-        return <ExpenseBudgets me={me!} />;
+        return <ExpenseBudgets me={gme} />;
       case "referrals":
-        return <Referrals me={me!} openId={route.id ?? undefined} />;
+        return <Referrals me={gme} openId={route.id ?? undefined} />;
       case "pipeline":
-        return <Pipeline me={me!} />;
+        return <Pipeline me={gme} />;
       case "job-requisitions":
-        return <Requisitions me={me!} openId={route.id ?? undefined} />;
+        return <Requisitions me={gme} openId={route.id ?? undefined} />;
       case "candidates":
-        return route.id ? <CandidateProfile id={route.id} me={me!} /> : <Candidates me={me!} />;
+        return route.id ? <CandidateProfile id={route.id} me={gme} /> : <Candidates me={gme} />;
       case "interviews":
-        return <Interviews me={me!} openId={route.id ?? undefined} />;
+        return <Interviews me={gme} openId={route.id ?? undefined} />;
       case "offers":
-        return <Offers me={me!} openId={route.id ?? undefined} />;
+        return <Offers me={gme} openId={route.id ?? undefined} />;
       case "recruiting-analytics":
-        return <RecruitingAnalytics me={me!} />;
+        return <RecruitingAnalytics me={gme} />;
       case "tickets":
-        return <Tickets me={me!} openId={route.id ?? undefined} />;
+        return <Tickets me={gme} openId={route.id ?? undefined} />;
       case "assets":
-        return <Assets me={me!} openId={route.id ?? undefined} />;
+        return <Assets me={gme} openId={route.id ?? undefined} />;
       case "pay-components": // moved into Settings; deep-link straight to its tab
-        return <Settings me={me!} tab="pay-components" />;
+        return <Settings me={gme} tab="pay-components" />;
       case "pay-periods": // merged into Payroll Runs; deep-link to its Pay periods tab
-        return <PayrollRuns me={me!} tab="periods" />;
+        return <PayrollRuns me={gme} tab="periods" />;
       case "payroll-runs":
-        return <PayrollRuns me={me!} tab={route.id ?? undefined} />;
+        return <PayrollRuns me={gme} tab={route.id ?? undefined} />;
       case "settings":
-        return <Settings me={me!} tab={route.id ?? undefined} openId={route.sub ?? undefined} />;
+        return <Settings me={gme} tab={route.id ?? undefined} openId={route.sub ?? undefined} />;
       case "workflows":
-        return <Workflows me={me!} />;
+        return <Workflows me={gme} />;
       case "activity":
-        return <Activity me={me!} />;
+        return <Activity me={gme} />;
       case "users": // legacy deep link -> Settings Access → Roles & permissions
-        return <Settings me={me!} tab="users" />;
+        return <Settings me={gme} tab="users" />;
       case "operations": // moved into Settings; deep-link straight to its tab
-        return <Settings me={me!} tab="operations" />;
+        return <Settings me={gme} tab="operations" />;
       default:
-        return <Dashboard me={me!} />;
+        return <Dashboard me={gme} />;
     }
   }
 
@@ -352,7 +483,7 @@ export default function App() {
   function renderWithWorkspace() {
     const ws = workspaceForKey(route.page);
     if (!ws?.tabs) return renderPage();
-    const tabs = ws.tabs.filter((t) => !t.perm || hasCapability(me!.capabilities, t.perm));
+    const tabs = ws.tabs.filter((t) => { const p = navPerm(t); return !p || hasCapability(gme.capabilities, p); });
     return (
       <Workspace tabs={tabs} active={route.page}>
         {renderPage()}
@@ -361,23 +492,23 @@ export default function App() {
   }
 
   return (
-    <CapabilitiesContext.Provider value={me.capabilities}>
+    <CapabilitiesContext.Provider value={gme.capabilities}>
     <ConfirmProvider>
     <OrgProvider>
-    <AccessModeProvider userEmail={me.email}>
-    <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(me.capabilities, c))}>
+    <AccessModeProvider userEmail={me.email} capabilities={me.capabilities}>
+    <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(gme.capabilities, c))}>
     <NotificationsProvider>
       <NotificationClearOnLeave page={route.page} />
       <div className="flex min-h-screen bg-background">
-        <Sidebar me={me} current={route.page} mobileOpen={mobileOpen} onNavigate={() => setMobileOpen(false)} />
+        <Sidebar me={gme} current={route.page} mobileOpen={mobileOpen} onNavigate={() => setMobileOpen(false)} />
         <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar me={me} page={route.page} sub={route.id ?? undefined} onOpenMenu={() => setMobileOpen(true)} onOpenSearch={() => setPaletteOpen(true)} />
+          <TopBar me={gme} page={route.page} sub={route.id ?? undefined} onOpenMenu={() => setMobileOpen(true)} onOpenSearch={() => setPaletteOpen(true)} />
           <main className="mx-auto w-full max-w-screen-2xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
             {/* Ambient access scope for the whole page: collection = the route key (the collection for most
                 pages), object = the detail id when on an item page. Shared primitives (Field, Detail, ...)
-                read this so access-mode lights up every data element/control path. Pages whose route key is
-                not a 1:1 collection (dashboard/profile/documents) can wrap an inner <AccessScope> to override. */}
-            <AccessScope collection={route.page} objectPath={route.id ? `${route.page}/${route.id}` : undefined}>
+                read this so access-mode lights up every data element/control path. ROUTE_SCOPE corrects the
+                routes whose key is NOT their wire collection; pages can still nest a narrower <AccessScope>. */}
+            <RouteAccessScope page={route.page} id={route.id}>
               <div className="animate-fade-in">
                 {/* Per-route boundary: a single page crash shows a recoverable fallback instead of white-
                     screening the shell. resetKey clears the error automatically when the route changes. */}
@@ -385,11 +516,13 @@ export default function App() {
                   <Suspense fallback={<PageLoading />}>{renderWithWorkspace()}</Suspense>
                 </ErrorBoundary>
               </div>
-            </AccessScope>
+            </RouteAccessScope>
           </main>
         </div>
         <Toaster />
-        <CommandPalette me={me} open={paletteOpen} onOpenChange={setPaletteOpen} />
+        <CommandPalette me={gme} open={paletteOpen} onOpenChange={setPaletteOpen} />
+        <ShortcutLayer me={gme} page={route.page} />
+        <SessionExpiredDialog open={sessionExpired} onSignedIn={() => setSessionExpired(false)} />
       </div>
     </NotificationsProvider>
     </ApprovalsProvider>

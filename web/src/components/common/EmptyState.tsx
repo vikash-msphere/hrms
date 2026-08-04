@@ -1,6 +1,7 @@
 import * as React from "react";
 import { type LucideIcon, Inbox } from "lucide-react";
 import { type Illustration, illustrationSrc } from "@/lib/illustrations";
+import { ART_DIECUT } from "@/lib/kudosArt";
 
 export function EmptyState({
   icon: Icon = Inbox,
@@ -25,7 +26,7 @@ export function EmptyState({
           alt=""
           aria-hidden
           loading="lazy"
-          className="mb-6 h-32 w-auto max-w-[15rem] opacity-90 sm:h-40"
+          className={`mb-6 h-32 w-auto max-w-[15rem] opacity-90 sm:h-40 ${ART_DIECUT}`}
         />
       ) : (
         <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent text-accent-foreground">

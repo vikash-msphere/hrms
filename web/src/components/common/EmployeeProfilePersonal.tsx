@@ -23,7 +23,7 @@ const NONE = "__none__";
  *  (read-redacted + write-gated), so the section self-hides when the viewer has no personal-info access and
  *  shows "-" for a single field they can't read. Saving preserves the sibling contact/emergency fields (the
  *  server stores the whole blob), so this and the Contact editor never clobber each other. */
-export function EmployeeProfilePersonal({ employeeId, canEdit }: { employeeId: string; canEdit: boolean }) {
+export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { employeeId: string; canEdit: boolean; onSaved?: () => void }) {
   const { toast } = useToast();
   const [data, setData] = useState<PersonalDetails | null>(null);
   const [denied, setDenied] = useState(false);
@@ -56,6 +56,7 @@ export function EmployeeProfilePersonal({ employeeId, canEdit }: { employeeId: s
       setData(updated);
       toast({ title: "Personal details saved", variant: "success" });
       setOpen(false);
+      onSaved?.();
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
     } finally {

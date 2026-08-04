@@ -59,7 +59,8 @@ export default function RecruitingAnalytics({ me: _me }: { me: Me }) {
 
   return (
     <div>
-      <PageHeader title="Recruiting analytics" description="Pipeline funnel, source effectiveness, and offer outcomes across your open jobs." />
+      {/* Read-only rollup of applications; the header icon manages read access to the underlying collection. */}
+      <PageHeader accessCollection="applications" title="Recruiting analytics" description="Pipeline funnel, source effectiveness, and offer outcomes across your open jobs." />
 
       <DataState state={state} error={error} onRetry={reload}>
         {apps.length === 0 && reqs.length === 0 && candidates.length === 0 ? (

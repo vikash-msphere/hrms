@@ -287,19 +287,56 @@ export async function approvedUnpaidEncashments(deps: Deps, employeeId: string) 
     .where(and(eq(schema.leaveEncashments.employeeId, employeeId), eq(schema.leaveEncashments.state, "APPROVED"), isNull(schema.leaveEncashments.paidRunId)));
 }
 
-// Idempotent rebuild: un-pay any rows previously paid by THIS run (back to APPROVED) before re-picking.
-export async function resetEncashmentsPaidByRun(deps: Deps, runId: string) {
+// The whole payout queue in one read, for the run build (which walks every employee): one select instead of
+// one per employee, to stay inside the per-invocation subrequest budget.
+export async function approvedUnpaidEncashmentsAll(deps: Deps) {
+  return deps.db
+    .select()
+    .from(schema.leaveEncashments)
+    .where(and(eq(schema.leaveEncashments.state, "APPROVED"), isNull(schema.leaveEncashments.paidRunId)));
+}
+
+// Settled by a full-and-final settlement rather than a run: PAID with paidRunId left null, exactly like a
+// separately-paid reimbursement, so it drops out of the payroll queue (state APPROVED + no run). The release
+// puts it back when a corrected settlement is recomputed; it only ever touches rows with no run.
+export async function markEncashmentsSettled(deps: Deps, ids: string[], at: Date) {
+  if (!ids.length) return;
   await deps.db
+    .update(schema.leaveEncashments)
+    .set({ state: "PAID", paidAt: at, updatedAt: at })
+    .where(and(inArray(schema.leaveEncashments.uuid, ids), eq(schema.leaveEncashments.state, "APPROVED"), isNull(schema.leaveEncashments.paidRunId)));
+}
+export async function releaseEncashmentsSettled(deps: Deps, ids: string[]) {
+  if (!ids.length) return;
+  await deps.db
+    .update(schema.leaveEncashments)
+    .set({ state: "APPROVED", paidAt: null, updatedAt: new Date() })
+    .where(and(inArray(schema.leaveEncashments.uuid, ids), eq(schema.leaveEncashments.state, "PAID"), isNull(schema.leaveEncashments.paidRunId)));
+}
+
+// The write helpers below return UNEXECUTED statements so the run build can fold them into one atomic
+// db.batch (see lib/dbBatch.ts). Awaiting the return value still executes it (drizzle builders are
+// thenable), so a direct caller behaves as before.
+
+// Idempotent rebuild: un-pay any rows previously paid by THIS run (back to APPROVED) before re-picking.
+export function resetEncashmentsPaidByRun(deps: Deps, runId: string) {
+  return deps.db
     .update(schema.leaveEncashments)
     .set({ state: "APPROVED", paidRunId: null, paidAt: null, updatedAt: new Date() })
     .where(eq(schema.leaveEncashments.paidRunId, runId));
 }
 
-// Mark a set of encashments paid by a payroll run (called during the build).
-export async function markEncashmentsPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
-  if (!ids.length) return;
-  await deps.db
+// Mark a set of encashments paid by a payroll run (called during the build). ids must already be chunked
+// under the D1 param cap by the caller when large.
+// The eligibility predicate is repeated in the WHERE: the build reads the queue up front and flips it at the
+// end, so a row can leave the queue in between (cancelEncashment credits the days back, another run claims
+// it). Matching only rows that are STILL approved-and-unpaid means such a row can never be flipped to PAID
+// after its days were returned - the employee would otherwise be paid for leave they still hold. A row that
+// loses the race stays queued while the run's item still carries the line; reconcileRunPayouts (payroll.ts)
+// blocks the approve that would ship that mismatch, and a rebuild resolves it.
+export function markEncashmentsPaidByRun(deps: Deps, ids: string[], runId: string, at: Date) {
+  return deps.db
     .update(schema.leaveEncashments)
     .set({ state: "PAID", paidRunId: runId, paidAt: at, updatedAt: at })
-    .where(inArray(schema.leaveEncashments.uuid, ids));
+    .where(and(inArray(schema.leaveEncashments.uuid, ids), eq(schema.leaveEncashments.state, "APPROVED"), isNull(schema.leaveEncashments.paidRunId)));
 }

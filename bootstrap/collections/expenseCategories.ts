@@ -1,6 +1,6 @@
 // Operational-expense categories. requiresReceipt gates whether an expense in this category must carry an
 // invoice attachment. glCode is the accounting general-ledger code.
-import { Ctx, T0, q, b, code2, rows } from "../lib";
+import { type Ctx, T0, q, b, code2, rows } from "../lib";
 
 type ExpenseCategorySeed = { name: string; requiresReceipt: boolean; glCode: string };
 

@@ -14,12 +14,17 @@ export type DashboardConfig = {
   // Whole KPI categories the org has switched off - every card in a listed category is hidden for everyone,
   // regardless of its per-card audience. A coarse "turn off this band" org-wide toggle above the per-card rules.
   hiddenKpiCategories?: KpiCategory[];
+  // Ordered shortcut tiles at the bottom of the dashboard, as namespaced ids (lib/dashboardShortcuts). Absent =
+  // the built-in default set; an empty array = the org turned the row off.
+  shortcuts?: string[];
 };
 
-// KPI cards group by INTENT, not by module, so the dashboard reads as bands: what needs action now, what's
-// coming up, and a plain snapshot. The order here is the band order top-to-bottom on the dashboard.
-export type KpiCategory = "attention" | "upcoming" | "snapshot";
+// KPI cards group by INTENT, not by module, so the dashboard reads as bands: what's yours personally, what
+// needs action now, what's coming up, and a plain snapshot. The order here is the band order top-to-bottom
+// on the dashboard.
+export type KpiCategory = "personal" | "attention" | "upcoming" | "snapshot";
 export const KPI_CATEGORIES: { key: KpiCategory; label: string; blurb: string }[] = [
+  { key: "personal", label: "For you", blurb: "Your own items - things to sign, submit or finish." },
   { key: "attention", label: "Needs attention", blurb: "Overdue, blocked or waiting on a decision - act now." },
   { key: "upcoming", label: "Coming up", blurb: "Due soon or pending your action - get ahead of the deadline." },
   { key: "snapshot", label: "At a glance", blurb: "Where the organization stands right now." },
@@ -37,6 +42,12 @@ export const HR_ROLE = "hr_admin";
 // its band. `defaultAudience` (omit = "none") sets who sees it before any config. Keys MUST match the keys the
 // dashboard renders and the icon map in lib/kpiIcons.
 export const KPI_DEFS: { key: string; label: string; category: KpiCategory; defaultAudience?: KpiDefaultAudience }[] = [
+  // --- For you: the caller's OWN items (every card here counts only rows that belong to the viewer) ---
+  { key: "docs_to_ack", label: "Policies to sign", category: "personal", defaultAudience: "everyone" },
+  { key: "letters_to_sign", label: "Letters to e-sign", category: "personal", defaultAudience: "everyone" },
+  { key: "timesheets_draft", label: "Timesheets to submit", category: "personal" },
+  { key: "my_open_cards", label: "My open tasks", category: "personal" },
+  { key: "timesheet_week", label: "My hours (week)", category: "personal" },
   // --- Needs attention: lagging / problem indicators (something already breached or is waiting on you) ---
   { key: "pending", label: "Pending approvals", category: "attention", defaultAudience: "everyone" },
   { key: "open_tickets", label: "Open support tickets", category: "attention", defaultAudience: "everyone" },
@@ -48,7 +59,6 @@ export const KPI_DEFS: { key: string; label: string; category: KpiCategory; defa
   { key: "tax_verify", label: "Tax proofs to verify", category: "attention", defaultAudience: "hr" },
   { key: "bgchecks_open", label: "Background checks open", category: "attention", defaultAudience: "hr" },
   { key: "suggestions_open", label: "Suggestions to answer", category: "attention", defaultAudience: "hr" },
-  { key: "docs_to_ack", label: "Policies to sign", category: "attention", defaultAudience: "everyone" },
   { key: "docs_expiring", label: "Documents expiring (30 days)", category: "attention", defaultAudience: "hr" },
   { key: "probation_ending", label: "Probation ending (30 days)", category: "attention", defaultAudience: "hr" },
   { key: "notice_serving", label: "Serving notice", category: "attention", defaultAudience: "hr" },
@@ -59,9 +69,7 @@ export const KPI_DEFS: { key: string; label: string; category: KpiCategory; defa
   { key: "reviews_due_soon", label: "Reviews due soon", category: "upcoming" },
   { key: "interviews_upcoming", label: "Interviews scheduled", category: "upcoming", defaultAudience: "hr" },
   { key: "onboarding_tasks_pending", label: "Onboarding tasks pending", category: "upcoming", defaultAudience: "hr" },
-  { key: "letters_to_sign", label: "Letters to e-sign", category: "upcoming", defaultAudience: "everyone" },
   { key: "offers_pending", label: "Offers awaiting response", category: "upcoming", defaultAudience: "hr" },
-  { key: "timesheets_draft", label: "Timesheets to submit", category: "upcoming" },
   { key: "recurring_expenses_due", label: "Recurring expenses due", category: "upcoming", defaultAudience: "hr" },
   // --- At a glance: current-state snapshot metrics ---
   { key: "on_leave", label: "On leave today", category: "snapshot", defaultAudience: "everyone" },
@@ -80,8 +88,7 @@ export const KPI_DEFS: { key: string; label: string; category: KpiCategory; defa
   { key: "goals_active", label: "Active goals", category: "snapshot" },
   { key: "loans_outstanding", label: "Outstanding loans", category: "snapshot", defaultAudience: "hr" },
   { key: "benefits_enrolled", label: "Benefit enrollments", category: "snapshot", defaultAudience: "hr" },
-  { key: "my_open_cards", label: "My open tasks", category: "snapshot" },
-  { key: "timesheet_week", label: "Hours logged (week)", category: "snapshot" },
+  { key: "team_hours_week", label: "Team hours (week)", category: "snapshot" },
 ];
 
 // key -> default audience ("none" when unset), for the dashboard's visibility fallback and the settings labels.

@@ -17,6 +17,9 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { useConfirm } from "@/components/common/confirm";
+import { bulkInvoke, mergeBulkResults, bulkSummary } from "@/lib/bulk";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -58,6 +61,8 @@ function ApprovalRow({
   decidedState,
   onApproved,
   onRejectClick,
+  checked,
+  onCheckedChange,
 }: {
   collection: string;
   row: Approvable;
@@ -73,6 +78,9 @@ function ApprovalRow({
   decidedState?: string;
   onApproved: (path: string) => void;
   onRejectClick: () => void;
+  // Multi-select for bulk approve/reject (pending mode only). Undefined = row not selectable.
+  checked?: boolean;
+  onCheckedChange?: () => void;
 }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
@@ -92,6 +100,9 @@ function ApprovalRow({
   }
   return (
     <div className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+      {onCheckedChange && (
+        <Checkbox checked={checked} onCheckedChange={onCheckedChange} aria-label={`Select ${name}'s request`} className="shrink-0" />
+      )}
       <PhotoAvatar employeeId={employeeId ?? ""} name={name} photo={photo} className="h-9 w-9 shrink-0" />
       <div className="min-w-0 flex-1">
         <p className="flex items-center gap-2 truncate text-sm font-medium">
@@ -389,6 +400,71 @@ export default function Approvals({ me }: { me: Me }) {
     .sort((a, b) => isHistory
       ? (b.r.update_time ?? "").localeCompare(a.r.update_time ?? "")
       : (a.r.create_time ?? "").localeCompare(b.r.create_time ?? ""));
+  // --- bulk selection over the pending queue --------------------------------------------------------------
+  // Rows the caller may decide (per-object can hints) are checkbox-selectable; Approve/Reject selected then
+  // fan out per collection and only the rows that succeeded disappear (failures stay selected for a retry).
+  const { toast } = useToast();
+  const confirmDialog = useConfirm();
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState<null | "approve" | "reject">(null);
+  const canDecideRow = (r: Approvable) => (r.access?.can ?? []).includes("approve") || (r.access?.can ?? []).includes("reject");
+  const selectablePaths = isHistory ? [] : merged.filter(({ r }) => canDecideRow(r)).map(({ r }) => r.path);
+  // Rows that got decided (elsewhere or here) fall out of the selection automatically.
+  React.useEffect(() => {
+    setSel((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(selectablePaths);
+      const next = new Set([...prev].filter((p) => live.has(p)));
+      return next.size === prev.size ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHistory, selectablePaths.join("|")]);
+  const toggleSel = (path: string) =>
+    setSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  async function runBulkDecision(verb: "approve" | "reject") {
+    const items = merged.filter(({ r }) => sel.has(r.path) && (r.access?.can ?? []).includes(verb));
+    if (items.length === 0) return;
+    const n = items.length;
+    const ok = await confirmDialog({
+      title: verb === "approve" ? `Approve ${n} request${n === 1 ? "" : "s"}?` : `Reject ${n} request${n === 1 ? "" : "s"}?`,
+      description:
+        verb === "reject"
+          ? "Requesters are notified. A bulk reject carries no note - reject individually to explain why."
+          : "Each requester is notified of the decision.",
+      destructive: verb === "reject",
+      confirmLabel: verb === "approve" ? "Approve all" : "Reject all",
+    });
+    if (!ok) return;
+    setBulkBusy(verb);
+    try {
+      const byColl = new Map<string, Approvable[]>();
+      for (const { g, r } of items) byColl.set(g.collection, [...(byColl.get(g.collection) ?? []), r]);
+      const parts = await Promise.all([...byColl].map(([coll, rows]) => bulkInvoke(coll, verb, rows)));
+      const res = mergeBulkResults(parts);
+      toast(bulkSummary(verb === "approve" ? "Approved" : "Rejected", res));
+      // Hide the decided rows immediately (same optimistic path as a single decision), keep failures selected.
+      setDecided((prev) => {
+        const next = new Set(prev);
+        for (const r of res.okRows) next.add(r.path);
+        return next;
+      });
+      setSel((prev) => {
+        const next = new Set(prev);
+        for (const r of res.okRows) next.delete(r.path);
+        return next;
+      });
+      reload();
+    } finally {
+      setBulkBusy(null);
+    }
+  }
+
   const oldestWait = merged.length ? waitingDays(merged[0]!.r.create_time) : 0;
   const requesterCount = (() => {
     const s = new Set<string>();
@@ -422,6 +498,8 @@ export default function Approvals({ me }: { me: Me }) {
         decidedState={decidedState}
         onApproved={settle}
         onRejectClick={() => setRejecting({ collection: g.collection, row: r, name: who.name, summary })}
+        checked={sel.has(r.path)}
+        onCheckedChange={!isHistory && canDecideRow(r) ? () => toggleSel(r.path) : undefined}
       />
     );
   };
@@ -499,6 +577,26 @@ export default function Approvals({ me }: { me: Me }) {
                         { label: "People waiting", value: requesterCount, icon: Users },
                       ]}
                     />
+                    {sel.size > 0 && (
+                      <div className="sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop">
+                        <span className="text-sm font-medium tabular-nums">{sel.size} selected</span>
+                        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSel(new Set())}>
+                          Clear
+                        </Button>
+                        {sel.size < selectablePaths.length && (
+                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSel(new Set(selectablePaths))}>
+                            Select all {selectablePaths.length}
+                          </Button>
+                        )}
+                        <div className="min-w-4 flex-1" />
+                        <Button size="sm" variant="success" loading={bulkBusy === "approve"} disabled={bulkBusy === "reject"} onClick={() => void runBulkDecision("approve")}>
+                          <CheckCheck className="h-4 w-4" /> Approve selected
+                        </Button>
+                        <Button size="sm" variant="outline" loading={bulkBusy === "reject"} disabled={bulkBusy === "approve"} onClick={() => void runBulkDecision("reject")}>
+                          <X className="h-4 w-4" /> Reject selected
+                        </Button>
+                      </div>
+                    )}
                     {tabsBlock}
                   </>
                 )}

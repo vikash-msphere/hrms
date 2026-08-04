@@ -19,6 +19,12 @@ components:
         can:
           type: array
           items: { type: string }
+        why:
+          type: string
+          enum: [all, subtree, exact, self, dept]
+          description: >-
+            The scope by which the caller holds READ on this object, shown as provenance.
+            Absent when the object carries no addressable code to resolve a scope against.
     Problem:
       title: An RFC 9457 problem object
       type: object
@@ -30,12 +36,30 @@ components:
         instance: { type: string, format: uri-reference }
     operation:
       type: object
+      required: [path, done, metadata]
       properties:
-        path: { type: string, description: The server-assigned path of the operation. }
-        done: { type: boolean }
-        error: { type: object }
-        response: { type: object }
-        metadata: { type: object, description: "Admin-facing detail: kind, live status, attempts, create_time, update_time." }
+        path: { type: string, readOnly: true, description: The server-assigned path of the operation. }
+        done: { type: boolean, readOnly: true, description: "True once the operation has finished, successfully or not." }
+        error:
+          readOnly: true
+          description: "Set when the operation failed; absent otherwise."
+          $ref: '#/components/schemas/Problem'
+        response:
+          type: object
+          readOnly: true
+          additionalProperties: true
+          description: "The operation's result, shaped by its kind. Present only on success."
+        metadata:
+          type: object
+          readOnly: true
+          required: [status]
+          description: "Admin-facing detail, kept out of the LRO contract (path/done/error/response) proper."
+          properties:
+            kind: { type: string, description: "What the job does (the queue handler that owns it)." }
+            status: { type: string, enum: [queued, running, done, error], description: "Live job state; done/error both mean the operation has finished." }
+            attempts: { type: integer, description: "How many times the job has been picked up." }
+            create_time: { type: string, format: date-time }
+            update_time: { type: string, format: date-time }
       x-aep-resource:
         singular: operation
         plural: operations
@@ -44,6 +68,7 @@ components:
         type: hrms.example.com/operation
     cron_run:
       type: object
+      required: [create_time, update_time, etag, start_time]
       properties:
         path: { type: string, description: The server-assigned path of the cron run. }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -63,9 +88,11 @@ components:
         type: hrms.example.com/cron-run
     automation:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the automation rule.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -79,11 +106,24 @@ components:
         trigger_type: { type: string, description: The domain event type that fires this rule (see workflow-meta events). }
         condition:
           type: [object, 'null']
+          additionalProperties: true
           description: "JSON predicate, or null for always-match: a comparison {field, op, value} or an all/any/not composite. Validated in depth server-side."
         actions:
           type: array
-          items: { type: object }
+          items: { type: object, additionalProperties: true }
           description: Ordered action list (notify / notifyManager / notifyAudience / apiCall / emitEvent / wait / waitFor / webhook).
+        schedule:
+          type: [object, 'null']
+          description: "Recurrence for a scheduled rule (trigger_type schedule.recurring), or null for an event-triggered rule. Scanned daily by the recurring-rule scanner."
+          required: [freq]
+          properties:
+            freq: { type: string, enum: [daily, weekly, monthly] }
+            day: { type: integer, description: "weekly: day of week (0 = Sunday). monthly: day of month. Ignored for daily." }
+            scope:
+              type: string
+              enum: [once, perEmployee]
+              description: "once = a single firing. perEmployee = one firing per active employee, with the employee bound into the payload."
+        last_scheduled_on: { type: string, format: date, readOnly: true, description: "Idempotency stamp: the last date the daily scanner fired this scheduled rule." }
         enabled:
           type: boolean
           description: Whether the rule fires (authoring on/off switch, distinct from the disabled lifecycle flag).
@@ -95,9 +135,11 @@ components:
         type: hrms.example.com/automation
     automation_run:
       type: object
+      required: [path, create_time, update_time, etag, event_type, status, start_time]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the automation run.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -123,9 +165,11 @@ components:
         type: hrms.example.com/automation-run
     workflow_instance:
       type: object
+      required: [path, create_time, update_time, etag, status, arms]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the workflow instance.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -154,9 +198,11 @@ components:
         type: hrms.example.com/workflow-instance
     event_log_entry:
       type: object
+      required: [path, create_time, update_time, etag, type, payload, occurred_time]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the event-log entry.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -207,9 +253,11 @@ components:
         conditionOps: { type: array, items: { type: string } }
     user:
       type: object
+      required: [path, create_time, update_time, etag, email]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -218,10 +266,13 @@ components:
         role: { type: string, description: Role value employee/manager/hr_admin/payroll_admin/super_admin. }
         status: { type: string, description: Account status value active/disabled. }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
-        access:
+        caller_access:
           type: object
           readOnly: true
-          description: Present on the caller's own record (users/me). The caller's scope-stripped capability set for client-side UI gating.
+          description: >-
+            Present on the caller's own record (users/me) only. The caller's scope-stripped capability set for
+            client-side UI gating. Distinct from the per-object `access` hint every other resource carries:
+            this describes the CALLER, not this row.
           properties:
             capabilities:
               type: array
@@ -240,9 +291,11 @@ components:
         type: hrms.example.com/user
     setting:
       type: object
+      required: [path, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The path of the org setting (settings/{key}).
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
@@ -256,9 +309,11 @@ components:
         type: hrms.example.com/setting
     preference:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The caller-scoped path of the preference (preferences/{key}).
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -273,9 +328,11 @@ components:
         type: hrms.example.com/preference
     employee:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -287,6 +344,7 @@ components:
         employee_number: { type: string, description: "Human-facing employee ID (e.g. EMP-0042). Auto-assigned from the org format (settings/employee-number) on create when omitted; HR-overridable (unique). A protected field: not self-writable. Distinct from the opaque wire id." }
         work_email: { type: string, format: email }
         job_title: { type: string }
+        bio: { type: string, readOnly: true, maxLength: 280, description: "Short public 'about me' (plain text). Readable by anyone who can read the employee record; written via the owner-writable employees/{employee_id}/bio sub-resource, not this record." }
         department: { type: string, description: "Resource path: departments/{department_id}" }
         manager: { type: string, description: "Resource path: employees/{employee_id}" }
         start_date: { type: string, format: date, description: First working day. Drives leave accrual and probation. }
@@ -294,6 +352,18 @@ components:
         epf_enrolled: { type: boolean, description: "EPF is opt-in per employee. When false (default) the PF deduction and employer-share CTC line are skipped." }
         photo: { type: string, readOnly: true, description: Present when the employee has a profile photo (fetch via :getPhoto). }
         signature: { type: string, readOnly: true, description: "Owner-private. Present (and fetchable via :getSignature) ONLY for the employee themselves; omitted for all other viewers." }
+        profile_completeness:
+          type: object
+          readOnly: true
+          description: "Which profile sections have data: the self-service completeness meter on /profile, and a record-quality signal for HR. Present only on a single GET by the employee themselves or a caller holding employees.write; omitted for everyone else (the flags reveal whether e.g. bank data exists). The signature flag is owner-only - stripped for HR, since even its existence is private. Computed from the record the read already loaded - no extra queries."
+          properties:
+            photo: { type: boolean, description: A profile photo is set. }
+            personal: { type: boolean, description: Date of birth and gender are filled in. }
+            contact: { type: boolean, description: Personal phone plus at least one address are filled in. }
+            emergency: { type: boolean, description: An emergency contact name and phone are filled in. }
+            identity: { type: boolean, description: At least one identity field has a value. }
+            bank: { type: boolean, description: Bank account number and IFSC are filled in. }
+            signature: { type: boolean, description: A signature image is set. }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true }
@@ -333,11 +403,14 @@ components:
         label: { type: string }
         mandatory: { type: boolean, description: Whether this field is required. }
         sensitive: { type: boolean, description: Whether the value is encrypted and returned masked. }
+        document: { type: string, description: "Document type this field expects as proof, when the admin configured one." }
         value: { type: string, description: Current value (masked when the field is sensitive). }
         has_value: { type: boolean }
+        has_doc: { type: boolean, description: "Whether a supporting document is on file for this field (slot identity:<key>)." }
         denied: { type: boolean, readOnly: true, description: True when the caller is denied read on this specific field; the value is withheld. }
     identity:
       type: object
+      required: [path, etag, fields]
       description: An employee's configured identity fields (singleton; PAN/UAN/Aadhaar etc.). Sensitive values are encrypted and returned masked.
       properties:
         path: { type: string, readOnly: true }
@@ -360,13 +433,16 @@ components:
         type: hrms.example.com/identity
     tax-slab:
       type: object
+      required: [from, rate, amount]
+      description: One slab of the computed tax projection. Entirely derived - never sent by a client.
       properties:
-        from: { type: number }
-        to: { type: number, nullable: true }
-        rate: { type: number }
-        amount: { type: number }
+        from: { type: number, readOnly: true, description: Lower bound of the slab. }
+        to: { type: number, nullable: true, readOnly: true, description: Upper bound; null on the top slab. }
+        rate: { type: number, readOnly: true, description: Marginal rate applied within the slab. }
+        amount: { type: number, readOnly: true, description: Tax accrued from this slab. }
     tax:
       type: object
+      required: [path, regime, regime_label, assessment_year, financial_year, tds_configured, annual_gross, standard_deduction, taxable_income, slabs, income_tax, rebate, income_tax_after_rebate, surcharge, cess, total_tax, deducted_so_far, remaining_months]
       description: An employee's income-tax (TDS) projection for the financial year (new regime). Computed; only the prior-employer declarations are writable.
       properties:
         path: { type: string, readOnly: true }
@@ -414,6 +490,7 @@ components:
     celebration:
       type: object
       description: An upcoming birthday or work anniversary. Birthdays carry day + month ONLY (never the birth year).
+      required: [employee, name, kind, month, day, in_days]
       properties:
         employee: { type: string, readOnly: true, description: Employee resource reference. }
         name: { type: string, readOnly: true }
@@ -476,6 +553,7 @@ components:
         taxable: { type: boolean, description: "Earnings only; false excludes the line from the taxable gross (e.g. reimbursements)." }
     payroll-run-item:
       type: object
+      required: [employee, employee_name, code, gross, taxable_gross, total_deductions, tax, net, lines]
       description: One employee's computed payroll for a run - the per-employee review breakdown.
       properties:
         employee: { type: string, readOnly: true, description: Employee resource reference. }
@@ -518,12 +596,26 @@ components:
         patterns:
           - 'employees/{employee_id}/personal-info'
         type: hrms.example.com/personal-info
+    bio:
+      type: object
+      description: An employee's public "about me" one-liner (singleton sub-resource). Self-writable (plus HR); shown on profile heroes and the directory via the base employee record.
+      properties:
+        path: { type: string, readOnly: true }
+        bio: { type: string, maxLength: 280, description: "Plain text, max 280 characters. Null or empty clears it." }
+      x-aep-resource:
+        singular: bio
+        plural: bios
+        singleton: true
+        patterns:
+          - 'employees/{employee_id}/bio'
+        type: hrms.example.com/bio
     notification-prefs:
       type: object
       description: An employee's self-service in-app notification preferences (singleton). Layered over the org-level settings/notifications config; muting a category stops those notifications being created for this employee.
       properties:
         path: { type: string, readOnly: true }
         muted: { type: array, items: { type: string }, description: "Event category keys the employee has silenced for themselves (e.g. leave, kudos)." }
+        digest: { type: boolean, description: "Batch this employee's notifications into one daily digest instead of delivering each as it happens." }
       x-aep-resource:
         singular: notification-prefs
         plural: notification-prefs
@@ -533,9 +625,11 @@ components:
         type: hrms.example.com/notification-prefs
     department:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -558,9 +652,11 @@ components:
         type: hrms.example.com/department
     holiday:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -586,6 +682,7 @@ components:
     compliance-event:
       type: object
       description: A statutory compliance calendar entry - one dated obligation (PF/ESI/TDS/GST/PT/returns) with a due date + status workflow.
+      required: [path, create_time, update_time, etag]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -614,6 +711,7 @@ components:
     compliance-rule:
       type: object
       description: A recurring statutory obligation that auto-generates compliance-event occurrences on a schedule.
+      required: [path, create_time, update_time, etag]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -638,6 +736,7 @@ components:
     background-check:
       type: object
       description: A background-verification check for an employee (identity/address/education/employment/criminal/reference/credit).
+      required: [path, create_time, update_time, etag]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -662,9 +761,11 @@ components:
         type: hrms.example.com/background-check
     event:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -693,9 +794,11 @@ components:
     holiday-selection:
       type: object
       description: An employee's pick of an optional holiday.
+      required: [path, create_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
@@ -709,9 +812,11 @@ components:
         type: hrms.example.com/holiday-selection
     announcement:
       type: object
+      required: [path, create_time, update_time, etag, body_text, read, reactions, replies, reply_count]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -745,10 +850,10 @@ components:
             opacity: { type: number, description: "0.05 (barely there) to 1 (solid)." }
             wrap: { type: string, enum: [inline, square, tight, through, top-bottom, behind, front], description: "How the card's words behave around it, in word-processor terms: inline (its own column), square/tight/through (text flows around it, on the side its x favours), top-bottom (its own band, text above and below), behind or front (floating over the card at x/y). Absent = the card's own default." }
         title: { type: string }
-        body: { type: string, description: "Markdown-lite source: `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, `[text](url)`, `- `/`1. ` lists, `> ` quotes, `#`-`###` headings, `---` rules, plus a block attribute line (`{center xl serif}`) carrying alignment, type size and typeface. Rendered to elements, never to HTML." }
+        body: { type: string, description: "Markdown-lite source: `**bold**`, `*italic*`, `***both***`, `~~strike~~`, `` `code` ``, `[text](url)`, `- `/`1. ` lists, `> ` quotes, `#`-`###` headings, `---` rules, plus a block attribute line (`{center lg serif}`) carrying alignment, type size (sm/base/lg) and typeface. Rendered to elements, never to HTML." }
         body_text: { type: string, readOnly: true, description: "The body with its markup stripped, derived server-side. What the search index, notification excerpts and list teasers use." }
         title_align: { type: string, enum: [left, center, right], description: "How the card heading is aligned. Absent = start-aligned. The title is its own field, so unlike a body block it cannot carry a `{center}` attribute line." }
-        body_valign: { type: string, enum: [top, middle, bottom], description: "Where the words sit VERTICALLY in the card. Only visible when the card is taller than its text - which is what a placed sticker does to one. Absent = top." }
+        body_valign: { type: string, enum: [top, middle, bottom], description: "Where the words sit VERTICALLY in the card. Only visible when the card is taller than its text - which is what a placed sticker does to one. Absent = middle (the card centres everything by default); send \"top\" to pin the words to the top." }
         options:
           type: array
           writeOnly: true
@@ -760,6 +865,7 @@ components:
           type: object
           readOnly: true
           description: "Present on a poll (kind=poll): its options, anonymous tallies, and state."
+          required: [options, closed, total_votes, voted]
           properties:
             multiple: { type: boolean, description: "Whether a voter may pick more than one option." }
             closes_time: { type: string, format: date-time, description: "Deadline after which voting is locked." }
@@ -770,17 +876,19 @@ components:
               type: array
               items:
                 type: object
+                required: [id, label, votes, voted]
                 properties:
                   id: { type: string, description: "Option id (sub-resource handle; pass as `option` to the vote method)." }
                   label: { type: string }
                   votes: { type: integer }
                   voted: { type: boolean, description: "Whether the calling viewer chose this option." }
         author: { type: string, description: "Resource path: employees/{employee_id}" }
-        publish_time: { type: string, format: date-time }
+        publish_time: { type: string, format: date-time, description: "When the post goes (or went) live. Set with published=false on create to SCHEDULE it: the 5-minute cron publishes the draft once this time passes." }
+        pin_time: { type: string, format: date-time, readOnly: true, description: "When the post was pinned to the top of the board (the :pin verb; :unpin clears it). Absent = not pinned. The feed shows pinned posts first, most recently pinned leading." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true }
-        published: { type: boolean, readOnly: true }
+        published: { type: boolean, description: "Live on the board. Accepted on create only (false = a draft: no notification, visible only to editors); afterwards use the publish/unpublish methods, which own the broadcast. Ignored on update." }
         read: { type: boolean, readOnly: true, description: "Whether the calling viewer has opened (read) this post. Drives the dashboard unread widget." }
         read_count: { type: integer, readOnly: true, description: "Number of viewers who have read this post. Present only for the author and HR." }
         read_by:
@@ -794,10 +902,15 @@ components:
           description: "Grouped emoji reactions on this post."
           items:
             type: object
+            required: [emoji, count, reacted]
             properties:
               emoji: { type: string }
               count: { type: integer }
               reacted: { type: boolean, description: "Whether the calling viewer reacted with this emoji." }
+              reactors:
+                type: array
+                description: "Who reacted (employee resource paths), for the chip's hover list. Capped at 12 - `count` stays authoritative, so a longer list reads as the named ones plus the remainder."
+                items: { type: string }
         reply_count: { type: integer, readOnly: true, description: "Number of replies on this post." }
         replies:
           type: array
@@ -816,10 +929,15 @@ components:
                 description: "Grouped emoji reactions on this reply."
                 items:
                   type: object
+                  required: [emoji, count, reacted]
                   properties:
                     emoji: { type: string }
                     count: { type: integer }
                     reacted: { type: boolean }
+                    reactors:
+                      type: array
+                      description: "Who reacted (employee resource paths), for the chip's hover list. Capped at 12."
+                      items: { type: string }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -831,9 +949,11 @@ components:
         type: hrms.example.com/announcement
     leave-type:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -867,8 +987,9 @@ components:
     letter-template:
       type: object
       description: An HR letter/document type (offer, increment, ...). Per-template access is the real authz engine - READ = who may generate this letter type, WRITE = who may edit it.
+      required: [path, create_time, update_time, etag]
       properties:
-        path: { type: string }
+        path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
@@ -890,6 +1011,7 @@ components:
     compensation:
       type: object
       description: An employee's effective-dated base pay. POST creates a revision (increment) - the current row is closed and a new current row opens from effective_from.
+      required: [path, create_time, update_time, etag, base_pay, current]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -920,6 +1042,7 @@ components:
     position:
       type: object
       description: An employee's effective-dated role record (designation/department/location). POST records a promotion/transfer - the current row is closed and a new current row opens from effective_from.
+      required: [path, create_time, update_time, etag, current]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -942,6 +1065,7 @@ components:
     bonus:
       type: object
       description: A one-off award (bonus/incentive). POST records an award; the bonus/incentive letter cites the most recent one.
+      required: [path, create_time, update_time, etag, scope, paid]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -967,6 +1091,7 @@ components:
     asset:
       type: object
       description: A company asset (laptop, phone, etc.). Org inventory; assigned_to ties it to an employee, whose profile lists their assigned assets. POST adds one; PATCH edits / assigns / returns it.
+      required: [path, create_time, update_time, etag]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -980,6 +1105,8 @@ components:
         assigned_to: { type: string, description: "Resource path: employees/{employee_id} (omitted when in stock)." }
         assigned_on: { type: string, format: date, description: "Date the asset was assigned." }
         purchase_date: { type: string, format: date }
+        tag_printed_time: { type: string, format: date-time, description: "Last time a physical sticker tag was printed for this asset (set by the tag printer's mark-printed step)." }
+        last_verified_time: { type: string, format: date-time, description: "Last time the physical asset was sighted (set by a stocktake scan)." }
         notes: { type: string }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -990,6 +1117,7 @@ components:
     settlement:
       type: object
       description: A full-and-final settlement (FnF) snapshot computed at exit. POST computes + stores it from the employee's data and exit inputs; the FnF letter renders the most recent one.
+      required: [path, create_time, update_time, etag, lines, total_earnings, total_deductions, net]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1013,6 +1141,7 @@ components:
     leave-encashment:
       type: object
       description: A mid-employment leave encashment (cashout). HR POSTs a request; :approve debits the leave balance; the next payroll run pays approved rows as a taxable earning line.
+      required: [path, create_time, update_time, etag, rate_per_day, amount, currency_code, state]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1036,6 +1165,7 @@ components:
     attendance:
       type: object
       description: A clock-in to clock-out session. clock_out absent (open=true) means currently clocked in; multiple sessions per day model breaks.
+      required: [path, create_time, update_time, etag, clock_in, open, source]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1045,7 +1175,7 @@ components:
         clock_in: { type: string, readOnly: true, description: ISO 8601 timestamp of the clock-in. }
         clock_out: { type: string, readOnly: true, description: ISO 8601 timestamp of the clock-out (absent while open). }
         open: { type: boolean, readOnly: true, description: True while the session has no clock-out (currently clocked in). }
-        source: { type: string, readOnly: true, description: "clock (a live punch) or correction (written by an approved regularization)." }
+        source: { type: string, readOnly: true, enum: [clock, correction], description: "clock (a live punch) or correction (written by an approved regularization)." }
         note: { type: string, readOnly: true }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -1056,6 +1186,7 @@ components:
     attendance-regularization:
       type: object
       description: An employee's request to correct a whole day's clock times; sessions is the complete intended set of in/out pairs. A manager (own dept) or HR approves, which supersedes the day's punches and writes the requested correction sessions.
+      required: [path, create_time, update_time, etag, state]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1068,6 +1199,7 @@ components:
           description: The complete intended set of in/out pairs for the day. An empty array clears the day's punches.
           items:
             type: object
+            required: [clock_in, clock_out]
             properties:
               clock_in: { type: string, description: ISO 8601 timestamp of the corrected clock-in. }
               clock_out: { type: string, description: ISO 8601 timestamp of the corrected clock-out. }
@@ -1083,6 +1215,7 @@ components:
     overtime-request:
       type: object
       description: An employee's request logging overtime hours for a day; a manager (own dept) or HR approves/rejects, the owner can cancel while pending.
+      required: [path, create_time, update_time, etag, date, minutes, state, paid]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1108,6 +1241,7 @@ components:
     remote-work-request:
       type: object
       description: An employee's request to work remotely over a date range; a manager (own dept) or HR approves/rejects, the owner can cancel while pending. Does not consume leave.
+      required: [path, create_time, update_time, etag, days, state]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1133,6 +1267,7 @@ components:
     notice-period:
       type: object
       description: A departing employee's notice period (resignation/termination/retirement) - notice date + last working day, with a derived countdown.
+      required: [path, create_time, update_time, etag, total_days]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1160,6 +1295,7 @@ components:
     notification:
       type: object
       description: An in-app notification delivered to one recipient (a request decision, a kudos, a new item to review). Emitted server-side; the recipient reads and marks it read.
+      required: [path, create_time, update_time, etag, type, title, priority]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1188,6 +1324,7 @@ components:
     suggestion:
       type: object
       description: An employee suggestion (engagement suggestion box), optionally anonymous; peers upvote, HR responds + sets status.
+      required: [path, create_time, update_time, etag, status, upvotes, downvotes, my_vote, own]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -1214,9 +1351,11 @@ components:
         type: hrms.example.com/suggestion
     leave-request:
       type: object
+      required: [path, create_time, update_time, etag, days, state]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1241,15 +1380,18 @@ components:
         type: hrms.example.com/leave-request
     goal:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller's own employee." }
+        parent: { type: string, description: "Resource path: goals/{goal_id}. Optional parent goal this one aligns under (OKR-style). Cycles are rejected." }
         title: { type: string }
         description: { type: string }
         weight: { type: integer, description: "Relative importance 0-100." }
@@ -1267,9 +1409,11 @@ components:
         type: hrms.example.com/goal
     board:
       type: object
+      required: [path, create_time, update_time, etag, card_count]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1281,14 +1425,27 @@ components:
         mode: { type: string, enum: [kanban, scrum], description: "kanban = continuous flow; scrum = sprint-based." }
         columns:
           type: array
-          description: "Ordered columns (a column is the workflow state). Each: {key, label, wipLimit|null, policy, isCommitment, isDelivery}. Set via :configure."
-          items: { type: object }
+          description: "Ordered columns; a column IS the workflow state. Set via :configure. Keys are camelCase here because this is a stored JSON blob, not a wire resource."
+          items:
+            type: object
+            required: [key, label, wipLimit, policy, commitment, delivery]
+            properties:
+              key: { type: string }
+              label: { type: string }
+              wipLimit: { type: [integer, 'null'], description: "Max cards allowed in this column; null = unlimited." }
+              limitScope: { type: string, enum: [column, assignee], description: "Whether wipLimit counts column-wide or per assignee. Default column." }
+              policy: { type: string, description: "The column's explicit policy text (what it means for work to sit here)." }
+              commitment: { type: boolean, description: "Entering this column commits the work and starts lead time." }
+              delivery: { type: boolean, description: "Entering this column delivers the work and ends lead/cycle time." }
         swimlane_mode: { type: string, enum: [none, assignee, goal, priority, department, custom] }
         no_lane_label: { type: string, description: "Custom mode: label for the catch-all bucket (default \"No lane\")." }
+        hide_empty_lanes: { type: boolean, description: "Board view: hide swimlanes that have no visible cards." }
+        reassign_lane_on_move: { type: boolean, description: "Board view: a cross-lane drop reassigns the card's swimlane. Off = lanes are locked and cross-lane drops are rejected." }
         swimlanes:
           type: array
           items:
             type: object
+            required: [key, label]
             properties:
               key: { type: string }
               label: { type: string }
@@ -1297,6 +1454,7 @@ components:
           description: "Label catalog {key,label,color}; cards reference keys."
           items:
             type: object
+            required: [key, label]
             properties:
               key: { type: string }
               label: { type: string }
@@ -1313,9 +1471,11 @@ components:
         type: hrms.example.com/board
     card:
       type: object
+      required: [path, create_time, update_time, etag, comments, todo_done, todo_total]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1334,6 +1494,7 @@ components:
         assignee: { type: string, description: "Resource path: employees/{employee_id}." }
         priority: { type: string, enum: [low, medium, high, urgent] }
         labels: { type: array, items: { type: string }, description: "Label keys from the board's label catalog." }
+        documents: { type: array, items: { type: string }, description: "Linked documents, as resource paths: org-documents/{document_id}. Link-only (the card owns no storage); a write replaces the whole set." }
         size: { type: integer, description: "Estimate / story points." }
         due_date: { type: string, format: date }
         blocked: { type: boolean }
@@ -1349,10 +1510,25 @@ components:
           description: "Threaded comments (oldest-first), present on Get. Post via :comment."
           items:
             type: object
+            required: [body, create_time]
             properties:
               author: { type: string, description: "Resource path: employees/{employee_id}." }
               author_email: { type: string }
               body: { type: string }
+              create_time: { type: string, format: date-time }
+        todo_done: { type: integer, readOnly: true, description: "Completed checklist items. Present on list and get." }
+        todo_total: { type: integer, readOnly: true, description: "Total checklist items. Present on list and get." }
+        todos:
+          type: array
+          readOnly: true
+          description: "Checklist items, oldest first. Present on the Get response only."
+          items:
+            type: object
+            required: [id, text, done, create_time]
+            properties:
+              id: { type: string, description: "Item id (sub-resource handle; pass as `todo` to :toggleTodo / :removeTodo)." }
+              text: { type: string }
+              done: { type: boolean }
               create_time: { type: string, format: date-time }
         access:
           readOnly: true
@@ -1365,9 +1541,11 @@ components:
         type: hrms.example.com/card
     sprint:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1390,9 +1568,11 @@ components:
         type: hrms.example.com/sprint
     review-cycle:
       type: object
+      required: [path, create_time, update_time, etag, state, review_count]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1417,17 +1597,25 @@ components:
     review:
       type: object
       description: "One employee's review within a cycle. Created when the cycle is launched; progressed via the workflow verbs. The manager's assessment is withheld from the employee until the review is shared."
+      required: [path, create_time, update_time, etag, state]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         cycle: { type: string, readOnly: true, description: "Resource path: review-cycles/{cycle_id}" }
         employee: { type: string, readOnly: true, description: "Resource path: employees/{employee_id}" }
-        state: { type: string, readOnly: true, description: "SELF, MANAGER, SHARED, or ACKNOWLEDGED." }
+        state: { type: string, readOnly: true, enum: [SELF, MANAGER, SHARED, ACKNOWLEDGED], description: "SELF, MANAGER, SHARED, or ACKNOWLEDGED." }
         self_comment: { type: string, readOnly: true, description: "The employee's self-assessment." }
+        self_ratings:
+          type: object
+          readOnly: true
+          additionalProperties: { type: integer }
+          description: "The employee's optional self ratings per competency, keyed by competency key. Visibility as self_comment."
+        ack_comment: { type: string, readOnly: true, description: "The employee's optional note recorded when acknowledging the shared review." }
         manager_comment: { type: string, readOnly: true, description: "The manager's assessment. Present once shared (or always to the manager/HR)." }
         overall_rating: { type: integer, readOnly: true, description: "Overall rating on the org scale. Visibility as manager_comment." }
         ratings:
@@ -1459,9 +1647,11 @@ components:
     review-feedback:
       type: object
       description: "A 360 peer feedback request on a review, from the nominee's perspective. Created when a manager/HR nominates peers; the nominee submits or declines it."
+      required: [path, create_time, update_time, etag, state]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1484,9 +1674,11 @@ components:
     transition:
       type: object
       description: "An employee's onboarding or offboarding: a checklist of tasks tracked to done. Seeded from a template; tasks are embedded for the subject/manager/HR view."
+      required: [path, create_time, update_time, etag, state]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1517,9 +1709,11 @@ components:
     transition-task:
       type: object
       description: "A task within a transition, owned by its assignee (who does it)."
+      required: [path, create_time, update_time, etag, title, status]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1547,9 +1741,11 @@ components:
     check-in:
       type: object
       description: "A 1:1 check-in between an employee (the report) and a counterpart (usually their manager). Both may edit the shared notes and action items."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1564,9 +1760,14 @@ components:
           description: "Action items from the check-in."
           items:
             type: object
+            required: [text, done]
             properties:
               text: { type: string }
               done: { type: boolean }
+        cadence:
+          type: string
+          enum: [weekly, biweekly, monthly]
+          description: "Recurring cadence. When set and the meeting date passes, the nightly cron creates the next 1:1 (carrying open action items) and moves the cadence onto it."
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1579,9 +1780,11 @@ components:
     benefit-plan:
       type: object
       description: "A benefit plan in the org's catalog (HR-managed)."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1595,6 +1798,7 @@ components:
         employer_cost: { type: number, description: "Employer's contribution per cost_period." }
         cost_period: { type: string, enum: [month, year], description: "The period the contributions are per. Default month." }
         allows_dependents: { type: boolean, description: "Whether dependents may be covered under this plan." }
+        auto_enroll: { type: boolean, description: "Whether new employees are enrolled in this plan automatically." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: benefit-plan
@@ -1605,9 +1809,11 @@ components:
     dependent:
       type: object
       description: "An employee's dependent, for benefit coverage. Employee-owned."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1627,9 +1833,11 @@ components:
     approval-delegation:
       type: object
       description: "Out-of-office approval cover: the delegator names a delegate to receive and act on their approvals for a date window. Delegator-owned (self-service)."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1649,9 +1857,11 @@ components:
     benefit-enrollment:
       type: object
       description: "An employee's election for a benefit plan. Employee-owned."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1675,9 +1885,11 @@ components:
     shift:
       type: object
       description: "A shift pattern in the org's catalog (HR-managed). Times are wall-clock HH:MM."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1698,9 +1910,11 @@ components:
     shift-assignment:
       type: object
       description: "A roster entry: an employee works a shift on a date. Employee-owned."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1720,9 +1934,11 @@ components:
     project:
       type: object
       description: "A project to log time against (HR/PM-managed catalog)."
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1743,9 +1959,11 @@ components:
     time-entry:
       type: object
       description: "A time entry: an employee's hours logged on a project on a date. Employee-owned; workflow DRAFT to SUBMITTED to APPROVED/REJECTED."
+      required: [path, create_time, update_time, etag, status]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1757,7 +1975,7 @@ components:
         hours: { type: number, description: "Hours, 0-24." }
         description: { type: string }
         billable: { type: boolean }
-        status: { type: string, readOnly: true, description: "DRAFT, SUBMITTED, APPROVED, or REJECTED." }
+        status: { type: string, readOnly: true, enum: [DRAFT, SUBMITTED, APPROVED, REJECTED], description: "DRAFT, SUBMITTED, APPROVED, or REJECTED." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: time-entry
@@ -1767,16 +1985,18 @@ components:
         type: hrms.example.com/time-entry
     loan:
       type: object
-      description: "An employee loan or salary advance, recovered over monthly installments. Employee-owned; workflow PENDING to APPROVED to DISBURSED to CLOSED (or REJECTED)."
+      description: "An employee loan or salary advance, recovered over monthly installments. Self-service only: a request is always for the caller, never on behalf of someone else. Employee-owned; workflow PENDING to APPROVED to DISBURSED to CLOSED (or REJECTED)."
+      required: [path, create_time, update_time, etag, monthly_amount, repaid, outstanding, status]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
-        employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller." }
+        employee: { type: string, readOnly: true, description: "Resource path: employees/{employee_id}. Always the caller - a loan cannot be requested for anyone else." }
         kind: { type: string, enum: [loan, advance] }
         principal: { type: number, description: "Total amount borrowed." }
         installments: { type: integer, description: "Number of monthly installments." }
@@ -1785,7 +2005,7 @@ components:
         outstanding: { type: number, readOnly: true, description: "principal - repaid." }
         reason: { type: string }
         start_date: { type: string, format: date, description: "First recovery month." }
-        status: { type: string, readOnly: true, description: "PENDING, APPROVED, DISBURSED, CLOSED, or REJECTED." }
+        status: { type: string, readOnly: true, enum: [PENDING, APPROVED, DISBURSED, CLOSED, REJECTED], description: "PENDING, APPROVED, DISBURSED, CLOSED, or REJECTED." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: loan
@@ -1796,9 +2016,11 @@ components:
     tax-declaration:
       type: object
       description: "An employee's declared tax-saving item for a financial year, with optional proof. Employee-owned; workflow DECLARED to VERIFIED/REJECTED by payroll/HR."
+      required: [path, create_time, update_time, etag, status, has_proof]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1810,7 +2032,7 @@ components:
         label: { type: string, description: "What the investment/expense is." }
         declared_amount: { type: number }
         verified_amount: { type: number, readOnly: true, description: "Amount payroll/HR accepted." }
-        status: { type: string, readOnly: true, description: "DECLARED, VERIFIED, or REJECTED." }
+        status: { type: string, readOnly: true, enum: [DECLARED, VERIFIED, REJECTED], description: "DECLARED, VERIFIED, or REJECTED." }
         note: { type: string }
         has_proof: { type: boolean, readOnly: true, description: "Whether a proof document is attached." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
@@ -1822,9 +2044,11 @@ components:
         type: hrms.example.com/tax-declaration
     reimbursement-category:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1847,9 +2071,11 @@ components:
     ticket-checklist:
       type: object
       description: A predefined, reusable ticket checklist. Private-by-default; each one's visibility is its own read grant.
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1868,9 +2094,11 @@ components:
         type: hrms.example.com/ticket-checklist
     reimbursement:
       type: object
+      required: [path, create_time, update_time, etag, state, has_receipt]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1896,9 +2124,11 @@ components:
     expense-category:
       type: object
       description: A configurable operational-expense category (rent, utilities, software, supplies, travel).
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1922,9 +2152,11 @@ components:
     vendor:
       type: object
       description: A vendor the company pays for operational expenses.
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1953,9 +2185,11 @@ components:
     expense:
       type: object
       description: An operational/company expense paid to a vendor (or fronted by an employee), with an approval workflow.
+      required: [path, create_time, update_time, etag, state, has_invoice]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -1992,9 +2226,11 @@ components:
     expense-budget:
       type: object
       description: A spend cap for a (department?, category?, period); spend is derived from approved/paid expenses.
+      required: [path, create_time, update_time, etag, spent, remaining, utilization]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2019,9 +2255,11 @@ components:
         type: hrms.example.com/expense-budget
     referral:
       type: object
+      required: [path, create_time, update_time, etag, has_resume, bonus_status]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2052,9 +2290,11 @@ components:
         type: hrms.example.com/referral
     job-requisition:
       type: object
+      required: [path, create_time, update_time, etag, applicant_count]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2081,9 +2321,11 @@ components:
         type: hrms.example.com/job-requisition
     candidate:
       type: object
+      required: [path, create_time, update_time, etag, has_resume]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2108,9 +2350,11 @@ components:
         type: hrms.example.com/candidate
     application:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2135,9 +2379,11 @@ components:
         type: hrms.example.com/application
     interview:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2161,9 +2407,11 @@ components:
         type: hrms.example.com/interview
     interview-feedback:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2185,9 +2433,11 @@ components:
         type: hrms.example.com/interview-feedback
     offer:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2215,6 +2465,7 @@ components:
     ticket-comment:
       type: object
       description: A threaded follow-up on a ticket (emitted inline on the ticket Get; not addressable on its own).
+      required: [create_time]
       properties:
         author: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} (the commenter, when they have an employee record)." }
         author_email: { type: string, readOnly: true }
@@ -2223,6 +2474,7 @@ components:
     ticket-todo:
       type: object
       description: A checklist item on a ticket (emitted inline on the ticket Get; not addressable on its own). Toggle/remove it via :toggleTodo / :removeTodo using its id.
+      required: [id, create_time]
       properties:
         id: { type: string, readOnly: true, description: "Item handle, used by :toggleTodo and :removeTodo." }
         text: { type: string }
@@ -2230,9 +2482,11 @@ components:
         create_time: { type: string, format: date-time, readOnly: true }
     ticket:
       type: object
+      required: [path, create_time, update_time, etag, state, todo_done, todo_total]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2243,7 +2497,7 @@ components:
         assignee: { type: string, readOnly: true, description: "Resource path: employees/{employee_id}. Auto-set from the category; change via :assign." }
         subject: { type: string }
         description: { type: string }
-        priority: { type: string, description: Priority low/medium/high. Defaults to medium; change via :prioritize. }
+        priority: { type: string, enum: [low, medium, high], description: Priority low/medium/high. Defaults to medium; change via :prioritize. }
         state: { type: string, readOnly: true, description: State value OPEN/IN_PROGRESS/RESOLVED/CLOSED/CANCELLED. }
         todo_done: { type: integer, readOnly: true, description: "Completed checklist items. Present on list and get." }
         todo_total: { type: integer, readOnly: true, description: "Total checklist items. Present on list and get." }
@@ -2269,9 +2523,11 @@ components:
         type: hrms.example.com/ticket
     leave-balance:
       type: object
+      required: [path, create_time, update_time, etag, balance_days]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2287,14 +2543,19 @@ components:
         type: hrms.example.com/leave-balance
     org-document:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
+        disabled: { type: boolean, readOnly: true, description: "Lifecycle flag; toggled via :enable / :disable." }
+        locked: { type: boolean, readOnly: true, description: "Locked rows reject writes until :unlock." }
+        locked_by: { type: string, readOnly: true }
         display_name: { type: string }
         document_type: { type: string, description: Document type CONTRACT/ID/PAYSLIP/POLICY/LETTER/INSURANCE/OTHER. }
         file_name: { type: string, readOnly: true, description: Original uploaded filename including extension. }
@@ -2309,6 +2570,7 @@ components:
         sign_anchor:
           description: "Where the signature is placed on the PDF (required when requires_ack): a single box in PDF points, bottom-left origin, 1-based page."
           type: object
+          required: [page, x1, y1, x2, y2]
           properties:
             page: { type: integer }
             x1: { type: number }
@@ -2328,6 +2590,7 @@ components:
     document-acknowledgement:
       type: object
       description: An employee's acknowledgement (e-signature) of an org-document version. Created only via org-documents :acknowledge; read-only here (plus admin soft-delete/restore).
+      required: [path, create_time, update_time, etag, version, signature, acknowledged_time]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
@@ -2349,14 +2612,19 @@ components:
         type: hrms.example.com/document-acknowledgement
     personal-document:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
+        disabled: { type: boolean, readOnly: true, description: "Lifecycle flag; toggled via :enable / :disable." }
+        locked: { type: boolean, readOnly: true, description: "Locked rows reject writes until :unlock." }
+        locked_by: { type: string, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
         source_document: { type: string, readOnly: true, description: "Source policy this was generated from (org-documents/{id}); set on a signed acknowledgement copy." }
         requires_signature: { type: boolean, readOnly: true, description: "True when this generated letter/contract has an e-signature placeholder the owner must sign via :sign." }
@@ -2385,9 +2653,11 @@ components:
         type: hrms.example.com/personal-document
     pay-component:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2415,9 +2685,11 @@ components:
     pay-grade:
       type: object
       description: A rung on the org salary-grade ladder with an optional salary band (min/mid/max base pay). Compensation rows reference a grade; bands are guardrails (out-of-band pay is flagged, never blocked).
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2442,9 +2714,11 @@ components:
     salary-structure:
       type: object
       description: A named salary structure - a per-employee selection of recurring earning components, each with an optional rate override. Assigned to an employee via their compensation; deductions and statutory lines (EPF/TDS) are not part of a structure.
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2457,6 +2731,7 @@ components:
           description: "Ordered earning components in this structure."
           items:
             type: object
+            required: [component]
             properties:
               component: { type: string, description: "Resource path: pay-components/{id} (must be an earning)." }
               rate: { type: number, nullable: true, description: "Overrides the component's own rate for this structure; null to use the component default." }
@@ -2471,9 +2746,11 @@ components:
         type: hrms.example.com/salary-structure
     pay-period:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2497,9 +2774,11 @@ components:
         type: hrms.example.com/pay-period
     payroll-run:
       type: object
+      required: [path, create_time, update_time, etag, state]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2510,6 +2789,7 @@ components:
         submitted_by_name: { type: string, readOnly: true, description: Display name of the submitter. }
         approved_by: { type: string, readOnly: true }
         approved_by_name: { type: string, readOnly: true, description: Display name of the approver. }
+        bank_file_time: { type: string, format: date-time, readOnly: true, description: "When a bank payout file was first generated for this run; null if never. Once set the run can no longer be deleted, since deleting releases the one-off payables it paid and the money may already have left." }
         built_time: { type: string, format: date-time, readOnly: true, description: "When the run's line items were last (re)built from live inputs; null if never built. Detail GET only." }
         stale: { type: boolean, readOnly: true, description: "True when an income-affecting input (compensation, pay components, bonuses, leave encashments, reimbursements, overtime, loans, tax verifications, settings, joiners) changed after built_time, so the built numbers are out of date and the run should be rebuilt. Only ever true while editable (DRAFT/REVIEW). Detail GET only." }
         changes: { type: array, readOnly: true, items: { type: string }, description: "Human-readable categories of inputs that changed since the build, when stale. Detail GET only." }
@@ -2524,9 +2804,11 @@ components:
         type: hrms.example.com/payroll-run
     payslip:
       type: object
+      required: [path, create_time, update_time, etag, gross, total_deductions, net]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the resource, unique within the service.
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2548,9 +2830,11 @@ components:
         type: hrms.example.com/payslip
     role:
       type: object
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the role (roles/{role_id}).
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2572,9 +2856,11 @@ components:
         One access-control rule for a subject (a role OR a user) - the single authority primitive; roles and
         users are managed identically. On create, the server derives the verbatim pattern + narrowing columns
         from the structured fields; server-derived fields are read-only.
+      required: [path, create_time, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the rule (access-rules/{access_rule_id}).
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
@@ -2596,9 +2882,11 @@ components:
         type: hrms.example.com/access-rule
     policy:
       type: object
+      required: [path, update_time, etag]
       properties:
         path:
           type: string
+          readOnly: true
           description: The server-assigned path of the policy document (policy/{policy_id}; e.g. policy/manifest).
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
@@ -2834,6 +3122,85 @@ paths:
         '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/policy' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/access-rules:preview:
+    post:
+      description: "Custom method preview: run the authorization engine for the given subject users against one target (collection, optional object/field/verb) and return their effective verdicts - read/write/admin ladder, the asked verb, read-scope provenance, and whether an explicit deny matched. Read-only report; powers the ACL modal's view-as panel and impact warnings. Never an enforcement path."
+      operationId: ":PreviewAccessRules"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subjects]
+              properties:
+                subjects:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: { type: string, description: "users/<id> ref, or employees/<id> (resolves to the linked account; a person with no account yet is graded as the default-role account they would get on first sign-in)" }
+                collection: { type: string, description: "The target collection. Optional only with include_capabilities (capability-set-only call)." }
+                object: { type: string, description: "Optional object ref (<collection>/<id>) to evaluate against one row." }
+                field: { type: string, description: "Optional protected-field/sub-resource key; requires object." }
+                verb: { type: string, description: "Optional custom method to check alongside the standard ladder." }
+                include_capabilities: { type: boolean, description: "Also return each subject's scope-stripped capability set (what /users/me carries) - powers app-wide view-as." }
+      responses:
+        '200':
+          description: Per-subject verdicts, in request order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [subject, email, role, disabled, read, write, admin, denied]
+                      properties:
+                        subject: { type: string }
+                        email: { type: string }
+                        name: { type: string, nullable: true }
+                        role: { type: string }
+                        disabled: { type: boolean }
+                        read: { type: boolean }
+                        write: { type: boolean }
+                        admin: { type: boolean }
+                        verb_allowed: { type: boolean }
+                        why: { type: string, enum: [all, subtree, exact, self, dept] }
+                        denied: { type: boolean }
+                        capabilities: { type: array, items: { type: string } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/access-rules:requestAccess:
+    post:
+      description: "Custom method requestAccess: notify every access admin (role holding access-rules.write) that the caller wants access to a collection (optionally a specific method). Fail-closed like any custom method - orgs enable the flow by granting the verb to the everyone role."
+      operationId: ":RequestAccessAccessRules"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [collection]
+              properties:
+                collection: { type: string, description: "The collection access is wanted for." }
+                verb: { type: string, description: "Optional custom method being asked for." }
+                note: { type: string, maxLength: 500, description: "Optional free-text context shown to the admins." }
+      responses:
+        '200':
+          description: How many admins were notified.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notified]
+                properties:
+                  notified: { type: integer }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /v1/access-rules/{access_rule_id}:
     parameters: [ { in: path, name: access_rule_id, required: true, schema: { type: string } } ]
     get:
@@ -3608,6 +3975,7 @@ paths:
               properties:
                 progress: { type: integer, description: "0-100." }
                 status: { type: string, enum: [not_started, in_progress, completed, cancelled] }
+                note: { type: string, maxLength: 500, description: "Optional short note on what changed; recorded in the goal's activity history." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -3764,7 +4132,7 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
   /v1/cards/{card_id}:move:
     post:
-      description: "Custom method move: pull a card to a column (enforcing WIP), optionally a swimlane + rank."
+      description: "Custom method move: pull a card to a column (enforcing WIP), optionally a swimlane + rank; to_sprint moves it between the backlog (null) and a sprint in the same atomic op."
       operationId: ":MoveCard"
       parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
       requestBody:
@@ -3780,6 +4148,9 @@ paths:
                 rank: { type: number }
                 to_assignee: { type: string, nullable: true }
                 to_goal: { type: string, nullable: true }
+                to_priority: { type: string, nullable: true }
+                to_department: { type: string, nullable: true }
+                to_sprint: { type: string, nullable: true }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -3989,7 +4360,7 @@ paths:
                     items:
                       type: object
                       properties:
-                        path: { type: string }
+                        path: { type: string, readOnly: true }
                         action: { type: string }
                         entity: { type: string, description: "Org-wide feed: the touched collection." }
                         entity_ref: { type: string, description: "Org-wide feed: the touched record as a resource path, when it has an id." }
@@ -4159,6 +4530,7 @@ paths:
               type: object
               properties:
                 self_comment: { type: string }
+                self_ratings: { type: object, additionalProperties: { type: integer }, description: "Optional self ratings per competency, keyed by competency key." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -4184,9 +4556,17 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/reviews/{review_id}:acknowledge:
     post:
-      description: "Custom method acknowledge: the employee acknowledges the shared review (SHARED to ACKNOWLEDGED)."
+      description: "Custom method acknowledge: the employee acknowledges the shared review (SHARED to ACKNOWLEDGED), optionally with a note."
       operationId: ":AcknowledgeReview"
       parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string, description: "Optional note recorded with the acknowledgement (context, agreement, or disagreement)." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -4195,6 +4575,26 @@ paths:
     post:
       description: "Custom method skipStage: advance the review one stage without filling that stage's content."
       operationId: ":SkipStageReview"
+      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews/{review_id}:pdf:
+    post:
+      description: "Custom method pdf: the finished review as a letter-style PDF for the employee's records. Only a SHARED or ACKNOWLEDGED review renders (nothing unshared may leave the app)."
+      operationId: ":ReviewPdf"
+      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: "The review PDF, for inline display or saving.", content: { application/pdf: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews/{review_id}:nudge:
+    post:
+      description: "Custom method nudge: remind whoever owns the review's current stage (the employee in SELF/SHARED, the manager in MANAGER) with a notification. No state change."
+      operationId: ":NudgeReview"
       parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
@@ -8510,6 +8910,17 @@ paths:
         '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/personal-info' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+  /v1/employees/{employee_id}/bio:
+    parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]
+    patch:
+      description: Update method for bio (the employee's public "about me"). Owner-writable; HR may also edit.
+      operationId: UpdateBio
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/bio' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/bio' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}/notification-prefs:
     parameters: [ { in: path, name: employee_id, required: true, schema: { type: string } } ]
     get:
@@ -8697,6 +9108,35 @@ paths:
                         collection: { type: string, description: "Wire collection the hit belongs to." }
                         title: { type: [string, 'null'] }
                         subtitle: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/dashboard-summary:
+    get:
+      description: "Aggregated dashboard KPI counts. Each KPI is included only if the caller's list decision for its backing collection allows, and its COUNT/SUM is bound by that collection's own list scope - so every number equals what the caller would have counted from the list response. KPIs the caller may not see are absent from the map."
+      operationId: "GetDashboardSummary"
+      parameters:
+        - name: keys
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Comma-separated KPI keys to compute (e.g. open_tickets,cards_blocked). Empty computes every KPI the caller may see."
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kpis:
+                    type: object
+                    description: "KPI key -> aggregate. `value` is the card's number; `extra` is the key-specific companion number its hint shows (a money total, an of-N denominator, a today/overdue sub-count)."
+                    additionalProperties:
+                      type: object
+                      required: [value]
+                      properties:
+                        value: { type: number }
+                        extra: { type: number }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/employees:batchGetPhotos:
@@ -9077,6 +9517,40 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/announcement' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/announcements:markAllRead:
+    post:
+      description: "Custom method markAllRead: record the calling viewer's read receipt on every board post they can see, clearing the board's unread state in one call. Skips their own posts (an author is not a reader of their own post) and posts they had already opened."
+      operationId: ":MarkAllReadAnnouncements"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [marked]
+                properties:
+                  marked: { type: integer, description: "How many posts gained a read receipt on this call." }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/announcements/{announcement_id}:pin:
+    post:
+      description: "Custom method pin: pin this board post to the top of the feed (moderation). Re-pinning refreshes the pin time, moving it to the front of the pinned group. A draft can't be pinned."
+      operationId: ":PinAnnouncement"
+      parameters: [ { in: path, name: announcement_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/announcement' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/announcements/{announcement_id}:unpin:
+    post:
+      description: "Custom method unpin: take this board post back off the pinned group (moderation). Unpinning an unpinned post is a no-op."
+      operationId: ":UnpinAnnouncement"
+      parameters: [ { in: path, name: announcement_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/announcement' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/announcements:post:
     post:
       description: "Custom method post: create a generic board post (kind=post), or a poll (kind=poll) when `options` are given, authored by the caller. The 'anyone can post' gate, separate from the write-gated announcement create."
@@ -9099,7 +9573,7 @@ paths:
                 closes_time: { type: string, format: date-time, description: "Poll only: optional deadline after which voting is locked." }
                 illustration: { type: string, maxLength: 120, description: "Optional art for the card: a `<category>/<slug>` path into the bundled illustration set (e.g. `celebration-recognition/celebrating`) or a `<file>.png` brand sticker. Rejected unless it matches one of those two shapes." }
                 title_align: { type: string, enum: [left, center, right], description: "How the card heading is aligned. Omit for start-aligned." }
-                body_valign: { type: string, enum: [top, middle, bottom], description: "Where the words sit vertically in the card. Omit for top." }
+                body_valign: { type: string, enum: [top, middle, bottom], description: "Where the words sit vertically in the card. Omit for centred." }
                 illustration_layout:
                   type: object
                   description: "Where the sticker sits on the card, set once an author has moved, resized or faded it. Absent means the default: the sticker flows inline beside the message. Every value is a FRACTION of the card's own width, never pixels, so one placement holds at any card size."
@@ -9152,7 +9626,7 @@ paths:
                     y: { type: number }
                     size: { type: number }
                     wrap: { type: string, enum: [inline, square, tight, through, top-bottom, behind, front], description: "How the card's words behave around it, in word-processor terms: inline (its own column), square/tight/through (text flows around it, on the side its x favours), top-bottom (its own band, text above and below), behind or front (floating over the card at x/y). Absent = the card's own default." }
-                body_valign: { type: string, enum: [top, middle, bottom], description: "Where the message sits vertically in the card. Omit for top." }
+                body_valign: { type: string, enum: [top, middle, bottom], description: "Where the message sits vertically in the card. Omit for centred." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/announcement' } } } }
         '400': { $ref: '#/components/responses/Problem' }

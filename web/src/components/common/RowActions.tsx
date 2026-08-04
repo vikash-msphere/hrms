@@ -24,7 +24,11 @@ export type RowAction = {
 // on the row's object icon, so they stay un-iconed here.
 export function RowActions({ actions, objectPath, can }: { actions: RowAction[]; objectPath?: string; can?: string[] }) {
   const am = useAccessMode();
-  if (actions.length === 0) return null;
+  // Central belt-and-braces: when the row's server-computed `can` is provided, a verb-carrying action the
+  // caller may not invoke is dropped here even if the page forgot to filter. Access mode shows everything -
+  // an admin manages the gates of actions they cannot use themselves.
+  const shown = am.enabled ? actions : actions.filter((a) => !a.verb || !can || can.includes(a.verb));
+  if (shown.length === 0) return null;
   const collection = objectPath?.split("/")[0];
   return (
     <DropdownMenu>
@@ -39,7 +43,7 @@ export function RowActions({ actions, objectPath, can }: { actions: RowAction[];
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        {actions.map((a) => {
+        {shown.map((a) => {
           const showIcon = am.enabled && !!collection && isCustomMethod(a.verb);
           return (
             <DropdownMenuItem

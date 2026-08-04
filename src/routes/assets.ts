@@ -18,6 +18,8 @@ const writeSchema = z
     assigned_to: z.string().nullable().optional(),
     assigned_on: z.string().nullable().optional(),
     purchase_date: z.string().nullable().optional(),
+    tag_printed_time: z.string().datetime({ offset: true }).nullable().optional(),
+    last_verified_time: z.string().datetime({ offset: true }).nullable().optional(),
     notes: z.string().nullable().optional(),
   })
   .strict();

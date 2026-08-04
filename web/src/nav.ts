@@ -44,12 +44,21 @@ export type NavItem = {
   tabs?: NavTab[];
 };
 
+// The capability that gates a nav entry (item or tab): explicit `perm` wins, else `<collection>.read` is
+// derived - an entry tied to a collection the caller cannot read at ANY scope must not render (a
+// self-scoped grant still strips to `<collection>.read`, so ordinary self-service pages stay visible).
+// Entries with neither (dashboard, profile) are identity surfaces, visible to every signed-in user.
+export function navPerm(t: { perm?: string; collection?: string }): string | undefined {
+  return t.perm ?? (t.collection ? `${t.collection}.read` : undefined);
+}
+
 // Whether a nav item is visible for a capability set. Workspaces show if any tab is permitted; items with
-// `anyPerm` show if any of those are held; otherwise the single `perm` gate (or always, if none).
+// `anyPerm` show if any of those are held; otherwise the single derived gate (or always, if none).
 export function itemVisible(item: NavItem, has: (perm: string) => boolean): boolean {
-  if (item.tabs) return item.tabs.some((t) => !t.perm || has(t.perm));
+  if (item.tabs) return item.tabs.some((t) => { const p = navPerm(t); return !p || has(p); });
   if (item.anyPerm) return item.anyPerm.some((p) => has(p));
-  return !item.perm || has(item.perm);
+  const p = navPerm(item);
+  return !p || has(p);
 }
 
 // Capabilities that grant access to the Approvals hub (any one is enough). Reused by the nav item gate.
@@ -86,7 +95,7 @@ export const NAV: NavGroup[] = [
         icon: Users,
         tabs: [
           { key: "employees", label: "Directory", collection: "employees" },
-          { key: "org-chart", label: "Org Chart" },
+          { key: "org-chart", label: "Org Chart", perm: "employees.read" },
           { key: "transitions", label: "Onboarding", perm: "transitions.read", collection: "transitions" },
           { key: "notice-periods", label: "Offboarding", perm: "notice-periods.read", collection: "notice-periods" },
           { key: "background-checks", label: "Background Checks", perm: "background-checks.read", collection: "background-checks" },
@@ -151,7 +160,7 @@ export const NAV: NavGroup[] = [
         icon: CalendarCheck,
         tabs: [
           { key: "leave-requests", label: "My Leave", collection: "leave-requests" },
-          { key: "leave-calendar", label: "Calendar" },
+          { key: "leave-calendar", label: "Calendar", perm: "leave-requests.read" },
           { key: "holidays", label: "Holidays", collection: "holidays" },
         ],
       },
@@ -173,7 +182,7 @@ export const NAV: NavGroup[] = [
   {
     label: "Company",
     items: [
-      { key: "documents", label: "Documents", icon: FileText },
+      { key: "documents", label: "Documents", icon: FileText, anyPerm: ["org-documents.read", "personal-documents.read"] },
       {
         key: "expenses",
         label: "Expenses",

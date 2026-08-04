@@ -16,7 +16,7 @@ import { useToast } from "@/components/ui/use-toast";
 /** Configured identity fields (PAN/UAN/Aadhaar etc.) for one employee. The set of fields and
  *  which are required/sensitive is configured centrally in Settings. Sensitive values are
  *  encrypted at rest and only ever shown masked. Access: owner, HR, super_admin. */
-export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity" }: { employeeId: string; canEdit: boolean; title?: string }) {
+export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity", onSaved }: { employeeId: string; canEdit: boolean; title?: string; onSaved?: () => void }) {
   const { toast } = useToast();
   const [data, setData] = useState<IdentityDetails | null>(null);
   const [denied, setDenied] = useState(false);
@@ -71,6 +71,7 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
       const updated = await patch<IdentityDetails>(`employees/${employeeId}/identity`, { values: form });
       setData(updated);
       toast({ title: "Identity details saved", variant: "success" });
+      onSaved?.();
       setOpen(false);
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });

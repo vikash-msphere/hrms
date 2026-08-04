@@ -10,6 +10,8 @@ export type EmployeeMetrics = {
   pendingApprovals: number; // requests awaiting THIS employee's decision (as the requester's manager)
   daysSinceLastLeave: number; // days since their last approved leave ended (NEVER if they've taken none)
   leaveBalanceDays: number; // total leave balance across all types
+  goalsDueSoon: number; // open goals due within the next 7 days
+  goalsOverdue: number; // open goals past their due date
 };
 
 // Sentinel for "has never taken leave" - large enough that `daysSinceLastLeave >= N` style thresholds fire.
@@ -21,7 +23,7 @@ export async function computeEmployeeMetrics(
 ): Promise<Map<string, EmployeeMetrics>> {
   const managerOf = new Map(employees.map((e) => [e.uuid, e.managerId]));
   const metrics = new Map<string, EmployeeMetrics>();
-  for (const e of employees) metrics.set(e.uuid, { pendingApprovals: 0, daysSinceLastLeave: NEVER_TAKEN_LEAVE, leaveBalanceDays: 0 });
+  for (const e of employees) metrics.set(e.uuid, { pendingApprovals: 0, daysSinceLastLeave: NEVER_TAKEN_LEAVE, leaveBalanceDays: 0, goalsDueSoon: 0, goalsOverdue: 0 });
 
   // Pending approvals: every request awaiting a decision counts against its requester's manager.
   const bump = (requesterId: string) => {
@@ -49,6 +51,20 @@ export async function computeEmployeeMetrics(
   for (const r of approved) { const t = +new Date(r.end); const cur = lastEnd.get(r.e); if (cur === undefined || t > cur) lastEnd.set(r.e, t); }
   const now = +deps.clock.now();
   for (const [e, t] of lastEnd) { const m = metrics.get(e); if (m) m.daysSinceLastLeave = Math.max(0, Math.floor((now - t) / 86_400_000)); }
+
+  // Goal due-date pressure: open goals due within a week / already past due.
+  const openGoals = await deps.db
+    .select({ e: schema.goals.employeeId, due: schema.goals.dueDate, status: schema.goals.status, del: schema.goals.deleteTime })
+    .from(schema.goals);
+  const weekOut = now + 7 * 86_400_000;
+  for (const g of openGoals) {
+    if (g.del || !g.due || (g.status !== "not_started" && g.status !== "in_progress")) continue;
+    const m = metrics.get(g.e);
+    if (!m) continue;
+    const t = +g.due;
+    if (t < now) m.goalsOverdue++;
+    else if (t <= weekOut) m.goalsDueSoon++;
+  }
 
   for (const m of metrics.values()) m.leaveBalanceDays = Math.round(m.leaveBalanceDays * 100) / 100;
   return metrics;

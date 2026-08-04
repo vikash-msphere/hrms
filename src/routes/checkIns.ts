@@ -17,6 +17,7 @@ const writeSchema = z.object({
   meeting_date: z.string().nullable().optional(),
   notes: z.string().nullable().optional(),
   action_items: z.array(actionItem).optional(),
+  cadence: z.enum(["weekly", "biweekly", "monthly"]).nullable().optional(),
 }).strict();
 
 export const checkIns = new Hono<AppEnv>()

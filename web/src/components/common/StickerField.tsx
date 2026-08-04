@@ -1,7 +1,7 @@
 import { Check, ImagePlus, Move, Scaling, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { IllustrationPicker, type PinnedArt } from "@/components/common/IllustrationPicker";
-import { isKudosSticker, kudosArtLabel, kudosCardArtUrl, KUDOS_ART_DIECUT_SM } from "@/lib/kudosArt";
+import { isKudosSticker, kudosArtLabel, kudosCardArtUrl, ART_DIECUT_SM } from "@/lib/kudosArt";
 import { DEFAULT_WRAP, MAX_STICKER_SIZE, MIN_STICKER_SIZE, withWrap } from "@/components/common/CardSticker";
 import { FoldSection } from "@/components/common/FoldSection";
 import { WrapSelect } from "@/components/common/WrapSelect";
@@ -47,7 +47,8 @@ export function StickerField({
   pinned,
   pinnedLabel,
   pinnedHint,
-  pinnedClassName,
+  narrow,
+  defaultOpen,
 }: {
   value: string; // the chosen art; "" = no picture on the card, on any kind
   onChange: (value: string) => void;
@@ -63,7 +64,11 @@ export function StickerField({
   pinned?: PinnedArt[]; // an in-house set to show above the catalogue in the browse dialog
   pinnedLabel?: string;
   pinnedHint?: string;
-  pinnedClassName?: string;
+  // Stack the tiles above the dials instead of putting them side by side. The side-by-side layout keys off the
+  // VIEWPORT (`sm:`), which is the wrong question when this sits in a fixed-width column of a wide dialog: the
+  // viewport is wide, the column is not. The caller knows which it is.
+  narrow?: boolean;
+  defaultOpen?: boolean;
 }) {
   // The current pick always has a tile, even when it is not one of the suggestions (picked from the catalogue, or
   // suggested by earlier wording that has since been edited away) - otherwise choosing it would make it vanish.
@@ -92,6 +97,7 @@ export function StickerField({
   return (
     <FoldSection
       title={label}
+      defaultOpen={defaultOpen}
       // Shut, the header says what is on the card; open, the tiles do.
       summary={value ? stickerLabel(value) : "None"}
       // Reset appears only once the author has moved the picture off the card's own layout, which is the only
@@ -111,9 +117,9 @@ export function StickerField({
         </>
       }
     >
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-          {/* Four fixed 92px tiles once there is room for them; full width on a phone. */}
-          <div className="grid w-full grid-cols-4 gap-2 sm:w-auto sm:shrink-0 sm:grid-cols-[repeat(4,92px)]">
+        <div className={cn("flex flex-col gap-3", !narrow && "sm:flex-row sm:items-start")}>
+          {/* Four fixed 92px tiles once there is room for them; full width on a phone (or in a narrow column). */}
+          <div className={cn("grid w-full grid-cols-4 gap-2", !narrow && "sm:w-auto sm:shrink-0 sm:grid-cols-[repeat(4,92px)]")}>
             {tiles.map((art) => {
               const on = value === art;
               const name = stickerLabel(art);
@@ -133,7 +139,7 @@ export function StickerField({
                     alt=""
                     aria-hidden
                     loading="lazy"
-                    className={cn("h-full w-full select-none object-contain", isKudosSticker(art) && KUDOS_ART_DIECUT_SM)}
+                    className={cn("h-full w-full select-none object-contain", ART_DIECUT_SM)}
                     onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
                   />
                   {on && (
@@ -157,7 +163,6 @@ export function StickerField({
               pinned={pinned}
               pinnedLabel={pinnedLabel}
               pinnedHint={pinnedHint}
-              pinnedClassName={pinnedClassName}
             >
               <button type="button" title="Browse all art" className={cn(tileClass, "flex-col gap-1 border-dashed text-muted-foreground hover:text-foreground")}>
                 <ImagePlus className="h-4 w-4" />

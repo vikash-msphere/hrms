@@ -11,6 +11,7 @@ import { scopeFor, stateReadAllowed, type ListScope } from "../domain/access";
 import { buildCodedPath, uuidToCode, resolveItemState } from "../lib/authzResolve";
 import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptionCodesFor } from "../lib/policyLoad";
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
+import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
 import { ancestorsOf } from "../domain/codes";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
 import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
@@ -121,14 +122,14 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   return { allow: true };
 }
 
-// Per-collection list verdicts for a `GET /v1/search` request: for every searchable collection, run the very
-// same decision a real `GET /v1/<collection>` would get here, and where it passes, resolve that collection's
-// list scope (breadth + the caller's per-object shares/denies). Collections the caller may not list are simply
-// absent from the map, so the search service can never query them. The exceptions for all of them are read
-// once, not once per collection.
-export async function searchScopesFor(deps: Deps, user: AppUser): Promise<Map<string, ListScope>> {
+// Per-collection list verdicts for a fan-out envelope (`GET /v1/search`, `GET /v1/dashboard-summary`): for
+// every named collection, run the very same decision a real `GET /v1/<collection>` would get here, and where
+// it passes, resolve that collection's list scope (breadth + the caller's per-object shares/denies).
+// Collections the caller may not list are simply absent from the map, so the consuming service can never
+// query them. The exceptions for all of them are read once, not once per collection.
+export async function scopesForCollections(deps: Deps, user: AppUser, collections: readonly string[]): Promise<Map<string, ListScope>> {
   const self = { employeeCode: user.employeeCode };
-  const listable = SEARCHABLE_COLLECTIONS.filter((col) => decide(user.grant, resolveRequest("GET", `/v1/${col}`), self).allow);
+  const listable = collections.filter((col) => decide(user.grant, resolveRequest("GET", `/v1/${col}`), self).allow);
   const out = new Map<string, ListScope>();
   if (listable.length === 0) return out;
   const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
@@ -142,6 +143,8 @@ export async function searchScopesFor(deps: Deps, user: AppUser): Promise<Map<st
   }
   return out;
 }
+
+export const searchScopesFor = (deps: Deps, user: AppUser) => scopesForCollections(deps, user, SEARCHABLE_COLLECTIONS);
 
 export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
   let decision: Decision | null = null;
@@ -163,7 +166,9 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // Global search: `search` is a TRANSPORT, not a resource - it owns no data and widens nothing, like the
       // /v1/batch:run envelope. So the ENVELOPE is allowed for any authenticated caller, and the real gating
       // happens per collection, below, in searchScopesFor() - still here, in the one place that decides.
-      if (collection === "search") {
+      if (collection === "search" || collection === "dashboard-summary") {
+        // dashboard-summary is the same shape: an aggregate envelope over many collections, each gated below
+        // (scopesForCollections) by the exact decision its own list request would get.
         decision = { allow: true };
       // Activity feed: GET /v1/activity?resource=<entity>/<id> is gated by READ on the TARGET resource —
       // decided HERE (the single gate), not on the `activity` capability. The service only queries rows.
@@ -239,10 +244,12 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // Resource-level write allowed -> additionally gate protected fields + body references.
       if (decision.allow) decision = (await bodyDecision(c, deps, coded, user, grant)) ?? decision;
 
-      // State-visibility gate: reading a NON-public row (e.g. unpublished/disabled) needs `requires` on
-      // the item. The row state rode the resolve above. Public rows are read by the resource grant; this
-      // closes the direct-item-GET leak so draft visibility is enforced for lists AND items (no BOLA).
-      if (decision.allow && stateRule && itemCode && itemState && c.req.method.toUpperCase() === "GET") {
+      // State-visibility gate: touching a NON-public row (e.g. unpublished/disabled) needs `requires` on
+      // the item. The row state rode the resolve above. Public rows are read by the resource grant. Applies
+      // to EVERY item method, not just GET: a broadly-granted custom verb (react/vote/markRead) both acts on
+      // the row and re-serializes it in its response, so a GET-only gate would let a caller who cannot read
+      // a draft still interact with it - and read it back - through a write verb.
+      if (decision.allow && stateRule && itemCode && itemState) {
         if (!stateReadAllowed(grant, `${collection}.${itemCode}`, itemState, stateRule, self)) {
           decision = { allow: false, reason: `restricted ${collection}: not public, needs ${stateRule.requires}` };
         }
@@ -290,12 +297,21 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
   const user = c.get("user");
   if (user) {
     const segs = pathname.replace(/^\/v1\//, "").split("/").filter(Boolean);
-    const collection = segs[0] ?? "";
+    // A COLLECTION-level custom method carries its verb in that first segment (`announcements:markAllRead`),
+    // so the raw segment is not a collection name. Scope is about the collection either way - split the verb
+    // off, or a handler that reads the scope (announcements:markAllRead does) would get one computed against
+    // a resource that does not exist.
+    const verbAt = segs[0]?.indexOf(":") ?? -1;
+    const collection = verbAt >= 0 ? segs[0]!.slice(0, verbAt) : segs[0] ?? "";
     const scope = scopeFor(user, collection);
     // A collection-level list also honors the caller's per-object shares/denies (one indexed read): shares
     // widen the result, denies remove rows (deny-wins). Covers user exceptions AND exact role rules. Item
-    // paths don't need it (handled in the decision).
-    if (segs.length === 1 && collection !== "search") {
+    // paths don't need it (handled in the decision) - and neither do custom methods, which act on what the
+    // caller named rather than listing rows, so they stay off this extra read.
+    // `search` and `dashboard-summary` are aggregate ROUTES, not collections: no rule can carry their
+    // namespace, and their handlers read searchScopes/summaryScopes (each already scoped per collection
+    // below), never this scope - so the read would be a guaranteed-empty one thrown away.
+    if (segs.length === 1 && verbAt < 0 && collection !== "search" && collection !== "dashboard-summary") {
       const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
       const exc = await loadObjectExceptionCodes(c.get("deps"), user.uuid, roleSubjects, collection);
       scope.shares = exc.shares;
@@ -307,6 +323,9 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // over as a map; the search service only binds them to columns. That keeps this middleware the one place
     // access is decided even for a request that spans the whole app.
     if (collection === "search") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
+    // Dashboard summary fans COUNT/SUM queries across the KPI collections - same per-collection decide/scope
+    // pair as search, handed over as a map; the service only binds them.
+    if (collection === "dashboard-summary") c.set("summaryScopes", await scopesForCollections(c.get("deps"), user, DASHBOARD_SUMMARY_COLLECTIONS));
   }
 
   await next();

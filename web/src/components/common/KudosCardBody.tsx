@@ -46,7 +46,6 @@ export function KudosCardBody({
   recipientLastName,
   message,
   artUrl,
-  artIsSticker,
   stickerLayout,
   onStickerLayoutChange,
   recipientLayout,
@@ -64,7 +63,6 @@ export function KudosCardBody({
   recipientLastName?: string;
   message: string;
   artUrl: string;
-  artIsSticker: boolean;
   stickerLayout?: StickerLayout | null; // where the giver placed the art; null = the default 200px column
   onStickerLayoutChange?: (layout: StickerLayout) => void; // set = the composer preview, where it can be dragged
   recipientLayout?: RecipientLayout | null; // where the giver placed the recipient; null = its default column
@@ -150,9 +148,9 @@ export function KudosCardBody({
       artUrl={artUrl}
       flowClassName="hidden w-[200px] shrink-0 sm:block"
     >
-      {/* KUDOS_ART_DIECUT (inside StickerImage) gives dark mode a solid white silhouette behind a brand sticker;
-          without it the dark-navy slogans vanish into the card. Illustrations are slate-toned and get none. */}
-      <StickerImage url={artUrl} isSticker={artIsSticker} onAspect={setAspect} />
+      {/* ART_DIECUT (inside StickerImage) gives dark mode a solid white silhouette behind the art; without it
+          the dark-navy slogans and near-black illustration ink vanish into the card. */}
+      <StickerImage url={artUrl} onAspect={setAspect} />
     </PlacedElement>
   ) : null;
 

@@ -1,6 +1,6 @@
 // Shift patterns. Times are wall-clock "HH:MM" in the org timezone; a roster assignment puts a shift on a
 // date for an employee. Night rolls past midnight (end < start).
-import { Ctx, T0, q, code2, rows } from "../lib";
+import { type Ctx, T0, q, code2, rows } from "../lib";
 
 type ShiftSeed = { name: string; start: string; end: string; breakMinutes: number; color: string };
 

@@ -11,7 +11,9 @@ const badgeVariants = cva(
         secondary: "border-transparent bg-secondary text-secondary-foreground",
         outline: "text-foreground",
         success: "border-transparent bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
-        info: "border-transparent bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300",
+        // "info" is the one status that IS the brand, so it runs on the Brand Blue ramp rather than
+        // Tailwind's stock blue - it should read as the same blue as primary, just quieter.
+        info: "border-transparent bg-brand-blue-100 text-brand-blue-700 dark:bg-brand-blue-950/60 dark:text-brand-blue-300",
         warning: "border-transparent bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
         destructive: "border-transparent bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300",
         muted: "border-transparent bg-muted text-muted-foreground",

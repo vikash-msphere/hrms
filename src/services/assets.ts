@@ -9,6 +9,7 @@ import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { notify } from "./notifications";
+import { emitEvent } from "./eventBus";
 
 export type AssetInput = {
   asset_tag?: string | null;
@@ -19,6 +20,8 @@ export type AssetInput = {
   assigned_to?: string | null; // employees/<id> or null (the inbound edge already decoded the ref)
   assigned_on?: string | null; // YYYY-MM-DD
   purchase_date?: string | null;
+  tag_printed_time?: string | null; // ISO timestamp - set by the tag printer's "mark printed", null clears
+  last_verified_time?: string | null; // ISO timestamp - set by a stocktake scan sighting the physical asset
   notes?: string | null;
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -59,6 +62,7 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
     })
     .returning())[0]!;
   await audit(deps, actor, "asset.create", "assets", row.uuid, undefined, row);
+  await emitEvent(deps, actor, "asset.created", { subject: `assets/${row.uuid}`, employeeId: assignedTo, payload: { category: row.category, hasTag: !!row.assetTag } });
   if (assignedTo && assignedTo !== actor.employeeId)
     await notify(deps, { recipient: assignedTo, type: "asset.assigned", title: "Asset assigned to you", body: `${row.name}${row.assetTag ? ` (${row.assetTag})` : ""}`, link: "assets", subject: `assets/${row.uuid}`, actorId: actor.employeeId });
   return row;
@@ -78,6 +82,16 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   if (has("category")) set.category = patch.category?.trim() || null;
   if (has("serial_number")) set.serialNumber = patch.serial_number?.trim() || null;
   if (has("purchase_date")) set.purchaseDate = dayMs(patch.purchase_date);
+  if (has("tag_printed_time")) {
+    const ts = patch.tag_printed_time ? new Date(Date.parse(patch.tag_printed_time)) : null;
+    if (ts && Number.isNaN(+ts)) throw invalidArgument("tag_printed_time must be an ISO timestamp");
+    set.tagPrintedAt = ts;
+  }
+  if (has("last_verified_time")) {
+    const ts = patch.last_verified_time ? new Date(Date.parse(patch.last_verified_time)) : null;
+    if (ts && Number.isNaN(+ts)) throw invalidArgument("last_verified_time must be an ISO timestamp");
+    set.verifiedAt = ts;
+  }
   if (has("notes")) set.notes = patch.notes?.trim() || null;
   // Assignment: set assigned_to (employees/<id> or null) -> owner + assigned-on date, and (unless an explicit
   // status is also given) the derived status. Keep the prior assigned-on if the same person is re-saved.

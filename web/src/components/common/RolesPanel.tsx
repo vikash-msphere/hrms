@@ -3,6 +3,7 @@ import { ShieldAlert, Pencil, MoreHorizontal, KeyRound } from "lucide-react";
 import { patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { roleLabel, type Role } from "@/lib/roles";
+import { CopyEmail } from "@/components/common/CopyEmail";
 import { usePermission } from "@/lib/perm";
 import { idOf } from "@/lib/utils";
 import type { Employee, Me, User } from "@/types";
@@ -73,7 +74,7 @@ export function RolesPanel({ me, controlsSlot }: { me: Me; controlsSlot?: HTMLEl
   }
 
   const columns: Column<User>[] = [
-    { id: "email", header: "Email", accessor: (u) => u.email, cell: (u) => <span className="font-medium">{u.email}</span> },
+    { id: "email", header: "Email", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
     { id: "role", header: "Role", filter: "select", accessor: (u) => roleLabel(u.role), cell: (u) => <Badge variant={roleVariant(u.role)}>{roleLabel(u.role)}</Badge> },
     {
       id: "status",

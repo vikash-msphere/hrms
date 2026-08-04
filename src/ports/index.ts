@@ -29,6 +29,12 @@ export interface DocumentStore {
   delete(key: string): Promise<void>;
 }
 
+// Browser Web Push delivery to one device subscription. Optional: absent unless VAPID keys are configured.
+// "gone" = the push service says the subscription is dead (404/410) and the caller should prune it.
+export interface PushSender {
+  send(subscription: unknown, payload: { title: string; body?: string; link?: string }): Promise<"ok" | "gone" | "error">;
+}
+
 // Outbound egress for the automation engine's `webhook` action. Optional/absent by default (egress off): the
 // engine records the action as skipped when no sender is wired, so a rule can't leak data to the internet
 // unless an operator explicitly configures a destination allowlist. See docs/workflow-engine-plan.md.

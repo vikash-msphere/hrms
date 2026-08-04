@@ -24,6 +24,7 @@ export function FoldSection({
   actions,
   open: openProp,
   onOpenChange,
+  defaultOpen = false,
   children,
   className,
 }: {
@@ -32,10 +33,13 @@ export function FoldSection({
   actions?: ReactNode; // undo-shaped affordances, always reachable
   open?: boolean; // controlled; omit to let the section keep its own state (and start folded)
   onOpenChange?: (open: boolean) => void;
+  // Which way an UNCONTROLLED section starts. Folded is the default because folding exists to keep a column of
+  // fields short; a caller with room to spare (a panel of its own) says so.
+  defaultOpen?: boolean;
   children: ReactNode;
   className?: string;
 }) {
-  const [ownOpen, setOwnOpen] = useState(false);
+  const [ownOpen, setOwnOpen] = useState(defaultOpen);
   const open = openProp ?? ownOpen;
   return (
     <div className={cn("space-y-1.5", className)}>

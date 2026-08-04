@@ -6,7 +6,7 @@ import {
   RefreshCw, ExternalLink, ShieldCheck, Loader2,
 } from "lucide-react";
 import { api, upload, patch, invoke, download as downloadFile } from "@/api";
-import { useDocuments, createDocument, docCollection } from "@/lib/documents";
+import { useDocuments, createDocument, docCollection, documentFileName } from "@/lib/documents";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
@@ -60,8 +60,8 @@ const EXT_ICON: Record<string, { icon: typeof File; tint: string }> = {
   odt: { icon: FileText, tint: "bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400" },
   rtf: { icon: FileText, tint: "bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400" },
   pages: { icon: FileText, tint: "bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400" },
-  txt: { icon: FileText, tint: "bg-slate-100 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300" },
-  md: { icon: FileText, tint: "bg-slate-100 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300" },
+  txt: { icon: FileText, tint: "bg-brand-neutral-100 text-brand-neutral-600 dark:bg-brand-neutral-500/20 dark:text-brand-neutral-300" },
+  md: { icon: FileText, tint: "bg-brand-neutral-100 text-brand-neutral-600 dark:bg-brand-neutral-500/20 dark:text-brand-neutral-300" },
   ppt: { icon: FileText, tint: "bg-orange-50 text-orange-600 dark:bg-orange-500/15 dark:text-orange-400" },
   pptx: { icon: FileText, tint: "bg-orange-50 text-orange-600 dark:bg-orange-500/15 dark:text-orange-400" },
   odp: { icon: FileText, tint: "bg-orange-50 text-orange-600 dark:bg-orange-500/15 dark:text-orange-400" },
@@ -333,7 +333,7 @@ export default function Documents({ me }: { me: Me }) {
       setGenOpen(false);
       reload();
       // Offer the freshly-rendered PDF straight away.
-      try { await downloadFile(doc.path, doc.file_name || `${doc.display_name}.pdf`); } catch { /* it's in the list to download */ }
+      try { await downloadFile(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" })); } catch { /* it's in the list to download */ }
     } catch (e) {
       toast({ title: "Couldn't generate letter", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -413,7 +413,7 @@ export default function Documents({ me }: { me: Me }) {
 
   async function onDownload(d: DocumentResource) {
     try {
-      await downloadFile(d.path, d.file_name || d.display_name);
+      await downloadFile(d.path, documentFileName(d));
     } catch (e) {
       toast({ title: "Download failed", description: (e as Error).message, variant: "destructive" });
     }
@@ -936,8 +936,8 @@ export default function Documents({ me }: { me: Me }) {
               {ackDoc.ack_method === "cashfree" ? (
                 <p className="text-sm text-muted-foreground">Continue opens a secure Aadhaar e-Sign page in a new tab. This document is marked acknowledged once you finish signing there.</p>
               ) : myEmp?.signature ? (
-                <div className="rounded-lg border bg-white p-3 dark:bg-zinc-100">
-                  <p className="mb-1 text-xs text-muted-foreground dark:text-zinc-500">Signing as <span className="font-medium text-foreground dark:text-zinc-900">{myLegalName}</span></p>
+                <div className="rounded-lg border bg-white p-3 dark:bg-brand-neutral-100">
+                  <p className="mb-1 text-xs text-muted-foreground dark:text-brand-neutral-500">Signing as <span className="font-medium text-foreground dark:text-brand-neutral-900">{myLegalName}</span></p>
                   <SignatureImage employeeId={idOf(myEmp.path)} signature={myEmp.signature} className="max-h-16 object-contain" />
                 </div>
               ) : (
@@ -992,8 +992,8 @@ export default function Documents({ me }: { me: Me }) {
                 <Button variant="outline" size="sm" className="w-fit" onClick={() => onDownload(signDoc)}><Download className="h-4 w-4" /> Open document</Button>
               ) : null}
               {myEmp?.signature ? (
-                <div className="rounded-lg border bg-white p-3 dark:bg-zinc-100">
-                  <p className="mb-1 text-xs text-muted-foreground dark:text-zinc-500">Signing as <span className="font-medium text-foreground dark:text-zinc-900">{myLegalName}</span></p>
+                <div className="rounded-lg border bg-white p-3 dark:bg-brand-neutral-100">
+                  <p className="mb-1 text-xs text-muted-foreground dark:text-brand-neutral-500">Signing as <span className="font-medium text-foreground dark:text-brand-neutral-900">{myLegalName}</span></p>
                   <SignatureImage employeeId={idOf(myEmp.path)} signature={myEmp.signature} className="max-h-16 object-contain" />
                 </div>
               ) : (

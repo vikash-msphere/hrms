@@ -241,7 +241,7 @@ function RuleCard({ a, meta, canWrite, onToggle, onTest, onEdit, onDelete }: {
   return (
     <Card className={cn("p-3.5 transition-colors", !a.enabled && "bg-muted/30")}>
       <div className="flex items-start gap-3">
-        {canWrite && <div className="pt-0.5"><EnableToggle on={a.enabled} onClick={onToggle} label={a.enabled ? "Disable rule" : "Enable rule"} /></div>}
+        {canWrite && <div className="pt-0.5"><AccessAction collection="automations" objectPath={a.path} verb={a.enabled ? "disable" : "enable"} label={a.enabled ? "Disable rule" : "Enable rule"}><EnableToggle on={a.enabled} onClick={onToggle} label={a.enabled ? "Disable rule" : "Enable rule"} /></AccessAction></div>}
         <div className="min-w-0 flex-1">
           <AccessAction collection="automations" objectPath={a.path} label={a.name}>
             <span className={cn("font-medium", !a.enabled && "text-muted-foreground")}>{a.name}</span>

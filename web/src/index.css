@@ -1,97 +1,163 @@
-/* App UI font (Inter) plus the optional wordmark faces for the organization-name font selector
-   (Settings -> Organization). One @import so no rule sits between imports (a comment there can make a CSS
-   bundler drop the following @import). Each family loads the full weight range the selector offers
-   (Regular..Extra bold) so the weight picker takes effect; faces whose max is 700 (Comfortaa, Oswald, Space
-   Grotesk) cap there, and Pacifico is a single-weight script. */
-@import url("https://fonts.googleapis.com/css2?family=Comfortaa:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&family=Montserrat:wght@400;500;600;700;800&family=Oswald:wght@400;500;600;700&family=Pacifico&family=Playfair+Display:wght@400;500;600;700;800&family=Poppins:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+/* App UI font: Inter, self-hosted (@fontsource - bundled, served same-origin; no third-party request, no
+   render-blocking remote @import). Only the UI font loads up front; the optional wordmark/post faces
+   (Settings -> Organization, board-post typefaces) lazy-load on first use via lib/fonts.ts. */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/inter/800.css";
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
-  /* Design language: modern-enterprise, on the Metasphere identity - a navy -> teal brand (from Metasphere.svg,
-     mirrored in the email template). Primary is the navy-blue anchor; teal is the complementary accent; the
-     neutral ramp is a calm cool slate biased toward the brand hue. Real elevation (white cards lift off a
-     faintly tinted page). Every colour is a token so the .dark block re-skins the whole app by overriding the
-     same names. Identity = brand blue (primary) with a teal accent + the brand gradient for signature surfaces. */
+  /* ============================================================================================
+     THE PALETTE. This block is the single source of colour for the whole web app: the brand ramps
+     below are the only place a raw colour value is written. Everything else - every semantic token,
+     every Tailwind colour, every component - resolves back to one of these steps, so re-skinning the
+     app is an edit here and nowhere else.
+
+     Ramps come from branding.json (Figma design tokens): a navy Brand Blue (anchored at 800, #15396D;
+     the app carries the identity one step lighter at 700 - see --primary below),
+     an electric Brand Cyan anchored at 400 (#00F6FF), and a cool blue-biased Neutral ramp. Values are
+     bare HSL triplets, not hex, because Tailwind wraps them as hsl(var(--x) / <alpha>) - that is what
+     makes `bg-primary/90`, `text-foreground/70` and friends work.
+     ============================================================================================ */
   :root {
-    --background: 220 24% 97%;
-    --foreground: 222 26% 13%;
+    /* --- Primitive: Brand Blue (branding.json Primitive.Color.Brand.Blue) ---------------------- */
+    --blue-50: 215 66.7% 96.5%;   /* #F0F5FC */
+    --blue-100: 210 63.2% 92.5%;  /* #E0ECF8 */
+    --blue-200: 211 69% 83.5%;    /* #B8D4F2 */
+    --blue-300: 211 66.7% 70.6%;  /* #82B2E6 */
+    --blue-400: 211 60.9% 55.9%;  /* #4A8CD3 */
+    --blue-500: 214 62.2% 45.7%;  /* #2C6CBD */
+    --blue-600: 215 66.7% 37.6%;  /* #2056A0 */
+    --blue-700: 216 66.7% 34.1%;  /* #1D4C91 */
+    --blue-800: 215 67.7% 25.5%;  /* #15396D - Brand Color.Blue */
+    --blue-900: 216 67.4% 16.9%;  /* #0E2548 */
+    --blue-950: 217 68.9% 8.8%;   /* #071326 */
+
+    /* --- Primitive: Brand Cyan (branding.json Primitive.Color.Brand.Cyan) ---------------------- */
+    --cyan-50: 177 100% 95.9%;    /* #EAFFFE */
+    --cyan-100: 179 100% 89.8%;   /* #CBFFFE */
+    --cyan-200: 181 100% 81%;     /* #9EFEFF */
+    --cyan-300: 181 100% 67.8%;   /* #5BFCFF */
+    --cyan-400: 182 100% 50%;     /* #00F6FF - Brand Color.Cyan */
+    --cyan-500: 183 100% 44.9%;   /* #00DAE5 */
+    --cyan-600: 186 100% 37.6%;   /* #00ADC0 */
+    --cyan-700: 187 96.2% 31%;    /* #03899B */
+    --cyan-800: 189 81.2% 27.1%;  /* #0D6D7D */
+    --cyan-900: 191 73.6% 23.7%;  /* #105969 */
+    --cyan-950: 191 92.1% 14.9%;  /* #033C49 */
+
+    /* --- Primitive: Neutral (branding.json Primitive.Color.Neutral) ---------------------------- */
+    --neutral-50: 210 33.3% 97.6%;  /* #F7F9FB */
+    --neutral-100: 210 26.7% 94.1%; /* #ECF0F4 */
+    --neutral-200: 208 24.6% 88%;   /* #D9E1E8 */
+    --neutral-300: 210 22% 76.9%;   /* #B7C4D1 */
+    --neutral-400: 212 17.9% 62.7%; /* #8F9FB1 */
+    --neutral-500: 212 15.4% 47.3%; /* #66778B */
+    --neutral-600: 212 19.1% 34.9%; /* #48586A */
+    --neutral-700: 214 20.3% 24.1%; /* #313C4A */
+    --neutral-800: 215 26.8% 16.1%; /* #1E2734 */
+    --neutral-900: 213 38.5% 10.2%; /* #101924 */
+    --neutral-950: 217 68.9% 8.8%;  /* #071326 */
+
+    /* --- Status ramps. branding.json carries no red/green/amber, so these stay hand-tuned; they are
+           written here (not inline) so they re-skin from the same place as everything else. --------- */
+    --red-500: 0 72% 51%;
+    --green-600: 152 60% 38%;
+    --amber-500: 35 92% 48%;
+
+    /* ==========================================================================================
+       Semantic tokens. Light mode: white cards lift off a faintly tinted page, chrome recedes.
+       Every value below is a reference to a primitive - never a literal.
+       ========================================================================================== */
+    --background: var(--neutral-50);
+    --foreground: var(--neutral-950);
 
     --card: 0 0% 100%;
-    --card-foreground: 222 26% 13%;
+    --card-foreground: var(--neutral-950);
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 26% 13%;
+    --popover-foreground: var(--neutral-950);
 
-    --primary: 224 64% 44%;
+    /* Identity: Brand Blue is the interactive colour - buttons, links, active nav, focus. Sits at 700
+       rather than the ramp's 800 anchor: a touch more light in it, so filled controls read as blue on a
+       white card instead of near-black, without giving up contrast against primary-foreground. */
+    --primary: var(--blue-700);
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 220 18% 94%;
-    --secondary-foreground: 222 24% 22%;
+    --secondary: var(--neutral-100);
+    --secondary-foreground: var(--neutral-700);
 
-    --muted: 220 18% 94%;
-    --muted-foreground: 220 10% 46%;
+    --muted: var(--neutral-100);
+    --muted-foreground: var(--neutral-500);
 
-    /* Accent = a light teal surface (the gradient's far end), with a deep teal-blue foreground. */
-    --accent: 187 58% 93%;
-    --accent-foreground: 197 76% 28%;
+    /* Accent carries the second brand colour: a pale cyan surface with a deep cyan foreground.
+       It is the hover/selected ground for menus, nav and ghost controls. */
+    --accent: var(--cyan-50);
+    --accent-foreground: var(--cyan-800);
 
-    --destructive: 0 72% 51%;
+    --destructive: var(--red-500);
     --destructive-foreground: 0 0% 100%;
 
-    --success: 152 60% 38%;
+    --success: var(--green-600);
     --success-foreground: 0 0% 100%;
 
-    --warning: 35 92% 48%;
+    --warning: var(--amber-500);
     --warning-foreground: 35 80% 16%;
 
-    --border: 220 18% 90%;
-    --input: 220 18% 90%;
-    --ring: 224 64% 44%;
+    --border: var(--neutral-200);
+    --input: var(--neutral-200);
+    /* Focus ring lifts off the dark primary so it stays visible on brand-coloured controls. */
+    --ring: var(--blue-500);
 
-    /* Light sidebar: a hair greyer than the page so it recedes as chrome (cards 100% > page 97% > sidebar
-       95%), separated by a right border. Nav text is a medium slate; the active item carries the brand blue.
-       In dark mode (below) it flips to a dark slate. */
-    --sidebar: 222 16% 95%;
-    --sidebar-foreground: 222 12% 42%;
-    --sidebar-accent: 224 64% 44%;
-    --sidebar-border: 220 14% 88%;
+    /* Light sidebar: a hair greyer than the page so it recedes as chrome (cards 100% > page > sidebar),
+       separated by a right border. Nav text is a mid neutral; the active item carries Brand Blue. */
+    --sidebar: var(--neutral-100);
+    --sidebar-foreground: var(--neutral-500);
+    --sidebar-accent: var(--blue-700);
+    --sidebar-border: var(--neutral-200);
 
-    /* The Metasphere brand gradient (navy -> mid -> teal), for signature surfaces (sidebar brand, hero, auth).
-       Kept as its own token so components opt in via the .brand-gradient utility rather than hard-coding it. */
-    --brand-gradient: linear-gradient(120deg, hsl(232 66% 32%), hsl(203 67% 40%), hsl(179 64% 45%));
+    /* The brand gradient (deep navy -> blue -> cyan), for signature surfaces (sidebar brand, hero,
+       auth). Its own token so components opt in via .brand-gradient rather than hard-coding it. */
+    --brand-gradient: linear-gradient(120deg, hsl(var(--blue-900)), hsl(var(--blue-600)), hsl(var(--cyan-500)));
 
-    /* Themeable elevation: cards rely on shadow in light mode, on border + a deeper shadow in dark. */
-    --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 2px 6px -1px rgba(16, 24, 40, 0.06);
-    --shadow-card-hover: 0 8px 24px -8px rgba(16, 24, 40, 0.18);
-    --shadow-pop: 0 12px 32px -8px rgba(16, 24, 40, 0.16), 0 2px 6px -2px rgba(16, 24, 40, 0.08);
+    /* Themeable elevation, tinted with the brand navy (#071326) rather than plain black. */
+    --shadow-card: 0 1px 2px rgba(7, 19, 38, 0.05), 0 2px 6px -1px rgba(7, 19, 38, 0.07);
+    --shadow-card-hover: 0 8px 24px -8px rgba(7, 19, 38, 0.2);
+    --shadow-pop: 0 12px 32px -8px rgba(7, 19, 38, 0.18), 0 2px 6px -2px rgba(7, 19, 38, 0.09);
 
-    --radius: 0.625rem;
+    /* One radius knob. The Tailwind scale derives every step from it and lands on the branding
+       corner radii: md = 8, xl = 16, 2xl = 24, 3xl = 32 (see tailwind.config.js). */
+    --radius: 0.5rem;
   }
 
+  /* Dark mode re-points the SAME semantic names at different steps of the SAME ramps. No new colours. */
   .dark {
-    --background: 224 28% 8%;
-    --foreground: 214 18% 90%;
+    --background: var(--neutral-950);
+    --foreground: var(--neutral-200);
 
-    --card: 223 24% 11%;
-    --card-foreground: 214 18% 90%;
+    --card: var(--neutral-900);
+    --card-foreground: var(--neutral-200);
 
-    --popover: 223 26% 12%;
-    --popover-foreground: 214 18% 90%;
+    --popover: var(--neutral-800);
+    --popover-foreground: var(--neutral-200);
 
-    --primary: 205 78% 62%;
-    --primary-foreground: 224 45% 9%;
+    /* Blue 800 disappears on a navy ground, so dark mode carries the identity at Blue 300. */
+    --primary: var(--blue-300);
+    --primary-foreground: var(--blue-950);
 
-    --secondary: 223 18% 18%;
-    --secondary-foreground: 214 18% 88%;
+    --secondary: var(--neutral-800);
+    --secondary-foreground: var(--neutral-200);
 
-    --muted: 223 18% 17%;
-    --muted-foreground: 217 14% 60%;
+    --muted: var(--neutral-800);
+    --muted-foreground: var(--neutral-400);
 
-    --accent: 195 44% 20%;
-    --accent-foreground: 185 72% 76%;
+    --accent: var(--cyan-950);
+    --accent-foreground: var(--cyan-300);
 
     --destructive: 0 64% 56%;
     --destructive-foreground: 0 0% 100%;
@@ -102,17 +168,17 @@
     --warning: 35 88% 56%;
     --warning-foreground: 35 60% 10%;
 
-    --border: 223 18% 21%;
-    --input: 223 18% 23%;
-    --ring: 205 78% 62%;
+    --border: var(--neutral-800);
+    --input: var(--neutral-700);
+    --ring: var(--blue-300);
 
-    --sidebar: 224 22% 11%;
-    --sidebar-foreground: 217 14% 68%;
-    --sidebar-accent: 205 78% 62%;
-    --sidebar-border: 224 16% 18%;
+    --sidebar: var(--neutral-900);
+    --sidebar-foreground: var(--neutral-400);
+    --sidebar-accent: var(--blue-300);
+    --sidebar-border: var(--neutral-800);
 
-    /* Gradient reads brighter on the dark ground so it still carries the brand. */
-    --brand-gradient: linear-gradient(120deg, hsl(226 60% 46%), hsl(200 66% 50%), hsl(179 62% 52%));
+    /* Gradient starts lighter on the dark ground so it still carries the brand. */
+    --brand-gradient: linear-gradient(120deg, hsl(var(--blue-800)), hsl(var(--blue-500)), hsl(var(--cyan-500)));
 
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 8px -2px rgba(0, 0, 0, 0.45);
     --shadow-card-hover: 0 10px 28px -10px rgba(0, 0, 0, 0.6);
@@ -138,11 +204,24 @@
     transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, fill 0.2s ease,
       box-shadow 0.2s ease;
   }
-  /* Signature Metasphere surface: the navy -> teal brand gradient. Opt in on brand chrome (sidebar brand,
-     auth hero) rather than baking it into every primary surface. */
+  /* Respect the OS "reduce motion" preference: collapse every animation/transition to a single frame.
+     Spinners are exempted - a frozen loading spinner reads as a hang, and rotation at steady speed is not
+     the parallax/slide motion the preference exists to avoid. */
+  @media (prefers-reduced-motion: reduce) {
+    *:not(.animate-spin),
+    *:not(.animate-spin)::before,
+    *:not(.animate-spin)::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+  /* Signature brand surface: the navy -> cyan gradient. Opt in on brand chrome (sidebar brand, auth
+     hero) rather than baking it into every primary surface. */
   .brand-gradient {
     background-image: var(--brand-gradient);
-    background-color: hsl(224 64% 44%); /* fallback ground before the image paints */
+    background-color: hsl(var(--blue-700)); /* fallback ground before the image paints */
   }
 }
 
@@ -210,6 +289,17 @@
   left: 50%;
   height: 1.25rem;
   border-left: 2px solid hsl(var(--border));
+}
+/* Export mode: the PNG/print capture flips data-exporting on the chart canvas; interactive chrome
+   (grips, move/focus buttons, expand carets) hides but keeps its box so nothing reflows mid-capture. */
+[data-exporting] [data-chrome] {
+  visibility: hidden !important;
+}
+/* Lineage trace: hovering a card tints the border of every ancestor card in its chain (each card's
+   accent left-border is inline-styled, so it wins and stays put). */
+.org-tree [data-org-id]:hover,
+.org-tree li:has(li [data-org-id]:hover) > :not(ul) [data-org-id] {
+  border-color: hsl(var(--primary) / 0.55);
 }
 
 /* Thin, unobtrusive scrollbars */

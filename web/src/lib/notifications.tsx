@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useCollection } from "@/hooks/useCollection";
 import { patch, invoke, get, type ListResponse } from "@/api";
 import { idOf } from "@/lib/utils";
+import { usePermission } from "@/lib/perm";
 import { toast } from "@/components/ui/use-toast";
 import { categoryOf } from "@/lib/notificationMeta";
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
@@ -125,7 +126,10 @@ export const useNotifications = () => useContext(NotificationsContext);
 
 export function NotificationsProvider({ children }: { children: ReactNode }) {
   const { rows, setRows, state, reload, meta } = useCollection<Notification>("notifications");
-  const available = state !== "error";
+  // No read capability -> useCollection never fetches and settles "ready"+empty, so the error check alone
+  // would leave the bell visible with a forever-empty panel. The capability is the real gate.
+  const canRead = usePermission("notifications.read");
+  const available = canRead && state !== "error";
   const unread = useMemo(() => rows.filter((n) => !n.read).length, [rows]);
   // Count of still-sleeping rows piggybacked on the feed read (see listNotifications). The source of truth for
   // the Snoozed badge until the full list is opened, after which the loaded array is authoritative.

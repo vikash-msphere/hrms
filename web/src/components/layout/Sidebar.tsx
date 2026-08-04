@@ -7,6 +7,7 @@ import { useNotifications } from "@/lib/notifications";
 import { cn } from "@/lib/utils";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx, CELEBRATION_WEEK_DAYS } from "@/lib/org";
+import { useMedia } from "@/hooks/useMedia";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Me } from "@/types";
 
@@ -37,19 +38,6 @@ const loadRail = (email: string) => localStorage.getItem(railKey(email)) === "1"
 const saveRail = (email: string, on: boolean) => {
   try { localStorage.setItem(railKey(email), on ? "1" : "0"); } catch { /* ignore */ }
 };
-
-// A reactive CSS media-query match (SSR-safe default false).
-function useMedia(query: string): boolean {
-  const [matches, setMatches] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
-  useEffect(() => {
-    const mql = window.matchMedia(query);
-    const on = () => setMatches(mql.matches);
-    on();
-    mql.addEventListener("change", on);
-    return () => mql.removeEventListener("change", on);
-  }, [query]);
-  return matches;
-}
 
 // A festive balloon-and-ribbon overlay shown during the company anniversary week (matches the balloon+ribbon
 // reference): big glossy teardrop balloons cluster up-and-right (overlapping only the logo's right edge),

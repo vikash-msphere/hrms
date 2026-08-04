@@ -13,3 +13,10 @@ misc/
 
 # Claude Code local session state
 .claude/projects/
+.claude/scheduled_tasks.lock
+
+# scratch: wrangler resource-creation output
+cf.txt
+
+# downloaded source archive; extracted assets are committed
+web/public/assets/illustrations.zip

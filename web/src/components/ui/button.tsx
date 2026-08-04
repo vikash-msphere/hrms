@@ -39,12 +39,22 @@ export interface ButtonProps
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, asChild = false, loading = false, disabled, children, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button";
+    // Slot does React.Children.only, so the asChild branch must pass the child through ALONE - a second child
+    // expression (even one that evaluates to `false`) makes children an array and throws.
+    if (asChild) {
+      // Slot forwards unknown props straight to the child, so `disabled` still lands on the real element -
+      // SlotProps just doesn't model it, hence the cast.
+      return (
+        <Slot className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...({ disabled } as { disabled?: boolean })} {...props}>
+          {children}
+        </Slot>
+      );
+    }
     return (
-      <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} disabled={disabled || (!asChild && loading)} {...props}>
-        {!asChild && loading && <Loader2 className="animate-spin" />}
+      <button className={cn(buttonVariants({ variant, size, className }))} ref={ref} disabled={disabled || loading} {...props}>
+        {loading && <Loader2 className="animate-spin" />}
         {children}
-      </Comp>
+      </button>
     );
   }
 );

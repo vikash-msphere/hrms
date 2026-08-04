@@ -15,18 +15,31 @@ export function useSoftDelete(collection: string, label: string, reload: () => v
   const { toast } = useToast();
   const cap = label.charAt(0).toUpperCase() + label.slice(1);
 
+  // Soft delete is reversible by design, so it skips the confirm dialog: the row disappears immediately and
+  // the toast carries an Undo (restore) for the change-of-heart window. Hard delete below still confirms.
   async function softDelete(row: Deletable) {
-    const ok = await confirm({
-      title: `Delete this ${label}?`,
-      description: "It will be moved to deleted items where it can be restored.",
-      confirmLabel: "Delete",
-      destructive: true,
-    });
-    if (!ok) return;
     try {
       await remove(`${collection}/${idOf(row.path)}`, row.etag);
-      toast({ title: `${cap} deleted`, variant: "success" });
       reload();
+      toast({
+        title: `${cap} deleted`,
+        description: "Moved to deleted items.",
+        variant: "success",
+        duration: 8000,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            restoreApi(`${collection}/${idOf(row.path)}`)
+              .then(() => {
+                toast({ title: `${cap} restored`, variant: "success" });
+                reload();
+              })
+              .catch((e) =>
+                toast({ title: "Couldn't restore", description: (e as Error).message, variant: "destructive" })
+              );
+          },
+        },
+      });
     } catch (e) {
       toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" });
     }

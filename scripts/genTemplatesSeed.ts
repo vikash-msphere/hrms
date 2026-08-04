@@ -1,0 +1,452 @@
+// Single source for scripts/templates.sql: the default HR letter templates, rendered as an idempotent upsert
+// into the `letter-templates` setting. Unlike scripts/seed.sql (grants), this is a STARTING POINT only - HR
+// edits the templates at runtime via the settings API, so it is deliberately NOT drift-tested. Re-run after
+// changing the defaults: `node --import ./scripts/tsResolve.mjs scripts/genTemplatesSeed.ts > scripts/templates.sql`.
+import type { LetterTemplate } from "../src/domain/letters";
+import { bytesToBase32 } from "../src/lib/idCodec";
+
+const SEED_TS = 1700000000000;
+
+// Categories used to group the letters in the editor + generate pickers.
+const ONBOARDING = "Onboarding";
+const AGREEMENTS = "Agreements";
+const CAREER = "Career";
+const COMPENSATION = "Compensation";
+const VERIFICATION = "Verification";
+const EXIT = "Exit";
+const OTHER = "Other";
+
+const OFFER: LetterTemplate = {
+  id: "offer",
+  label: "Offer Letter",
+  category: ONBOARDING,
+  filename: "{{employee_name}} - Offer Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Offer of Employment" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "Congratulations!", bold: true },
+    { kind: "para", text: "Further to our discussions and the selection process, **{{company}}** (the \"Company\") is pleased to extend to you this offer of employment on the terms and conditions set out below. We were impressed by your background and believe you will make a valuable contribution to the Company." },
+    { kind: "para", text: "We are pleased to offer you a full-time {{work_mode}} position as **{{designation}}**{{department_clause}}{{reporting_to_clause}}. Your scheduled start date will be **{{joining_date}}**.{{probation_clause}}" },
+    { kind: "para", text: "Your normal working hours will be **{{working_pattern}}**{{work_location_suffix}}. The Company may, at its sole discretion and in the interests of the business, vary your role, duties, reporting line, place of work and hours from time to time.", requires: "working_pattern" },
+    { kind: "para", text: "The remuneration offered to you is an annual cost to company (CTC) of **{{ctc_in_words}}**, on which professional tax, income tax and other statutory deductions apply at the rates in force. The detailed breakup is set out in the **Salary Annexure** to this letter. Your remuneration is strictly confidential and is not to be disclosed to any other employee or third party.", requires: "ctc" },
+    { kind: "para", text: "This offer is made subject to, and is conditional upon, the following:", bold: true },
+    { kind: "bullets", items: [
+      "Satisfactory completion of reference, employment, education, identity and, where applicable, background and criminal-record verification. The Company reserves the right, at its sole discretion, to withdraw this offer or to terminate your employment at any time if any information or document furnished by you is found to be false, misleading or incomplete.",
+      "Your execution of the Company's Non-Disclosure, Non-Solicitation and Invention Assignment Agreement, and your continued compliance with all policies, codes and rules of the Company as amended from time to time.",
+      "Your being, and remaining, legally eligible to work and fit to perform the duties of the role, subject to any reasonable accommodation required by applicable law.",
+      "This being a letter of intent to offer employment. The binding Appointment Letter, setting out the full terms and conditions of your employment, will be issued to you on your date of joining and shall govern the employment relationship.",
+    ] },
+    { kind: "para", text: "During your employment you shall devote your whole time, attention and abilities to the business of the Company, shall not engage in any other trade, business, employment or consultancy without the Company's prior written consent, and shall not solicit its employees, customers or suppliers. You shall keep all confidential and proprietary information of the Company strictly confidential both during and after your employment, and all work product and intellectual property created by you in the course of your employment shall vest solely in the Company. To the extent permitted by applicable law, you authorise the Company to recover and set off any amount lawfully due from you - including notice-pay shortfall, advances, loans and the value of any unreturned Company property - against any amount payable to you." },
+    { kind: "para", text: "Joining Formalities:", bold: true },
+    { kind: "para", text: "Please submit the following documents at the time of your joining:" },
+    { kind: "bullets", items: [
+      "Signed copy of this offer letter",
+      "Educational qualification: marksheets and certificates of 10th, 12th, Graduation & Post Graduation (if any)",
+      "Relieving / resignation acceptance letter from present / previous employer",
+      "Documentary evidence of last salary drawn (payslips of last 3 months & Form 16)",
+      "One passport-size colour photograph",
+      "PAN Card",
+      "Aadhaar Card",
+    ] },
+    { kind: "para", text: "This offer is valid until **{{validity_date}}**. Please confirm your acceptance by signing below on or before that date, after which this offer stands automatically withdrawn without further notice.", requires: "validity_date" },
+    { kind: "para", text: "This letter, together with the documents referred to in it, constitutes the entire understanding between you and the Company in relation to this offer and supersedes all prior discussions, representations and correspondence, until superseded by the Appointment Letter. It may be varied only in writing signed by an authorized representative of the Company. If any provision is held invalid or unenforceable, the remaining provisions shall continue in full force. This letter is governed by the laws of India, with the courts at the Company's registered office having exclusive jurisdiction." },
+    { kind: "para", text: "We look forward to welcoming you to **{{company}}**. Should you have any questions, please reach out{{hr_contact_clause}} at your earliest convenience." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+    { kind: "gap", height: 10 },
+    { kind: "subject", text: "Acceptance and Declaration by the Employee" },
+    { kind: "para", text: "I, **{{legal_name}}**, have read and understood this offer of employment in its entirety and I accept it unconditionally. I confirm that the information and documents furnished by me to the Company are true, complete and accurate, and I consent to their verification and to the collection and processing of my personal data by the Company for employment and statutory purposes. I agree to be bound by the terms of this letter, the Appointment Letter to be issued to me, and all policies of the Company as amended from time to time. I agree that this document may be executed electronically, and that my acceptance and signature provided by electronic means are valid, binding and enforceable on me." },
+    { kind: "esignature", label: "Employee Signature", withDate: true },
+    { kind: "pageBreak", requires: "ctc" },
+    { kind: "subject", text: "Salary Annexure", requires: "ctc" },
+    { kind: "computed", ref: "ctc_annexure", requires: "ctc" },
+    { kind: "note", text: "NOTE: Net pay does not include taxes or other deductions (if any). The compensation package is subject to all applicable tax laws currently in force.", requires: "ctc" },
+  ],
+};
+
+const APPOINTMENT: LetterTemplate = {
+  id: "appointment",
+  label: "Appointment Letter",
+  category: ONBOARDING,
+  filename: "{{employee_name}} - Appointment Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Letter of Appointment" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "With reference to your application and the subsequent selection process, **{{company}}** (the \"Company\") is pleased to appoint you as **{{designation}}**{{department_clause}}{{reporting_to_clause}}, with effect from **{{joining_date}}**.{{probation_clause}} Your appointment is governed by the terms and conditions set out below." },
+    { kind: "para", text: "Your annual cost to company (CTC) is **{{ctc_in_words}}**, on which professional tax, income tax and other statutory deductions apply at the rates in force. The detailed breakup is provided in the **Salary Annexure**. Your remuneration is confidential and personal to you, and is subject to periodic review entirely at the discretion of the Company; a review does not imply or guarantee any increase.", requires: "ctc" },
+    { kind: "para", text: "Your normal working hours will be **{{working_pattern}}**{{work_location_suffix}}.", requires: "working_pattern" },
+    { kind: "para", text: "Terms and Conditions of Employment:", bold: true },
+    { kind: "bullets", items: [
+      "Duties and exclusivity: You shall diligently discharge the duties assigned to you and such other duties as the Company may reasonably require, shall devote your whole time and attention to the Company's business, and shall not, during your employment, engage in any other trade, business, employment or consultancy without the Company's prior written consent.",
+      "Place of work and mobility: You may be required, at the sole discretion of the Company, to work at, or be transferred or deputed to, any of its offices, group companies, clients or locations, whether in India or abroad, without diminution of your remuneration.",
+      "Policies and conduct: Your employment is at all times governed by, and you shall comply with, the policies, codes of conduct and rules of the Company as amended from time to time, which form part of these terms.",
+      "Confidentiality and intellectual property: You shall keep all confidential and proprietary information of the Company strictly confidential both during and after your employment. All work product, inventions and intellectual property created by you in the course of your employment shall vest solely and exclusively in the Company.",
+      "Non-solicitation and conflict of interest: During your employment and, to the extent permitted by applicable law, for twelve (12) months thereafter, you shall not solicit or entice away any employee, customer or supplier of the Company, and you shall promptly disclose and avoid any actual or potential conflict of interest.",
+      "Probation and confirmation: Confirmation of your employment is at the sole discretion of the Company upon satisfactory performance; until confirmed in writing, you remain on probation, which the Company may extend.",
+      "Termination and notice: After confirmation, either party may terminate this employment by serving the notice period stipulated in Company policy, or salary in lieu thereof. In the event of proven misconduct or material breach of these terms, the Company may, following the process required by applicable law and Company policy, terminate your employment without notice or pay in lieu. Nothing in this clause limits the protections available to you under applicable law.",
+      "Fitness and accuracy: This appointment is conditional on the accuracy of the documents and information furnished by you and on your fitness to perform the duties of the role, subject to any reasonable accommodation and protection required by applicable law; any misrepresentation by you renders this appointment liable to termination.",
+      "Recovery and set-off: To the extent permitted by applicable law, you authorise the Company to recover and set off any amount lawfully due from you - including notice-pay shortfall, advances, loans and the value of unreturned Company property - against any amount payable to you, including your full and final settlement.",
+      "Retirement: You shall retire from the services of the Company on attaining the age of superannuation as per Company policy.",
+      "Severability and survival: If any provision of these terms is held invalid or unenforceable, it shall be modified to the minimum extent necessary, or severed, and the remaining provisions shall continue in full force. Your obligations relating to confidentiality, intellectual property, non-solicitation and return of Company property survive the termination of your employment.",
+    ] },
+    { kind: "para", text: "This letter, together with the Company's policies and the Salary Annexure, constitutes the entire agreement between you and the Company and supersedes all prior offers, discussions and representations. It may be varied only in writing signed by an authorized representative of the Company, and is governed by the laws of India, with the courts at the Company's registered office having exclusive jurisdiction." },
+    { kind: "para", text: "We welcome you to **{{company}}** and look forward to a long and mutually rewarding association." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+    { kind: "gap", height: 10 },
+    { kind: "subject", text: "Acceptance and Declaration by the Employee" },
+    { kind: "para", text: "I, **{{legal_name}}**, have read, understood and accept this Letter of Appointment and all the terms and conditions set out in it and in the Company's policies. I confirm that the information and documents furnished by me are true, complete and accurate, and I consent to the collection and processing of my personal data by the Company for employment and statutory purposes. I agree to be bound by these terms during my employment with the Company. I agree that this document may be executed electronically, and that my acceptance and signature provided by electronic means are valid, binding and enforceable on me." },
+    { kind: "esignature", label: "Employee Signature", withDate: true },
+    { kind: "pageBreak", requires: "ctc" },
+    { kind: "subject", text: "Salary Annexure", requires: "ctc" },
+    { kind: "computed", ref: "ctc_annexure", requires: "ctc" },
+    { kind: "note", text: "NOTE: Net pay does not include taxes or other deductions (if any). The compensation package is subject to all applicable tax laws currently in force.", requires: "ctc" },
+  ],
+};
+
+const CONFIRMATION: LetterTemplate = {
+  id: "confirmation",
+  label: "Confirmation Letter",
+  category: ONBOARDING,
+  filename: "{{employee_name}} - Confirmation Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Confirmation of Employment" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "We are pleased to confirm your employment with **{{company}}** as **{{designation}}**{{department_clause}}, with effect from **{{joining_date}}**, following the successful completion of your probationary period." },
+    { kind: "para", text: "Your current annual CTC is **{{ctc_in_words}}**.", requires: "ctc" },
+    { kind: "para", text: "All the terms and conditions of your employment, including those relating to confidentiality, intellectual property, non-solicitation and notice, as set out in your Letter of Appointment and the Company's policies, continue to apply and remain in full force. We congratulate you and look forward to your continued contribution." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+  ],
+};
+
+const PROBATION_EXTENSION: LetterTemplate = {
+  id: "probation_extension",
+  label: "Probation Extension Letter",
+  category: ONBOARDING,
+  filename: "{{employee_name}} - Probation Extension",
+  blocks: [
+    { kind: "subject", text: "Subject: Extension of Probation" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "This is with reference to your employment with **{{company}}** as **{{designation}}**{{department_clause}}, which commenced on **{{joining_date}}**." },
+    { kind: "para", text: "After a review of your performance during the probationary period, the Company has decided to extend your probation. During the extended period, your performance will be reviewed again, and at the end of it the Company reserves the right, at its sole discretion and in accordance with applicable law, to confirm your employment, further extend your probation, or terminate your employment." },
+    { kind: "para", text: "All other terms and conditions of your employment remain unchanged and in full force. We encourage you to use this period to demonstrate the improvements discussed with you." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+  ],
+};
+
+// Binding confidentiality + IP-assignment agreement, signed by the employee in place (e-signature). Referenced
+// by the offer letter as an employment prerequisite. Company-protective throughout.
+const NDA: LetterTemplate = {
+  id: "nda",
+  label: "Confidentiality & IP Assignment Agreement",
+  category: AGREEMENTS,
+  filename: "{{employee_name}} - Confidentiality and IP Assignment Agreement",
+  blocks: [
+    { kind: "subject", text: "Subject: Non-Disclosure, Non-Solicitation and Invention Assignment Agreement" },
+    { kind: "para", text: "This Agreement is entered into between **{{company}}** (the \"Company\") and **{{legal_name}}** (the \"Employee\"){{exp_designation_clause}}, and forms part of, and is a condition of, the Employee's employment with the Company." },
+    { kind: "para", text: "1. Confidentiality.", bold: true },
+    { kind: "para", text: "The Employee acknowledges that in the course of employment the Employee will have access to confidential and proprietary information of the Company, including business plans, customer and supplier data, pricing, source code, trade secrets, financial and personnel information (\"Confidential Information\"). The Employee shall hold all Confidential Information in strict confidence, shall use it solely for the Company's benefit and in the discharge of assigned duties, and shall not disclose it to any third party, both during employment and at all times after its cessation. This obligation does not apply to information that is or becomes publicly available other than through the Employee's breach, or that the Employee is required to disclose by law or court or regulatory order, provided the Employee gives the Company prompt prior notice where lawfully permitted." },
+    { kind: "para", text: "2. Assignment of Intellectual Property.", bold: true },
+    { kind: "para", text: "All inventions, works, discoveries, designs, software and other intellectual property conceived, developed or reduced to practice by the Employee, whether alone or with others, in the course of or in connection with the employment, shall be the sole and exclusive property of the Company. The Employee hereby irrevocably assigns all right, title and interest in such intellectual property to the Company and agrees to execute all documents and do all acts necessary to perfect and protect the Company's rights, both during and after employment." },
+    { kind: "para", text: "3. Non-Solicitation.", bold: true },
+    { kind: "para", text: "During employment and, to the extent permitted by applicable law, for a period of twelve (12) months following its cessation, the Employee shall not, directly or indirectly, solicit, entice away or endeavour to engage any employee, consultant, customer or supplier of the Company, nor interfere with the Company's business relationships. Nothing in this Agreement restrains the Employee from lawfully exercising a profession, trade or business after the cessation of employment." },
+    { kind: "para", text: "4. Return of Property.", bold: true },
+    { kind: "para", text: "On cessation of employment, or earlier on the Company's request, the Employee shall return all Company property, documents and Confidential Information (in every form and copy) in the Employee's possession or control, and shall retain no copies." },
+    { kind: "para", text: "5. Remedies and General.", bold: true },
+    { kind: "para", text: "The Employee acknowledges that any breach of this Agreement would cause the Company irreparable harm for which damages alone would be inadequate, and that the Company shall be entitled to injunctive relief in addition to any other remedy. This Agreement survives the termination of employment, is in addition to the Employee's obligations under the Letter of Appointment and Company policy, is governed by the laws of India, and is subject to the exclusive jurisdiction of the courts at the Company's registered office. If any provision is held unenforceable, the remainder shall continue in full force." },
+    { kind: "para", text: "The Employee confirms that the Employee has read and understood this Agreement and agrees to be bound by it. The Employee agrees that this Agreement may be executed electronically, and that a signature provided by electronic means is valid, binding and enforceable." },
+    { kind: "gap", height: 6 },
+    { kind: "para", text: "Signed for and on behalf of the Company:" },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+    { kind: "gap", height: 10 },
+    { kind: "para", text: "Agreed and accepted by the Employee:" },
+    { kind: "esignature", label: "Employee Signature", withDate: true },
+  ],
+};
+
+const PROMOTION: LetterTemplate = {
+  id: "promotion",
+  label: "Promotion Letter",
+  category: CAREER,
+  filename: "{{employee_name}} - Promotion Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Promotion" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "We are pleased to inform you that, in recognition of your performance and contribution, you have been promoted from **{{old_designation}}** to **{{new_designation}}**, effective **{{role_effective_date}}**.", requires: "promotion" },
+    { kind: "para", text: "Your new role and responsibilities will be communicated to you by your reporting manager. All other terms and conditions of your employment remain unchanged." },
+    { kind: "para", text: "We congratulate you on this well-deserved recognition and look forward to your continued contribution." },
+    { kind: "signature", closing: "Best regards," },
+  ],
+};
+
+const TRANSFER: LetterTemplate = {
+  id: "transfer",
+  label: "Transfer Letter",
+  category: CAREER,
+  filename: "{{employee_name}} - Transfer Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Transfer" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "This is to inform you that you are being transferred {{transfer_clause}}, effective **{{role_effective_date}}**.", requires: "transfer" },
+    { kind: "para", text: "Your terms of employment remain unchanged except as stated above. We request you to coordinate with your reporting manager for a smooth transition of your responsibilities." },
+    { kind: "para", text: "We wish you continued success in your new assignment." },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+const INCREMENT: LetterTemplate = {
+  id: "increment",
+  label: "Increment Letter",
+  category: COMPENSATION,
+  filename: "{{employee_name}} - Increment Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Revision in Compensation" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "We are pleased to inform you that, in recognition of your performance and contribution, your compensation has been revised." },
+    { kind: "para", text: "Your revised annual CTC will be **{{inc_new_annual_words}}**, effective **{{inc_effective_date}}**.", requires: "increment" },
+    { kind: "computed", ref: "increment_table", requires: "increment" },
+    { kind: "para", text: "Your annual CTC is **{{ctc_in_words}}**, effective **{{date}}**.", requires: "ctc_no_increment" },
+    { kind: "para", text: "This revision is made at the sole discretion of the Company and does not create any entitlement to, or expectation of, any future revision. Your revised remuneration is confidential and personal to you. All other terms and conditions of your employment remain unchanged and in full force. We thank you for your continued commitment and look forward to your ongoing contribution." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+  ],
+};
+
+const APPRAISAL: LetterTemplate = {
+  id: "appraisal",
+  label: "Appraisal Letter",
+  category: COMPENSATION,
+  filename: "{{employee_name}} - Appraisal Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Performance Appraisal" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "We would like to acknowledge and appreciate your performance and contribution {{appraisal_role_clause}} over the appraisal period. Your dedication and commitment have been valuable to the organization." },
+    { kind: "para", text: "Following your appraisal, your annual CTC has been revised to **{{inc_new_annual_words}}**, effective **{{inc_effective_date}}**. A detailed compensation breakup is available with the HR team.", requires: "increment" },
+    { kind: "para", text: "Your current annual CTC stands at **{{ctc_in_words}}**. A detailed compensation breakup is available with the HR team.", requires: "ctc_no_increment" },
+    { kind: "para", text: "Any revision reflected above is made at the sole discretion of the Company and confers no entitlement to future revisions. All other terms and conditions of your employment remain unchanged. We look forward to your continued growth and success with us, and we are confident that you will keep raising the bar in the period ahead." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+  ],
+};
+
+const BONUS: LetterTemplate = {
+  id: "bonus",
+  label: "Bonus / Incentive Letter",
+  category: COMPENSATION,
+  filename: "{{employee_name}} - {{bonus_kind}}",
+  blocks: [
+    { kind: "subject", text: "Subject: {{bonus_kind}}" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "We are pleased to inform you that you have been awarded a {{bonus_kind}} of **{{bonus_amount_words}}**, with effect from **{{bonus_date}}**.{{bonus_reason_clause}}", requires: "bonus" },
+    { kind: "para", text: "The amount will be processed as per company policy, subject to applicable statutory deductions." },
+    { kind: "para", text: "We thank you for your efforts and look forward to your continued contribution." },
+    { kind: "signature", closing: "Best regards," },
+  ],
+};
+
+const SALARY_CERTIFICATE: LetterTemplate = {
+  id: "salary_certificate",
+  label: "Salary Certificate",
+  category: COMPENSATION,
+  filename: "{{employee_name}} - Salary Certificate",
+  blocks: [
+    { kind: "subject", text: "Subject: Salary Certificate" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "This is to certify that **{{employee_name}}** is employed with **{{company}}**{{exp_designation_clause}}{{exp_department_clause}} since **{{joining_date}}**." },
+    { kind: "para", text: "The current annual cost to company (CTC) is **{{ctc_in_words}}**. The detailed breakup is provided below.", requires: "ctc" },
+    { kind: "computed", ref: "ctc_annexure", requires: "ctc" },
+    { kind: "para", text: "This certificate is issued on request for the employee's records and may be used for official purposes." },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+const EMPLOYMENT_VERIFICATION: LetterTemplate = {
+  id: "employment_verification",
+  label: "Employment Verification",
+  category: VERIFICATION,
+  filename: "{{employee_name}} - Employment Verification",
+  blocks: [
+    { kind: "subject", text: "Subject: Employment Verification" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "This is to certify that **{{employee_name}}** is currently employed with **{{company}}**{{exp_designation_clause}}{{exp_department_clause}}, and has been with the organization since **{{joining_date}}**." },
+    { kind: "para", text: "This letter is issued at the request of the employee for the purpose of verification of employment. Should you require any further information, please contact us{{hr_contact_clause}}." },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+const NOC: LetterTemplate = {
+  id: "noc",
+  label: "No Objection Certificate",
+  category: VERIFICATION,
+  filename: "{{employee_name}} - No Objection Certificate",
+  blocks: [
+    { kind: "subject", text: "Subject: No Objection Certificate" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "This is to certify that **{{employee_name}}** is employed with **{{company}}**{{exp_designation_clause}}{{exp_department_clause}} since **{{joining_date}}**." },
+    { kind: "para", text: "The organization has **no objection** to the employee's application and confirms that there is no impediment from our side. We extend our support for the purpose for which this certificate has been requested." },
+    { kind: "para", text: "This certificate is issued on the employee's request." },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+const RECOMMENDATION: LetterTemplate = {
+  id: "recommendation",
+  label: "Recommendation Letter",
+  category: VERIFICATION,
+  filename: "{{employee_name}} - Recommendation Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Letter of Recommendation" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "It is my pleasure to recommend **{{employee_name}}**, who has been associated with **{{company}}**{{exp_designation_clause}}{{exp_department_clause}}." },
+    { kind: "para", text: "During this association, {{first_name}} has consistently demonstrated professionalism, strong commitment and a collaborative approach. {{first_name}}'s contribution has been valuable to the team and the organization." },
+    { kind: "para", text: "I am confident that {{first_name}} will be a valuable addition to any organization, and I recommend {{first_name}} without reservation. Please feel free to contact us{{hr_contact_clause}} for any further information." },
+    { kind: "signature", closing: "Sincerely," },
+  ],
+};
+
+const RELIEVING: LetterTemplate = {
+  id: "relieving",
+  label: "Relieving Letter",
+  category: EXIT,
+  filename: "{{employee_name}} - Relieving Letter",
+  blocks: [
+    { kind: "subject", text: "Subject: Relieving Letter" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "This is to certify that **{{employee_name}}**{{rel_role_clause}}, has been relieved of all duties and responsibilities{{tenure_clause}}." },
+    { kind: "para", text: "At the time of leaving, all dues and company property have been settled and there are no obligations pending against the employee. The employee's obligations of confidentiality, non-solicitation and assignment of intellectual property survive the cessation of employment." },
+    { kind: "para", text: "We thank **{{first_name}}** for the contribution during the tenure with us and wish every success in future endeavours." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+  ],
+};
+
+const RESIGNATION_ACCEPTANCE: LetterTemplate = {
+  id: "resignation_acceptance",
+  label: "Resignation Acceptance",
+  category: EXIT,
+  filename: "{{employee_name}} - Resignation Acceptance",
+  blocks: [
+    { kind: "subject", text: "Subject: Acceptance of Resignation" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "This is to acknowledge and accept your resignation from the position of **{{designation}}**{{department_clause}} at **{{company}}**. Your last working day with the organization will be **{{end_date}}**." },
+    { kind: "para", text: "You are required to serve your notice period, ensure a smooth handover of your responsibilities, and return all Company property on or before your last working day. Your full and final settlement will be processed as per Company policy, subject, to the extent permitted by applicable law, to the Company's right to recover and set off any amount lawfully due from you. Your obligations of confidentiality, non-solicitation and assignment of intellectual property survive the cessation of your employment." },
+    { kind: "para", text: "We thank **{{first_name}}** for the contribution during the tenure with us and wish every success in future endeavours." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+  ],
+};
+
+const EXPERIENCE: LetterTemplate = {
+  id: "experience",
+  label: "Experience Certificate",
+  category: EXIT,
+  filename: "{{employee_name}} - Experience Certificate",
+  blocks: [
+    { kind: "subject", text: "Subject: Experience Certificate" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "This is to certify that **{{employee_name}}** was employed with **{{company}}**{{exp_designation_clause}}{{exp_department_clause}} {{employment_period}}." },
+    { kind: "para", text: "During the tenure with us, {{first_name}} was found to be sincere, hardworking and professional in conduct. We found the contribution to be valuable." },
+    { kind: "para", text: "We wish **{{first_name}}** all the best for future endeavours." },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+const SETTLEMENT: LetterTemplate = {
+  id: "settlement",
+  label: "Full & Final Settlement",
+  category: EXIT,
+  filename: "{{employee_name}} - Full and Final Settlement",
+  blocks: [
+    { kind: "subject", text: "Subject: Full and Final Settlement" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "para", text: "This letter sets out the full and final settlement of your dues consequent to your separation from **{{company}}**, with your last working day being **{{settlement_date}}**." },
+    { kind: "para", text: "Your settlement is computed as follows:", requires: "settlement" },
+    { kind: "computed", ref: "settlement_table", requires: "settlement" },
+    { kind: "para", text: "The net amount payable to you is **{{settlement_net_words}}**, which will be credited to your registered bank account, subject to applicable statutory deductions, the return of all Company property, and, to the extent permitted by applicable law, the Company's right to recover and set off any amount lawfully due from you against this settlement.", requires: "settlement" },
+    { kind: "para", text: "This full and final settlement is issued in complete and final discharge of all dues payable by the Company to you. Your obligations of confidentiality, non-solicitation and assignment of intellectual property, as set out in your Letter of Appointment, survive the termination of your employment. On receipt of the above amount, you confirm that you have no further claim of any nature whatsoever against the Company, its group companies, or their officers and employees. The Company reserves its right to recover any amount subsequently found to be due from you on account of error, overpayment, fraud or misstatement.", requires: "settlement" },
+    { kind: "para", text: "We thank you for your contribution during your tenure with us and wish you the very best for the future." },
+    { kind: "signature", closing: "For and on behalf of {{company}}," },
+    { kind: "gap", height: 10 },
+    { kind: "subject", text: "Acknowledgement by the Employee", requires: "settlement" },
+    { kind: "para", text: "I, **{{legal_name}}**, acknowledge and accept the above full and final settlement in complete satisfaction of all my dues, and confirm that I have no further claim of any nature against **{{company}}**. I agree that my acknowledgement and signature provided by electronic means are valid, binding and enforceable on me.", requires: "settlement" },
+    { kind: "esignature", label: "Employee Signature", withDate: true, requires: "settlement" },
+  ],
+};
+
+const INTERNSHIP_COMPLETION: LetterTemplate = {
+  id: "internship_completion",
+  label: "Internship Completion Certificate",
+  category: EXIT,
+  filename: "{{employee_name}} - Internship Completion Certificate",
+  blocks: [
+    { kind: "subject", text: "Subject: Internship Completion Certificate" },
+    { kind: "para", text: "To Whomsoever It May Concern," },
+    { kind: "para", text: "This is to certify that **{{employee_name}}** has successfully completed an internship with **{{company}}**{{exp_designation_clause}}{{exp_department_clause}} {{employment_period}}." },
+    { kind: "para", text: "During the internship, {{first_name}} was found to be diligent, enthusiastic and quick to learn, and made a positive contribution to the team." },
+    { kind: "para", text: "We wish **{{first_name}}** all the best for future endeavours." },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+// Generic letter: HR supplies the subject + body at generation time; the letterhead, date and recipient are
+// auto-filled. The body is rendered one paragraph per line, with {{placeholders}} and **bold** supported.
+const OTHER_LETTER: LetterTemplate = {
+  id: "other",
+  label: "Other Letter",
+  category: OTHER,
+  filename: "{{employee_name}} - {{subject}}",
+  inputs: [
+    { key: "subject", label: "Subject", type: "text", required: true, placeholder: "e.g. Confirmation of Address" },
+    { key: "body", label: "Letter body", type: "multiline", required: true, placeholder: "Type the letter content. One paragraph per line; **bold** and {{placeholders}} are supported." },
+  ],
+  blocks: [
+    { kind: "subject", text: "Subject: {{subject}}" },
+    { kind: "para", text: "Dear {{first_name}}," },
+    { kind: "input", field: "body" },
+    { kind: "signature", closing: "For {{company}}," },
+  ],
+};
+
+// Order matters: it's the order shown within each category in the editor + pickers.
+export const DEFAULT_LETTER_TEMPLATES: LetterTemplate[] = [
+  OFFER, APPOINTMENT, CONFIRMATION, PROBATION_EXTENSION,
+  NDA,
+  PROMOTION, TRANSFER,
+  INCREMENT, APPRAISAL, BONUS, SALARY_CERTIFICATE,
+  EMPLOYMENT_VERIFICATION, NOC, RECOMMENDATION,
+  RELIEVING, RESIGNATION_ACCEPTANCE, SETTLEMENT, EXPERIENCE, INTERNSHIP_COMPLETION,
+  OTHER_LETTER,
+];
+
+
+// Deterministic 13-char base32 id from a counter (offset 5000 to never collide with genSeed's login/demo ids).
+const tid = (n: number) => {
+  const b = new Uint8Array(8);
+  let x = BigInt(n + 5000);
+  for (let i = 7; i >= 0; i--) { b[i] = Number(x & 0xffn); x >>= 8n; }
+  return bytesToBase32(b);
+};
+const sq = (s: string | null | undefined) => (s == null ? "NULL" : `'${String(s).replace(/'/g, "''")}'`);
+const sj = (v: unknown) => (v == null ? "NULL" : `'${JSON.stringify(v).replace(/'/g, "''")}'`);
+const code2 = (n: number) => String(n).padStart(2, "0");
+
+// Templates are a first-class collection (letter_templates), so the seed inserts ROWS (each an addressable
+// object with its own code -> per-template access via the ACL icon), not a settings blob. Emit one INSERT per
+// CHUNK of rows (not a single mega-statement) so no statement nears D1's per-statement size cap.
+const CHUNK = 5;
+function chunkedInsert(header: string, rows: string[]): string {
+  const out: string[] = [];
+  for (let i = 0; i < rows.length; i += CHUNK) out.push(`${header}\n${rows.slice(i, i + CHUNK).join(",\n")};`);
+  return out.join("\n");
+}
+
+export function renderTemplatesSeed(): string {
+  let counter = 0;
+  const letterRows = DEFAULT_LETTER_TEMPLATES.map((t, i) =>
+    ` (${sq(tid(counter++))},${sq(code2(i + 1))},${sq(t.label)},${sq(t.category ?? null)},${sq(t.filename ?? null)},${sj(t.inputs ?? null)},${sj(t.blocks)},${SEED_TS},${SEED_TS})`,
+  );
+  return [
+    "-- Generated by scripts/genTemplatesSeed.ts - default HR templates (initial seed only; HR edits at runtime).",
+    "-- Apply with: npx wrangler d1 execute hrms --local --file=scripts/templates.sql",
+    chunkedInsert("INSERT INTO letter_templates (uuid,code,label,category,filename,inputs,blocks,created_at,updated_at) VALUES", letterRows),
+    "",
+  ].join("\n");
+}
+
+if (typeof process !== "undefined" && import.meta.url === `file://${process.argv?.[1]}`) {
+  console.log(renderTemplatesSeed());
+}

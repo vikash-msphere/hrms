@@ -7,7 +7,7 @@
 // (SLA escalations, webhooks) ship DISABLED so an admin opts in.
 //
 // Grammar: src/domain/automations.ts (conditions + action catalog). Triggers: src/domain/events.ts EVENT_TYPES.
-import { Ctx, T0, q, b, j, code2, rows } from "../lib";
+import { type Ctx, T0, q, b, j, code2, rows } from "../lib";
 import type { Action, Condition, Schedule } from "../../src/domain/automations";
 import { SCHEDULE_TRIGGER } from "../../src/domain/automations";
 
@@ -821,7 +821,7 @@ export const AUTOMATIONS: AutomationSeed[] = [
   // -------------------------------------------------------------------------------------------------------
   // Scheduled (time-driven) rules. A daily scanner fires these when the recurrence matches - no inbound event.
   // `once` rules broadcast to an audience; `perEmployee` rules fan out per active employee with derived metrics
-  // (pendingApprovals / daysSinceLastLeave / leaveBalanceDays) in scope, so the condition can be genuinely
+  // (pendingApprovals / daysSinceLastLeave / leaveBalanceDays / goalsDueSoon / goalsOverdue) in scope, so the condition can be genuinely
   // smart. Enabled by default - they're gentle, opt-out nudges that make the app feel proactive.
   // -------------------------------------------------------------------------------------------------------
 
@@ -857,6 +857,29 @@ export const AUTOMATIONS: AutomationSeed[] = [
     enabled: false,
     condition: { all: [{ field: "daysSinceLastLeave", op: "gte", value: 180 }, { field: "leaveBalanceDays", op: "gte", value: 5 }] },
     actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Due for a break?", body: "You haven't taken leave in a while and have {{leaveBalanceDays}} days in balance. Consider planning some time off." }],
+  },
+
+  // Performance: goals shouldn't slip silently. Weekly owner nudge for goals inside the 7-day due window.
+  {
+    name: "Monday: nudge owners of goals due soon",
+    description: "Every Monday, remind each employee who has open goals due within the next 7 days to push them over the line (or move the date).",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "goalsDueSoon", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Goals due this week", body: "You have {{goalsDueSoon}} goal(s) due within a week. Update progress or adjust the due date.", link: "goals" }],
+  },
+
+  // Performance: overdue goals ping the owner AND surface to their manager - slippage becomes a conversation.
+  {
+    name: "Monday: chase overdue goals",
+    description: "Every Monday, remind each employee with overdue goals to update or reschedule them, and let their manager know so it can come up in a 1:1.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "goalsOverdue", op: "gte", value: 1 },
+    actions: [
+      { kind: "notify", recipient: { of: "subject" }, title: "Overdue goals", body: "You have {{goalsOverdue}} overdue goal(s). Update progress, push the due date, or close them out.", link: "goals" },
+      { kind: "notifyManager", noun: "report has overdue goals" },
+    ],
   },
 
   // Month start: open the payroll-prep checklist for the finance team (broadcast, no per-employee fan-out).

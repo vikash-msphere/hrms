@@ -82,7 +82,8 @@ export function subresourceBodyKey(sub: string): string | null {
 // body owner is an unverified object reference - the BOLA gap). For each, the middleware requires the
 // caller may create under that owner: the ref resolves to an employee code and the caller has write on
 // `<collection>.<ownerCode>` (own via `me`, or an admin who may write that owner's namespace). `collection`
-// is the ref TARGET (always employees here). holiday-selections is omitted: its service forces self.
+// is the ref TARGET (always employees here). holiday-selections and loans are omitted: their services force
+// self, so there is no body owner to gate (a loan/advance is requested for the caller and no one else).
 export type OwnerRef = { collection: string };
 export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   "leave-requests": { employee: { collection: "employees" } },
@@ -106,7 +107,6 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   "benefit-enrollments": { employee: { collection: "employees" } },
   "shift-assignments": { employee: { collection: "employees" } },
   "time-entries": { employee: { collection: "employees" } },
-  loans: { employee: { collection: "employees" } },
   "tax-declarations": { employee: { collection: "employees" } },
   // A ticket is owned by its requester employee. Absent = the caller (self-service). Present = raise it ON
   // BEHALF OF that employee - the middleware gates it (needs write on tickets.<ownerCode>), so an ordinary

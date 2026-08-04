@@ -4,7 +4,7 @@
 
 // One column on the board. The column IS the workflow state (no separate enum). `wipLimit` null = unlimited.
 // `policy` is the explicit column policy (definition of done / entry criteria) shown on the header. Exactly one
-// column should carry `isCommitment` (work is committed to on entry -> starts lead time) and one `isDelivery`
+// column should carry `commitment` (work is committed to on entry -> starts lead time) and one `delivery`
 // (work is delivered on entry -> ends lead/cycle time); columns before the commitment point are the "options"
 // backlog (uncommitted).
 // How a column's WIP limit is counted: board-wide (every card in the column, the canonical Kanban constraint)
@@ -16,8 +16,8 @@ export type BoardColumn = {
   wipLimit: number | null;
   limitScope?: WipScope;
   policy: string;
-  isCommitment: boolean;
-  isDelivery: boolean;
+  commitment: boolean;
+  delivery: boolean;
 };
 
 export type SwimlaneMode = "none" | "assignee" | "goal" | "priority" | "department" | "custom";
@@ -35,21 +35,21 @@ export type CardPriority = (typeof CARD_PRIORITIES)[number];
 // Sensible starter board: an options backlog, a committed "Ready" column, work + review WIP-limited columns,
 // and a delivery "Done" column. Teams reshape it via the `configure` verb.
 export const DEFAULT_BOARD_COLUMNS: BoardColumn[] = [
-  { key: "backlog", label: "Backlog", wipLimit: null, policy: "Anything proposed. Not yet committed.", isCommitment: false, isDelivery: false },
-  { key: "ready", label: "Ready", wipLimit: 5, policy: "Refined, estimated, and ready to pull. Entering here commits the work.", isCommitment: true, isDelivery: false },
-  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", isCommitment: false, isDelivery: false },
-  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", isCommitment: false, isDelivery: false },
-  { key: "done", label: "Done", wipLimit: null, policy: "Accepted and delivered.", isCommitment: false, isDelivery: true },
+  { key: "backlog", label: "Backlog", wipLimit: null, policy: "Anything proposed. Not yet committed.", commitment: false, delivery: false },
+  { key: "ready", label: "Ready", wipLimit: 5, policy: "Refined, estimated, and ready to pull. Entering here commits the work.", commitment: true, delivery: false },
+  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", commitment: false, delivery: false },
+  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", commitment: false, delivery: false },
+  { key: "done", label: "Done", wipLimit: null, policy: "Accepted and delivered.", commitment: false, delivery: true },
 ];
 
 // Scrum default columns: the IN-SPRINT workflow only (the product backlog is the separate "no sprint" set,
 // so there is deliberately no "Backlog" column here). Entering "To do" commits the item to the sprint board
 // (lead time starts); "Done" is the delivery point.
 export const DEFAULT_SCRUM_COLUMNS: BoardColumn[] = [
-  { key: "to_do", label: "To do", wipLimit: null, policy: "Pulled into the sprint, not yet started.", isCommitment: true, isDelivery: false },
-  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", isCommitment: false, isDelivery: false },
-  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", isCommitment: false, isDelivery: false },
-  { key: "done", label: "Done", wipLimit: null, policy: "Meets the definition of done.", isCommitment: false, isDelivery: true },
+  { key: "to_do", label: "To do", wipLimit: null, policy: "Pulled into the sprint, not yet started.", commitment: true, delivery: false },
+  { key: "in_progress", label: "In progress", wipLimit: 3, policy: "Actively being worked. One person, one card.", commitment: false, delivery: false },
+  { key: "review", label: "Review", wipLimit: 3, policy: "Awaiting review / verification.", commitment: false, delivery: false },
+  { key: "done", label: "Done", wipLimit: null, policy: "Meets the definition of done.", commitment: false, delivery: true },
 ];
 
 const KEY_RE = /^[a-z0-9][a-z0-9_]*$/;
@@ -71,12 +71,12 @@ export function normalizeColumns(input: unknown): BoardColumn[] {
     const wl = c.wipLimit;
     const wipLimit = wl == null || wl === "" ? null : Math.max(0, Math.trunc(Number(wl)));
     if (wipLimit !== null && Number.isNaN(wipLimit)) throw new Error(`wip limit for "${key}" is invalid`);
-    const isCommitment = !!c.isCommitment;
-    const isDelivery = !!c.isDelivery;
-    if (isCommitment) commit++;
-    if (isDelivery) deliver++;
+    const commitment = !!c.commitment;
+    const delivery = !!c.delivery;
+    if (commitment) commit++;
+    if (delivery) deliver++;
     const limitScope: WipScope = c.limitScope === "assignee" ? "assignee" : "column";
-    return { key, label, wipLimit, limitScope, policy: String(c.policy ?? "").trim(), isCommitment, isDelivery };
+    return { key, label, wipLimit, limitScope, policy: String(c.policy ?? "").trim(), commitment, delivery };
   });
   if (commit > 1) throw new Error("only one column may be the commitment point");
   if (deliver > 1) throw new Error("only one column may be the delivery point");
@@ -148,8 +148,8 @@ export function columnIndex(cols: BoardColumn[], key: string): number {
   return cols.findIndex((c) => c.key === key);
 }
 export function commitmentIndex(cols: BoardColumn[]): number {
-  return cols.findIndex((c) => c.isCommitment);
+  return cols.findIndex((c) => c.commitment);
 }
 export function deliveryKey(cols: BoardColumn[]): string | null {
-  return cols.find((c) => c.isDelivery)?.key ?? null;
+  return cols.find((c) => c.delivery)?.key ?? null;
 }

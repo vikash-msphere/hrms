@@ -34,7 +34,7 @@ const statusVariant: Record<string, "secondary" | "warning" | "success" | "muted
 
 export default function Suggestions({ me, openId }: { me: Me; openId?: string }) {
   void me;
-  const { rows, state, error, reload } = useCollection<Suggestion>("suggestions");
+  const { rows, setRows, state, error, reload } = useCollection<Suggestion>("suggestions");
   const { rows: employees } = useCollection<Employee>("employees");
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -74,13 +74,32 @@ export default function Suggestions({ me, openId }: { me: Me; openId?: string })
     } catch (e) { toast({ title: "Couldn't submit", description: (e as Error).message, variant: "destructive" }); }
     finally { setBusy(false); }
   }
+  // The local mirror of the server's toggle: same direction clears the vote, the other direction switches it.
+  const applyVote = (s: Suggestion, dir: 1 | -1): Suggestion => {
+    const next = s.my_vote === dir ? 0 : dir;
+    let { upvotes, downvotes } = s;
+    if (s.my_vote === 1) upvotes--;
+    if (s.my_vote === -1) downvotes--;
+    if (next === 1) upvotes++;
+    if (next === -1) downvotes++;
+    return { ...s, my_vote: next as -1 | 0 | 1, upvotes, downvotes };
+  };
   const [voting, setVoting] = useState<string | null>(null);
   async function vote(s: Suggestion, dir: 1 | -1) {
     if (voting) return; // one vote in flight at a time - rapid clicks would race the toggle
     setVoting(s.path);
-    try { await invoke(`suggestions/${idOf(s.path)}`, dir === 1 ? "upvote" : "downvote"); await reload(); }
-    catch (e) { toast({ title: "Couldn't vote", description: (e as Error).message, variant: "destructive" }); }
-    finally { setVoting(null); }
+    // Optimistic: the tally moves under the click; the server's reserialized row then reconciles it (or the
+    // original row comes back on failure). No collection refetch either way (see resourceStore's verb map).
+    setRows((prev) => prev.map((r) => (r.path === s.path ? applyVote(r, dir) : r)));
+    try {
+      const updated = await invoke<Suggestion>(`suggestions/${idOf(s.path)}`, dir === 1 ? "upvote" : "downvote");
+      setRows((prev) => prev.map((r) => (r.path === s.path ? { ...r, ...updated } : r)));
+    } catch (e) {
+      setRows((prev) => prev.map((r) => (r.path === s.path ? s : r)));
+      toast({ title: "Couldn't vote", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setVoting(null);
+    }
   }
   async function del(s: Suggestion) {
     if (!(await confirm({ title: "Remove this suggestion?", description: `"${s.title}" and its votes will be permanently removed.`, confirmLabel: "Remove", destructive: true }))) return;
@@ -173,7 +192,7 @@ export default function Suggestions({ me, openId }: { me: Me; openId?: string })
                       </div>
                     )}
                     <div className="mt-2 flex items-center gap-2">
-                      {can.includes("respond") && <Button size="sm" variant="outline" onClick={() => setRespondFor(s)}><MessageSquare className="h-3.5 w-3.5" /> Respond</Button>}
+                      {can.includes("respond") && <AccessAction verb="respond" can={can} label="Respond to suggestion"><Button size="sm" variant="outline" onClick={() => setRespondFor(s)}><MessageSquare className="h-3.5 w-3.5" /> Respond</Button></AccessAction>}
                       {can.includes("delete") && <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" onClick={() => del(s)}><Trash2 className="h-3.5 w-3.5" /> Remove</Button>}
                     </div>
                   </div>

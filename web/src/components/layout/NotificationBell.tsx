@@ -52,7 +52,7 @@ export function NotificationBell() {
     open_(n);
   };
   // Relative wake time for a snoozed row ("in 40m", "in 3h", "in 2d").
-  const untilLabel = (iso?: string): string => {
+  const untilLabel = (iso?: string | null): string => {
     if (!iso) return "";
     const m = Math.max(0, Math.round((+new Date(iso) - Date.now()) / 60000));
     if (m < 1) return "now";

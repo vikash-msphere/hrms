@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../env";
 import type { AppUser } from "../env";
-import { listReviews, getReview, submitSelf, submitManager, acknowledgeReview, skipReviewStage } from "../services/reviews";
+import { listReviews, getReview, submitSelf, submitManager, acknowledgeReview, skipReviewStage, nudgeReview, renderReviewPdf } from "../services/reviews";
 import { nominateFeedback, feedbackForReviews } from "../services/reviewFeedback";
 import { toReviewResource } from "../http/serialize";
 import { withAccess } from "../http/accessHint";
@@ -46,8 +46,11 @@ export const reviews = new Hono<AppEnv>()
     const user = c.get("user");
     const out = async (row: any) => c.json(serialize(user, row, (await feedbackForReviews(deps, [row.uuid])).get(row.uuid) ?? [], c.get("objectGrant")));
     if (verb === "submitSelf") {
-      const { self_comment } = z.object({ self_comment: z.string().nullable().optional() }).strict().parse(await c.req.json().catch(() => ({})));
-      return out(await submitSelf(deps, user, id, self_comment));
+      const { self_comment, self_ratings } = z.object({
+        self_comment: z.string().nullable().optional(),
+        self_ratings: z.record(z.string(), z.number()).optional(),
+      }).strict().parse(await c.req.json().catch(() => ({})));
+      return out(await submitSelf(deps, user, id, self_comment, self_ratings));
     }
     if (verb === "submitManager") {
       const body = z.object({
@@ -61,7 +64,16 @@ export const reviews = new Hono<AppEnv>()
       const { employees } = z.object({ employees: z.array(z.string()).min(1) }).strict().parse(await c.req.json().catch(() => ({})));
       return out(await nominateFeedback(deps, user, id, employees));
     }
-    if (verb === "acknowledge") return out(await acknowledgeReview(deps, user, id));
+    if (verb === "acknowledge") {
+      const { comment } = z.object({ comment: z.string().nullable().optional() }).strict().parse(await c.req.json().catch(() => ({})));
+      return out(await acknowledgeReview(deps, user, id, comment));
+    }
     if (verb === "skipStage") return out(await skipReviewStage(deps, user, id));
+    if (verb === "nudge") return out(await nudgeReview(deps, user, id));
+    if (verb === "pdf") {
+      const { bytes, fileName } = await renderReviewPdf(deps, user, id);
+      // pdf-lib returns a Uint8Array over an ArrayBufferLike; hand Hono a plain ArrayBuffer copy.
+      return c.body(bytes.slice().buffer, 200, { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${fileName}"` });
+    }
     return c.notFound();
   });

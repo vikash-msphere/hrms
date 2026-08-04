@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte } from "drizzle-orm";
+import { eq, and, isNull, gte, sql } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -12,7 +12,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
-import { installmentAmount, isFullyRepaid } from "../domain/loans";
+import { installmentAmount, isFullyRepaid, outstandingOf } from "../domain/loans";
 
 type Status = typeof schema.loans.$inferSelect.status;
 export type LoanInput = {
@@ -26,6 +26,7 @@ export type LoanInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 import { round2 } from "../domain/money";
+import type { BatchStmt, CheckedStmt } from "../lib/dbBatch";
 const MANUAL_REPAY_DEDUP_MS = 60_000; // an identical manual repayment within 60s = accidental double-submit
 
 export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false) {
@@ -43,9 +44,15 @@ export async function getLoan(deps: Deps, _actor: AppUser, id: string) {
   return row;
 }
 
+// SELF-SERVICE ONLY: a loan/advance request is always for the caller. There is no on-behalf-of path - `employee`
+// is readOnly on the wire and this forces it, so no role (HR, payroll, super) can borrow in someone else's name.
+// Same shape as holiday-selections: the service forces self, so `loans` carries no owner_ref for the middleware
+// to gate. Everything AFTER the request (approve / reject / disburse / recordRepayment) stays an admin action.
 export async function createLoan(deps: Deps, actor: AppUser, input: LoanInput, id?: string) {
-  const employeeId = idFromPath(input.employee) ?? actor.employeeId;
-  if (!employeeId) throw invalidArgument("employee is required");
+  const employeeId = actor.employeeId;
+  if (!employeeId) throw invalidArgument("only a user linked to an employee record can request a loan or advance");
+  const asked = idFromPath(input.employee);
+  if (asked && asked !== employeeId) throw invalidArgument("a loan or advance can only be requested for yourself");
   const principal = input.principal ?? 0;
   if (!(principal > 0)) throw invalidArgument("principal must be greater than 0");
   const installments = Math.max(1, Math.round(input.installments ?? 1));
@@ -146,16 +153,39 @@ export async function recordLoanRepayment(deps: Deps, actor: AppUser, id: string
     .from(schema.loanRepayments)
     .where(and(eq(schema.loanRepayments.loanId, id), isNull(schema.loanRepayments.runId), gte(schema.loanRepayments.at, cutoff)));
   if (recent.some((r) => round2(r.amount) === applied)) return row;
-  const repaid = round2(row.repaid + applied);
   await deps.db.insert(schema.loanRepayments).values({ loanId: id, runId: null, amount: applied, at: new Date() });
-  // No expectFrom: the DISBURSED check + dedup window above already gate this; the row exists (uuid matched).
-  const updated = (await setStatus(deps, id, { repaid, ...(repaid >= row.principal ? { status: "CLOSED" } : {}) }))!;
+  // Advance `repaid` by the delta in SQL (repaidCreditStmt), never by an absolute total computed from the read
+  // above: a payroll build committing an installment in between would otherwise be erased, leaving the
+  // employee owing an installment they already paid.
+  await repaidCreditStmt(deps, id, applied, new Date());
   await audit(deps, actor, "loan.recordRepayment", "loans", id);
-  return updated;
+  return await load(deps, id);
 }
 
 // ---- Payroll integration (domain PULL, mirrors bonuses/reimbursements) ----
 type LoanRow = typeof schema.loans.$inferSelect;
+
+// Credit a repayment to a loan: advance `repaid` by the amount IN SQL and re-derive CLOSED from the result in
+// the same statement. The ledger (loan_repayments) is the source of truth and `repaid` is its running total,
+// so every writer moves it relatively - writing an absolute total computed from an earlier read silently
+// discards any repayment committed in between (a payroll build's installment landing next to a manual
+// repayment), leaving the loan owing money it has already collected. Clamped at the principal so no rounding
+// path overshoots. Guarded on the loan still being collectible: one closed or soft-deleted between a build's
+// read and its commit must not take another installment. Returns the UNEXECUTED statement so the payroll
+// build can batch it - and check it, since a rejected credit means the payslip is deducting for a loan that
+// no longer owes anything.
+export function repaidCreditStmt(deps: Deps, loanId: string, amount: number, at: Date) {
+  const moved = sql`round(${schema.loans.repaid} + ${amount}, 2)`;
+  return deps.db
+    .update(schema.loans)
+    .set({
+      repaid: sql`min(${schema.loans.principal}, ${moved})`,
+      // Fully repaid, within the same epsilon as isFullyRepaid.
+      status: sql`case when ${moved} >= ${schema.loans.principal} - 0.005 then 'CLOSED' else ${schema.loans.status} end`,
+      updatedAt: at,
+    })
+    .where(and(eq(schema.loans.uuid, loanId), eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
+}
 
 // Installments due from an employee's DISBURSED loans this run: EMI capped at the outstanding balance (pure
 // math in domain/loans.ts). The payroll build turns each into a "Loan repayment" deduction line. (Deferred:
@@ -168,33 +198,102 @@ export async function dueLoanInstallments(deps: Deps, employeeId: string): Promi
   return loans.map((l) => ({ loan: l, amount: installmentAmount(l) })).filter((x) => x.amount > 0.005);
 }
 
-// Idempotent rebuild: undo any repayments THIS run recorded (decrement `repaid`, reopen a loan it closed),
-// then delete the ledger rows - so a re-build re-applies cleanly. Mirrors resetBonusesPaidByRun.
-export async function resetLoanRepaymentsByRun(deps: Deps, runId: string): Promise<void> {
-  const rows = await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.runId, runId));
-  for (const r of rows) {
-    const loan = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, r.loanId)).limit(1))[0];
-    if (loan) {
-      const repaid = Math.max(0, round2(loan.repaid - r.amount));
-      await deps.db.update(schema.loans).set({ repaid, ...(loan.status === "CLOSED" ? { status: "DISBURSED" as const } : {}), updatedAt: new Date() }).where(eq(schema.loans.uuid, r.loanId));
-    }
-  }
-  await deps.db.delete(schema.loanRepayments).where(eq(schema.loanRepayments.runId, runId));
+// An exiting employee's still-collectible loans and what each still owes. The FnF settlement recovers the
+// WHOLE outstanding (not one installment): after the exit transition the employee is in no payroll run, so
+// the final settlement is the last chance to recover the balance.
+export async function outstandingLoans(deps: Deps, employeeId: string): Promise<{ uuid: string; kind: string; outstanding: number }[]> {
+  const loans = await deps.db
+    .select()
+    .from(schema.loans)
+    .where(and(eq(schema.loans.employeeId, employeeId), eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
+  return loans
+    .map((l) => ({ uuid: l.uuid, kind: l.kind, outstanding: outstandingOf(l) }))
+    .filter((l) => l.outstanding > 0.005);
 }
 
-// Record this run's loan deductions: write the ledger, advance each loan's `repaid`, CLOSE it when fully repaid,
-// and announce it (loan.repaymentRecorded / loan.closed) for automations/observability. System-emitted.
-export async function markLoanRepaymentsByRun(deps: Deps, entries: { loanId: string; amount: number }[], runId: string, at: Date): Promise<void> {
+// Every employee's due installments in one read, keyed by employee - the run build's shape (one select for
+// the whole org instead of one per employee, to stay inside the per-invocation subrequest budget).
+export async function dueLoanInstallmentsAll(deps: Deps): Promise<Map<string, { loan: LoanRow; amount: number }[]>> {
+  const loans = await deps.db.select().from(schema.loans).where(and(eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
+  const out = new Map<string, { loan: LoanRow; amount: number }[]>();
+  for (const l of loans) {
+    const amount = installmentAmount(l);
+    if (amount <= 0.005) continue;
+    const arr = out.get(l.employeeId);
+    if (arr) arr.push({ loan: l, amount });
+    else out.set(l.employeeId, [{ loan: l, amount }]);
+  }
+  return out;
+}
+
+// Idempotent rebuild: undo any repayments THIS run recorded (re-derive `repaid`, reopen a loan it closed),
+// then delete the ledger rows - so a re-build re-applies cleanly. Mirrors resetBonusesPaidByRun. Split into
+// a read half and a statement half so the build can fold the writes into its atomic reset batch: the one
+// read here (the run's ledger rows) is a single subrequest however many loans are involved - the balances
+// go through recomputeRepaidStmt, which needs no loan read because it re-sums the ledger in SQL.
+export async function resetLoanRepaymentStmts(deps: Deps, runId: string): Promise<BatchStmt[]> {
+  const rows = await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.runId, runId));
+  const stmts: BatchStmt[] = [];
+  // A loan can have at most one ledger row per run, but sum defensively.
+  const decrement = new Map<string, number>();
+  for (const r of rows) decrement.set(r.loanId, round2((decrement.get(r.loanId) ?? 0) + r.amount));
+  const at = new Date();
+  for (const loanId of decrement.keys()) stmts.push(recomputeRepaidStmt(deps, loanId, at, runId));
+  stmts.push(deps.db.delete(schema.loanRepayments).where(eq(schema.loanRepayments.runId, runId)));
+  return stmts;
+}
+
+// Re-derive a loan's `repaid` from the ledger, ignoring the rows this run wrote (deleted in the same batch).
+// `repaid` is by definition the running total of loan_repayments, so recomputing it is exact whatever state
+// the row is in. Subtracting the run's ledger amounts instead would be wrong in one real case: the build's
+// increment is guarded on the loan still being collectible while its ledger row is not, so a build that lost
+// that race wrote a ledger row without ever advancing `repaid` - and the subtraction would then wipe out an
+// installment the employee actually paid.
+// `exceptRunId` omitted = re-derive from the WHOLE ledger (used after a settlement's repayment rows are
+// deleted); passed = ignore that run's rows too, since they are deleted in the same batch.
+export function recomputeRepaidStmt(deps: Deps, loanId: string, at: Date, exceptRunId?: string) {
+  const scoped = exceptRunId
+    ? sql`and (${schema.loanRepayments.runId} is null or ${schema.loanRepayments.runId} <> ${exceptRunId})`
+    : sql``;
+  const total = sql`round((select coalesce(sum(${schema.loanRepayments.amount}), 0) from ${schema.loanRepayments} where ${schema.loanRepayments.loanId} = ${loanId} ${scoped}), 2)`;
+  return deps.db
+    .update(schema.loans)
+    .set({
+      repaid: sql`max(0, min(${schema.loans.principal}, ${total}))`,
+      status: sql`case when ${total} >= ${schema.loans.principal} - 0.005 then 'CLOSED' when ${schema.loans.status} = 'CLOSED' then 'DISBURSED' else ${schema.loans.status} end`,
+      updatedAt: at,
+    })
+    .where(eq(schema.loans.uuid, loanId));
+}
+
+// Record this run's loan deductions: write the ledger, advance each loan's `repaid`, CLOSE it when fully
+// repaid. Returns the UNEXECUTED statements plus the events to announce (loan.repaymentRecorded /
+// loan.closed) - the caller batches the statements atomically with the rest of the build, then emits the
+// events only after the batch commits, so an aborted build never announces a repayment that didn't land.
+// `loans` are the rows the caller already holds (dueLoanInstallmentsAll) - no reads here.
+export function loanRepaymentWrites(
+  deps: Deps,
+  loans: Map<string, LoanRow>,
+  entries: { loanId: string; amount: number }[],
+  runId: string,
+  at: Date,
+): { stmts: (BatchStmt | CheckedStmt)[]; events: { type: "loan.repaymentRecorded" | "loan.closed"; loanId: string; employeeId: string; payload: Record<string, number> }[] } {
+  const stmts: (BatchStmt | CheckedStmt)[] = [];
+  const events: ReturnType<typeof loanRepaymentWrites>["events"] = [];
   for (const e of entries) {
-    await deps.db.insert(schema.loanRepayments).values({ loanId: e.loanId, runId, amount: e.amount, at });
-    const loan = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, e.loanId)).limit(1))[0];
+    const loan = loans.get(e.loanId);
     if (!loan) continue;
+    stmts.push(deps.db.insert(schema.loanRepayments).values({ loanId: e.loanId, runId, amount: e.amount, at }));
     const repaid = Math.min(loan.principal, round2(loan.repaid + e.amount));
     const closed = isFullyRepaid(loan.principal, repaid);
-    await deps.db.update(schema.loans).set({ repaid, ...(closed ? { status: "CLOSED" as const } : {}), updatedAt: at }).where(eq(schema.loans.uuid, e.loanId));
-    await emitEvent(deps, null, "loan.repaymentRecorded", { subject: `loans/${e.loanId}`, employeeId: loan.employeeId, payload: { amount: e.amount, outstanding: round2(loan.principal - repaid) } });
-    if (closed) await emitEvent(deps, null, "loan.closed", { subject: `loans/${e.loanId}`, employeeId: loan.employeeId, payload: { principal: loan.principal } });
+    // Checked: the deduction is already on the payslip, so if the loan stopped being collectible between the
+    // caller's read and this batch (closed by a manual repayment, soft-deleted), the caller must undo the
+    // whole build rather than deduct from an employee for a loan that is no longer owed.
+    stmts.push({ stmt: repaidCreditStmt(deps, e.loanId, e.amount, at).returning({ uuid: schema.loans.uuid }), expect: 1, label: `loan ${loan.code}` });
+    events.push({ type: "loan.repaymentRecorded", loanId: e.loanId, employeeId: loan.employeeId, payload: { amount: e.amount, outstanding: round2(loan.principal - repaid) } });
+    if (closed) events.push({ type: "loan.closed", loanId: e.loanId, employeeId: loan.employeeId, payload: { principal: loan.principal } });
   }
+  return { stmts, events };
 }
 
 export async function deleteLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {

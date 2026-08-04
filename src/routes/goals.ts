@@ -17,6 +17,7 @@ const statusEnum = z.enum(["not_started", "in_progress", "completed", "cancelled
 const createSchema = z
   .object({
     employee: z.string().nullable().optional(),
+    parent: z.string().nullable().optional(),
     title: z.string().min(1),
     description: z.string().nullable().optional(),
     weight: z.number().optional(),
@@ -59,8 +60,8 @@ export const goals = new Hono<AppEnv>()
     const user = c.get("user");
     const hint = (row: { code: string | null } | undefined) => withAccess(toGoalResource(row), user, COL, row?.code, c.get("objectGrant"));
     if (verb === "updateProgress") {
-      const { progress, status } = z.object({ progress: z.number(), status: statusEnum.optional() }).strict().parse(await c.req.json().catch(() => ({})));
-      return c.json(hint(await updateGoalProgress(c.get("deps"), user, id, progress, status)));
+      const { progress, status, note } = z.object({ progress: z.number(), status: statusEnum.optional(), note: z.string().max(500).optional() }).strict().parse(await c.req.json().catch(() => ({})));
+      return c.json(hint(await updateGoalProgress(c.get("deps"), user, id, progress, status, note)));
     }
     if (verb === "restore") return c.json(hint((await restoreGoal(c.get("deps"), user, id)) as unknown as { code: string | null }));
     return c.notFound();

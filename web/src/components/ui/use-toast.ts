@@ -9,6 +9,10 @@ type ToasterToast = ToastProps & {
   id: string;
   title?: React.ReactNode;
   description?: React.ReactNode;
+  /** Inline action button (e.g. Undo). Clicking it also dismisses the toast. */
+  action?: { label: string; onClick: () => void };
+  /** How long the toast stays up (ms). Defaults to TOAST_REMOVE_DELAY; undo toasts pass a longer window. */
+  duration?: number;
 };
 
 let count = 0;
@@ -27,12 +31,12 @@ function dispatch(state: State) {
   listeners.forEach((l) => l(memoryState));
 }
 
-function scheduleRemove(id: string) {
+function scheduleRemove(id: string, delay = TOAST_REMOVE_DELAY) {
   if (timeouts.has(id)) return;
   const t = setTimeout(() => {
     timeouts.delete(id);
     dispatch({ toasts: memoryState.toasts.filter((x) => x.id !== id) });
-  }, TOAST_REMOVE_DELAY);
+  }, delay);
   timeouts.set(id, t);
 }
 
@@ -49,7 +53,7 @@ function toast(props: ToastInput) {
     },
   };
   dispatch({ toasts: [newToast, ...memoryState.toasts].slice(0, TOAST_LIMIT) });
-  scheduleRemove(id);
+  scheduleRemove(id, props.duration);
   return id;
 }
 

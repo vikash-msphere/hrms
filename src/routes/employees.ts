@@ -5,13 +5,14 @@ import type { AppEnv } from "../env";
 import { customMethod } from "../http/customMethod";
 import { lifecycleVerb } from "../http/lifecycleRoute";
 import * as schema from "../db/schema";
-import { listEmployees, getEmployee, createEmployee, updateEmployee, deleteEmployee, restoreEmployee, purgeEmployee } from "../services/employees";
+import { listEmployees, getEmployee, createEmployee, updateEmployee, deleteEmployee, restoreEmployee, purgeEmployee, setBio } from "../services/employees";
 import { enrollDefaultBenefits } from "../services/benefitEnrollments";
 import { getBankDetails, setBankDetails } from "../services/bankDetails";
 import { getIdentityDetails, setIdentityDetails } from "../services/identityDetails";
 import { getPersonalDetails, setPersonalDetails } from "../services/personalDetails";
 import { getTaxDetails, setTaxDetails } from "../services/taxDetails";
 import { getNotificationPrefs, setNotificationPrefs } from "../services/notificationPrefs";
+import { computeProfileCompleteness } from "../services/profileCompleteness";
 import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, getSignature } from "../services/employeePhoto";
 import { putAttachment, downloadAttachment, deleteAttachment } from "../services/attachments";
 import { identityDocSlot } from "../services/identityDetails";
@@ -20,6 +21,7 @@ import { withAccess } from "../http/accessHint";
 import { redactIdentity, redactFlat, deniedFieldKeys } from "../http/fieldAccess";
 import { invalidArgument, forbidden } from "../lib/errors";
 import { clampPageSize } from "../http/pagination";
+import { actorCan } from "../domain/access";
 
 const COL = "employees";
 
@@ -68,7 +70,17 @@ export const employees = new Hono<AppEnv>()
   })
   .get("/:employee_id", async (c) => {
     const row = await getEmployee(c.get("deps"), c.get("user"), c.req.param("employee_id"));
-    return c.json(withAccess(empResource(c.get("user").employeeId, row), c.get("user"), COL, row?.code, c.get("objectGrant")));
+    const user = c.get("user");
+    const res = empResource(user.employeeId, row);
+    // Owner-private (like `signature`) with one exception: HR (employees.write) also gets the flags as a
+    // record-quality signal. The `signature` flag stays owner-only - even its existence is private (see
+    // empResource) - so it's stripped for any other viewer.
+    if (user.employeeId === row.uuid || actorCan(user, "employees.write")) {
+      const flags = await computeProfileCompleteness(c.get("deps"), row);
+      if (user.employeeId !== row.uuid) delete flags.signature;
+      res.profile_completeness = flags;
+    }
+    return c.json(withAccess(res, user, COL, row?.code, c.get("objectGrant")));
   })
   .post("/", zValidator("json", writeSchema), async (c) => {
     const row = await createEmployee(c.get("deps"), c.get("user"), c.req.valid("json"), c.req.query("id"));
@@ -139,6 +151,14 @@ export const employees = new Hono<AppEnv>()
     const id = c.req.param("employee_id")!;
     return c.json({ path: `employees/${id}/notification-prefs`, ...(await getNotificationPrefs(c.get("deps"), c.get("user"), id)) });
   })
+  .patch(
+    "/:employee_id/bio",
+    zValidator("json", z.object({ bio: z.string().max(280).nullable().optional() }).strict()),
+    async (c) => {
+      const id = c.req.param("employee_id")!;
+      return c.json({ path: `employees/${id}/bio`, ...(await setBio(c.get("deps"), c.get("user"), id, c.req.valid("json").bio)) });
+    },
+  )
   .patch("/:employee_id/notification-prefs", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = (await c.req.json().catch(() => ({}))) as { muted?: unknown; digest?: unknown };

@@ -1,5 +1,5 @@
-import { allocFlatCode } from "./services/codeAlloc";
-import { eq, and, or, ne, isNull, lte } from "drizzle-orm";
+import { allocFlatCode, allocOwnedCode } from "./services/codeAlloc";
+import { eq, and, or, ne, isNull, lte, inArray } from "drizzle-orm";
 import * as schema from "./db/schema";
 import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
@@ -12,6 +12,7 @@ import { accrueLeave } from "./services/leaveAccrual";
 import { generateComplianceOccurrences } from "./services/complianceRules";
 import { awardReferralBonuses } from "./services/referrals";
 import { reconcilePendingEsign } from "./services/esign/callback";
+import { publishDueAnnouncements } from "./services/announcements";
 import { getSettingValue } from "./services/settings";
 import { renderEmail, loadEmailBrand } from "./lib/emailLayout";
 import { notify, managerIdOf } from "./services/notifications";
@@ -66,8 +67,21 @@ export async function runScheduled(cron: string, deps: Deps): Promise<string> {
   return runId;
 }
 
+// Best-effort subtask wrapper: a failure must not abort the tick, but with Workers Logs persisted it must
+// also not vanish - a silently failing bonus award or e-sign reconcile is money/documents stuck with no trace.
+const bestEffort = (name: string, p: Promise<number>): Promise<number> =>
+  p.catch((err) => {
+    console.error(`cron subtask ${name} failed (non-fatal)`, err);
+    return 0;
+  });
+
 async function dispatchCron(cron: string, deps: Deps): Promise<Record<string, number>> {
-  if (cron === "*/5 * * * *") return { drained: await drainJobs(deps, 20) };
+  if (cron === "*/5 * * * *") {
+    // Scheduled board posts ride the fast tick, not the nightly one: an announcement set for 09:00 has to land
+    // at 09:00, give or take the tick. Best-effort - a failure here must not stop the job queue draining.
+    const announcementsPublished = await bestEffort("publishDueAnnouncements", publishDueAnnouncements(deps));
+    return { drained: await drainJobs(deps, 20), announcementsPublished };
+  }
   if (cron === "0 2 * * *") {
     // Carry-forward runs BEFORE accrual so it caps last year's balance before the new year accrues on top.
     const carriedForward = await carryForwardLeave(deps);
@@ -92,7 +106,10 @@ async function dispatchCron(cron: string, deps: Deps): Promise<Record<string, nu
     // Reconcile e-sign documents stuck pending (missed/dropped vendor webhook): poll the vendor or auto-expire
     // past the signing window. Best-effort - never aborts the tick.
     const esignReconciled = await reconcilePendingEsign(deps).catch(() => 0);
-    return { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, recurringExpenses, budgetAlerts, esignReconciled };
+    // Recurring 1:1s roll forward once their date passes, and tomorrow's 1:1s get a day-before nudge.
+    const checkInsRolled = await bestEffort("rollRecurringCheckIns", rollRecurringCheckIns(deps));
+    const checkInReminders = await bestEffort("remindUpcomingCheckIns", remindUpcomingCheckIns(deps));
+    return { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, recurringExpenses, budgetAlerts, esignReconciled, checkInsRolled, checkInReminders };
   }
   return {};
 }
@@ -181,34 +198,62 @@ export async function carryForwardLeave(deps: Deps): Promise<number> {
   const employees = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
   const leaveTypes = await deps.db.select().from(schema.leaveTypes);
   const ltById = new Map(leaveTypes.map((lt) => [lt.uuid, lt] as const));
+  // All balances in one read, grouped per employee: on an ordinary night (everything already stamped for
+  // `year`) the whole subtask costs 3 reads, not one per employee. This snapshot is only a cheap "is there
+  // anything to roll over" probe - the rollover itself re-reads the employee's rows (below), because it
+  // writes ABSOLUTE balances and a stale one would restore days already spent. The per-row guarded claims
+  // are rollover-only writes and deliberately stay individual - each claim gates a payout on its own result.
+  const balByEmp = new Map<string, (typeof schema.leaveBalances.$inferSelect)[]>();
+  for (const b of await deps.db.select().from(schema.leaveBalances)) {
+    const arr = balByEmp.get(b.employeeId);
+    if (arr) arr.push(b);
+    else balByEmp.set(b.employeeId, [b]);
+  }
   let processed = 0;
 
   for (const emp of employees) {
     if (emp.deleteTime) continue;
+    if (!(balByEmp.get(emp.uuid) ?? []).some((b) => b.lastCarryForwardYear !== year)) continue;
+    // There IS work for this employee, so pay for one fresh read of their rows. Carry-forward collapses the
+    // balance to the carried days and sizes an auto-encashment PAYOUT from the excess, both derived from the
+    // balance it reads - computing either off the org-wide snapshot taken at the top of this subtask would
+    // silently hand back days spent in between and pay out cash for them. Rollover is one night a year (and
+    // already does per-row writes), so the extra read is only spent on the night that needs it.
     const balances = await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp.uuid));
     const due = balances.filter((b) => b.lastCarryForwardYear !== year);
     if (due.length === 0) continue;
 
-    // Never-stamped rows: initialize to this year with no forfeiture. Earlier-year rows actually roll over.
+    // Never-stamped rows: initialize to this year with no forfeiture (one chunked statement for the
+    // employee's rows - a first-deploy night stamps every row in the org, and per-row writes would eat the
+    // subrequest budget). Earlier-year rows actually roll over.
     const roll = due.filter((b) => b.lastCarryForwardYear != null);
-    for (const b of due.filter((b) => b.lastCarryForwardYear == null)) {
-      await deps.db.update(schema.leaveBalances).set({ lastCarryForwardYear: year, updatedAt: new Date() }).where(eq(schema.leaveBalances.uuid, b.uuid));
+    const init = due.filter((b) => b.lastCarryForwardYear == null);
+    if (init.length) {
+      await deps.db
+        .update(schema.leaveBalances)
+        .set({ lastCarryForwardYear: year, updatedAt: new Date() })
+        .where(inArray(schema.leaveBalances.uuid, init.map((b) => b.uuid)));
     }
     if (roll.length === 0) continue;
 
-    // (carried, excess) per balance row, by mode.
-    const splits = new Map<string, { carried: number; excess: number }>();
-    if (caps.carry_forward_mode === "cumulative") {
-      const eligible = roll.filter((b) => ltById.get(b.leaveTypeId)?.carryForward);
-      const cum = splitCarryForwardCumulative(eligible.map((b) => b.balanceDays), caps.carry_forward_cumulative_cap_days);
-      eligible.forEach((b, i) => splits.set(b.uuid, cum[i]!));
-      for (const b of roll.filter((b) => !ltById.get(b.leaveTypeId)?.carryForward)) splits.set(b.uuid, { carried: 0, excess: round2(b.balanceDays) });
-    } else {
-      for (const b of roll) {
-        const lt = ltById.get(b.leaveTypeId);
-        splits.set(b.uuid, splitCarryForward(b.balanceDays, !!lt?.carryForward, lt?.carryForwardCapDays ?? null));
+    // (carried, excess) per balance row, by mode. Cumulative mode splits ONE shared cap across the rows
+    // passed in, so a retry below re-runs this over what is still pending against the cap that is still free.
+    type BalanceRow = typeof schema.leaveBalances.$inferSelect;
+    const splitsFor = (rows: BalanceRow[], cumulativeCap: number | null): Map<string, { carried: number; excess: number }> => {
+      const splits = new Map<string, { carried: number; excess: number }>();
+      if (caps.carry_forward_mode === "cumulative") {
+        const eligible = rows.filter((b) => ltById.get(b.leaveTypeId)?.carryForward);
+        const cum = splitCarryForwardCumulative(eligible.map((b) => b.balanceDays), cumulativeCap);
+        eligible.forEach((b, i) => splits.set(b.uuid, cum[i]!));
+        for (const b of rows.filter((b) => !ltById.get(b.leaveTypeId)?.carryForward)) splits.set(b.uuid, { carried: 0, excess: round2(b.balanceDays) });
+      } else {
+        for (const b of rows) {
+          const lt = ltById.get(b.leaveTypeId);
+          splits.set(b.uuid, splitCarryForward(b.balanceDays, !!lt?.carryForward, lt?.carryForwardCapDays ?? null));
+        }
       }
-    }
+      return splits;
+    };
 
     // Remaining encashment cap for auto-encash; in cumulative mode it's shared across the employee's types.
     let cumEncRemaining = caps.encashment_mode === "cumulative"
@@ -220,28 +265,51 @@ export async function carryForwardLeave(deps: Deps): Promise<number> {
       return lt.encashmentCapDaysPerYear == null ? Infinity : Math.max(0, lt.encashmentCapDaysPerYear - (await encashedDaysThisYear(deps, emp.uuid, lt.uuid)));
     };
 
-    for (const b of roll) {
-      const lt = ltById.get(b.leaveTypeId);
-      const split = splits.get(b.uuid)!;
-      // Claim this balance for `year` FIRST: collapse it to the carried days and stamp lastCarryForwardYear
-      // in one conditional update guarded on it not already being `year`. If a concurrent tick or a retry of
-      // a crashed run already processed it (0 rows), skip - otherwise we'd create a SECOND auto-encashment
-      // payout for the same excess. Stamping before creating the payout means a crash mid-loop can at worst
-      // skip the encashment (recoverable), never double-pay it.
-      const claimed = await deps.db.update(schema.leaveBalances)
-        .set({ balanceDays: split.carried, lastCarryForwardYear: year, updatedAt: new Date() })
-        .where(and(eq(schema.leaveBalances.uuid, b.uuid), ne(schema.leaveBalances.lastCarryForwardYear, year)))
-        .returning();
-      if (!claimed.length) continue;
-      if (split.excess > 0 && caps.carry_forward_excess === "encash" && lt) {
-        const { encash } = splitEncashExcess(split.excess, "encash", await encashRemainingFor(lt));
-        if (encash > 0) {
-          const ok = await createAutoEncashment(deps, emp.uuid, lt.uuid, encash);
-          if (ok && caps.encashment_mode === "cumulative") cumEncRemaining = Math.max(0, cumEncRemaining - encash);
-        }
+    // Claim each row for `year`, guarded on BOTH the year stamp and the balance that was read. The stamp
+    // guard stops a concurrent tick (or a retry of a crashed run) from creating a SECOND auto-encashment
+    // payout for the same excess. The balance guard stops the absolute write from erasing a debit committed
+    // in between (a leave approval, an encashment): those days would come back and be encashable, i.e. real
+    // money, and the payout below would be sized off a balance the employee no longer has.
+    // A row that loses its claim is RETRIED here rather than left for tomorrow: in cumulative mode one cap is
+    // shared across the employee's types, and tomorrow's run would re-split the whole cap across that single
+    // leftover row and carry over more than the cap allows. `capLeft` shrinks by what each claimed row kept,
+    // so a retry only ever splits what is still free. Stamping before creating the payout means a crash
+    // mid-loop can at worst skip the encashment (recoverable), never double-pay it.
+    let capLeft = caps.carry_forward_cumulative_cap_days;
+    let pending = roll;
+    for (let attempt = 0; pending.length && attempt < 4; attempt++) {
+      if (attempt > 0) {
+        const wanted = new Set(pending.map((b) => b.uuid));
+        const fresh = await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp.uuid));
+        // Drop anything another tick has since stamped - that run owns its own cap accounting for those rows.
+        pending = fresh.filter((b) => wanted.has(b.uuid) && b.lastCarryForwardYear !== year);
+        if (!pending.length) break;
       }
-      processed++;
+      const splits = splitsFor(pending, capLeft);
+      const lost: BalanceRow[] = [];
+      for (const b of pending) {
+        const lt = ltById.get(b.leaveTypeId);
+        const split = splits.get(b.uuid)!;
+        const claimed = await deps.db.update(schema.leaveBalances)
+          .set({ balanceDays: split.carried, lastCarryForwardYear: year, updatedAt: new Date() })
+          .where(and(eq(schema.leaveBalances.uuid, b.uuid), ne(schema.leaveBalances.lastCarryForwardYear, year), eq(schema.leaveBalances.balanceDays, b.balanceDays)))
+          .returning();
+        if (!claimed.length) { lost.push(b); continue; }
+        if (capLeft != null) capLeft = Math.max(0, round2(capLeft - split.carried));
+        if (split.excess > 0 && caps.carry_forward_excess === "encash" && lt) {
+          const { encash } = splitEncashExcess(split.excess, "encash", await encashRemainingFor(lt));
+          if (encash > 0) {
+            const ok = await createAutoEncashment(deps, emp.uuid, lt.uuid, encash);
+            if (ok && caps.encashment_mode === "cumulative") cumEncRemaining = Math.max(0, cumEncRemaining - encash);
+          }
+        }
+        processed++;
+      }
+      pending = lost;
     }
+    // Only reachable if the same rows kept changing under every attempt. Leaving them unstamped is the safe
+    // side (no forfeiture, no payout); tomorrow's tick retries them.
+    if (pending.length) console.warn(`[cron] carry-forward skipped ${pending.length} balance row(s) for employee ${emp.uuid}: balances kept changing mid-rollover`);
   }
   return processed;
 }
@@ -305,6 +373,89 @@ async function emitScheduledEvents(deps: Deps): Promise<number> {
     }
   }
   return emitted;
+}
+
+type CheckInItem = { text: string; done?: boolean };
+
+// Recurring 1:1s: once a cadence-bearing 1:1's meeting date has passed, create the next occurrence - same
+// pair, next date on the cadence grid (stepping from the previous date, so the weekday / day-of-month
+// sticks), open action items carried forward - and MOVE the cadence onto the new row, so exactly one row
+// per pair ever carries it. The claim clears the cadence with a guard on its current value (same
+// guarded-flip shape as carry-forward): a re-run or concurrent tick finds it already NULL and skips, so
+// two next-occurrences can never be minted for one 1:1.
+export async function rollRecurringCheckIns(deps: Deps): Promise<number> {
+  const today = new Date(deps.clock.now());
+  today.setUTCHours(0, 0, 0, 0);
+  const todayMs = +today;
+  const rows = await deps.db.select().from(schema.checkIns);
+  let rolled = 0;
+  for (const r of rows) {
+    if (r.deleteTime || !r.cadence || !r.meetingDate || +new Date(r.meetingDate) >= todayMs) continue;
+    const next = new Date(+new Date(r.meetingDate));
+    while (+next < todayMs) {
+      if (r.cadence === "monthly") next.setUTCMonth(next.getUTCMonth() + 1);
+      else next.setUTCDate(next.getUTCDate() + (r.cadence === "weekly" ? 7 : 14));
+    }
+    const items: CheckInItem[] = r.actionItemsJson ? JSON.parse(r.actionItemsJson) : [];
+    const open = items.filter((i) => !i.done);
+    // Claim: clear the cadence off the old row and retire its open items (they move to the new one).
+    const claimed = await deps.db
+      .update(schema.checkIns)
+      .set({
+        cadence: null,
+        ...(open.length ? { actionItemsJson: JSON.stringify(items.map((i) => ({ ...i, done: true }))) } : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.checkIns.uuid, r.uuid), eq(schema.checkIns.cadence, r.cadence)))
+      .returning();
+    if (!claimed.length) continue;
+    const created = (await deps.db
+      .insert(schema.checkIns)
+      .values({
+        code: await allocOwnedCode(deps, schema.checkIns, schema.checkIns.employeeId, r.employeeId),
+        employeeId: r.employeeId,
+        counterpartId: r.counterpartId,
+        meetingDate: next,
+        actionItemsJson: open.length ? JSON.stringify(open.map((i) => ({ text: i.text, done: false }))) : null,
+        cadence: r.cadence,
+      })
+      .returning())[0]!;
+    const when = next.toISOString().slice(0, 10);
+    const carried = open.length ? ` ${open.length} open action item${open.length === 1 ? "" : "s"} carried forward.` : "";
+    for (const rid of [r.employeeId, r.counterpartId].filter((x): x is string => !!x))
+      await notify(deps, { recipient: rid, type: "checkin.scheduled", title: "Next 1:1 scheduled", body: `Your recurring 1:1 was scheduled for ${when}.${carried}`, link: "check-ins", subject: `check-ins/${created.uuid}` });
+    rolled++;
+  }
+  return rolled;
+}
+
+// Day-before reminder: both attendees of a 1:1 dated tomorrow get an in-app nudge on the nightly tick.
+// The one-day window means each 1:1 matches exactly one tick, so there is nothing to dedupe.
+export async function remindUpcomingCheckIns(deps: Deps): Promise<number> {
+  const today = new Date(deps.clock.now());
+  today.setUTCHours(0, 0, 0, 0);
+  const dayMs = 86_400_000;
+  const tomorrowMs = +today + dayMs;
+  const due = (await deps.db.select().from(schema.checkIns)).filter((r) => {
+    if (r.deleteTime || !r.meetingDate) return false;
+    const ms = +new Date(r.meetingDate);
+    return ms >= tomorrowMs && ms < tomorrowMs + dayMs;
+  });
+  if (!due.length) return 0;
+  const ids = [...new Set(due.flatMap((r) => [r.employeeId, r.counterpartId]).filter((x): x is string => !!x))];
+  const names = new Map(
+    (await deps.db.select().from(schema.employees).where(inArray(schema.employees.uuid, ids))).map((e) => [e.uuid, `${e.firstName} ${e.lastName}`]),
+  );
+  let sent = 0;
+  for (const r of due) {
+    for (const [rid, other] of [[r.employeeId, r.counterpartId], [r.counterpartId, r.employeeId]] as const) {
+      if (!rid) continue;
+      const withWho = other ? ` with ${names.get(other) ?? "your counterpart"}` : "";
+      await notify(deps, { recipient: rid, type: "checkin.reminder", title: "1:1 tomorrow", body: `Your 1:1${withWho} is tomorrow - jot down talking points beforehand.`, link: "check-ins", subject: `check-ins/${r.uuid}` });
+      sent++;
+    }
+  }
+  return sent;
 }
 
 // Sends email reminders for probation endings (90-day), expiring documents, and work anniversaries.

@@ -505,7 +505,7 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
         subject: `employees/${emp.uuid}`,
         actorId: null,
         employeeId: emp.uuid,
-        payload: { ...base, pendingApprovals: m?.pendingApprovals ?? 0, daysSinceLastLeave: m?.daysSinceLastLeave ?? NEVER_TAKEN_LEAVE, leaveBalanceDays: m?.leaveBalanceDays ?? 0 },
+        payload: { ...base, pendingApprovals: m?.pendingApprovals ?? 0, daysSinceLastLeave: m?.daysSinceLastLeave ?? NEVER_TAKEN_LEAVE, leaveBalanceDays: m?.leaveBalanceDays ?? 0, goalsDueSoon: m?.goalsDueSoon ?? 0, goalsOverdue: m?.goalsOverdue ?? 0 },
         occurredAt: now,
       });
     }

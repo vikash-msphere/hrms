@@ -29,7 +29,7 @@ first admin out-of-band.
 
 ```bash
 # 1. regenerate the SQL (deterministic - byte-identical on re-run)
-npx tsx bootstrap/genBootstrap.ts > bootstrap/bootstrap.sql
+node --import ./scripts/tsResolve.mjs bootstrap/genBootstrap.ts > bootstrap/bootstrap.sql
 
 # 2. apply to a FRESH database (empty - applying over an existing seed collides on role/PK rows)
 npx wrangler d1 execute hrms --local --file=bootstrap/bootstrap.sql   # drop --local for remote

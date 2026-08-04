@@ -20,28 +20,48 @@ export type Problem = {
   instance?: string;
 };
 
-// A 401 behind Cloudflare Access means the Access session lapsed; a hard nav to "/" lets Access re-challenge
-// and bounce back. But with no Access in front (local dev / self-host) that reload just re-hits /users/me ->
-// 401 -> reload again = a loop. Fire the redirect at most once; after that, fall through to throwing the 401
-// so the app can show its in-app "Session expired" screen instead of looping.
+// A 401 means the session lapsed. /auth/login is the one door for every mode: under Cloudflare Access it
+// bounces home (the edge re-challenges on the way), in direct-Google mode it starts the OAuth round-trip.
+// With neither in front (local dev misconfig) that nav just 401s again = a loop - so fire the redirect at
+// most once; after that, fall through to throwing the 401 so the app can show its in-app "Session expired"
+// screen instead of looping.
 let redirectedOn401 = false;
 function redirectToLogin() {
   if (redirectedOn401) return;
   redirectedOn401 = true;
-  window.location.href = "/";
+  window.location.href = "/auth/login";
+}
+// Mid-session expiry: once the app shell is up it registers a handler that shows a "sign in again" overlay
+// IN PLACE - the page (and any half-typed form) stays mounted while the user re-authenticates in another
+// tab. Before a handler exists (initial page load, nothing to preserve), the redirect path stands.
+let sessionExpiredHandler: (() => void) | null = null;
+export function setSessionExpiredHandler(fn: (() => void) | null) {
+  sessionExpiredHandler = fn;
+}
+function onAuthDead() {
+  if (sessionExpiredHandler) sessionExpiredHandler();
+  else redirectToLogin();
 }
 function handle401(): never {
-  // Broadcast so every sibling tab of this user bounces to login at once, instead of each discovering the
-  // lapsed session via its own doomed request.
+  // Broadcast so every sibling tab of this user reacts to the lapsed session at once, instead of each
+  // discovering it via its own doomed request.
   publish("auth", { op: "dead" });
-  redirectToLogin();
+  onAuthDead();
   throw new ApiError("unauthenticated", 401, null);
 }
 subscribeTopic<{ op: string }>("auth", (m) => {
-  if (m.op === "dead") redirectToLogin();
+  if (m.op === "dead") onAuthDead();
 });
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+// Permission walls: the app shell registers a handler that offers "request access" when a call 403s.
+// Passive - the failed call still throws to its caller; this only adds the side-channel offer. The
+// request-access probe itself must never re-trigger the handler (loop), so it opts out via a flag.
+let forbiddenHandler: ((collection: string) => void) | null = null;
+export function setForbiddenHandler(fn: ((collection: string) => void) | null) {
+  forbiddenHandler = fn;
+}
+
+export async function api<T>(path: string, init: RequestInit & { skipForbiddenHandler?: boolean } = {}): Promise<T> {
   const res = await fetch(`/v1${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...(init.headers ?? {}) },
@@ -49,6 +69,14 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (res.status === 401) handle401();
   if (!res.ok) {
+    // Only user ACTIONS get the request-access offer: background reads legitimately 403 while the UI is
+    // settling (and gated reads shouldn't fire at all) - a toast for those would nag constantly.
+    const method = (init.method ?? "GET").toUpperCase();
+    if (res.status === 403 && forbiddenHandler && !init.skipForbiddenHandler && method !== "GET") {
+      // First path segment = the collection the wall belongs to ("/leave-requests/..." -> leave-requests).
+      const collection = path.replace(/^\//, "").split(/[/?:]/)[0] ?? "";
+      if (collection) forbiddenHandler(collection);
+    }
     const problem = (await res.json().catch(() => null)) as Problem | null;
     throw new ApiError(problem?.detail ?? problem?.title ?? res.statusText, res.status, problem);
   }
@@ -101,14 +129,29 @@ export type ListResponse<T> = { results: T[]; next_page_token?: string };
  *  coalescer, so all reads fired in the same tick collapse into one /v1/batch:run request. */
 export function list<T>(
   collection: string,
-  opts: { max?: number; showDeleted?: boolean; q?: string } = {}
+  opts: { max?: number; showDeleted?: boolean; q?: string; pageToken?: string } = {}
 ): Promise<ListResponse<T>> {
   const params = new URLSearchParams({ max_page_size: String(opts.max ?? 200) });
   if (opts.showDeleted) params.set("show_deleted", "true");
   // Server-side text filter (FTS-backed). Present only when the page offers a search box, so an ordinary
   // list request is byte-identical to before and keeps sharing its cache entry.
   if (opts.q) params.set("q", opts.q);
+  // Cursor from a previous page's next_page_token - used by the store's loadMore to follow the server cursor.
+  if (opts.pageToken) params.set("page_token", opts.pageToken);
   return coalescedGet<ListResponse<T>>(`${collection}?${params.toString()}`);
+}
+
+/** Follow the cursor to the end: EVERY row of a collection (the server caps a page at 100). For pickers
+ * that must be complete (the view-as / add-user dropdowns) - not for list pages, which stay paged. */
+export async function listAll<T>(collection: string): Promise<T[]> {
+  const all: T[] = [];
+  let pageToken: string | undefined;
+  do {
+    const page = await list<T>(collection, { max: 100, pageToken });
+    all.push(...page.results);
+    pageToken = page.next_page_token;
+  } while (pageToken);
+  return all;
 }
 
 export function get<T>(path: string): Promise<T> {

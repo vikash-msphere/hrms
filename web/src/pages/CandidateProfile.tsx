@@ -9,7 +9,10 @@ import type { Application, Candidate, Employee, Interview, JobRequisition, Me, O
 import { useAtsConfig, sourceLabel } from "./Candidates";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
+import { AccessAction } from "@/components/access/AccessAction";
+import { AccessItem } from "@/components/access/AccessItem";
 import { ActivitySection } from "@/components/common/ActivitySection";
+import { CopyEmail } from "@/components/common/CopyEmail";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -96,7 +99,11 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
               <div className="min-w-0">
                 <h1 className="text-2xl font-semibold">{candidate.name}</h1>
                 <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                  {candidate.email && <a className="flex items-center gap-1 hover:text-foreground hover:underline" href={`mailto:${candidate.email}`}><Mail className="h-3.5 w-3.5" /> {candidate.email}</a>}
+                  {candidate.email && (
+                    <CopyEmail email={candidate.email}>
+                      <a className="flex items-center gap-1 hover:text-foreground hover:underline" href={`mailto:${candidate.email}`}><Mail className="h-3.5 w-3.5" /> {candidate.email}</a>
+                    </CopyEmail>
+                  )}
                   {candidate.phone && <span className="flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> {candidate.phone}</span>}
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -106,9 +113,11 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                 </div>
               </div>
               {candidate.has_resume && (
-                <Button variant="outline" size="sm" onClick={() => download(`candidates/${id}`, `resume-${candidate.name}`)}>
-                  <Download className="h-3.5 w-3.5" /> Resume
-                </Button>
+                <AccessAction verb="download" collection="candidates" objectPath={`candidates/${id}`} can={candidate.access?.can} label="Download resume">
+                  <Button variant="outline" size="sm" onClick={() => download(`candidates/${id}`, `resume-${candidate.name}`)}>
+                    <Download className="h-3.5 w-3.5" /> Resume
+                  </Button>
+                </AccessAction>
               )}
             </div>
 
@@ -126,7 +135,8 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                     const since = a.stage_changed_time ?? a.applied_time;
                     const days = a.status === "active" && since ? Math.floor((Date.now() - new Date(since).getTime()) / 86400000) : null;
                     return (
-                      <Card key={a.path} className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
+                      <AccessItem key={a.path} collection="applications" objectPath={a.path} can={a.access?.can} label={reqTitle(a.requisition)}>
+                      <Card className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
                         <span className="font-medium">{reqTitle(a.requisition)}</span>
                         <Badge variant={sm.variant}>{sm.label}</Badge>
                         {a.status === "active" && <Badge variant="outline">{stageLabel(a.stage)}</Badge>}
@@ -136,6 +146,7 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                           {days != null && days >= 1 ? ` · ${days}d in stage` : ""}
                         </span>
                       </Card>
+                      </AccessItem>
                     );
                   })}
                 </div>
@@ -150,7 +161,8 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                   {myInterviews.map((i) => {
                     const sm = meta(INTERVIEW_STATUS, i.status);
                     return (
-                      <Card key={i.path} className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
+                      <AccessItem key={i.path} collection="interviews" objectPath={i.path} can={i.access?.can} label={i.title}>
+                      <Card className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
                         <span className="font-medium">{i.title}</span>
                         <Badge variant={sm.variant}>{sm.label}</Badge>
                         {i.scheduled_start_time && <span className="text-xs text-muted-foreground">{fmtWhen(i.scheduled_start_time)}</span>}
@@ -158,6 +170,7 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                           <span className="ml-auto text-xs text-muted-foreground">{(i.interviewers ?? []).map((r) => empName(r)).join(", ")}</span>
                         )}
                       </Card>
+                      </AccessItem>
                     );
                   })}
                 </div>
@@ -172,7 +185,8 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                   {myOffers.map((o) => {
                     const sm = meta(OFFER_STATUS, o.status);
                     return (
-                      <Card key={o.path} className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
+                      <AccessItem key={o.path} collection="offers" objectPath={o.path} can={o.access?.can} label="Offer">
+                      <Card className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
                         {o.base_comp != null && <span className="font-medium tabular-nums">{money(o.base_comp, o.currency_code || undefined)}</span>}
                         <Badge variant={sm.variant}>{sm.label}</Badge>
                         <span className="ml-auto text-xs text-muted-foreground">
@@ -183,6 +197,7 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                           ].filter(Boolean).join(" · ")}
                         </span>
                       </Card>
+                      </AccessItem>
                     );
                   })}
                 </div>

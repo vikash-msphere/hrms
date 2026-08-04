@@ -93,6 +93,31 @@ export function ensureFetch(collection: string, opts: { showDeleted?: boolean; m
   return e.inflight;
 }
 
+// Follow the server cursor: fetch the NEXT page for this key and append it to the cached rows. No-op while a
+// fetch is in flight or when the last response carried no next_page_token (nothing further to load). Appended
+// pages ride the same snapshot, so every subscriber (and the truncation flag) updates together.
+export function loadMoreRows(collection: string, opts: { showDeleted?: boolean; max?: number; q?: string }): Promise<void> {
+  const e = getEntry(collection, opts);
+  if (e.inflight) return e.inflight;
+  const token = (e.snap.meta as { next_page_token?: string } | undefined)?.next_page_token;
+  if (!token) return Promise.resolve();
+  e.inflight = list<unknown>(collection, { ...e.opts, pageToken: token })
+    .then((resp) => {
+      e.ts = Date.now();
+      const { results, ...meta } = resp as { results?: unknown[] } & Record<string, unknown>;
+      const rows = [...e.snap.rows, ...(results ?? [])];
+      setSnap(e, { rows, state: "ready", error: null, meta });
+      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, meta } satisfies RowsMsg);
+    })
+    .catch((err) => {
+      setSnap(e, { state: "error", error: (err as Error).message });
+    })
+    .finally(() => {
+      e.inflight = null;
+    });
+  return e.inflight;
+}
+
 export function subscribe(collection: string, opts: { showDeleted?: boolean; max?: number; q?: string }, cb: () => void): () => void {
   const e = getEntry(collection, opts);
   e.subs.add(cb);
@@ -180,6 +205,23 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "time-entries:approve": ["time-entries", "notifications"],
   "time-entries:reject": ["time-entries", "notifications"],
   "suggestions:respond": ["suggestions", "notifications"],
+  // Votes hand back the reserialized suggestion and the page folds it in (optimistically applied first) -
+  // same no-refetch shape as the board verbs below.
+  "suggestions:upvote": [],
+  "suggestions:downvote": [],
+  // The board's own verbs hand back the fully reserialized post, and the feed folds that row straight into the
+  // store - so refetching the whole board after each of them would buy nothing and cost a D1 read per reaction,
+  // reply, vote, and per post scrolled past (markRead fires on dwell).
+  "announcements:markRead": [],
+  "announcements:react": [],
+  "announcements:reply": [],
+  "announcements:vote": [],
+  // Pin/unpin also hand back the reserialized post; the feed folds it in and re-sorts locally.
+  "announcements:pin": [],
+  "announcements:unpin": [],
+  // Mark-all-read stamps receipts on many posts at once and hands back only a count, so the board has to
+  // refetch to pick up the new read state.
+  "announcements:markAllRead": ["announcements"],
   "announcements:publish": ["announcements", "notifications"],
   "notifications:markAllRead": ["notifications"],
 };

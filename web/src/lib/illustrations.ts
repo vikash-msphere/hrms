@@ -3,8 +3,8 @@
 // `node --experimental-strip-types scripts/fetchIllustrations.ts`.
 //
 // Files are served as plain assets and loaded by <img>, so nothing is bundled and an illustration that
-// never renders costs no bytes. Their palette is the Metasphere brand ramp (navy -> teal, the same axis as
-// the tokens in index.css), fixed and legible on both themes, so there is no light/dark variant to pick
+// never renders costs no bytes. Their palette runs the brand axis (navy -> cyan, the same axis as the
+// ramps in index.css), fixed and legible on both themes, so there is no light/dark variant to pick
 // between.
 //
 // Refer to one either by an alias below - a role rather than a subject, so swapping the art is a

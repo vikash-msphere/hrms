@@ -3,8 +3,9 @@ import { ExternalLink } from "lucide-react";
 import type { Me } from "@/types";
 import { Button } from "@/components/ui/button";
 import {
-  Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle, SheetDescription,
+  Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle, SheetDescription,
 } from "@/components/ui/sheet";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import type { AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { settingsEntry, hostSettings, entryScope } from "@/settings/registry";
@@ -101,18 +102,25 @@ export function SettingsButton({
             </React.Suspense>
           )}
         </SheetBody>
-        {/* Org singletons deep-link to their full settings page; non-org config already lives on this page. */}
+        {/* Org singletons deep-link to their full settings page; a floating corner icon (not a footer row), so
+            the panel keeps its full width and height for content. */}
         {scope === "org" && (
-          <SheetFooter>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground"
-              onClick={() => navigate(`settings/${entry.key}`)}
-            >
-              <ExternalLink className="h-3.5 w-3.5" /> Open full settings
-            </Button>
-          </SheetFooter>
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="absolute bottom-4 right-4 z-20 rounded-full text-muted-foreground shadow-md"
+                  aria-label="Open full settings"
+                  onClick={() => navigate(`settings/${entry.key}`)}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="left">Open full settings</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         )}
       </SheetContent>
     </Sheet>

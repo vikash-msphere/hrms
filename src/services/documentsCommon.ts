@@ -47,6 +47,38 @@ export function isPdfUpload(fileName?: string, contentType?: string): boolean {
   return fileName?.split(".").pop()?.toLowerCase() === "pdf";
 }
 
+// Extension implied by a stored content type, for rows that carry no uploaded file name (generated letters,
+// signed acknowledgement copies). Only the types the app itself produces or allows on upload.
+const EXT_BY_TYPE: Record<string, string> = {
+  "application/pdf": "pdf",
+  "text/plain": "txt",
+  "text/csv": "csv",
+  "text/markdown": "md",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/heic": "heic",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.oasis.opendocument.text": "odt",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.oasis.opendocument.spreadsheet": "ods",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+};
+
+// The name a document is saved under. Rows created by the app (a generated letter, a signed policy copy) have
+// no uploaded file name, so the title carries the identity - it needs the extension appended or the browser/OS
+// saves an extensionless file. Slashes are stripped: the name lands in Content-Disposition and on disk.
+export function documentFileName(row: { fileName?: string | null; title?: string | null; contentType?: string | null }): string {
+  const ext = EXT_BY_TYPE[(row.contentType ?? "").toLowerCase().split(";")[0]!.trim()];
+  const base = (row.fileName || row.title || "document").replace(/[/\\]/g, "-").trim();
+  const hasExt = /\.[a-z0-9]{1,5}$/i.test(base);
+  return hasExt || !ext ? base : `${base}.${ext}`;
+}
+
 export type DocumentInput = {
   document_type?: string;
   display_name?: string;

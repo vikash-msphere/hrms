@@ -3,7 +3,8 @@ import { KeyRound } from "lucide-react";
 import { create, remove } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
-import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules } from "./permMatrix";
+import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, groupOf, COLLECTION_GROUPS } from "./permMatrix";
+import { Input } from "@/components/ui/input";
 import { FineRulesEditor } from "./FineRulesEditor";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -49,6 +50,19 @@ export function SubjectPermissionsDialog({
 
   const mine = rules.filter((r) => r.subject_kind === subjectKind && r.subject === subject);
   const collections = collectionsForRules(mine);
+  const [filter, setFilter] = React.useState("");
+  // Group the rows by module (curated order, "Other" last for live-rule extras), then filter by label.
+  const grouped = React.useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const shown = q ? collections.filter((c) => labelOf(c).toLowerCase().includes(q) || c.includes(q)) : collections;
+    const order = [...COLLECTION_GROUPS.map((g) => g.label), "Other"];
+    const byGroup = new Map<string, string[]>();
+    for (const c of shown) {
+      const g = groupOf(c);
+      byGroup.set(g, [...(byGroup.get(g) ?? []), c]);
+    }
+    return order.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)!] as const);
+  }, [collections, filter]);
   const isGlobal = mine.some((r) => (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
 
   const cellRules = (collection: string) => mine.filter((r) => !r.verb && ruleMatchesTarget(r, { collection }));
@@ -92,28 +106,36 @@ export function SubjectPermissionsDialog({
             <TabsTrigger value="fine">All rules</TabsTrigger>
           </TabsList>
 
-          {/* Coarse: collection-wide level per collection. */}
+          {/* Coarse: collection-wide level per collection, grouped by module + filterable - the flat list
+              outgrew scanning once the catalog covered every collection. */}
           <TabsContent value="coarse">
             <p className="mb-2 text-xs text-muted-foreground">Collection-wide access. Finer scope (own/department, fields, custom methods, single objects) is on the "All rules" tab and the in-context manage-access icons.</p>
+            <Input className="mb-2 h-8" placeholder="Filter collections…" value={filter} onChange={(e) => setFilter(e.target.value)} />
             <div className="max-h-[55vh] space-y-1 overflow-y-auto">
-              {collections.map((c) => {
-                const v = valueOf(c);
-                return (
-                  <div key={c} className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-accent/40">
-                    <span className="text-sm font-medium">{labelOf(c)}</span>
-                    {isGlobal || !canWrite ? (
-                      <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"}>{v}</Badge>
-                    ) : (
-                      <Select value={v} onValueChange={(nv) => setCell(c, nv)} disabled={busy}>
-                        <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {CELL.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </div>
-                );
-              })}
+              {grouped.map(([group, cols]) => (
+                <React.Fragment key={group}>
+                  <p className="sticky top-0 z-10 bg-background px-2 pb-0.5 pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</p>
+                  {cols.map((c) => {
+                    const v = valueOf(c);
+                    return (
+                      <div key={c} className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-accent/40">
+                        <span className="text-sm font-medium">{labelOf(c)}</span>
+                        {isGlobal || !canWrite ? (
+                          <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"}>{v}</Badge>
+                        ) : (
+                          <Select value={v} onValueChange={(nv) => setCell(c, nv)} disabled={busy}>
+                            <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              {CELL.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        )}
+                      </div>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+              {grouped.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No collection matches "{filter}".</p>}
             </div>
           </TabsContent>
 

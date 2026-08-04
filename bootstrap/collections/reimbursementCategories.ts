@@ -1,5 +1,5 @@
 // Reimbursement categories. requiresReceipt gates whether a claim in this category must carry an attachment.
-import { Ctx, T0, q, b, code2, rows } from "../lib";
+import { type Ctx, T0, q, b, code2, rows } from "../lib";
 
 type ReimbCategorySeed = { name: string; requiresReceipt: boolean };
 

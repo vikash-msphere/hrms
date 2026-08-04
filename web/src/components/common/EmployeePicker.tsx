@@ -12,12 +12,14 @@ const empRef = (e: Employee) => `employees/${idOf(e.path)}`;
 
 // A filtered multi-select of employees (department + name search), as a modal. Used to pick review-cycle
 // participants and to nominate 360 feedback givers. `exclude` drops employees that shouldn't be selectable.
-export function EmployeePicker({ title, confirmLabel, employees, departments, exclude, onClose, onConfirm }: {
+// `suggested` (ranked employee refs) floats likely picks to the top and offers them as one-click chips.
+export function EmployeePicker({ title, confirmLabel, employees, departments, exclude, suggested, onClose, onConfirm }: {
   title: string;
   confirmLabel: string;
   employees: Employee[];
   departments: Department[];
   exclude?: string[]; // employee refs to omit (e.g. the reviewee, already-picked)
+  suggested?: string[]; // employee refs, best first (e.g. same team, recent collaborators)
   onClose: () => void;
   onConfirm: (refs: string[]) => void;
 }) {
@@ -25,16 +27,23 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
   const [q, setQ] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const excluded = useMemo(() => new Set((exclude ?? []).map((r) => idOf(r))), [exclude]);
+  const suggestedRank = useMemo(() => new Map((suggested ?? []).map((r, i) => [idOf(r), i])), [suggested]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return employees.filter((e) => {
+    const rows = employees.filter((e) => {
       if (excluded.has(idOf(e.path))) return false;
       if (dept !== "all" && (!e.department || idOf(e.department) !== idOf(dept))) return false;
       if (needle && !`${e.first_name} ${e.last_name}`.toLowerCase().includes(needle)) return false;
       return true;
     });
-  }, [employees, dept, q, excluded]);
+    if (!suggestedRank.size) return rows;
+    return rows.sort((a, b) => (suggestedRank.get(idOf(a.path)) ?? Infinity) - (suggestedRank.get(idOf(b.path)) ?? Infinity));
+  }, [employees, dept, q, excluded, suggestedRank]);
+  const suggestedRows = useMemo(
+    () => (suggested ?? []).map((ref) => employees.find((e) => idOf(e.path) === idOf(ref))).filter((e): e is Employee => !!e && !excluded.has(idOf(e.path))).slice(0, 6),
+    [suggested, employees, excluded],
+  );
   const allShown = filtered.length > 0 && filtered.every((e) => picked.has(empRef(e)));
   const toggle = (ref: string) => setPicked((s) => { const n = new Set(s); n.has(ref) ? n.delete(ref) : n.add(ref); return n; });
 
@@ -55,6 +64,25 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name…" className="h-9 pl-8" />
           </div>
         </div>
+        {suggestedRows.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">Suggested:</span>
+            {suggestedRows.map((e) => {
+              const ref = empRef(e);
+              const on = picked.has(ref);
+              return (
+                <button
+                  key={e.path}
+                  type="button"
+                  onClick={() => toggle(ref)}
+                  className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${on ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}
+                >
+                  {on ? "✓ " : "+ "}{e.first_name} {e.last_name}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="max-h-72 space-y-0.5 overflow-y-auto rounded-lg border p-1.5">
           <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm font-medium hover:bg-accent">
             <Checkbox checked={allShown} onCheckedChange={(v) => setPicked((s) => { const n = new Set(s); filtered.forEach((e) => v ? n.add(empRef(e)) : n.delete(empRef(e))); return n; })} />

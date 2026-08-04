@@ -11,6 +11,8 @@ import { etagOf } from "../http/serialize";
 import { getSettingValue } from "./settings";
 import { DEFAULT_NOTIFICATION_CONFIG, eventConfig, isMutedByUser, isDigestible, parseNotificationPrefs, type NotificationConfig, type NotificationPriority } from "../domain/notificationConfig";
 import { queueForDigest } from "./notificationDigest";
+import { pushToEmployee } from "./webPush";
+import { runBatch } from "../lib/dbBatch";
 import { activeDelegatesFor } from "./approvalDelegations";
 
 // Full name of an employee-ish row, or null. Used to denormalize the actor's display name onto a notification.
@@ -84,6 +86,14 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
       actorId: input.actorId || null,
       actorName: input.actorId ? nameOf(byId.get(input.actorId)) : null,
     });
+    // Bonus channel: mirror the notification to the recipient's registered browsers (only when VAPID keys are
+    // configured AND this person opted in). Deliberately single-recipient only - the notifyMany broadcast path
+    // must not fan external fetches out per device x per employee inside one request (subrequest cap).
+    await pushToEmployee(deps, recipientId, {
+      title: input.title,
+      body: input.body?.trim() || undefined,
+      link: input.link?.trim() || undefined,
+    });
   } catch (e) {
     console.error("[notify] insert failed (non-fatal)", e);
   }
@@ -150,9 +160,11 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
         actorId,
         actorName,
       }));
-    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-      await deps.db.insert(schema.notifications).values(rows.slice(i, i + INSERT_CHUNK));
-    }
+    // One batch = one subrequest for the whole fan-out (each chunk is a statement inside it), and the
+    // broadcast lands atomically - no half-notified audience on a crash.
+    const chunks: (typeof rows)[] = [];
+    for (let i = 0; i < rows.length; i += INSERT_CHUNK) chunks.push(rows.slice(i, i + INSERT_CHUNK));
+    await runBatch(deps.db, chunks.map((c) => deps.db.insert(schema.notifications).values(c)));
   } catch (e) {
     console.error("[notifyMany] broadcast failed (non-fatal)", e);
   }

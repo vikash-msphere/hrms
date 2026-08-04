@@ -357,8 +357,9 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
         const canBankFile = run.access?.can?.includes("bankFile") && ["APPROVED", "PUBLISHED"].includes(run.state?.toUpperCase() ?? "") && banks.length > 0;
         // Statutory report (PF/ESI/PT/TDS): available once the run is built (review onward).
         const canStatutory = run.access?.can?.includes("statutoryReport") && ["REVIEW", "APPROVED", "PUBLISHED"].includes(run.state?.toUpperCase() ?? "");
-        // Unpublished runs can be deleted (the server rejects PUBLISHED too).
-        const canDelete = run.access?.can?.includes("delete") && run.state?.toUpperCase() !== "PUBLISHED";
+        // Unpublished runs can be deleted (the server rejects PUBLISHED too) - but not once a bank payout file
+        // has been generated: deleting releases every payable the run paid, and the money may already be out.
+        const canDelete = run.access?.can?.includes("delete") && run.state?.toUpperCase() !== "PUBLISHED" && !run.bank_file_time;
         const actions: RowAction[] = [
           { label: "Review", icon: <Eye className="h-4 w-4" />, onClick: () => openReview(run) },
           ...steps.map((s) => ({ label: s.label, icon: <s.icon className="h-4 w-4" />, onClick: () => transition(run, s.verb), verb: s.verb })),

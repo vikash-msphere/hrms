@@ -1,31 +1,34 @@
-// The kudos sticker set: PNG artwork in web/public/assets/kudos, shown on a kudos card when the giver picked no
-// illustration of their own. Each sticker has its slogan drawn into the image ("Good Job!", "Out Of The Box"),
-// so which category it suits is a judgement about the wording - not something derivable from the file name. That
-// pairing therefore lives in the `settings/kudos` category config (`art`), editable in Settings, and this module
-// only lists what is on disk so the editor can offer it.
+// The kudos sticker set: PNG artwork in web/public/assets/kudos. Picking a category in the composer seeds the
+// card's `illustration` with one of that category's stickers, which the giver can then swap or clear. Each
+// sticker has its slogan drawn into the image ("Good Job!", "Out Of The Box"), so which category it suits is a
+// judgement about the wording - not something derivable from the file name. That pairing therefore lives in the
+// `settings/kudos` category config (`art`), editable in Settings, and this module only lists what is on disk so
+// the editor can offer it.
 //
-// Adding a sticker: drop the file in web/public/assets/kudos and add its name here.
+// Adding a sticker: drop the file in web/public/assets/kudos and add its name here, spelled exactly as on disk -
+// KudosArtPicker filters a saved set through this list, so a typo drops that sticker from the category instead
+// of just showing a broken thumbnail.
 
 export const KUDOS_ART_FILES = [
-  "I-heart-design.png",
   "brain-storming.png",
   "coffee-time.png",
   "creative-buddy.png",
   "creative-mind.png",
-  "drawin.png",
+  "drawing.png",
   "embrace-your-perfection.png",
   "explore-new-world.png",
   "focus-time.png",
   "good-job.png",
   "hard-work.png",
+  "i-heart-design.png",
   "imagination.png",
   "open-mind.png",
   "out-of-the-box.png",
   "ready-set-go.png",
-  "relex-time.png",
+  "relax-time.png",
   "think-about.png",
   "thinking-out-loud.png",
-  "tiddy-up.png",
+  "tidy-up.png",
   "you-did-it.png",
 ] as const;
 
@@ -37,9 +40,10 @@ export function kudosArtUrl(file: string): string {
   return `/assets/kudos/${file}`;
 }
 
-// Die-cut backing for dark mode. The stickers have transparent backdrops and letter their slogans in dark navy,
-// which disappears against a dark card, so they get a solid white silhouette behind them - the printed-sticker
-// look - rather than a rectangular plate.
+// Die-cut backing for dark mode, for BOTH art sets. The kudos stickers letter their slogans in dark navy, and
+// the unDraw illustrations paint hair/trousers/shoes/outlines in near-black Blue 950 (see
+// web/public/assets/illustrations/README.md) - either one disappears against a dark card, so all card art gets a
+// solid white silhouette behind it - the printed-sticker look - rather than a rectangular plate.
 //
 // Four chained zero-blur opaque drop-shadows do it. A drop-shadow paints the ALPHA SILHOUETTE behind the element,
 // and each filter in a chain applies to the previous one's output, so the horizontal pair spreads the silhouette
@@ -55,11 +59,11 @@ export function kudosArtUrl(file: string): string {
 // in the source - a composed string would leave these rules out of the stylesheet entirely.
 
 /** Solid white die-cut silhouette behind full-size card art, dark mode only. */
-export const KUDOS_ART_DIECUT =
+export const ART_DIECUT =
   "dark:[filter:drop-shadow(2px_0_0_#fff)_drop-shadow(-2px_0_0_#fff)_drop-shadow(0_2px_0_#fff)_drop-shadow(0_-2px_0_#fff)]";
 
 /** Same, one pixel thinner, for previews and picker thumbnails. */
-export const KUDOS_ART_DIECUT_SM =
+export const ART_DIECUT_SM =
   "dark:[filter:drop-shadow(1px_0_0_#fff)_drop-shadow(-1px_0_0_#fff)_drop-shadow(0_1px_0_#fff)_drop-shadow(0_-1px_0_#fff)]";
 
 // "good-job.png" -> "Good job". For labelling the choices in the editor.

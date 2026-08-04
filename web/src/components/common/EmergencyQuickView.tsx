@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { HeartPulse, ShieldPlus, Download as DownloadIcon, Upload as UploadIcon, Loader2 } from "lucide-react";
 import { get, patch, list, upload, download } from "@/api";
-import { createDocument } from "@/lib/documents";
+import { createDocument, documentFileName } from "@/lib/documents";
 import type { PersonalDetails, DocumentResource } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,9 +19,25 @@ const NONE = "__none__";
 
 /** Heart-pulse button that opens the emergency modal - the single place to both view and edit
  *  emergency info (contacts, blood group, allergies, medical notes). */
-export function EmergencyQuickView({ employeeId, canEdit }: { employeeId: string; canEdit: boolean }) {
+export function EmergencyQuickView({
+  employeeId,
+  canEdit,
+  open: openProp,
+  onOpenChange,
+  onSaved,
+}: {
+  employeeId: string;
+  canEdit: boolean;
+  // Optional controlled open, so the dialog can also be opened from outside its own trigger button
+  // (the profile completeness meter's "Emergency contact" chip does).
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onSaved?: () => void;
+}) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const [openLocal, setOpenLocal] = useState(false);
+  const open = openProp ?? openLocal;
+  const setOpen = onOpenChange ?? setOpenLocal;
   const [data, setData] = useState<PersonalDetails | null>(null);
   const [loading, setLoading] = useState(false);
   const [edit, setEdit] = useState(false);
@@ -34,20 +50,21 @@ export function EmergencyQuickView({ employeeId, canEdit }: { employeeId: string
   const [insBusy, setInsBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  async function openModal() {
-    setOpen(true);
+  // Load on open (whether via the trigger button or the controlled prop).
+  useEffect(() => {
+    if (!open) return;
     setEdit(false);
     setLoading(true);
     void loadInsurance();
-    try {
-      setData(await get<PersonalDetails>(`employees/${employeeId}/personal-info`));
-    } catch (e) {
-      toast({ title: "Couldn't load emergency details", description: (e as Error).message, variant: "destructive" });
-      setOpen(false);
-    } finally {
-      setLoading(false);
-    }
-  }
+    get<PersonalDetails>(`employees/${employeeId}/personal-info`)
+      .then((r) => setData(r))
+      .catch((e) => {
+        toast({ title: "Couldn't load emergency details", description: (e as Error).message, variant: "destructive" });
+        setOpen(false);
+      })
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, employeeId]);
 
   async function loadInsurance() {
     try {
@@ -84,6 +101,7 @@ export function EmergencyQuickView({ employeeId, canEdit }: { employeeId: string
       setData(updated);
       setEdit(false);
       toast({ title: "Emergency details saved", variant: "success" });
+      onSaved?.();
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -116,7 +134,9 @@ export function EmergencyQuickView({ employeeId, canEdit }: { employeeId: string
   return (
     <>
       <span className="inline-flex items-center gap-1">
-        <Button variant="outline" size="icon" title="Emergency details" onClick={openModal}>
+        {/* Ghost: lives in the banner's right stack, which should stay quieter than the identity side.
+            The red icon alone carries the recognition. */}
+        <Button variant="ghost" size="icon" title="Emergency details" onClick={() => setOpen(true)}>
           <HeartPulse className="h-4 w-4 text-destructive" />
         </Button>
         <FieldAccess accessTarget={subRef} />
@@ -202,7 +222,7 @@ export function EmergencyQuickView({ employeeId, canEdit }: { employeeId: string
                           <span className="truncate">{doc.display_name}</span>
                           <FieldAccess accessTarget={{ collection: "personal-documents", objectPath: doc.path, label: doc.display_name }} />
                         </span>
-                        <Button size="sm" variant="ghost" className="h-7 shrink-0" title="Download" onClick={() => download(doc.path, doc.file_name || `${doc.display_name}.pdf`)}>
+                        <Button size="sm" variant="ghost" className="h-7 shrink-0" title="Download" onClick={() => download(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" }))}>
                           <DownloadIcon className="h-4 w-4" />
                         </Button>
                       </li>

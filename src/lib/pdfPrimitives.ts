@@ -1,16 +1,19 @@
 import { PDFDocument, PDFImage, rgb } from "pdf-lib";
+import { BRAND, BRAND_NEUTRAL, hexToRgb01 } from "../domain/brand";
 
 // Shared primitives for the server-side PDF renderers (payslip + HR letters). pdf-lib is pure JS and runs
 // in Workers; the base fonts are WinAnsi-encoded (no ₹, no smart quotes), so all text passes through enc().
 // Nothing here is hardcoded business data - these are font/encoding/number-formatting utilities.
 
-// Palette (from the reference designs).
-export const DARK = rgb(0.059, 0.09, 0.165); // #0f172a
-export const SLATE = rgb(0.118, 0.161, 0.231); // #1e293b
-export const MUTED = rgb(0.337, 0.396, 0.482); // #56657a
-export const LABEL = rgb(0.486, 0.553, 0.635); // #7c8da2
-export const HAIR = rgb(0.796, 0.835, 0.882); // #cbd5e1
-export const FAINT = rgb(0.886, 0.91, 0.941); // #e2e8f0
+// Palette: the brand Neutral ramp (src/domain/brand.ts), converted to pdf-lib's 0..1 components. No colour
+// value is written here - change the ramp in brand.ts and every generated PDF follows.
+const ink = (hex: string) => rgb(...hexToRgb01(hex));
+export const DARK = ink(BRAND.ink); // headings, totals, the heavy rules
+export const SLATE = ink(BRAND_NEUTRAL[800]); // body copy
+export const MUTED = ink(BRAND.muted); // secondary text
+export const LABEL = ink(BRAND.label); // column headers, the quietest legible text
+export const HAIR = ink(BRAND.hairline); // rules, boxes, dividers
+export const FAINT = ink(BRAND.faint); // row separators
 
 export const PAGE_W = 595.28; // A4 at 72dpi
 export const PAGE_H = 841.89;

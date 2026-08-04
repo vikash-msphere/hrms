@@ -17,6 +17,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConfirm } from "@/components/common/confirm";
+import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
 
 type Toast = (t: { title: string; description?: string; variant?: "success" | "destructive" }) => void;
 
@@ -55,6 +56,7 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
   }, []);
 
   const dirty = !!template && JSON.stringify(template) !== saved;
+  useUnsavedTracker(dirty, () => save());
 
   // ── Live preview: the DRAFT rendered on sample figures (never a real employee's pay) ────────────────
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);

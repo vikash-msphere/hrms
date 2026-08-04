@@ -17,7 +17,7 @@ import type { Me, Notification } from "@/types";
 type Mode = "all" | "unread" | "snoozed";
 
 // Relative wake time for a snoozed row ("in 40m", "in 3h", "in 2d") - mirrors the bell dropdown.
-function untilLabel(iso?: string): string {
+function untilLabel(iso?: string | null): string {
   if (!iso) return "";
   const m = Math.max(0, Math.round((+new Date(iso) - Date.now()) / 60000));
   if (m < 1) return "now";

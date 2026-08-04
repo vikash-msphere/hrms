@@ -1,6 +1,6 @@
 // Benefit plans. employeeCost/employerCost are contributions per costPeriod; allowsDependents gates whether
 // an enrollment can cover the employee's dependents.
-import { Ctx, T0, q, b, code2, rows } from "../lib";
+import { type Ctx, T0, q, b, code2, rows } from "../lib";
 
 type BenefitPlanSeed = {
   name: string;

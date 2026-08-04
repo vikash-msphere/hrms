@@ -8,7 +8,7 @@ import type { Column } from "@/components/common/DataTable";
 export function NewBadge({ path }: { path: string }) {
   const { newSubjects } = useNotifications();
   if (!newSubjects.has(path)) return null;
-  return <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-blue-500" aria-label="New" title="New" />;
+  return <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-primary" aria-label="New" title="New" />;
 }
 
 // Decorate a column set so the FIRST (name/identity) column shows the "New" pill inline next to the value,

@@ -5,7 +5,7 @@ import type { AppEnv } from "../env";
 import { customMethod } from "../http/customMethod";
 import { lifecycleVerb } from "../http/lifecycleRoute";
 import * as schema from "../db/schema";
-import { listAnnouncements, getAnnouncement, createAnnouncement, updateAnnouncement, deleteAnnouncement, restoreAnnouncement, purgeAnnouncement, markAnnouncementRead, readsFor, toggleReaction, reactionsFor, addReply, repliesFor, castVote, pollDataFor } from "../services/announcements";
+import { listAnnouncements, getAnnouncement, createAnnouncement, updateAnnouncement, deleteAnnouncement, restoreAnnouncement, purgeAnnouncement, markAnnouncementRead, readsFor, toggleReaction, reactionsFor, addReply, repliesFor, castVote, pollDataFor, setPinned, markAllAnnouncementsRead } from "../services/announcements";
 import { toAnnouncementResource } from "../http/serialize";
 import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
@@ -50,14 +50,22 @@ const recipientLayout = z.object({ x: z.number(), y: z.number(), size: z.number(
 const pollFields = {
   options: z.array(z.string().min(1)).min(2).optional(),
   multiple: z.boolean().optional(),
-  closes_time: z.string().nullable().optional(),
+  closes_time: z.string().datetime({ offset: true }).nullable().optional(),
 };
 const writeSchema = z.object({
   title: z.string().min(1).optional(),
-  body: z.string().min(1).optional(),
+  // Empty is allowed through: a poll's description is optional, so clearing it is an edit like any other. Which
+  // kinds may actually go without one is decided per kind in the service (create and update both), not here -
+  // this schema cannot see the row's kind on a PATCH.
+  body: z.string().optional(),
   kind: z.enum(["announcement", "post", "poll"]).optional(),
   author: z.string().nullable().optional(),
-  publish_time: z.string().nullable().optional(),
+  // A malformed timestamp would make an Invalid-Date publishTime, which the scheduler's `lte` never matches -
+  // a draft scheduled with one would silently never go out. Rejected here instead.
+  publish_time: z.string().datetime({ offset: true }).nullable().optional(),
+  // Create only - see the note on AnnouncementInput.published. `updateAnnouncement` deliberately ignores it, so
+  // going live is always the `:publish` verb: one gate, one broadcast, one audit line.
+  published: z.boolean().optional(),
   // Kudos recognition meta, editable after the fact: fixing the level or category (or picking better art) is not a
   // rewrite of who was recognized. Null clears any of them. `points` stays server-derived from `level` - see
   // updateAnnouncement - so an edit can no more inflate recognition than the original giveKudos could. The
@@ -90,6 +98,15 @@ export const announcementPost = new Hono<AppEnv>().post("/", zValidator("json", 
   const user = c.get("user");
   const pollMap = await pollDataFor(c.get("deps"), [row.uuid], user.employeeId ?? null);
   return c.json(serializeWithReads(user, row, [], [], [], pollMap.get(row.uuid), c.get("objectGrant")));
+});
+
+// Collection-level custom method `announcements:markAllRead` (mounted at the full path in index.ts, like
+// `announcements:post`). Clears the board's unread state in one call - the same self-action as `:markRead`,
+// which is why every employee holds it. Returns the count it stamped rather than a resource: nothing about
+// any single post changed, and the client refetches the board anyway.
+export const announcementMarkAllRead = new Hono<AppEnv>().post("/", async (c) => {
+  const { marked } = await markAllAnnouncementsRead(c.get("deps"), c.get("user"), c.get("scope"));
+  return c.json({ marked });
 });
 
 // Give-kudos input: a recipient + message + optional recognition meta. `points` is NOT accepted (snapshotted
@@ -188,6 +205,10 @@ export const announcements = new Hono<AppEnv>()
       // Cast / change / clear the caller's vote on a poll option, then re-serialize with the new tallies.
       const { option } = z.object({ option: z.string().min(1) }).strict().parse(await c.req.json().catch(() => ({})));
       return c.json(await reserialize(await castVote(c.get("deps"), user, id, option)));
+    }
+    if (verb === "pin" || verb === "unpin") {
+      // Pin the post to the top of the board / take it down (moderation - gated by the verb grant).
+      return c.json(await reserialize(await setPinned(c.get("deps"), user, id, verb === "pin")));
     }
     if (verb !== "restore") return c.notFound();
     const row = await restoreAnnouncement(c.get("deps"), c.get("user"), id);

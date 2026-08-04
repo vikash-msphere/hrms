@@ -1,15 +1,17 @@
 import * as React from "react";
-import { KeyRound, Trash2, Plus, ShieldCheck, ArrowLeft, Zap, Globe, Waypoints } from "lucide-react";
+import { KeyRound, Trash2, Plus, ShieldCheck, ArrowLeft, Zap, Globe, Waypoints, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
-import { list, create, remove } from "@/api";
-import { fetchAllAccessRules } from "./permMatrix";
+import { create, listAll, remove } from "@/api";
+import { fetchAllAccessRules, scopeText, permText } from "./permMatrix";
 import { usePaged, Pager } from "@/components/common/Pager";
 import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
 import type { User } from "@/types";
@@ -17,6 +19,10 @@ import type { AccessTargetRef } from "./AccessModeProvider";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
 import { customMethodsFor } from "./customMethods";
 import { scopesForCollection, fetchScopeCapabilities } from "./permMatrix";
+import { metaFor } from "./collectionMeta";
+import { verbInfo } from "./verbMeta";
+import { PreviewPanel, fetchPreview } from "./PreviewPanel";
+import { usePermission } from "@/lib/perm";
 
 // One access rule (the unified resource). Roles and users are the same primitive.
 type AccessRule = {
@@ -51,7 +57,6 @@ const WHY_LABEL: Record<string, string> = {
 const VERB_EFFECTS = ["none", "allow", "deny"] as const;
 // Wildcard verb sentinel = ALL custom methods in one rule (matches the engine's `*` verb token).
 const ALL_VERBS = "*";
-const verbLabel = (v: string) => (v === ALL_VERBS ? "all methods" : v);
 
 export function AclModal({
   target,
@@ -127,8 +132,8 @@ export function AclModal({
     setBusy(true);
     try {
       const tasks: Promise<unknown>[] = [fetchAllAccessRules().then((r) => setRules(r as AccessRule[]))];
-      if (showUsers) tasks.push(list<User>("users").then((r) => setUsers(r.results)));
-      if (showRoles) tasks.push(list<Role>("roles").then((r) => setRoles(r.results)));
+      if (showUsers) tasks.push(listAll<User>("users").then(setUsers));
+      if (showRoles) tasks.push(listAll<Role>("roles").then(setRoles));
       await Promise.all(tasks);
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load access", description: String((e as Error).message) });
@@ -158,6 +163,19 @@ export function AclModal({
   const verbBody = (v: string, effect: "allow" | "deny"): Record<string, unknown> => ({ verb: v, effect });
 
   const roleAll = (name: string) => rules.filter((r) => r.subject_kind === "role" && r.subject === name && matchesTarget(r));
+  // Same subject + same target dimension, but at ANOTHER scope tier - shown as context so "HR already has
+  // write on ALL leave requests" is visible while authoring a narrower (or duplicate) rule here.
+  const otherScopeRules = (subjectKind: "role" | "user", subject: string) =>
+    rules.filter(
+      (r) =>
+        r.subject_kind === subjectKind &&
+        r.subject === subject &&
+        r.collection === collection &&
+        r.scope !== "create" &&
+        (r.field ?? undefined) === (field ?? undefined) &&
+        (verbMode ? r.verb === activeVerb : !r.verb) &&
+        !matchesTarget(r),
+    );
   const roleLevelCurrent = (name: string): string => {
     const rs = roleAll(name).filter((r) => !r.verb);
     if (rs.some((r) => r.effect === "deny")) return "deny";
@@ -175,10 +193,47 @@ export function AclModal({
     () => [...roles].sort((a, b) => (a.name === EVERYONE_ROLE ? -1 : b.name === EVERYONE_ROLE ? 1 : 0)),
     [roles],
   );
-  const rolePaged = usePaged(sortedRoles, 8);
-  const userPaged = usePaged(userShown, 8);
+  // Filter boxes appear once a list outgrows one page - paging alone makes a long catalog unscannable.
+  const [roleFilter, setRoleFilter] = React.useState("");
+  const [userFilter, setUserFilter] = React.useState("");
+  const shownRoles = React.useMemo(() => {
+    const q = roleFilter.trim().toLowerCase();
+    return q ? sortedRoles.filter((r) => roleLabel(r.name).toLowerCase().includes(q) || r.name.includes(q)) : sortedRoles;
+  }, [sortedRoles, roleFilter]);
+  const shownUserRules = React.useMemo(() => {
+    const q = userFilter.trim().toLowerCase();
+    return q ? userShown.filter((r) => emailOf(r.subject).toLowerCase().includes(q)) : userShown;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userShown, userFilter, users]);
+  const rolePaged = usePaged(shownRoles, 8);
+  const userPaged = usePaged(shownUserRules, 8);
+
+  // Impact line for a destructive change (deny / rule removal): ask the engine how many people can do the
+  // target thing RIGHT NOW, so the confirm dialog states what is being taken away instead of a bare "sure?".
+  // Preview-capability holders only; everyone else keeps the plain confirm (fail quiet, never block).
+  const canPreview = usePermission("access-rules.preview");
+  async function impactLine(): Promise<string | undefined> {
+    if (!canPreview || !collection) return undefined;
+    try {
+      const pool = users.length ? users : await listAll<User>("users");
+      const verbAsk = activeVerb && activeVerb !== ALL_VERBS ? activeVerb : undefined;
+      const verdicts = await fetchPreview(
+        { collection, object: objectPath, field, verb: verbAsk },
+        pool.slice(0, 100).map((u) => u.path),
+      );
+      const n = verdicts.filter((v) => (verbAsk ? v.verb_allowed : createMode ? v.write : v.read)).length;
+      const what = verbAsk ? `use "${verbAsk}" here` : createMode ? "create here" : "see this";
+      return n > 0 ? `Right now ${n} ${n === 1 ? "person" : "people"} can ${what}. A deny wins over every allow, and removing a rule can take access away.` : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   async function setRoleLevel(name: string, value: string) {
+    if (value === "deny") {
+      const ok = await confirm({ title: `Deny ${roleLabel(name)} here?`, description: await impactLine(), destructive: true, confirmLabel: "Deny" });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       for (const r of roleAll(name).filter((x) => !x.verb)) await remove(r.path, r.etag); // edit = delete + create
@@ -192,6 +247,10 @@ export function AclModal({
   }
 
   async function setRoleVerb(name: string, v: string, value: string) {
+    if (value === "deny") {
+      const ok = await confirm({ title: `Deny ${roleLabel(name)} the "${v}" method here?`, description: await impactLine(), destructive: true, confirmLabel: "Deny" });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       for (const r of roleAll(name).filter((x) => x.verb === v)) await remove(r.path, r.etag);
@@ -200,6 +259,35 @@ export function AclModal({
       await reload();
     } catch (e) {
       toast({ variant: "destructive", title: "Could not update role", description: String((e as Error).message) });
+      setBusy(false);
+    }
+  }
+
+  // One-click canonical rule bundles on the Everyone role - the patterns admins hand-assemble over and
+  // over (open a kudos wall, open a suggestion box). Additive only: existing rules stay, a deny still wins,
+  // and rules that already exist are skipped.
+  async function applyPreset(kind: "view" | "openBox" | "selfService") {
+    const defs: Record<string, { title: string; desc: string; rules: { scope: string; level: string }[] }> = {
+      view: { title: `Open ${plural} to everyone?`, desc: "Adds: Everyone can read all. Use for org-wide read-only surfaces.", rules: [{ scope: "all", level: "read" }] },
+      openBox: { title: `Let everyone add + see all ${plural}?`, desc: "Adds: Everyone can create, and read every entry. The open-wall pattern (kudos, announcements).", rules: [{ scope: "create", level: "write" }, { scope: "all", level: "read" }] },
+      selfService: { title: `Let everyone add + manage their own ${plural}?`, desc: "Adds: Everyone can create, and read/edit only their own entries. The self-service pattern (requests, suggestions).", rules: [{ scope: "create", level: "write" }, { scope: "self", level: "write" }] },
+    };
+    const def = defs[kind]!;
+    const ok = await confirm({ title: def.title, description: `${def.desc} Existing rules stay untouched; an explicit deny still wins.`, confirmLabel: "Apply" });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      for (const r of def.rules) {
+        const exists = rules.some(
+          (x) => x.subject_kind === "role" && x.subject === EVERYONE_ROLE && x.collection === collection && x.scope === r.scope && !x.field && !x.verb && x.effect === "allow" && (r.scope === "create" || x.level === r.level),
+        );
+        if (!exists) await create("access-rules", { subject_kind: "role", subject: EVERYONE_ROLE, collection, scope: r.scope, level: r.level });
+      }
+      toast({ title: "Preset applied" });
+      await reload();
+    } catch (e) {
+      toast({ variant: "destructive", title: "Couldn't apply the preset", description: String((e as Error).message) });
+    } finally {
       setBusy(false);
     }
   }
@@ -220,7 +308,7 @@ export function AclModal({
   }
 
   async function removeRule(r: AccessRule) {
-    const ok = await confirm({ title: "Remove this access rule?", destructive: true, confirmLabel: "Remove" });
+    const ok = await confirm({ title: "Remove this access rule?", description: await impactLine(), destructive: true, confirmLabel: "Remove" });
     if (!ok) return;
     setBusy(true);
     try {
@@ -233,9 +321,11 @@ export function AclModal({
     }
   }
 
-  // Readable collection nouns (kebab -> words; naive singularize is fine for our collections).
-  const plural = (collection ?? "").replace(/-/g, " ");
-  const singular = plural.endsWith("s") ? plural.slice(0, -1) : plural;
+  // Human context for the collection: curated label/nouns plus a note that answers "what does granting
+  // this actually do?" - critical for the virtual capabilities (export, activity) where the auto-derived
+  // noun ("all export") says nothing about their app-wide semantics.
+  const meta = metaFor(collection ?? "");
+  const { singular, plural } = meta;
   // The object the rule lands on, in words. `target.label` is a real object name ONLY for a plain object
   // target; for a field/verb target it's the field/verb name, so fall back to a generic "this <singular>".
   const objectName = hasObject && !hasField && !verbMode ? (target?.label ?? `this ${singular}`) : `this ${singular}`;
@@ -244,11 +334,11 @@ export function AclModal({
     : scopeSel === "subtree" ? `${objectName} & below`
     : scopeSel === "self" ? `their own ${plural}`
     : scopeSel === "dept" ? `their department's ${plural}`
-    : `all ${plural}`;
+    : meta.allPhrase ?? `all ${plural}`;
   const scopeNote = createMode
     ? `creating a new ${singular}`
     : verbMode
-    ? `${activeVerb === ALL_VERBS ? "all methods" : `the "${activeVerb}" method`} on ${whereNote}`
+    ? `${activeVerb === ALL_VERBS ? "all methods" : `"${verbInfo(collection ?? "", activeVerb!).label}"`} on ${whereNote}`
     : hasField
     ? `the "${target?.label ?? field}" field of ${whereNote}`
     : whereNote;
@@ -258,7 +348,7 @@ export function AclModal({
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <KeyRound className="h-5 w-5 text-amber-600 dark:text-amber-400" /> Manage access
+            <KeyRound className="h-5 w-5 text-amber-600 dark:text-amber-400" /> Manage access · {meta.label}
           </DialogTitle>
           <DialogDescription>
             {createMode ? (
@@ -267,14 +357,14 @@ export function AclModal({
               </>
             ) : verbMode ? (
               <>
-                {activeVerb === ALL_VERBS ? "All custom methods" : <>Custom method <code className="rounded bg-muted px-1">{activeVerb}</code></>} on {whereNote}
+                Who can {activeVerb === ALL_VERBS ? "use any method" : <>{verbInfo(collection ?? "", activeVerb!).label.toLowerCase()} (<code className="rounded bg-muted px-1">{activeVerb}</code>)</>} on {whereNote}
               </>
             ) : hasField ? (
               <>
-                Field <code className="rounded bg-muted px-1">{target?.label ?? field}</code> of {whereNote}
+                Who can see or edit <code className="rounded bg-muted px-1">{target?.label ?? field}</code> on {whereNote}
               </>
             ) : (
-              <>{whereNote}</>
+              <>Who can see or change {whereNote}</>
             )}
             {target?.can && (
               <span className="ml-2 inline-flex items-center gap-1 text-xs text-muted-foreground">
@@ -289,11 +379,20 @@ export function AclModal({
           </DialogDescription>
         </DialogHeader>
 
-        {/* Scope chips: how broadly the rule applies - this object, the subject's own / department rows, or the
-            whole collection. Options + narrowest-first default come from the central scopesForCollection, so
-            every access icon offers the same (relevant) choices. Hidden when there's only one (e.g. a plain
-            collection that isn't owner-scoped is collection-wide only). */}
-        {scopeOpts.length > 0 && (
+        {/* What granting this actually does - the answer to "does export apply to every table or this one?",
+            "why can't I pick a department here?". Only collections with real ambiguity carry a note. */}
+        {meta.note && (
+          <p className="flex items-start gap-2 rounded-md border border-primary/20 bg-primary/5 p-2.5 text-xs text-muted-foreground">
+            <Info className="mt-px h-3.5 w-3.5 shrink-0 text-primary" />
+            <span>{meta.note}</span>
+          </p>
+        )}
+
+        {/* Scope: how broadly the rule applies - this object, the subject's own / department rows, or the
+            whole collection. Options + narrowest-first default come from the central scopesForCollection
+            (backend policy manifest), so every access icon offers the same (relevant) choices. When only one
+            tier exists, say so instead of showing a lone pre-selected chip that looks like a broken picker. */}
+        {scopeOpts.length > 1 ? (
           <div className="flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/30 p-2">
             <span className="mr-1 text-xs font-medium text-muted-foreground">Scope:</span>
             {scopeOpts.map((s) => (
@@ -302,7 +401,38 @@ export function AclModal({
               </Button>
             ))}
           </div>
+        ) : (
+          (() => {
+            const [value, why] = createMode
+              ? ["org-wide", `creating applies to the whole ${meta.label.toLowerCase()} collection.`]
+              : meta.kind === "virtual"
+                ? ["org-wide", "this is an app-wide capability with no narrower tiers."]
+                : meta.kind === "settings" && !hasObject
+                  ? ["all settings sections", "open a specific section's gear to scope a rule to just that section."]
+                  : [scopeOpts[0]?.value === "exact" ? objectName : `all ${plural}`, "the only tier this resource supports."];
+            return (
+              <p className="rounded-md border bg-muted/30 p-2 text-xs text-muted-foreground">
+                <span className="font-medium">Scope:</span> <span className="font-semibold text-foreground">{value}</span> - {why}
+              </p>
+            );
+          })()
         )}
+
+        {/* Canonical rule bundles for a plain collection target - one click instead of hand-assembling the
+            same open-wall / self-service rules on every engagement collection. */}
+        {showRoles && !hasObject && !hasField && !verbMode && !createMode && (
+          <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-dashed bg-muted/20 p-2">
+            <span className="mr-1 text-xs font-medium text-muted-foreground">Presets:</span>
+            <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can read all entries." onClick={() => void applyPreset("view")}>Everyone can view</Button>
+            <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can create, and read every entry (open wall)." onClick={() => void applyPreset("openBox")}>Everyone adds + sees all</Button>
+            {scopeOpts.some((o) => o.value === "self") && (
+              <Button variant="outline" size="sm" className="h-7" disabled={busy} title="Everyone can create, and read/edit only their own entries (self-service)." onClick={() => void applyPreset("selfService")}>Everyone adds + sees own</Button>
+            )}
+          </div>
+        )}
+
+        {/* Ground truth: what the engine actually answers for a chosen person on this target. */}
+        {target && <PreviewPanel target={{ ...target, verb: undefined }} activeVerb={activeVerb} createMode={createMode} />}
 
         {/* Custom-method navigation: step back from a drilled-in method, or drill into one. */}
         {focusVerb && !target?.verb && (
@@ -319,11 +449,14 @@ export function AclModal({
             <Button variant="secondary" size="sm" className="h-7" onClick={() => setFocusVerb(ALL_VERBS)}>
               All methods
             </Button>
-            {collectionVerbs.map((v) => (
-              <Button key={v} variant="outline" size="sm" className="h-7" onClick={() => setFocusVerb(v)}>
-                {v}
-              </Button>
-            ))}
+            {collectionVerbs.map((v) => {
+              const info = verbInfo(collection ?? "", v);
+              return (
+                <Button key={v} variant="outline" size="sm" className="h-7" title={info.description ?? v} onClick={() => setFocusVerb(v)}>
+                  {info.label}
+                </Button>
+              );
+            })}
           </div>
         )}
 
@@ -339,13 +472,25 @@ export function AclModal({
                 Per-user access on {scopeNote}. {verbMode ? "A custom method is denied unless explicitly allowed; a deny always wins." : "A deny always wins."}
                 {!verbMode && !createMode && " Levels nest: read ⊂ write ⊂ full (full = delete + purge)."}
               </p>
+              {userShown.length > 8 && <Input className="h-8" placeholder="Filter by email…" value={userFilter} onChange={(e) => setUserFilter(e.target.value)} />}
               <div className="space-y-2">
                 {userShown.length === 0 && <p className="text-sm text-muted-foreground">No per-user rules here.</p>}
+                {userShown.length > 0 && shownUserRules.length === 0 && <p className="text-sm text-muted-foreground">No rule matches "{userFilter}".</p>}
                 {userPaged.pageItems.map((r) => (
                   <div key={r.path} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                    <span className="truncate">{emailOf(r.subject)}</span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate">{emailOf(r.subject)}</span>
+                      {(() => {
+                        const others = otherScopeRules("user", r.subject);
+                        return others.length > 0 ? (
+                          <span className="truncate text-[11px] text-muted-foreground" title="This person's rules on the same target at other scope tiers.">
+                            also: {others.map((o) => `${scopeText(o)} · ${permText(o)}`).join(", ")}
+                          </span>
+                        ) : null;
+                      })()}
+                    </span>
                     <div className="flex items-center gap-2">
-                      <Badge variant={r.effect === "deny" ? "destructive" : "secondary"}>{r.effect === "deny" ? "deny" : r.verb ? verbLabel(r.verb) : createMode ? "can create" : levelLabel(r.level ?? "allow")}</Badge>
+                      <Badge variant={r.effect === "deny" ? "destructive" : "secondary"}>{r.effect === "deny" ? "deny" : r.verb ? verbInfo(collection ?? "", r.verb).label : createMode ? "can create" : levelLabel(r.level ?? "allow")}</Badge>
                       <Button variant="ghost" size="icon" disabled={busy} onClick={() => removeRule(r)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -357,18 +502,7 @@ export function AclModal({
               <div className="flex items-end gap-2 border-t pt-3">
                 <div className="flex-1">
                   <label className="mb-1 block text-xs font-medium">User</label>
-                  <Select value={addUser} onValueChange={setAddUser}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select a user…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {users.map((u) => (
-                        <SelectItem key={u.path} value={u.path}>
-                          {u.email}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox value={addUser} onValueChange={setAddUser} options={users.map((u) => ({ value: u.path, label: u.email }))} placeholder="Search people…" />
                 </div>
                 <div className="w-32">
                   <label className="mb-1 block text-xs font-medium">{verbMode ? "Effect" : createMode ? "Create" : "Access"}</label>
@@ -398,7 +532,9 @@ export function AclModal({
                 Access per role on {scopeNote} (one rule per role). {verbMode && "Allowed only with an explicit allow; a deny wins."}
                 {!verbMode && !createMode && " Levels nest: read ⊂ write ⊂ full (full = delete + purge)."}
               </p>
+              {sortedRoles.length > 8 && <Input className="h-8" placeholder="Filter roles…" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} />}
               <div className="space-y-2">
+                {sortedRoles.length > 0 && shownRoles.length === 0 && <p className="text-sm text-muted-foreground">No role matches "{roleFilter}".</p>}
                 {rolePaged.pageItems.map((role) => {
                   const isEveryone = role.name === EVERYONE_ROLE;
                   return (
@@ -409,15 +545,29 @@ export function AclModal({
                       isEveryone && "border-indigo-300 bg-indigo-50 dark:border-indigo-900 dark:bg-indigo-950/40",
                     )}
                   >
-                    {isEveryone ? (
-                      <span className="flex items-center gap-2">
-                        <Globe className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                        <span className="font-medium text-indigo-700 dark:text-indigo-300">Everyone</span>
-                        <span className="text-xs text-muted-foreground">all signed-in users</span>
-                      </span>
-                    ) : (
-                      <span>{roleLabel(role.name)}</span>
-                    )}
+                    {(() => {
+                      const others = otherScopeRules("role", role.name);
+                      const alsoNote = others.length > 0 && (
+                        <span className="text-[11px] text-muted-foreground" title="Rules for this role on the same target at other scope tiers.">
+                          also: {others.map((o) => `${scopeText(o)} · ${permText(o)}`).join(", ")}
+                        </span>
+                      );
+                      return isEveryone ? (
+                        <span className="flex flex-col">
+                          <span className="flex items-center gap-2">
+                            <Globe className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                            <span className="font-medium text-indigo-700 dark:text-indigo-300">Everyone</span>
+                            <span className="text-xs text-muted-foreground">all signed-in users</span>
+                          </span>
+                          {alsoNote}
+                        </span>
+                      ) : (
+                        <span className="flex flex-col">
+                          <span>{roleLabel(role.name)}</span>
+                          {alsoNote}
+                        </span>
+                      );
+                    })()}
                     {verbMode ? (
                       <Select value={roleVerbCurrent(role.name, activeVerb!)} onValueChange={(v) => setRoleVerb(role.name, activeVerb!, v)} disabled={busy}>
                         <SelectTrigger className="w-32">

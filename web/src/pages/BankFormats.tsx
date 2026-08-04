@@ -12,6 +12,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { useToast } from "@/components/ui/use-toast";
+import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
 
 type Toast = ReturnType<typeof useToast>["toast"];
 
@@ -107,6 +108,16 @@ export default function BankFormats({ toast }: { toast: Toast }) {
   const setCol = (i: number, patch: Partial<BankFormatColumn>) =>
     setDraft((d) => ({ ...d, columns: d.columns.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) }));
 
+  // Dirty = the draft differs from what the sync effect above would reset it to (the stored format for the
+  // selected bank), or a debit-account change is pending. Switching banks resets both drafts, so this
+  // comparison is always against the current bank's stored state.
+  const restingDraft = formats[sel] ? { ...blank(), ...formats[sel] } : blank();
+  const dirty =
+    JSON.stringify(draft) !== JSON.stringify(restingDraft) ||
+    debitDraft.account.trim() !== "" ||
+    debitDraft.currency_code !== (debit[sel]?.currency_code ?? "");
+  useUnsavedTracker(dirty, () => save());
+
   async function onTemplate(file: File) {
     setBusy(true);
     try {
@@ -187,8 +198,10 @@ export default function BankFormats({ toast }: { toast: Toast }) {
               <AccessAction collection="bank-formats" verb="uploadTemplate" label="Upload template">
                 <label>
                   <input type="file" accept=".xlsx" className="hidden" disabled={busy} onChange={(e) => e.target.files?.[0] && onTemplate(e.target.files[0])} />
-                  <Button asChild size="sm" variant="outline" disabled={busy}>
-                    <span><Upload className="h-4 w-4" /> {draft.columns.length ? "Replace template" : "Upload template"}</span>
+                  {/* asChild: the clickable element must be the <label>'s span, not a nested <button>. `busy`
+                      can't use `disabled` here (not valid on a span), so it greys out + blocks pointer events. */}
+                  <Button asChild size="sm" variant="outline" className={busy ? "pointer-events-none opacity-50" : undefined}>
+                    <span aria-disabled={busy}><Upload className="h-4 w-4" /> {draft.columns.length ? "Replace template" : "Upload template"}</span>
                   </Button>
                 </label>
               </AccessAction>

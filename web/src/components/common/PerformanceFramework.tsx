@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
+import { useUnsaved } from "@/components/common/UnsavedChanges";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 
@@ -18,6 +19,7 @@ export function PerformanceFramework() {
   const [competencies, setCompetencies] = useState<Competency[]>(DEFAULT_PERFORMANCE.competencies);
   const [scale, setScale] = useState<RatingLevel[]>(DEFAULT_PERFORMANCE.scale);
   const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     get<{ value?: { competencies?: Competency[]; scale?: RatingLevel[] } }>("settings/performance")
@@ -25,9 +27,11 @@ export function PerformanceFramework() {
         if (s.value?.competencies?.length) setCompetencies(s.value.competencies);
         if (s.value?.scale?.length) setScale(s.value.scale);
       })
-      .catch(() => { /* not configured -> defaults */ });
+      .catch(() => { /* not configured -> defaults */ })
+      .finally(() => setReady(true));
   }, []);
 
+  const { markSaved } = useUnsaved({ competencies, scale }, ready, save);
   async function save() {
     // Drop blank-label rows; assign a stable key to any new competency; dedupe keys; renumber the scale 1..N.
     const seen = new Set<string>();
@@ -50,6 +54,7 @@ export function PerformanceFramework() {
       await patch("settings/performance", { value: { competencies: comps, scale: levels } });
       setCompetencies(comps);
       setScale(levels);
+      markSaved();
       toast({ title: "Framework saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -62,7 +67,7 @@ export function PerformanceFramework() {
     <Card>
       <CardHeader>
         <CardTitle>
-          <AccessAction objectPath="settings/performance" label="Performance framework"><span>Performance framework</span></AccessAction>
+          <AccessAction collection="settings" objectPath="settings/performance" label="Performance framework"><span>Performance framework</span></AccessAction>
         </CardTitle>
         <p className="text-sm text-muted-foreground">The competencies every review rates and the rating scale. Applies to new and in-progress reviews.</p>
       </CardHeader>

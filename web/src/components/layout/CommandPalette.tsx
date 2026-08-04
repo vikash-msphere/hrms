@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2 } from "lucide-react";
-import { NAV, itemVisible } from "@/nav";
+import { NAV, itemVisible, navPerm } from "@/nav";
 import { SETTINGS_REGISTRY } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
 import { navigate } from "@/router";
@@ -47,7 +47,7 @@ function buildLocal(me: Me, quickCfg?: OrgSettings["quick_actions"]): { actions:
     g.items.flatMap((i): Item[] => {
       if (i.tabs) {
         return i.tabs
-          .filter((t) => !t.perm || hasCapability(me.capabilities, t.perm))
+          .filter((t) => { const p = navPerm(t); return !p || hasCapability(me.capabilities, p); })
           .map((t) => ({ key: t.key, label: `${i.label}: ${t.label}`, detail: g.label, badge: "Page", tone: "page", icon: i.icon, route: t.key }));
       }
       if (!itemVisible(i, (p) => hasCapability(me.capabilities, p))) return [];
@@ -82,11 +82,44 @@ function score(item: Item, q: string): number {
   return -1;
 }
 
-const filterLocal = (items: Item[], q: string): Item[] =>
+// ---- Frecency ----------------------------------------------------------------------------------------------
+// What this user actually opens from the palette, kept in localStorage per user: use-count decayed by
+// recency. Ranks the empty-query view ("Recent" on top) and breaks match-score ties while typing, so the
+// palette learns the handful of destinations each person lives in.
+type FrecencyMap = Record<string, { n: number; t: number }>;
+const frecencyLsKey = (email: string) => `palette:frecent:${email}`;
+function loadFrecency(email: string): FrecencyMap {
+  try {
+    return JSON.parse(localStorage.getItem(frecencyLsKey(email)) || "{}") as FrecencyMap;
+  } catch {
+    return {};
+  }
+}
+function bumpFrecency(email: string, key: string) {
+  const map = loadFrecency(email);
+  const prev = map[key];
+  map[key] = { n: (prev?.n ?? 0) + 1, t: Date.now() };
+  // Cap the store so it can't grow unboundedly: keep the 50 strongest entries.
+  const kept = Object.entries(map)
+    .sort(([, a], [, b]) => frecencyScore(b) - frecencyScore(a))
+    .slice(0, 50);
+  try {
+    localStorage.setItem(frecencyLsKey(email), JSON.stringify(Object.fromEntries(kept)));
+  } catch {
+    /* private mode */
+  }
+}
+function frecencyScore(e?: { n: number; t: number }): number {
+  if (!e) return 0;
+  const days = (Date.now() - e.t) / 86_400_000;
+  return e.n / (1 + days); // linear recency decay: recent + frequent floats up, stale entries fade
+}
+
+const filterLocal = (items: Item[], q: string, fre: FrecencyMap): Item[] =>
   items
     .map((c) => ({ c, s: score(c, q) }))
     .filter((x) => x.s >= 0)
-    .sort((a, b) => a.s - b.s)
+    .sort((a, b) => a.s - b.s || frecencyScore(fre[b.c.key]) - frecencyScore(fre[a.c.key]))
     .map((x) => x.c);
 
 export function CommandPalette({
@@ -194,10 +227,22 @@ export function CommandPalette({
     }
   }, [open]);
 
+  // Re-read frecency each time the palette opens (another tab may have bumped it since).
+  const frecent = useMemo(() => (open ? loadFrecency(me.email) : {}), [open, me.email]);
+
   const sections = useMemo((): Section[] => {
     const q = query.trim().toLowerCase();
     if (!q) {
+      // Empty query: this user's most-opened targets first, then the full catalogue.
+      const all = [...local.actions, ...local.pages, ...local.settings];
+      const recent = all
+        .map((i) => ({ i, f: frecencyScore(frecent[i.key]) }))
+        .filter((x) => x.f > 0)
+        .sort((a, b) => b.f - a.f)
+        .slice(0, 5)
+        .map((x) => x.i);
       return [
+        { label: "Recent", items: recent },
         { label: "Actions", items: local.actions },
         { label: "Go to", items: local.pages },
         { label: "Settings", items: local.settings },
@@ -241,16 +286,16 @@ export function CommandPalette({
     }
 
     const out: Section[] = [];
-    const actions = filterLocal(local.actions, q);
-    const pages = filterLocal(local.pages, q);
-    const settings = filterLocal(local.settings, q);
+    const actions = filterLocal(local.actions, q, frecent);
+    const pages = filterLocal(local.pages, q, frecent);
+    const settings = filterLocal(local.settings, q, frecent);
     if (actions.length) out.push({ label: "Actions", items: actions });
     if (people.length) out.push({ label: "People", items: people });
     if (pages.length) out.push({ label: "Go to", items: pages });
     if (settings.length) out.push({ label: "Settings", items: settings });
     for (const [collection, items] of byCollection) out.push({ label: entityLabel(collection), items });
     return out;
-  }, [local, employees, hits, query]);
+  }, [local, employees, hits, query, frecent]);
 
   const flat = useMemo(() => sections.flatMap((s) => s.items), [sections]);
 
@@ -261,6 +306,7 @@ export function CommandPalette({
 
   const go = (item: Item | undefined) => {
     if (!item) return;
+    bumpFrecency(me.email, item.key);
     if (item.run) item.run();
     else if (item.route) navigate(item.route);
     onOpenChange(false);

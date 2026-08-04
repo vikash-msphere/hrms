@@ -4,6 +4,8 @@ import { CATEGORY_META } from "@/lib/notificationMeta";
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useUnsaved } from "@/components/common/UnsavedChanges";
+import { pushSupported, getPushState, enablePush, disablePush, type PushState } from "@/lib/webPush";
 import type { NotificationPrefs } from "@/types";
 
 // Self-service notification preferences: silence event categories FOR YOURSELF (layered over the org config).
@@ -27,11 +29,13 @@ export function NotificationPrefsPanel({ employeeId }: { employeeId: string }) {
   const toggle = (k: string) =>
     setMuted((m) => (m?.includes(k) ? m.filter((x) => x !== k) : [...(m ?? []), k]));
 
+  const { markSaved } = useUnsaved({ muted, digest }, muted !== null, save);
   async function save() {
     if (muted === null) return;
     setSaving(true);
     try {
       await patch(`employees/${employeeId}/notification-prefs`, { muted, digest });
+      markSaved();
       toast({ title: "Preferences saved" });
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
@@ -69,9 +73,58 @@ export function NotificationPrefsPanel({ employeeId }: { employeeId: string }) {
           <span className="block text-xs text-muted-foreground">Batch low-priority updates into one summary each day instead of pinging you one by one. Urgent items and anything needing your action still arrive right away.</span>
         </span>
       </label>
+      <BrowserPushRow />
       <div className="flex justify-end border-t pt-3">
         <Button size="sm" onClick={save} loading={saving} disabled={muted === null}>Save</Button>
       </div>
+    </div>
+  );
+}
+
+// Enrol/withdraw THIS browser for push while no tab is open. Renders only when the deployment has push
+// configured (VAPID key baked into the build) and the browser supports it; permission-denied shows how to fix
+// it rather than a dead toggle. Applies immediately (its own server write) - not part of the Save flow above.
+function BrowserPushRow() {
+  const { toast } = useToast();
+  const [state, setState] = useState<PushState>("unsupported");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void getPushState().then(setState);
+  }, []);
+  if (!pushSupported()) return null;
+  const on = state === "on";
+  async function toggle() {
+    setBusy(true);
+    try {
+      if (on) {
+        await disablePush();
+        setState("off");
+        toast({ title: "Browser notifications off" });
+      } else {
+        await enablePush();
+        setState("on");
+        toast({ title: "Browser notifications on", description: "This device now gets notified even with the app closed.", variant: "success" });
+      }
+    } catch (e) {
+      setState(await getPushState());
+      toast({ variant: "destructive", title: "Couldn't update browser notifications", description: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="flex items-start gap-2.5 rounded-md border px-3 py-2.5">
+      <div className="flex-1">
+        <span className="block text-sm font-medium">Browser notifications on this device</span>
+        <span className="block text-xs text-muted-foreground">
+          {state === "denied"
+            ? "Blocked in your browser's site settings - allow notifications for this site to turn these on."
+            : "Get notified even when no tab is open. Applies to this browser only."}
+        </span>
+      </div>
+      <Button size="sm" variant={on ? "outline" : "default"} loading={busy} disabled={state === "denied"} onClick={() => void toggle()}>
+        {on ? "Turn off" : "Turn on"}
+      </Button>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 // Shared bits for the role/user permission editors (the Permissions matrix and the per-subject dialog).
 import { api } from "@/api";
 import { fetchMeRaw } from "@/useMe";
+import { metaFor } from "./collectionMeta";
 
 // One access rule (the unified resource; same shape the ACL modal uses).
 export type AccessRule = {
@@ -20,18 +21,33 @@ export type AccessRule = {
 // Cell options: the read<write<admin ladder, "none" (no rule) and "deny" (blocks, wins).
 export const CELL = ["none", "read", "write", "admin", "deny"] as const;
 
-// Curated resource collections shown as rows; the live rules can add any others not listed here.
-export const BASE_COLLECTIONS = [
-  "employees", "departments", "compensation", "payroll-runs", "payslips", "pay-components", "pay-grades", "salary-structures", "pay-periods",
-  "reimbursements", "reimbursement-categories", "leave-requests", "leave-types", "leave-balances",
-  "holidays", "holiday-selections", "announcements", "org-documents", "personal-documents", "document-acknowledgements",
-  "users", "operations", "settings",
-  // Virtual capability: gates who may see the per-entity ACTIVITY trail (ANDed with reading the record). Scope
-  // (own/dept/all) narrows which records' activity; the optional Field picks ONE target collection.
-  "activity",
+// Every grantable resource collection, grouped by module - the group headers structure the matrix/editor
+// rows and keep the list auditable against the nav. Keep in step with new collections (add-collection
+// checklist). "Capabilities" are the virtual ones: `activity` gates the per-entity trail (ANDed with
+// reading the record; scope narrows whose records, Field picks one collection), `export` gates the
+// data-export affordance on every table (holders export only what they can read).
+export const COLLECTION_GROUPS: { label: string; collections: string[] }[] = [
+  { label: "People & org", collections: ["employees", "departments", "compensation", "dependents", "users"] },
+  { label: "Attendance & scheduling", collections: ["attendance", "attendance-regularizations", "overtime-requests", "remote-work-requests", "shifts", "shift-assignments", "time-entries", "projects"] },
+  { label: "Leave", collections: ["leave-requests", "leave-types", "leave-balances", "leave-encashments", "holidays", "holiday-selections"] },
+  { label: "Payroll & compensation", collections: ["payroll-runs", "payslips", "pay-components", "pay-grades", "salary-structures", "pay-periods", "bonuses", "loans", "tax-declarations", "bank-formats"] },
+  { label: "Expenses", collections: ["reimbursements", "reimbursement-categories", "expenses", "expense-categories", "expense-budgets", "vendors"] },
+  { label: "Benefits", collections: ["benefit-plans", "benefit-enrollments"] },
+  { label: "Performance", collections: ["goals", "review-cycles", "reviews", "review-feedback", "check-ins"] },
+  { label: "Boards", collections: ["boards", "cards", "sprints"] },
+  { label: "Engagement", collections: ["announcements", "suggestions", "events", "kudos"] },
+  { label: "Recruiting", collections: ["job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers", "referrals"] },
+  { label: "Onboarding & compliance", collections: ["transitions", "transition-tasks", "background-checks", "notice-periods", "org-documents", "personal-documents", "document-acknowledgements", "letter-templates", "compliance-events", "compliance-rules"] },
+  { label: "Support & ops", collections: ["tickets", "ticket-checklists", "assets", "approval-delegations", "automations", "operations", "settings"] },
+  { label: "Capabilities", collections: ["activity", "export"] },
 ];
+export const BASE_COLLECTIONS = COLLECTION_GROUPS.flatMap((g) => g.collections);
+// Group label for a collection ("Other" for live-rule collections outside the curated catalog).
+export function groupOf(collection: string): string {
+  return COLLECTION_GROUPS.find((g) => g.collections.includes(collection))?.label ?? "Other";
+}
 
-export const labelOf = (c: string) => c.replace(/-/g, " ").replace(/^\w/, (m) => m.toUpperCase());
+export const labelOf = (c: string) => metaFor(c).label;
 
 // Page through ALL access-rules (the server caps a page at 100 and there can be more), so a matrix/editor
 // reflects every rule rather than just the first page.
@@ -71,7 +87,7 @@ export async function fetchScopeCapabilities(): Promise<Record<string, string[]>
   if (scopeCapsCache) return scopeCapsCache;
   // Reuse the single shared /users/me request (see useMe.fetchMeRaw) instead of issuing a second one.
   const me = await fetchMeRaw();
-  scopeCapsCache = me?.access?.scopes ?? {};
+  scopeCapsCache = me?.caller_access?.scopes ?? {};
   return scopeCapsCache;
 }
 

@@ -1,7 +1,7 @@
 // Public holidays (India, calendar year HOLIDAY_YEAR). kind "fixed" = company-wide closed; "optional" =
 // restricted/floating holiday the employee may elect. Festival dates are India-specific and shift yearly, so
 // the list is hand-dated - bump HOLIDAY_YEAR (in lib.ts) and the dates once a year.
-import { Ctx, T0, HOLIDAY_YEAR, q, code2, rows } from "../lib";
+import { type Ctx, T0, HOLIDAY_YEAR, q, code2, rows } from "../lib";
 
 type HolidaySeed = { name: string; kind: "fixed" | "optional"; month: number; day: number };
 

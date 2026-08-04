@@ -5,6 +5,7 @@
 // denied set - access inherits by default. Lives in src/http (not scanned by the single-source gate) and uses
 // the engine exactly like accessHint.ts: the decision is still rendered by decide(), never re-implemented.
 import { decide, type Grant, type SelfContext } from "../domain/permissions";
+import type { Wire } from "./wire";
 
 // The subset of `keys` the caller may NOT read among the fields of `<base>.<code>.<subresource>`. Each check
 // is a pure in-memory decide() on `<base>.<code>.<subresource>.<key>` at read level - zero DB.
@@ -16,7 +17,9 @@ export function deniedFieldKeys(grant: Grant, base: string, code: string, subres
   return denied;
 }
 
-type IdentityField = { key: string; label: string; mandatory: boolean; sensitive: boolean; document?: string; value?: string; has_value: boolean; has_doc?: boolean; denied?: boolean };
+// The contract's own shape - this file redacts identity fields in place, so it must agree with what the
+// identity service emits and what the SPA reads.
+type IdentityField = Wire<"identity-field">;
 type IdentityView = { fields: IdentityField[] };
 
 // Identity GET returns a `fields[]` array. Keep a denied field's ROW (its key is admin-configured, so a

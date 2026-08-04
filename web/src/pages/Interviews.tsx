@@ -162,8 +162,8 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
                   <div className="flex items-center gap-1">
                     {/* After the interview the scorecard is the pending action - promote it. */}
                     <Button size="sm" variant={i.status === "done" ? "default" : "outline"} className="h-7" onClick={() => setScorecardFor(i)}><ClipboardList className="h-3.5 w-3.5" /> Scorecard</Button>
-                    {can.includes("complete") && i.status === "scheduled" && <Button size="sm" variant="ghost" className="h-7" onClick={() => complete(i)}><Check className="h-3.5 w-3.5" /> Done</Button>}
-                    {can.includes("cancel") && i.status === "scheduled" && <Button size="sm" variant="ghost" className="h-7 text-muted-foreground" onClick={() => cancel(i)} aria-label="Cancel interview"><X className="h-3.5 w-3.5" /> Cancel</Button>}
+                    {can.includes("complete") && i.status === "scheduled" && <AccessAction verb="complete" objectPath={i.path} can={can} label="Complete interview"><Button size="sm" variant="ghost" className="h-7" onClick={() => complete(i)}><Check className="h-3.5 w-3.5" /> Done</Button></AccessAction>}
+                    {can.includes("cancel") && i.status === "scheduled" && <AccessAction verb="cancel" objectPath={i.path} can={can} label="Cancel interview"><Button size="sm" variant="ghost" className="h-7 text-muted-foreground" onClick={() => cancel(i)} aria-label="Cancel interview"><X className="h-3.5 w-3.5" /> Cancel</Button></AccessAction>}
                     {can.includes("update") && <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setDialog(i)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>}
                     {can.includes("delete") && <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-destructive" onClick={() => del(i)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>}
                   </div>

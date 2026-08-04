@@ -1,5 +1,5 @@
 import { Check } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, relativeFuture } from "@/lib/utils";
 import type { Announcement } from "@/types";
 
 const dateTime = (iso?: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
@@ -13,23 +13,28 @@ const dateTime = (iso?: string | null) => (iso ? new Date(iso).toLocaleString(un
 // the whole post, and on a card with a sticker the space they give back is space the picture can use.
 //
 // Shared by the feed and the composer preview, which hands it a zero-tally poll built from the options being
-// typed - so an author sees the block they are about to post, not an approximation of it.
+// typed - so an author sees the block they are about to post, not an approximation of it. `preview` is what makes
+// that true: with no viewer to judge, the ordinary rules would read "this one cannot vote" and reveal the results
+// instead, showing the author a row of empty bars and a "voting not available" note that nobody they post to will
+// ever see. In preview it shows the unvoted block a reader gets, inert.
 export function PollBlock({
   poll,
   canVote,
   canManage,
+  preview,
   onVote,
   onSetClosed,
 }: {
   poll: NonNullable<Announcement["poll"]>;
   canVote: boolean;
   canManage: boolean;
+  preview?: boolean; // the composer's card: show what a reader will get, and let nothing be pressed
   onVote: (option: string) => void;
   onSetClosed: (close: boolean) => void;
 }) {
   const { options, total_votes, voted, closed, multiple, closes_time } = poll;
-  const interactive = canVote && !closed;
-  const showResults = voted || closed || !canVote;
+  const interactive = canVote && !closed && !preview;
+  const showResults = !preview && (voted || closed || !canVote);
   // Once a poll closes the tallies are final - the leading option(s) get a stronger fill + weight so the
   // outcome reads at a glance instead of asking the viewer to compare percentages.
   const topVotes = closed ? Math.max(0, ...options.map((o) => o.votes)) : 0;
@@ -80,8 +85,12 @@ export function PollBlock({
             <button
               key={o.id}
               type="button"
+              disabled={preview}
               onClick={() => onVote(o.id)}
-              className="block w-full rounded-md border px-3 py-2 text-left text-sm font-medium transition-colors hover:border-primary/60 hover:bg-muted/40"
+              className={cn(
+                "block w-full rounded-md border px-3 py-2 text-left text-sm font-medium transition-colors",
+                preview ? "cursor-default" : "hover:border-primary/60 hover:bg-muted/40",
+              )}
             >
               {o.label}
             </button>
@@ -91,8 +100,9 @@ export function PollBlock({
       <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
         <span className="tabular-nums">{total_votes} {total_votes === 1 ? "vote" : "votes"}</span>
         {multiple && <span>· pick more than one</span>}
-        {closed ? <span className="font-medium text-foreground/70">· voting closed · final results</span> : closes_time && <span>· closes {dateTime(closes_time)}</span>}
-        {!canVote && !closed && <span>· voting not available</span>}
+        {/* A deadline reads as a countdown ("closes in 2h") - the exact moment is on hover. */}
+        {closed ? <span className="font-medium text-foreground/70">· voting closed · final results</span> : closes_time && <span title={dateTime(closes_time)}>· closes {relativeFuture(closes_time)}</span>}
+        {!preview && !canVote && !closed && <span>· voting not available</span>}
         {canManage && (
           <button type="button" onClick={() => onSetClosed(!closed)} className="ml-auto font-medium text-primary hover:underline">
             {closed ? "Reopen" : "Close voting"}

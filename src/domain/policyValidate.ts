@@ -63,6 +63,11 @@ export function validateAccessRule(body: unknown, policy: Policy): AccessRuleInp
   // `*` is the wildcard verb = ALL custom methods (compiles to a `collection.<scope>.*` allow/deny that the
   // matcher's `*` token matches against any verb), so one rule covers every custom method instead of one each.
   if (hasVerb && b.verb !== "*" && (typeof b.verb !== "string" || !VERB_RE.test(b.verb))) throw invalidArgument("verb must be a custom-method name (or '*' for all custom methods)");
+  // The level tokens are the ACTION token of a STANDARD key, so a verb named `read`/`write`/`admin` would make
+  // a verb pattern collide with the standard lane (an all-scope verb rule carries a `**` id token, which also
+  // matches the collection-level standard key). No custom method is named that; reject it rather than let one
+  // author a rule whose blast radius is not what the modal shows.
+  if (hasVerb && LEVELS.has(b.verb as Level)) throw invalidArgument("verb must be a custom-method name, not a level (read|write|admin)");
   // `*` is ALLOW-only: the custom-allow lane is consulted only for custom requests (safe), but the deny lane
   // is checked for standard requests too, where `*` would also match the read/write/admin token and over-deny.
   if (b.verb === "*" && effect === "deny") throw invalidArgument("verb '*' (all custom methods) supports allow only; deny a specific method instead");
