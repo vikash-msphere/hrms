@@ -1,13 +1,8 @@
 import { eq } from "drizzle-orm";
-import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
-import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { invalidArgument, notFound } from "../lib/errors";
+import { crudService, has, type CrudSpec } from "./crud";
 import type { StructureLine } from "../domain/payroll";
 
 // A structure line on the wire: `component` is a `pay-components/<id>` ref (the inbound edge decodes the
@@ -66,65 +61,34 @@ export async function structureLinesById(deps: Deps, structureId?: string | null
   return parseLines(s.linesJson);
 }
 
-export async function listSalaryStructures(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.salaryStructures), showDeleted).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
-}
-
-export async function getSalaryStructure(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.salaryStructures).where(eq(schema.salaryStructures.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("salary structure not found");
-  return row;
-}
-
-export async function createSalaryStructure(deps: Deps, actor: AppUser, input: SalaryStructureInput, id?: string) {
-  if (!input.display_name) throw invalidArgument("display_name is required");
-  const lines = await normalizeLines(deps, input.lines ?? []);
-  const row = (await deps.db
-    .insert(schema.salaryStructures)
-    .values({
-      ...(id ? { id } : {}),
-      code: await allocFlatCode(deps, schema.salaryStructures),
+export const salaryStructureSpec: CrudSpec<SalaryStructureInput> = {
+  table: schema.salaryStructures,
+  collection: "salary-structures",
+  auditName: "salary_structure",
+  notFound: "salary structure not found",
+  insert: async (input, deps) => {
+    if (!input.display_name) throw invalidArgument("display_name is required");
+    return {
       name: input.display_name,
       description: input.description ?? null,
-      linesJson: JSON.stringify(lines),
-    })
-    .returning())[0]!;
-  await audit(deps, actor, "salary_structure.create", "salary-structures", row.uuid, undefined, row);
-  return row;
-}
+      linesJson: JSON.stringify(await normalizeLines(deps, input.lines ?? [])),
+    };
+  },
+  patch: async (patch, _row, deps) => {
+    const set: Record<string, unknown> = {};
+    if (has(patch, "display_name")) set.name = patch.display_name;
+    if (has(patch, "description")) set.description = patch.description ?? null;
+    if (has(patch, "lines")) set.linesJson = JSON.stringify(await normalizeLines(deps, patch.lines ?? []));
+    return set;
+  },
+};
 
-export async function updateSalaryStructure(deps: Deps, actor: AppUser, id: string, patch: SalaryStructureInput, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.salaryStructures).where(eq(schema.salaryStructures.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("salary structure not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
-  const has = (k: keyof SalaryStructureInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  if (has("display_name")) set.name = patch.display_name;
-  if (has("description")) set.description = patch.description ?? null;
-  if (has("lines")) set.linesJson = JSON.stringify(await normalizeLines(deps, patch.lines ?? []));
-  const updated = (await deps.db.update(schema.salaryStructures).set(set).where(eq(schema.salaryStructures.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "salary_structure.update", "salary-structures", id, diffMeta(row, updated, set), updated);
-  return updated;
-}
-
-export async function deleteSalaryStructure(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.salaryStructures, "salary_structure", "salary-structures", id, ifMatch);
-}
-
-export async function restoreSalaryStructure(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.salaryStructures, "salary_structure", "salary-structures", id);
-}
-
-export async function purgeSalaryStructure(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.salaryStructures, "salary_structure", "salary-structures", id, ifMatch);
-}
+export const {
+  list: listSalaryStructures,
+  get: getSalaryStructure,
+  create: createSalaryStructure,
+  update: updateSalaryStructure,
+  remove: deleteSalaryStructure,
+  restore: restoreSalaryStructure,
+  purge: purgeSalaryStructure,
+} = crudService(salaryStructureSpec);

@@ -28,8 +28,14 @@ export type CollectionRouteSpec<I> = CrudSpec<I> & {
   lifecycleName?: string;
   publish?: boolean; // resource supports :publish/:unpublish
   publishTime?: boolean; // also stamp publish_time on publish
-  /** Replace individual generic methods, keeping the rest (a bespoke create, a scoped list, ...). */
+  /** Replace individual generic service methods, keeping the rest (a bespoke create, a bespoke get, ...). */
   overrides?: Partial<CrudService<I>>;
+  /**
+   * Replaces the generic list. Takes the context because a scoped list needs `c.get("scope")` (the SQL-level
+   * row filter the middleware computed) and often its own `?employee` / `?from` / `?to` filters - things a
+   * service-level signature cannot see. The factory still owns the response shape and the access hints.
+   */
+  list?: (c: Context<AppEnv>) => Promise<{ items: any[]; nextPageToken?: string }>;
   /** This collection's own custom methods, by verb. Reached after the lifecycle verbs and `:restore`. */
   verbs?: Record<string, (c: Context<AppEnv>, id: string, svc: CrudService<I>) => Promise<Response>>;
 };
@@ -47,7 +53,9 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     .get("/", async (c) => {
       const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
       const user = c.get("user");
-      const { items, nextPageToken } = await svc.list(c.get("deps"), user, maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+      const { items, nextPageToken } = spec.list
+        ? await spec.list(c)
+        : await svc.list(c.get("deps"), user, maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
       return c.json({ results: items.map((r) => withAccess(serialize(r) as object, user, collection, r.code)), next_page_token: nextPageToken });
     })
     .get(`/:${param}`, async (c) => item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c))))
