@@ -273,6 +273,10 @@ export type CronRun = Wire<"cron_run">;
 
 export type User = Wire<"user">;
 
+// A machine credential. It acts as its `owner`, narrowed by `scope` - never wider than that user's own
+// access. `secret` is present ONLY on the create response: it is stored one-way and can never be read back.
+export type ApiKey = Wire<"api-key">;
+
 // `capabilities` is the server-computed, scope-stripped capability set (e.g. "holidays.write",
 // "leave-requests.approve"); UI gating reads it via <Can>/usePermission. The server still enforces.
 export type Me = { email: string; role: string; employee_id: string | null; capabilities: string[] };

@@ -7,7 +7,7 @@ How access control works in this codebase, end to end. This is the **current** r
 2. [The three identifiers](#2-the-three-identifiers)
 3. [Policy is data](#3-policy-is-data)
 4. [The compiled store (`access_rules`)](#4-the-compiled-store-access_rules)
-5. [The grant shape](#5-the-grant-shape)
+5. [The grant shape](#5-the-grant-shape) - [5.1 The API-key ceiling](#51-the-api-key-ceiling-machine-callers)
 6. [From request to permission key](#6-from-request-to-permission-key)
 7. [The matcher](#7-the-matcher)
 8. [The decision](#8-the-decision)
@@ -142,6 +142,63 @@ type Level = "read" | "write" | "admin";
 - **`deny`** is checked first and wins outright, for both kinds, with no downward ladder. This expresses
   separation-of-duties (payroll `:approve` is super-only via a deny on every other role) and per-object
   denies (section 10).
+
+### 5.1 The API-key ceiling (machine callers)
+
+A machine caller presents `Authorization: Bearer hrms_<prefix>_<secret>` instead of a Cloudflare Access JWT
+or a session cookie. An API key is **not a principal of its own**: it acts as its owner (a `users` row), and
+its scope may only narrow that user's authority.
+
+A scope is deliberately not a second `Grant` - intersecting two pattern grants would need pattern algebra
+over `me` / `my-dept` / `<prefix>-*`, which is where a BOLA hole would hide. It is three plain facts, each of
+which intersects exactly against the grant's own structure (`domain/keyScope.ts`):
+
+```ts
+type KeyScope = {
+  collections: string[] | "*"; // the FIRST pattern token - the same thing access_rules.namespace stores
+  maxLevel: Level;             // clamps every granted level down the ladder
+  verbs: string[] | "*";       // the custom-method (last) token
+};
+```
+
+An empty list is a lock, not a wildcard: `collections: []` grants nothing.
+
+The ceiling is enforced in **two** places, and neither is redundant:
+
+1. **`narrowGrant` at auth time** (`middleware/auth.ts`) rewrites `user.grant` before anything reads it.
+   Cross-collection patterns (super's `**`) collapse to one `<col>.**` entry per allowed collection; levels
+   clamp; `deny` carries through verbatim, since deny only ever subtracts. This is what makes every
+   grant-derived ANSWER correct - list scope, search scopes, dashboard scopes, capability hints - without a
+   single one of them special-casing machine callers.
+2. **`inScope` on the resolved request** (`middleware/authz.ts`) checks the request itself. Necessary
+   because the object lane merges per-object exception rules onto the grant at decision time (section 10),
+   and that merge could otherwise re-widen a key past its ceiling.
+
+The transports (`search`, `dashboard-summary`, `activity`, `batch`) get no exemption from the collection
+axis: a collection-scoped key cannot use them, and a `"*"`-scoped one can, subject to `max_level`.
+
+Three things a key may never do, regardless of scope:
+
+- **Simulate.** `X-View-As` from a key is refused (`middleware/auth.ts`), not ignored - a key holding
+  `access-rules:preview` would otherwise read the app as any employee.
+- **Mint another key.** Otherwise a narrow key with write access to `api-keys` could mint an unrestricted
+  one for its own owner and escape its ceiling entirely (`services/apiKeys.ts`).
+- **Outlive its owner's account.** The owner must exist and be `active` on every request, and the row
+  cascades on user delete.
+
+Two properties the rest of the design leans on:
+
+- **The bearer lane is terminal.** A request carrying an `hrms_`-shaped bearer is resolved as that key or
+  fails 401 - it never falls back to the cookie. `middleware/csrf.ts` skips its `X-Requested-By` check on the
+  mere presence of that header, which is sound *only* because of this rule; a fall-through would let an
+  attacker suppress CSRF with a junk bearer and ride the victim's session.
+- **The key row is never cached.** One indexed read by `prefix` per request, so revocation and expiry bite on
+  the very next call. The stored verifier is an HMAC (key derived from `FIELD_ENCRYPTION_KEY` by HKDF), not a
+  bare digest, so a dump of `api_keys` is not a set of working credentials.
+
+`test/keyScope.test.ts` states the top-level claim executably: over every seeded role grant, every scope and
+a broad request space, anything the narrowed grant allows the original grant also allows.
+
 
 ## 6. From request to permission key
 

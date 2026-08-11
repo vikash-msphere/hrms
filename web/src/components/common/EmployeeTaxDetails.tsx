@@ -150,7 +150,17 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
               <Row label="Projected income for the year" value={inr(d.annual_gross)} />
               {priorIncomeCounted ? <Row label={`Includes ${inr(priorIncomeCounted)} from a previous employer`} value="" muted /> : null}
               <Row label="Standard deduction" value={`− ${inr(d.standard_deduction)}`} muted />
+              {/* Chapter VI-A from VERIFIED investment declarations. A section this regime disallows is shown at
+                  zero rather than hidden, so the answer to "why didn't my 80C help?" is on the page. */}
+              {(d.deductions ?? []).filter((x) => (x.allowed ?? 0) > 0).map((x) => (
+                <Row key={x.section} label={`Deduction u/s ${x.section}`} value={`− ${inr(x.allowed ?? 0)}`} muted />
+              ))}
               <Row label="Taxable income" value={inr(d.taxable_income)} strong />
+              {(d.deductions ?? []).some((x) => (x.allowed ?? 0) === 0) && (
+                <p className="text-xs text-muted-foreground">
+                  Not allowed under this regime: {(d.deductions ?? []).filter((x) => (x.allowed ?? 0) === 0).map((x) => x.section).join(", ")}.
+                </p>
+              )}
               <div className="my-2 border-t" />
               {d.slabs.map((s) => (
                 <Row key={`${s.from}`} label={`${inr(s.from)}${s.to ? ` – ${inr(s.to)}` : " and above"} @ ${s.rate}%`} value={inr(s.amount)} muted />

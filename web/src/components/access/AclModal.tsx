@@ -1,6 +1,7 @@
 import * as React from "react";
-import { KeyRound, Trash2, Plus, ShieldCheck, ArrowLeft, Zap, Globe, Waypoints, Info } from "lucide-react";
+import { KeyRound, Trash2, Plus, ShieldCheck, ArrowLeft, Zap, Globe, Waypoints, Info, AlertTriangle, Clock, History, Check, X, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { timeAgo } from "@/lib/activity";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -10,8 +11,9 @@ import { Input } from "@/components/ui/input";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
-import { create, listAll, remove } from "@/api";
-import { fetchAllAccessRules, scopeText, permText } from "./permMatrix";
+import { api, create, invoke, listAll, remove } from "@/api";
+import { fetchAllAccessRules, scopeText, permText, accessTone, type AccessRule } from "./permMatrix";
+import { ruleSentence, expiryLabel, denyBlocking } from "./ruleLogic";
 import { usePaged, Pager } from "@/components/common/Pager";
 import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
 import type { User } from "@/types";
@@ -24,21 +26,13 @@ import { verbInfo } from "./verbMeta";
 import { PreviewPanel, fetchPreview } from "./PreviewPanel";
 import { usePermission } from "@/lib/perm";
 
-// One access rule (the unified resource). Roles and users are the same primitive.
-type AccessRule = {
-  path: string;
-  subject_kind: "role" | "user";
-  subject: string; // role name, or users/<id>
-  collection: string;
-  scope: string; // all | self | dept | subtree | exact
-  scope_ref?: string;
-  field?: string;
-  level?: string;
-  verb?: string;
-  effect: string; // allow | deny
-  etag?: string;
-};
+// The rule shape is the shared one (permMatrix) - roles and users are the same primitive, and the matrix,
+// the fine-rules editor and this modal all read the same fields, lifecycle included.
 type Role = { path: string; name: string };
+
+// One audit entry about an access rule, for "added by X, 2w ago" and the recent-changes strip. Read from the
+// audit trail the server already writes on every rule create/delete/approve - no new bookkeeping.
+type RuleEvent = { path: string; action: string; actor_name?: string; actor_email?: string; create_time: string; meta?: { rule_id?: string; collection?: string; sentence?: string } };
 
 // Standard-method levels (the read<write<admin ladder). `none` = remove the rule; `deny` blocks the object.
 const LEVELS = ["read", "write", "admin", "deny"] as const;
@@ -58,6 +52,26 @@ const VERB_EFFECTS = ["none", "allow", "deny"] as const;
 // Wildcard verb sentinel = ALL custom methods in one rule (matches the engine's `*` verb token).
 const ALL_VERBS = "*";
 
+// The trigger's default `[&>span]:line-clamp-1` turns the value slot into a -webkit-box, which fights the
+// dot+label row: keep it a single flex line and give the control WIDTH (w-40 fits "cannot create") instead of
+// letting it grow a second row.
+const ACCESS_TRIGGER = "[&>span]:flex [&>span]:items-center [&>span]:line-clamp-none";
+
+// Every access dropdown option renders as a coloured dot + coloured label - a grant and a no-grant must not
+// look alike at a glance ("can create" vs "cannot create" was the worst offender). Radix clones the SELECTED
+// item's children into the trigger, so this one component styles both the open menu and the closed control.
+function AccessOptionLabel({ value, label, createMode }: { value: string; label: string; createMode: boolean }) {
+  const tone = accessTone(value, createMode);
+  return (
+    // inline-flex + nowrap: the trigger is a fixed-width one-liner, so the dot+label must never wrap onto a
+    // second row (that grew the control's height instead of its width).
+    <span className={cn("inline-flex items-center gap-2 whitespace-nowrap font-medium", tone.text)}>
+      <span className={cn("h-2 w-2 shrink-0 rounded-full", tone.dot)} />
+      {label}
+    </span>
+  );
+}
+
 export function AclModal({
   target,
   onClose,
@@ -75,7 +89,12 @@ export function AclModal({
   const [users, setUsers] = React.useState<User[]>([]);
   const [roles, setRoles] = React.useState<Role[]>([]);
   const [busy, setBusy] = React.useState(false);
+  // Bulk grant: the add form collects a LIST of people (chips) and writes one rule each, because granting the
+  // same access to five people was five open-pick-add cycles.
+  const [addUsers, setAddUsers] = React.useState<string[]>([]);
   const [addUser, setAddUser] = React.useState("");
+  // Optional expiry on what is being granted (contractor / temporary access). "" = permanent.
+  const [addExpires, setAddExpires] = React.useState("");
   const [addAccess, setAddAccess] = React.useState("read"); // level (read|write|admin|deny) or verb effect (allow|deny)
   // Opened on an object/collection (no target.verb), the admin can drill into one custom method; `focusVerb`
   // is that drill-in. A verb-target (an action element) sets the verb directly and skips the chips.
@@ -87,6 +106,12 @@ export function AclModal({
   // Per-collection grantable scope tiers from the policy manifest (carried on users/me). Fetched once + cached
   // in permMatrix, so opening successive icons reuses it. Empty until loaded -> the target collapses to "all".
   const [scopeCaps, setScopeCaps] = React.useState<Record<string, string[]>>({});
+  // Bumped after every rule reload -> the preview panel re-asks the engine for the person it is showing.
+  const [rulesVersion, setRulesVersion] = React.useState(0);
+  // Recent access-rule changes from the audit trail: who authored which rule and when. Loaded once per open
+  // (best-effort - a caller without the audit capability simply gets no provenance, never an error).
+  const [events, setEvents] = React.useState<RuleEvent[]>([]);
+  const [showHistory, setShowHistory] = React.useState(false);
   React.useEffect(() => {
     fetchScopeCapabilities().then(setScopeCaps).catch(() => setScopeCaps({}));
   }, []);
@@ -122,6 +147,8 @@ export function AclModal({
   // Display labels for the standard ladder. The engine value `admin` is shown as "full" so it reads as a
   // superset (delete + purge) rather than a separate sibling of read/write that hides delete. Value unchanged.
   const levelLabel = (l: string) => (createMode && l === "write" ? "can create" : l === "admin" ? "full" : l);
+  // Bound to this modal's mode so the call sites stay short (see the hoisted AccessOption below).
+  const AccessOption = ({ value, label }: { value: string; label: string }) => <AccessOptionLabel value={value} label={label} createMode={createMode} />;
 
   const showUsers = canManageUsers;
   const showRoles = canManageRoles;
@@ -135,6 +162,9 @@ export function AclModal({
       if (showUsers) tasks.push(listAll<User>("users").then(setUsers));
       if (showRoles) tasks.push(listAll<Role>("roles").then(setRoles));
       await Promise.all(tasks);
+      // Every rule mutation funnels through reload(), so this counter is the modal's "rules changed" signal -
+      // it re-runs the preview panel's check for whoever is on screen (a stale verdict misreports the edit).
+      setRulesVersion((v) => v + 1);
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load access", description: String((e as Error).message) });
     } finally {
@@ -146,7 +176,33 @@ export function AclModal({
     if (target) void reload();
     setFocusVerb(undefined);
     setAddUser("");
+    setAddUsers([]);
+    setAddExpires("");
+    setShowHistory(false);
   }, [target, reload]);
+
+  // Provenance for the rules on screen: the audit trail already records every access-rule write, so "who
+  // added this and when" is a read, not new bookkeeping. Scoped to this collection by the free-text `q`
+  // (the audit meta carries the collection name), newest first.
+  React.useEffect(() => {
+    if (!target?.collection) return;
+    let live = true;
+    api<{ results: RuleEvent[] }>(`/activity?entity=access-rules&q=${encodeURIComponent(target.collection)}&max_page_size=50`)
+      .then((p) => live && setEvents(p.results))
+      .catch(() => live && setEvents([])); // no audit capability -> no provenance, never an error
+    return () => {
+      live = false;
+    };
+  }, [target?.collection, rulesVersion]);
+  // Rule id -> the event that created it, for the "added by …" line under each rule.
+  const originOf = React.useCallback(
+    (rulePath: string): RuleEvent | undefined => {
+      const id = rulePath.split("/").pop();
+      return events.find((e) => e.meta?.rule_id === id && (e.action === "access-rule.create" || e.action === "access-rule.approve" || e.action === "access-rule.request"));
+    },
+    [events],
+  );
+  const actorOf = (e: RuleEvent) => e.actor_name || e.actor_email || "someone";
   // Keep the add-form's access value valid for the current mode (levels vs verb effects).
   React.useEffect(() => {
     setAddAccess(verbMode ? "allow" : createMode ? "write" : "read");
@@ -161,6 +217,9 @@ export function AclModal({
 
   const levelBody = (lvl: string): Record<string, unknown> => (lvl === "deny" ? { effect: "deny" } : { level: lvl });
   const verbBody = (v: string, effect: "allow" | "deny"): Record<string, unknown> => ({ verb: v, effect });
+  // A date-only picker means "expires at the end of that day", which is what "access until Friday" means to
+  // a human - the server takes any ISO instant.
+  const expiryBody = (): Record<string, unknown> => (addExpires ? { expire_time: new Date(`${addExpires}T23:59:59`).toISOString() } : {});
 
   const roleAll = (name: string) => rules.filter((r) => r.subject_kind === "role" && r.subject === name && matchesTarget(r));
   // Same subject + same target dimension, but at ANOTHER scope tier - shown as context so "HR already has
@@ -208,6 +267,27 @@ export function AclModal({
   const rolePaged = usePaged(shownRoles, 8);
   const userPaged = usePaged(shownUserRules, 8);
 
+  // "2 roles + 1 person can approve" - the state of this target in one line, before anyone scrolls through
+  // eight dropdowns. Counted from the rules that ALLOW on this target at ANY scope tier (a dept-scoped grant
+  // is still someone who can), plus the `everyone` rule called out by name since it means the whole company.
+  const holders = React.useMemo(() => {
+    const onTarget = (r: AccessRule) =>
+      r.effect === "allow" &&
+      r.status !== "pending" &&
+      r.collection === collection &&
+      (r.field ?? undefined) === (field ?? undefined) &&
+      (verbMode ? r.verb === activeVerb || r.verb === ALL_VERBS : !r.verb) &&
+      (createMode ? r.scope === "create" : r.scope !== "create");
+    const matched = rules.filter(onTarget);
+    return {
+      roles: new Set(matched.filter((r) => r.subject_kind === "role" && r.subject !== EVERYONE_ROLE).map((r) => r.subject)).size,
+      people: new Set(matched.filter((r) => r.subject_kind === "user").map((r) => r.subject)).size,
+      everyone: matched.some((r) => r.subject_kind === "role" && r.subject === EVERYONE_ROLE),
+      pending: rules.filter((r) => r.collection === collection && r.status && r.status !== "active").length,
+    };
+  }, [rules, collection, field, verbMode, activeVerb, createMode]);
+  const canDoWhat = createMode ? "create" : verbMode ? (activeVerb === ALL_VERBS ? "use these methods" : `use ${verbInfo(collection ?? "", activeVerb!).label.toLowerCase()}`) : "see this";
+
   // Impact line for a destructive change (deny / rule removal): ask the engine how many people can do the
   // target thing RIGHT NOW, so the confirm dialog states what is being taken away instead of a bare "sure?".
   // Preview-capability holders only; everyone else keeps the plain confirm (fail quiet, never block).
@@ -229,16 +309,60 @@ export function AclModal({
     }
   }
 
+  // Re-author an existing rule from its serialized form - the inverse of a delete, and the building block of
+  // every Undo below. Field-for-field, so an undone rule is identical to the one that was there.
+  const recreate = (r: AccessRule) =>
+    create("access-rules", {
+      subject_kind: r.subject_kind,
+      subject: r.subject,
+      collection: r.collection,
+      scope: r.scope,
+      ...(r.scope_ref ? { scope_ref: r.scope_ref } : {}),
+      ...(r.field ? { field: r.field } : {}),
+      ...(r.verb ? { verb: r.verb } : r.level ? { level: r.level } : {}),
+      ...(r.effect === "deny" ? { effect: "deny" } : {}),
+      ...(r.expire_time ? { expire_time: r.expire_time } : {}),
+    });
+
+  // Every rule change is one click from being taken back. Permissions are exactly the kind of edit where the
+  // wrong pick is noticed one second later, and an 8s Undo beats reconstructing the previous rule by hand.
+  function undoable(title: string, undo: () => Promise<unknown>) {
+    toast({
+      title,
+      duration: 8000,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          setBusy(true);
+          undo()
+            .then(() => toast({ title: "Change undone" }))
+            .catch((e) => toast({ variant: "destructive", title: "Could not undo", description: String((e as Error).message) }))
+            .finally(() => void reload());
+        },
+      },
+    });
+  }
+
   async function setRoleLevel(name: string, value: string) {
     if (value === "deny") {
       const ok = await confirm({ title: `Deny ${roleLabel(name)} here?`, description: await impactLine(), destructive: true, confirmLabel: "Deny" });
       if (!ok) return;
     }
+    // Authoring an allow where a deny already covers the target writes a DEAD rule: the dropdown will read
+    // "write" and the person still gets 403. Say so before it lands, not after someone debugs it.
+    if (value !== "none" && value !== "deny") {
+      const blocker = denyBlocking({ subject_kind: "role", subject: name, collection: collection ?? "", scope: scopeSel, field, verb: activeVerb }, rules);
+      if (blocker && !(await confirm({ title: "A deny is already in place", description: `${ruleSentence(blocker, roleLabel(blocker.subject))}. A deny always wins, so this allow will have NO effect until that rule is removed. Add it anyway?`, confirmLabel: "Add anyway" }))) return;
+    }
     setBusy(true);
     try {
-      for (const r of roleAll(name).filter((x) => !x.verb)) await remove(r.path, r.etag); // edit = delete + create
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value) });
-      toast({ title: `Updated ${roleLabel(name)}` });
+      const before = roleAll(name).filter((x) => !x.verb);
+      for (const r of before) await remove(r.path, r.etag); // edit = delete + create
+      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...expiryBody() });
+      undoable(`Updated ${roleLabel(name)}`, async () => {
+        for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && !x.verb)) await remove(r.path, r.etag);
+        for (const r of before) await recreate(r);
+      });
       await reload();
     } catch (e) {
       toast({ variant: "destructive", title: "Could not update role", description: String((e as Error).message) });
@@ -253,9 +377,13 @@ export function AclModal({
     }
     setBusy(true);
     try {
-      for (const r of roleAll(name).filter((x) => x.verb === v)) await remove(r.path, r.etag);
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny") });
-      toast({ title: `Updated ${roleLabel(name)} · ${v}` });
+      const before = roleAll(name).filter((x) => x.verb === v);
+      for (const r of before) await remove(r.path, r.etag);
+      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...expiryBody() });
+      undoable(`Updated ${roleLabel(name)} · ${v}`, async () => {
+        for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
+        for (const r of before) await recreate(r);
+      });
       await reload();
     } catch (e) {
       toast({ variant: "destructive", title: "Could not update role", description: String((e as Error).message) });
@@ -292,14 +420,37 @@ export function AclModal({
     }
   }
 
+  // One rule per picked person, in one go. Rules that already exist come back as a 409 from the server; that
+  // person is reported as skipped instead of failing the whole batch, so a bulk grant is safely repeatable.
   async function addUserRule() {
-    if (!addUser) return;
+    const subjects = addUsers.length ? addUsers : addUser ? [addUser] : [];
+    if (!subjects.length) return;
+    if (addAccess !== "deny") {
+      const blocker = subjects.map((s) => denyBlocking({ subject_kind: "user", subject: s, collection: collection ?? "", scope: scopeSel, field, verb: activeVerb }, rules)).find(Boolean);
+      if (blocker && !(await confirm({ title: "A deny is already in place", description: `${ruleSentence(blocker, "This person")}. A deny always wins, so the new rule will have NO effect until it is removed. Add it anyway?`, confirmLabel: "Add anyway" }))) return;
+    }
     setBusy(true);
     try {
       const body = verbMode ? verbBody(activeVerb!, addAccess === "deny" ? "deny" : "allow") : levelBody(addAccess);
-      await create("access-rules", { subject_kind: "user", subject: addUser, collection, ...scopeBody(), ...body });
-      toast({ title: "Access updated" });
+      const added: string[] = [];
+      let skipped = 0;
+      for (const subject of subjects) {
+        try {
+          const row = await create<AccessRule>("access-rules", { subject_kind: "user", subject, collection, ...scopeBody(), ...body, ...expiryBody() });
+          added.push(row.path);
+        } catch (e) {
+          if (String((e as Error).message).toLowerCase().includes("already exists")) skipped++;
+          else throw e;
+        }
+      }
       setAddUser("");
+      setAddUsers([]);
+      undoable(
+        `${added.length} ${added.length === 1 ? "person" : "people"} updated${skipped ? ` · ${skipped} already had it` : ""}`,
+        async () => {
+          for (const path of added) await remove(path);
+        },
+      );
       await reload();
     } catch (e) {
       toast({ variant: "destructive", title: "Could not grant access", description: String((e as Error).message) });
@@ -313,10 +464,24 @@ export function AclModal({
     setBusy(true);
     try {
       await remove(r.path, r.etag);
-      toast({ title: "Access rule removed" });
+      undoable("Access rule removed", () => recreate(r));
       await reload();
     } catch (e) {
       toast({ variant: "destructive", title: "Could not remove", description: String((e as Error).message) });
+      setBusy(false);
+    }
+  }
+
+  // Four-eyes decision on a pending change (the verbs are fail-closed, so the buttons only appear for people
+  // the server would actually let decide - and it re-checks that the requester is not the approver).
+  async function decide(r: AccessRule, decision: "approve" | "reject") {
+    setBusy(true);
+    try {
+      await invoke("access-rules", decision, undefined, { rule: r.path });
+      toast({ title: decision === "approve" ? "Change approved" : "Change rejected" });
+      await reload();
+    } catch (e) {
+      toast({ variant: "destructive", title: `Could not ${decision}`, description: String((e as Error).message) });
       setBusy(false);
     }
   }
@@ -345,7 +510,11 @@ export function AclModal({
 
   return (
     <Dialog open={!!target} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl">
+      {/* The modal grew: holders line, deny banner, presets, the preview panel, then two paginated lists. On a
+          phone that is taller than the viewport, and the dialog primitive does not scroll on its own - so cap
+          it against the DYNAMIC viewport height (dvh, which excludes the mobile browser chrome) and scroll
+          inside. */}
+      <DialogContent className="max-h-[90dvh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="h-5 w-5 text-amber-600 dark:text-amber-400" /> Manage access · {meta.label}
@@ -378,6 +547,53 @@ export function AclModal({
             )}
           </DialogDescription>
         </DialogHeader>
+
+        {/* The current state in one line, plus the trail behind it. Without this the modal opens on eight
+            dropdowns and answers "who can do this?" only after scanning all of them. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span className="inline-flex items-center gap-1.5 font-medium">
+            <Users className="h-3.5 w-3.5 text-muted-foreground" />
+            {holders.everyone ? (
+              <span className="text-indigo-700 dark:text-indigo-300">Everyone can {canDoWhat}</span>
+            ) : holders.roles + holders.people === 0 ? (
+              <span className="text-muted-foreground">Nobody but full admins can {canDoWhat}</span>
+            ) : (
+              <span>
+                {[holders.roles && `${holders.roles} ${holders.roles === 1 ? "role" : "roles"}`, holders.people && `${holders.people} ${holders.people === 1 ? "person" : "people"}`].filter(Boolean).join(" + ")} can {canDoWhat}
+              </span>
+            )}
+          </span>
+          {holders.pending > 0 && (
+            <Badge variant="secondary" className="gap-1 text-amber-700 dark:text-amber-400">
+              <Clock className="h-3 w-3" /> {holders.pending} awaiting approval
+            </Badge>
+          )}
+          {events.length > 0 && (
+            <button type="button" className="inline-flex items-center gap-1 text-muted-foreground underline-offset-2 hover:underline" onClick={() => setShowHistory((s) => !s)}>
+              <History className="h-3.5 w-3.5" /> {showHistory ? "hide" : "recent changes"}
+            </button>
+          )}
+        </div>
+        {showHistory && (
+          <ul className="max-h-32 space-y-1 overflow-y-auto rounded-md border bg-muted/20 p-2 text-xs text-muted-foreground">
+            {events.slice(0, 12).map((e) => (
+              <li key={e.path} className="truncate">
+                <span className="font-medium text-foreground">{actorOf(e)}</span> {e.action.replace("access-rule.", "")}d{e.meta?.sentence ? ` ${e.meta.sentence}` : ""} · {timeAgo(e.create_time)}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* The recurring confusion of the whole model: creating is NOT write-on-existing-objects. Say it in
+            the one place someone is about to author a create rule. */}
+        {createMode && (
+          <p className="flex items-start gap-2 rounded-md border border-primary/20 bg-primary/5 p-2.5 text-xs text-muted-foreground">
+            <Info className="mt-px h-3.5 w-3.5 shrink-0 text-primary" />
+            <span>
+              This gate is only about making NEW {plural}. It does not let anyone see or edit existing ones - that is the write level on the {meta.label.toLowerCase()} icon itself. Most self-service setups want both (create + own records).
+            </span>
+          </p>
+        )}
 
         {/* What granting this actually does - the answer to "does export apply to every table or this one?",
             "why can't I pick a department here?". Only collections with real ambiguity carry a note. */}
@@ -431,8 +647,23 @@ export function AclModal({
           </div>
         )}
 
+        {/* Deny rules on this exact target, spelled out. The red key icon says a deny exists somewhere; this
+            says WHICH, so the allow someone is about to add is not authored dead. */}
+        {(() => {
+          const denies = rules.filter((r) => r.effect === "deny" && matchesTarget(r) && (verbMode ? r.verb === activeVerb : !r.verb));
+          if (!denies.length) return null;
+          return (
+            <p className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs">
+              <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-destructive" />
+              <span>
+                A deny is in force here ({denies.map((d) => (d.subject_kind === "role" ? roleLabel(d.subject) : emailOf(d.subject))).join(", ")}). A deny always wins, so an allow added below stays inert for them until the deny is removed.
+              </span>
+            </p>
+          );
+        })()}
+
         {/* Ground truth: what the engine actually answers for a chosen person on this target. */}
-        {target && <PreviewPanel target={{ ...target, verb: undefined }} activeVerb={activeVerb} createMode={createMode} />}
+        {target && <PreviewPanel target={{ ...target, verb: undefined }} activeVerb={activeVerb} createMode={createMode} rulesVersion={rulesVersion} />}
 
         {/* Custom-method navigation: step back from a drilled-in method, or drill into one. */}
         {focusVerb && !target?.verb && (
@@ -477,7 +708,7 @@ export function AclModal({
                 {userShown.length === 0 && <p className="text-sm text-muted-foreground">No per-user rules here.</p>}
                 {userShown.length > 0 && shownUserRules.length === 0 && <p className="text-sm text-muted-foreground">No rule matches "{userFilter}".</p>}
                 {userPaged.pageItems.map((r) => (
-                  <div key={r.path} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                  <div key={r.path} className={cn("flex items-center justify-between rounded-md border px-3 py-2 text-sm", r.status && r.status !== "active" && "border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30")}>
                     <span className="flex min-w-0 flex-col">
                       <span className="truncate">{emailOf(r.subject)}</span>
                       {(() => {
@@ -488,9 +719,43 @@ export function AclModal({
                           </span>
                         ) : null;
                       })()}
+                      {/* Who put this rule here, and when - a mystery rule nobody will dare remove becomes an
+                          accountable one. Falls back to the rule's own create time when the trail is not readable. */}
+                      {(() => {
+                        const origin = originOf(r.path);
+                        const when = origin?.create_time ?? r.create_time;
+                        return when ? (
+                          <span className="truncate text-[11px] text-muted-foreground">
+                            {origin ? `added by ${actorOf(origin)} · ` : "added "}
+                            {timeAgo(when)}
+                          </span>
+                        ) : null;
+                      })()}
                     </span>
                     <div className="flex items-center gap-2">
-                      <Badge variant={r.effect === "deny" ? "destructive" : "secondary"}>{r.effect === "deny" ? "deny" : r.verb ? verbInfo(collection ?? "", r.verb).label : createMode ? "can create" : levelLabel(r.level ?? "allow")}</Badge>
+                      {expiryLabel(r.expire_time) && (
+                        <Badge variant="muted" className="gap-1">
+                          <Clock className="h-3 w-3" /> {expiryLabel(r.expire_time)}
+                        </Badge>
+                      )}
+                      {r.status && r.status !== "active" && (
+                        <>
+                          <Badge variant="secondary" className="gap-1 text-amber-700 dark:text-amber-400">
+                            <Clock className="h-3 w-3" /> {r.status === "pending" ? "awaiting approval" : "removal awaiting approval"}
+                          </Badge>
+                          <Button variant="ghost" size="icon" title="Approve this change" disabled={busy} onClick={() => decide(r, "approve")}>
+                            <Check className="h-4 w-4 text-emerald-600" />
+                          </Button>
+                          <Button variant="ghost" size="icon" title="Reject this change" disabled={busy} onClick={() => decide(r, "reject")}>
+                            <X className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </>
+                      )}
+                      {/* Same tone as the dropdowns, so an existing per-user rule reads as the same thing the
+                          dropdown would say (a granted level is coloured; a deny stays the destructive badge). */}
+                      <Badge variant={r.effect === "deny" ? "destructive" : "secondary"} className={r.effect === "deny" ? undefined : accessTone(r.verb ? "allow" : r.level ?? "allow", createMode).text}>
+                        {r.effect === "deny" ? "deny" : r.verb ? verbInfo(collection ?? "", r.verb).label : createMode ? "can create" : levelLabel(r.level ?? "allow")}
+                      </Badge>
                       <Button variant="ghost" size="icon" disabled={busy} onClick={() => removeRule(r)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -499,29 +764,66 @@ export function AclModal({
                 ))}
               </div>
               <Pager page={userPaged.page} totalPages={userPaged.totalPages} total={userPaged.total} onPage={userPaged.setPage} />
-              <div className="flex items-end gap-2 border-t pt-3">
-                <div className="flex-1">
-                  <label className="mb-1 block text-xs font-medium">User</label>
-                  <Combobox value={addUser} onValueChange={setAddUser} options={users.map((u) => ({ value: u.path, label: u.email }))} placeholder="Search people…" />
+              <div className="space-y-2 border-t pt-3">
+                {/* Bulk grant: picking a person parks them as a chip, so the same access goes to several
+                    people in ONE add instead of one open-pick-add cycle each. */}
+                {addUsers.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {addUsers.map((u) => (
+                      <button key={u} type="button" onClick={() => setAddUsers((xs) => xs.filter((x) => x !== u))} className="inline-flex items-center gap-1 rounded-full border bg-muted/50 px-2 py-0.5 text-xs hover:bg-muted" title="Remove from this grant">
+                        {emailOf(u)} <X className="h-3 w-3" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="flex flex-wrap items-end gap-2">
+                  <div className="min-w-48 flex-1">
+                    <label className="mb-1 block text-xs font-medium">{addUsers.length ? "Add another person" : "User"}</label>
+                    <Combobox
+                      value=""
+                      onValueChange={(v) => v && setAddUsers((xs) => (xs.includes(v) ? xs : [...xs, v]))}
+                      options={users.filter((u) => !addUsers.includes(u.path)).map((u) => ({ value: u.path, label: u.email }))}
+                      placeholder="Search people…"
+                    />
+                  </div>
+                  <div className="w-40">
+                    <label className="mb-1 block text-xs font-medium">{verbMode ? "Effect" : createMode ? "Create" : "Access"}</label>
+                    <Select value={addAccess} onValueChange={setAddAccess}>
+                      <SelectTrigger className={ACCESS_TRIGGER}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(verbMode ? (activeVerb === ALL_VERBS ? ["allow"] : ["allow", "deny"]) : levelChoices).map((l) => (
+                          <SelectItem key={l} value={l}>
+                            <AccessOption value={l} label={verbMode ? l : levelLabel(l)} />
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {/* Temporary access: a contractor's grant that removes itself beats one nobody remembers
+                      to revoke. Empty = permanent. */}
+                  {addAccess !== "deny" && (
+                    <div className="w-36">
+                      <label className="mb-1 block text-xs font-medium" title="Leave empty for permanent access.">Expires (optional)</label>
+                      <Input type="date" className="h-9" value={addExpires} min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)} onChange={(e) => setAddExpires(e.target.value)} />
+                    </div>
+                  )}
+                  <Button disabled={busy || (!addUsers.length && !addUser)} onClick={addUserRule}>
+                    <Plus className="h-4 w-4" /> Add{addUsers.length > 1 ? ` ${addUsers.length}` : ""}
+                  </Button>
                 </div>
-                <div className="w-32">
-                  <label className="mb-1 block text-xs font-medium">{verbMode ? "Effect" : createMode ? "Create" : "Access"}</label>
-                  <Select value={addAccess} onValueChange={setAddAccess}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(verbMode ? (activeVerb === ALL_VERBS ? ["allow"] : ["allow", "deny"]) : levelChoices).map((l) => (
-                        <SelectItem key={l} value={l}>
-                          {verbMode ? l : levelLabel(l)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button disabled={busy || !addUser} onClick={addUserRule}>
-                  <Plus className="h-4 w-4" /> Add
-                </Button>
+                {/* The rule reads before it lands: the exact sentence the engine will enforce. */}
+                {(addUsers.length > 0 || addUser) && (
+                  <p className="rounded-md bg-muted/40 px-2 py-1.5 text-xs">
+                    <span className="font-medium">Grant:</span>{" "}
+                    {ruleSentence(
+                      { path: "", subject_kind: "user", subject: addUsers[0] ?? addUser, collection: collection ?? "", scope: createMode ? "create" : scopeSel, field, ...(verbMode ? { verb: activeVerb } : { level: addAccess }), effect: addAccess === "deny" ? "deny" : "allow" },
+                      addUsers.length > 1 ? `${addUsers.length} people` : emailOf(addUsers[0] ?? addUser),
+                    )}
+                    {addExpires && addAccess !== "deny" ? `, until ${addExpires}` : ""}
+                  </p>
+                )}
               </div>
             </TabsContent>
           )}
@@ -552,6 +854,34 @@ export function AclModal({
                           also: {others.map((o) => `${scopeText(o)} · ${permText(o)}`).join(", ")}
                         </span>
                       );
+                      // Lifecycle of THIS role's rules on this target: a pending change (four-eyes) or a
+                      // temporary grant is invisible in the level dropdown, so it rides beside the name.
+                      const mine = roleAll(role.name).filter((x) => (verbMode ? x.verb === activeVerb : !x.verb));
+                      const pendingRule = mine.find((x) => x.status && x.status !== "active");
+                      const expiring = mine.map((x) => expiryLabel(x.expire_time)).find(Boolean);
+                      const origin = mine[0] ? originOf(mine[0].path) : undefined;
+                      const notes = (
+                        <>
+                          {alsoNote}
+                          {origin && <span className="text-[11px] text-muted-foreground">added by {actorOf(origin)} · {timeAgo(origin.create_time)}</span>}
+                          <span className="flex flex-wrap items-center gap-1">
+                            {expiring && (
+                              <Badge variant="muted" className="gap-1">
+                                <Clock className="h-3 w-3" /> {expiring}
+                              </Badge>
+                            )}
+                            {pendingRule && (
+                              <>
+                                <Badge variant="secondary" className="gap-1 text-amber-700 dark:text-amber-400">
+                                  <Clock className="h-3 w-3" /> {pendingRule.status === "pending" ? "awaiting approval" : "removal awaiting approval"}
+                                </Badge>
+                                <button type="button" disabled={busy} onClick={() => decide(pendingRule, "approve")} className="text-[11px] font-medium text-emerald-700 underline-offset-2 hover:underline dark:text-emerald-400">approve</button>
+                                <button type="button" disabled={busy} onClick={() => decide(pendingRule, "reject")} className="text-[11px] font-medium text-destructive underline-offset-2 hover:underline">reject</button>
+                              </>
+                            )}
+                          </span>
+                        </>
+                      );
                       return isEveryone ? (
                         <span className="flex flex-col">
                           <span className="flex items-center gap-2">
@@ -559,38 +889,40 @@ export function AclModal({
                             <span className="font-medium text-indigo-700 dark:text-indigo-300">Everyone</span>
                             <span className="text-xs text-muted-foreground">all signed-in users</span>
                           </span>
-                          {alsoNote}
+                          {notes}
                         </span>
                       ) : (
                         <span className="flex flex-col">
                           <span>{roleLabel(role.name)}</span>
-                          {alsoNote}
+                          {notes}
                         </span>
                       );
                     })()}
                     {verbMode ? (
                       <Select value={roleVerbCurrent(role.name, activeVerb!)} onValueChange={(v) => setRoleVerb(role.name, activeVerb!, v)} disabled={busy}>
-                        <SelectTrigger className="w-32">
+                        <SelectTrigger className={cn("w-40 shrink-0", ACCESS_TRIGGER)}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           {(activeVerb === ALL_VERBS ? (["none", "allow"] as const) : VERB_EFFECTS).map((l) => (
                             <SelectItem key={l} value={l}>
-                              {l}
+                              <AccessOption value={l} label={l} />
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     ) : (
                       <Select value={roleLevelCurrent(role.name)} onValueChange={(v) => setRoleLevel(role.name, v)} disabled={busy}>
-                        <SelectTrigger className="w-32">
+                        <SelectTrigger className={cn("w-40 shrink-0", ACCESS_TRIGGER)}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="none">{createMode ? "cannot create" : "none"}</SelectItem>
+                          <SelectItem value="none">
+                            <AccessOption value="none" label={createMode ? "cannot create" : "none"} />
+                          </SelectItem>
                           {levelChoices.map((l) => (
                             <SelectItem key={l} value={l}>
-                              {levelLabel(l)}
+                              <AccessOption value={l} label={levelLabel(l)} />
                             </SelectItem>
                           ))}
                         </SelectContent>

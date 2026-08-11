@@ -8,7 +8,7 @@
 // correctness-independent (a cold isolate reconstructs the same Grant from the same rows); a grant edit
 // propagates within the TTL (the accepted few-seconds lag). Per-object USER exceptions are NOT loaded here -
 // they are narrowed by exact ancestor-code IN per request in P2.
-import { and, eq, inArray, isNull, isNotNull, or } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, isNotNull, or, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { Grant } from "../domain/permissions";
@@ -17,6 +17,21 @@ import { DEFAULT_POLICY } from "../domain/manifests";
 import { EMPTY_GRANT, EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
 import { rulesToGrant, mergeGrants, type CompiledRule } from "../domain/compileGrants";
 import { cached } from "./cache";
+
+// THE liveness predicate for authority: which rows actually decide. Every load path below ANDs this in, so
+// the two lifecycle features ride one condition:
+//   • four-eyes approval (services/accessRules.ts) - a `pending` row is INERT (a grant does nothing until a
+//     second admin approves it), while a `pending_delete` row KEEPS ENFORCING (the removal has not been
+//     approved yet, so the authority is still real). A pending change never applies itself in either
+//     direction; approving is what makes it take effect.
+//   • expiring grants - a temporary rule stops deciding the moment it lapses. The nightly cron then deletes
+//     the row, but deletion is hygiene, not the mechanism: a skipped tick can never leave access alive.
+// The composite index is still fully used: these are residual filters over an already-narrow row set.
+const live = (deps: Deps): SQL =>
+  and(
+    inArray(schema.accessRules.status, ["active", "pending_delete"]),
+    or(isNull(schema.accessRules.expiresAt), gt(schema.accessRules.expiresAt, deps.clock.now())),
+  )!;
 
 // Per-object EXCEPTION rules for one request: the caller's USER exceptions AND any exact ROLE rules in this
 // collection whose match_code is an ANCESTOR of the requested object's code (the exact ancestor-code IN
@@ -53,6 +68,7 @@ export async function loadObjectRulesForRequest(
         ),
         inArray(schema.accessRules.namespace, [collection, "*"]),
         inArray(schema.accessRules.matchCode, ancestorCodes),
+        live(deps),
       ),
     )) as CompiledRule[];
 }
@@ -100,7 +116,7 @@ export async function loadRoleGrantUncached(deps: Deps, role: string): Promise<G
     })
     .from(schema.accessRules)
     .where(
-      and(inArray(schema.accessRules.subject, subjects), eq(schema.accessRules.subjectKind, "role"), isNull(schema.accessRules.matchCode)),
+      and(inArray(schema.accessRules.subject, subjects), eq(schema.accessRules.subjectKind, "role"), isNull(schema.accessRules.matchCode), live(deps)),
     )) as (CompiledRule & { subject: string })[];
   if (rows.length === 0) return EMPTY_GRANT;
   const roleRows = rows.filter((r) => r.subject === role);
@@ -128,6 +144,7 @@ export async function loadObjectExceptionCodes(deps: Deps, userUuid: string, rol
         ),
         inArray(schema.accessRules.namespace, [collection, "*"]),
         isNotNull(schema.accessRules.matchCode),
+        live(deps),
       ),
     );
   const shares: string[] = [];
@@ -158,6 +175,7 @@ export async function loadObjectExceptionCodesFor(
         ),
         inArray(schema.accessRules.namespace, [...collections, "*"]),
         isNotNull(schema.accessRules.matchCode),
+        live(deps),
       ),
     );
   const out = new Map<string, { shares: string[]; denies: string[] }>();
@@ -199,7 +217,7 @@ export async function loadUserGrantUncached(deps: Deps, userUuid: string): Promi
     })
     .from(schema.accessRules)
     .where(
-      and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user"), isNull(schema.accessRules.matchCode)),
+      and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user"), isNull(schema.accessRules.matchCode), live(deps)),
     )) as CompiledRule[];
   if (rows.length === 0) return EMPTY_GRANT;
   return rulesToGrant(rows);

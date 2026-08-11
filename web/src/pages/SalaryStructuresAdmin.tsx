@@ -39,8 +39,10 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
   const [busy, setBusy] = useState(false);
   // A structure's earning lines feed each assigned employee's CTC split, so editing/deleting one can stale
   // their cached basic / Special-Allowance (annual CTC held fixed) - same shared signal as pay components.
-  const { canReapply, staleCount, skippedCount, reapplying, refresh: refreshSplitStatus, reapply: doReapply, promptReapply } = useSplitStaleness();
-  const afterMutation = useCallback(() => { reload(); refreshSplitStatus(); }, [reload, refreshSplitStatus]);
+  const { canReapply, staleCount, skippedCount, reapplying, reapply: doReapply, promptReapply } = useSplitStaleness();
+  // Deleting / disabling / restoring a structure re-points every employee assigned to it, so it prompts to
+  // propagate like an edit does. Silent when no split moved.
+  const afterMutation = useCallback(() => { reload(); void promptReapply(); }, [reload, promptReapply]);
   const sd = useSoftDelete("salary-structures", "salary structure", afterMutation);
   const writable = usePermission("salary-structures.write");
   const canPurge = usePermission("salary-structures.admin");

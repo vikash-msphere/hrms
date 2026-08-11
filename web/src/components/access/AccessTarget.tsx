@@ -29,6 +29,10 @@ export function AccessTarget({
   className?: string;
 }) {
   const am = useAccessMode();
+  // Count this icon while it is on screen (the pill reports the total). Registration is unconditional here
+  // and the hook order stays stable; the provider only shows the number while the mode is on.
+  const { registerTarget, enabled } = am;
+  React.useEffect(() => (enabled ? registerTarget() : undefined), [enabled, registerTarget]);
   if (!am.enabled) return <>{children ?? null}</>;
 
   // Red tint = an explicit deny rule covers this target - the lockouts worth finding. Amber = plain target.
@@ -45,7 +49,9 @@ export function AccessTarget({
         am.open(target);
       }}
       className={cn(
-        "inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+        // `.access-key` grows the hit area on touch devices (index.css): 24px is a comfortable pointer target
+        // and a miss with a fingertip, and these icons sit inside dense rows where a mis-tap opens the row.
+        "access-key inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
         deny
           ? "text-red-600 ring-1 ring-red-400/70 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-950"
           : "text-amber-600 ring-1 ring-amber-400/60 hover:bg-amber-100 dark:hover:bg-amber-950",

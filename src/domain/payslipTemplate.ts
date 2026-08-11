@@ -64,6 +64,18 @@ export type PayslipBlock = Styled &
       }
     // Net pay, boxed, with the amount in words.
     | { kind: "netBox"; label?: string; showWords?: boolean; fill?: string; borderWidth?: number }
+    // The employer's own contributions for the period (employer PF/ESI/gratuity) - cost to company, paid to
+    // neither the employee nor out of their gross. Contributions the org puts OVER AND ABOVE CTC carry
+    // `aboveCtcSuffix` and are excluded from the CTC total, with `grandTotalLabel` stating the all-in cost.
+    // Skipped when the run carries no employer contributions.
+    | {
+        kind: "employerCost";
+        title?: string;
+        totalLabel?: string; // in-CTC total = gross + in-CTC contributions
+        grandTotalLabel?: string; // all-in total, drawn only when an over-and-above-CTC line exists
+        aboveCtcSuffix?: string; // appended to an over-and-above-CTC line's name
+        showTotals?: boolean; // false = just the contribution rows
+      }
     | { kind: "note"; text: string; align?: "left" | "center"; emphasis?: boolean }
     | { kind: "rule"; weight?: number; color?: string }
     | { kind: "gap"; height?: number }
@@ -118,12 +130,19 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplate = {
       amountLabel: "Amount",
     },
     { kind: "netBox", label: "Net Salary Payable (A - B)", showWords: true },
+    {
+      kind: "employerCost",
+      title: "Employer Contributions (not deducted from your pay)",
+      totalLabel: "Cost to Company (CTC)",
+      grandTotalLabel: "Total Company Cost",
+      aboveCtcSuffix: "(over & above CTC)",
+    },
     { kind: "footer", left: "This is a system-generated payslip and does not require a signature.", right: "All amounts in {{currency}}." },
   ],
 };
 
 const KINDS = new Set<string>([
-  "orgHeader", "identity", "kvGrid", "attendance", "earningsDeductions", "netBox", "note", "rule", "gap", "footer",
+  "orgHeader", "identity", "kvGrid", "attendance", "earningsDeductions", "netBox", "employerCost", "note", "rule", "gap", "footer",
 ]);
 
 export const MAX_BLOCKS = 40;
@@ -274,6 +293,16 @@ export function parsePayslipTemplate(input: unknown): PayslipTemplate {
           ...(o.showWords != null ? { showWords: bool(o.showWords, at("showWords")) } : {}),
           ...(o.fill != null ? { fill: hex(o.fill, at("fill")) } : {}),
           ...(o.borderWidth != null ? { borderWidth: num(o.borderWidth, 0, 4, at("borderWidth")) } : {}),
+        };
+      case "employerCost":
+        return {
+          kind,
+          ...styled,
+          ...(o.title != null ? { title: str(o.title, MAX_LABEL, at("title")) } : {}),
+          ...(o.totalLabel != null ? { totalLabel: str(o.totalLabel, MAX_LABEL, at("totalLabel")) } : {}),
+          ...(o.grandTotalLabel != null ? { grandTotalLabel: str(o.grandTotalLabel, MAX_LABEL, at("grandTotalLabel")) } : {}),
+          ...(o.aboveCtcSuffix != null ? { aboveCtcSuffix: str(o.aboveCtcSuffix, MAX_LABEL, at("aboveCtcSuffix")) } : {}),
+          ...(o.showTotals != null ? { showTotals: bool(o.showTotals, at("showTotals")) } : {}),
         };
       case "note": {
         const align = o.align == null ? undefined : o.align;

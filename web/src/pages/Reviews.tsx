@@ -92,6 +92,12 @@ export default function Reviews({ me }: { me: Me }) {
     const m = new Map(cycles.map((c) => [idOf(c.path), c]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
   }, [cycles]);
+  // Declared before `needsMe`, which calls it during the first render pass (stage ownership needs the
+  // reviewee's manager) - a lower declaration would be a temporal-dead-zone crash, not a lint nit.
+  const empOf = useMemo(() => {
+    const m = new Map(employees.map((e) => [idOf(e.path), e]));
+    return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
+  }, [employees]);
   const mine = (r: Review) => !!r.employee && idOf(r.employee) === me.employee_id;
   // Cards the reviewee delivered within the cycle's window — read-only evidence on the review (kanban -> perf).
   const deliveredFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): KanbanCard[] => {
@@ -122,12 +128,19 @@ export default function Reviews({ me }: { me: Me }) {
     );
   }, [goals]);
 
-  // A review the caller can move forward right now sorts (and reads) as "needs you".
+  // A review the caller OWNS THE CURRENT STAGE OF reads as "needs you". Holding the verb is not the same
+  // thing: a super admin (and anyone granted submitManager broadly) can act on every review in the org, and
+  // keying off `can` alone put a "Needs you" badge on all of them. The manager stage belongs to the
+  // reviewee's manager; everyone else with the verb is an unblocker, and gets Nudge/Skip instead.
   const needsMe = (r: Review) => {
     const can = r.access?.can ?? [];
+    const managerOfReviewee = () => {
+      const mgr = empOf(r.employee)?.manager;
+      return !!mgr && !!me.employee_id && idOf(mgr) === me.employee_id;
+    };
     return (
       (r.state === "SELF" && mine(r) && can.includes("submitSelf")) ||
-      (r.state === "MANAGER" && can.includes("submitManager")) ||
+      (r.state === "MANAGER" && can.includes("submitManager") && managerOfReviewee()) ||
       (r.state === "SHARED" && mine(r) && can.includes("acknowledge"))
     );
   };
@@ -141,7 +154,7 @@ export default function Reviews({ me }: { me: Me }) {
           Number(mine(b)) - Number(mine(a)) ||
           (cycleOf(b.cycle)?.name ?? "").localeCompare(cycleOf(a.cycle)?.name ?? ""),
       ),
-    [reviews, cycles, me.employee_id],
+    [reviews, cycles, employees, me.employee_id],
   );
 
   const REVIEW_TOAST: Record<string, string> = {
@@ -171,8 +184,13 @@ export default function Reviews({ me }: { me: Me }) {
     }
   }
 
-  // 360 feedback requests addressed to the caller that still need a response.
-  const myRequests = useMemo(() => feedbackReqs.filter((f) => f.state === "REQUESTED"), [feedbackReqs]);
+  // 360 feedback requests addressed to the CALLER that still need a response. HR reads every feedback row
+  // (review-feedback.** read), so the author check is what keeps other people's nominations out of a
+  // section titled "requested from you" - without it HR sees requests it cannot answer.
+  const myRequests = useMemo(
+    () => feedbackReqs.filter((f) => f.state === "REQUESTED" && !!f.author && idOf(f.author) === me.employee_id),
+    [feedbackReqs, me.employee_id],
+  );
 
   // Ranked 360-nominee suggestions for a reviewee: people on the same kanban boards this cycle (they saw the
   // work) ahead of same-department colleagues. Pure client-side ranking over already-loaded collections.
@@ -196,11 +214,6 @@ export default function Reviews({ me }: { me: Me }) {
     return [...score.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => `employees/${id}`);
   };
 
-  const empOf = useMemo(() => {
-    const m = new Map(employees.map((e) => [idOf(e.path), e]));
-    return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
-  }, [employees]);
-
   // List filters: a status chip row plus (when reviews span several cycles) a cycle menu. Managers/HR
   // accumulate reviews fast; everyone else just sees the chips echo the summary strip. Both filters live
   // in the hash query (?filter=&cycle=) so a filtered view survives reload and can be shared.
@@ -211,11 +224,18 @@ export default function Reviews({ me }: { me: Me }) {
   const [cycleFilter, setCycleFilter] = useState(() => route.query.cycle ?? "all");
   const applyFilter = (f: Filter) => { setFilter(f); setQueryParams({ filter: f === "all" ? null : f }); };
   const applyCycle = (id: string) => { setCycleFilter(id); setQueryParams({ cycle: id === "all" ? null : id }); };
+  // The three buckets PARTITION the list (needs you / waiting on someone else / done) so the chip counts add
+  // up to "All". An "in progress" bucket that also counted the needs-you rows made the numbers unreadable.
+  // Every count is taken over the CYCLE-FILTERED set, the same rows the list renders - counting org-wide
+  // while showing one cycle made the chips contradict what was on screen.
+  const inCycle = (r: Review) => cycleFilter === "all" || (!!r.cycle && idOf(r.cycle) === cycleFilter);
+  const inScope = reviews.filter(inCycle);
+  const waitingOnOthers = (r: Review) => r.state !== "ACKNOWLEDGED" && !needsMe(r);
   const counts: Record<Filter, number> = {
-    all: reviews.length,
-    needs: reviews.filter(needsMe).length,
-    open: reviews.filter((r) => r.state !== "ACKNOWLEDGED").length,
-    done: reviews.filter((r) => r.state === "ACKNOWLEDGED").length,
+    all: inScope.length,
+    needs: inScope.filter(needsMe).length,
+    open: inScope.filter(waitingOnOthers).length,
+    done: inScope.filter((r) => r.state === "ACKNOWLEDGED").length,
   };
   const cycleOptions = useMemo(() => {
     const seen = new Map<string, string>();
@@ -228,9 +248,9 @@ export default function Reviews({ me }: { me: Me }) {
   }, [reviews, cycles]);
   const visible = sorted.filter(
     (r) =>
-      (cycleFilter === "all" || (!!r.cycle && idOf(r.cycle) === cycleFilter)) &&
+      inCycle(r) &&
       (filter === "all" ||
-        (filter === "needs" ? needsMe(r) : filter === "done" ? r.state === "ACKNOWLEDGED" : r.state !== "ACKNOWLEDGED")),
+        (filter === "needs" ? needsMe(r) : filter === "done" ? r.state === "ACKNOWLEDGED" : waitingOnOthers(r))),
   );
 
   const filterChip = (f: Filter, label: string) => (
@@ -253,7 +273,7 @@ export default function Reviews({ me }: { me: Me }) {
     const cyc = cycleOf(r.cycle);
     return r.state === "SELF" ? cyc?.self_due_date : r.state === "MANAGER" ? cyc?.manager_due_date : undefined;
   };
-  const overdueCount = reviews.filter((r) => { const d = stageDueOf(r); return !!d && d < todayStr(); }).length;
+  const overdueCount = inScope.filter((r) => { const d = stageDueOf(r); return !!d && d < todayStr(); }).length;
 
   // Previous-cycle overall rating per employee, so a shared result reads as a trend, not a lone number.
   // Everything needed is already client-side: order that employee's rated reviews by cycle period start.
@@ -277,8 +297,13 @@ export default function Reviews({ me }: { me: Me }) {
 
   // Open/folded state lives up here so expand/collapse-all and ?review= deep links can drive it; a card
   // with no explicit entry falls back to its default (open when it needs the caller).
+  // Auto-open is capped: a manager at cycle start owns every MANAGER-stage review on the page, and opening
+  // all of them buries the list under identical rating forms. Up to three needs-you cards open; past that
+  // only the top one does, and the rest stay scannable headers.
   const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
-  const defaultOpen = (r: Review) => needsMe(r) || sorted.length === 1;
+  const firstNeedsPath = sorted.find(needsMe)?.path;
+  const defaultOpen = (r: Review) =>
+    sorted.length === 1 || (needsMe(r) && (counts.needs <= 3 || r.path === firstNeedsPath));
   const isOpen = (r: Review) => openMap[r.path] ?? defaultOpen(r);
   const setAllOpen = (open: boolean) => setOpenMap(Object.fromEntries(visible.map((r) => [r.path, open])));
 
@@ -287,9 +312,13 @@ export default function Reviews({ me }: { me: Me }) {
     if (!route.id) return;
     const target = reviews.find((r) => idOf(r.path) === route.id);
     if (!target) return;
+    // The filters persist in the URL, so a notification can deep-link a review the current filter hides -
+    // the card would never render and the scroll would land nowhere. Being sent to a review outranks the
+    // filter that was left behind.
+    if (!visible.some((r) => r.path === target.path)) { applyFilter("all"); applyCycle("all"); }
     setOpenMap((m) => (m[target.path] ? m : { ...m, [target.path]: true }));
     requestAnimationFrame(() => document.getElementById(`review-${route.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }));
-  }, [route.id, reviews.length]);
+  }, [route.id, reviews]);
 
   // When "All cycles" is showing and reviews span several, section the list by cycle (newest name first,
   // matching the menu); otherwise everything renders as one unlabelled group.
@@ -310,7 +339,9 @@ export default function Reviews({ me }: { me: Me }) {
       <PageHeader
         accessCollection="reviews"
         title="Reviews"
-        description="Your performance reviews and self-assessments."
+        // Managers and admins see other people's reviews here too, so the subtitle can't claim the page is
+        // only yours - it's the first thing that made the page read wrong for anyone above employee.
+        description={reviews.some((r) => !mine(r)) ? "Performance reviews you own or oversee." : "Your performance reviews and self-assessments."}
         actions={<PageSettings me={me} host="reviews" />}
       />
 
@@ -318,7 +349,7 @@ export default function Reviews({ me }: { me: Me }) {
         <SummaryStrip
           items={[
             { label: "Need you", value: counts.needs, icon: CircleAlert, tone: counts.needs > 0 ? "warning" : "muted" },
-            { label: "In progress", value: counts.open, icon: Hourglass, tone: "primary" },
+            { label: "Waiting on others", value: counts.open, icon: Hourglass, tone: "primary" },
             { label: "Completed", value: counts.done, icon: CheckCircle2, tone: counts.done > 0 ? "success" : "muted" },
             ...(overdueCount > 0 ? [{ label: "Overdue", value: overdueCount, icon: AlarmClock, tone: "destructive" as const }] : []),
           ]}
@@ -349,7 +380,7 @@ export default function Reviews({ me }: { me: Me }) {
           <div className="mb-4 flex flex-wrap items-center gap-2">
             {filterChip("all", "All")}
             {filterChip("needs", "Needs you")}
-            {filterChip("open", "In progress")}
+            {filterChip("open", "Waiting on others")}
             {filterChip("done", "Completed")}
             <span className="ml-auto flex items-center gap-1">
               {cycleOptions.length > 1 && (
@@ -373,7 +404,7 @@ export default function Reviews({ me }: { me: Me }) {
             icon={ClipboardCheck}
             title="No reviews match"
             description="Nothing matches the current filters."
-            action={<Button variant="outline" size="sm" onClick={() => { setFilter("all"); setCycleFilter("all"); }}>Clear filters</Button>}
+            action={<Button variant="outline" size="sm" onClick={() => { applyFilter("all"); applyCycle("all"); }}>Clear filters</Button>}
           />
         ) : (
           <div className="space-y-6">
@@ -453,6 +484,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   onNominate: (employees: string[]) => void;
 }) {
   const can = review.access?.can ?? [];
+  const confirm = useConfirm();
   const [nominating, setNominating] = useState(false);
   // Open/folded state is owned by the page (expand-all + deep links); folded, the header line still says
   // who, which cycle, what stage, and the outcome once shared.
@@ -469,8 +501,17 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
     if (review.self_ratings && Object.keys(review.self_ratings).length) return review.self_ratings;
     try { return JSON.parse(loadDraft("selfRatings") || "{}"); } catch { return {}; }
   });
-  const [ratings, setRatings] = useState<Record<string, number>>(review.ratings ?? {});
-  const [overall, setOverall] = useState<number | undefined>(review.overall_rating);
+  // Manager ratings persist alongside the manager comment: half a rating grid is as expensive to redo as the
+  // write-up, and losing it silently while "Draft saved on this device" showed was the worst of both.
+  const [ratings, setRatings] = useState<Record<string, number>>(() => {
+    if (review.ratings && Object.keys(review.ratings).length) return review.ratings;
+    try { return JSON.parse(loadDraft("ratings") || "{}"); } catch { return {}; }
+  });
+  const [overall, setOverall] = useState<number | undefined>(() => {
+    if (review.overall_rating != null) return review.overall_rating;
+    const d = Number(loadDraft("overall"));
+    return Number.isFinite(d) && d > 0 ? d : undefined;
+  });
   const [mgrComment, setMgrComment] = useState(review.manager_comment || loadDraft("manager"));
   const [ackComment, setAckComment] = useState("");
   const [pdfSource, setPdfSource] = useState<PdfSource | null>(null);
@@ -483,6 +524,8 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
     try { await fn(); } finally { setBusy(""); }
   };
 
+  // "Waiting on the manager" is only actionable if it names them, so a nudge has an obvious target.
+  const managerName = employee?.manager ? empName(employee.manager) : "";
   // The current stage's deadline comes from the cycle (self vs manager due dates).
   const stageDue = review.state === "SELF" ? cycle?.self_due_date : review.state === "MANAGER" ? cycle?.manager_due_date : undefined;
   const stageOverdue = !!stageDue && stageDue < todayStr();
@@ -503,6 +546,38 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   // The shared outcome, readable from the folded header - a closed card still answers "how did it land?".
   const headerRating = (review.state === "SHARED" || review.state === "ACKNOWLEDGED") && review.overall_rating != null;
 
+  // A folded card must answer "whose review, and what is being asked of me" without opening. The cycle name
+  // alone answered neither: an employee's own self-assessment read as "H1 2026 · Needs you", which never says
+  // it is a SELF review. So the title names the subject, and the badge names the actual task.
+  const subject = mine ? "Your review" : employeeName;
+  const actionLabel = review.state === "SELF" ? "self-assessment" : review.state === "MANAGER" ? "your assessment" : "acknowledge";
+
+  // Sharing is a one-way door: it publishes the assessment to the employee and there is no path back to the
+  // manager stage. So an empty form can't be submitted at all, and a partial one asks first.
+  const ratedCount = framework.competencies.filter((c) => ratings[c.key] != null).length;
+  const managerEmpty = overall == null && ratedCount === 0 && !mgrComment.trim();
+  const submitManagerReview = async () => {
+    const missing = [
+      overall == null ? "an overall rating" : "",
+      ratedCount < framework.competencies.length ? `${framework.competencies.length - ratedCount} of ${framework.competencies.length} competency ratings` : "",
+      !mgrComment.trim() ? "written feedback" : "",
+    ].filter(Boolean);
+    if (missing.length) {
+      const ok = await confirm({
+        title: "Share an incomplete review?",
+        description: `Missing: ${missing.join("; ")}. Sharing sends it to ${employeeName || "the employee"} straight away and the review can't come back to the manager stage.`,
+        confirmLabel: "Share anyway",
+      });
+      if (!ok) return;
+    }
+    await run("manager", async () => {
+      await onSubmitManager({ ratings, overall_rating: overall, manager_comment: mgrComment.trim() });
+      clearDraft("manager");
+      clearDraft("ratings");
+      clearDraft("overall");
+    })();
+  };
+
   return (
     <Card className={cn("overflow-hidden", stageOverdue && "border-l-2 border-l-destructive")}>
       <button
@@ -522,8 +597,8 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
             <ClipboardCheck className="h-4 w-4 text-primary" />
           )}
           <span className="font-semibold">{cycle?.name ?? "Review"}</span>
-          {!mine && <span className="text-sm text-muted-foreground">· {employeeName}</span>}
-          {needsAction && <Badge variant="warning">Needs you</Badge>}
+          <span className="text-sm text-muted-foreground">· {subject}</span>
+          {needsAction && <Badge variant="warning">Needs you: {actionLabel}</Badge>}
           {stageDue && (
             <span className={cn("text-xs tabular-nums", stageOverdue ? "font-medium text-destructive" : "text-muted-foreground")}>
               · {stageOverdue ? "was due" : "due"} {formatDate(stageDue)}
@@ -607,6 +682,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 conversation flag once the manager's side lands. */}
             <div className="space-y-2 rounded-lg border p-3">
               <p className="text-sm font-medium">Rate yourself <span className="font-normal text-muted-foreground">(optional)</span></p>
+              <ScaleLegend scale={framework.scale} />
               {framework.competencies.map((comp) => (
                 <div key={comp.key} className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-sm">{comp.label}</span>
@@ -637,26 +713,27 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
         {review.state === "MANAGER" && can.includes("submitManager") && (
           <div className="space-y-3 rounded-lg border p-3">
             <p className="text-sm font-medium">Manager review</p>
+            <ScaleLegend scale={framework.scale} />
             {framework.competencies.map((comp) => (
               <div key={comp.key} className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm">
                   {comp.label}
                   {review.self_ratings?.[comp.key] != null && <span className="ml-1.5 text-xs text-muted-foreground">self: {review.self_ratings[comp.key]}</span>}
                 </span>
-                <ScalePicker scale={framework.scale} value={ratings[comp.key]} onPick={(v) => setRatings((r) => ({ ...r, [comp.key]: v }))} />
+                <ScalePicker scale={framework.scale} value={ratings[comp.key]} onPick={(v) => setRatings((r) => { const next = { ...r, [comp.key]: v }; saveDraft("ratings", JSON.stringify(next)); return next; })} />
               </div>
             ))}
             <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
               <span className="text-sm font-medium">Overall</span>
-              <ScalePicker scale={framework.scale} value={overall} onPick={setOverall} />
+              <ScalePicker scale={framework.scale} value={overall} onPick={(v) => { setOverall(v); saveDraft("overall", String(v)); }} />
             </div>
             <Textarea rows={3} value={mgrComment} onChange={(e) => { setMgrComment(e.target.value); saveDraft("manager", e.target.value); }} placeholder="Overall feedback for the employee." />
             <div className="flex flex-wrap items-center gap-2">
               <AccessAction verb="submitManager" can={can} label="Submit manager review">
-                <Button size="sm" loading={busy === "manager"} onClick={run("manager", async () => { await onSubmitManager({ ratings, overall_rating: overall, manager_comment: mgrComment.trim() }); clearDraft("manager"); })}>Share with employee <ChevronRight className="h-3.5 w-3.5" /></Button>
+                <Button size="sm" loading={busy === "manager"} disabled={managerEmpty} onClick={submitManagerReview}>Share with employee <ChevronRight className="h-3.5 w-3.5" /></Button>
               </AccessAction>
               {skipBtn}
-              {!!mgrComment.trim() && <span className="ml-auto text-xs text-muted-foreground">Draft saved on this device</span>}
+              {(!!mgrComment.trim() || ratedCount > 0 || overall != null) && <span className="ml-auto text-xs text-muted-foreground">Draft saved on this device</span>}
             </div>
           </div>
         )}
@@ -664,8 +741,8 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           <div className="flex items-center justify-between gap-2">
             <p className="text-sm text-muted-foreground">
               {mine
-                ? "Your manager is writing their review. Ratings and feedback stay hidden until they're shared with you - nothing is needed from you right now."
-                : `Waiting for ${employeeName || "the employee"}'s manager to finish their review.`}
+                ? `${managerName ? `${managerName} is` : "Your manager is"} writing their review. Ratings and feedback stay hidden until they're shared with you - nothing is needed from you right now.`
+                : `Waiting for ${managerName || `${employeeName || "the employee"}'s manager`} to finish this review.`}
             </p>
             {waitBtns}
           </div>
@@ -796,10 +873,10 @@ function FeedbackRequestCard({ request, subjectName, framework, onSubmit, onDecl
         <ScalePicker scale={framework.scale} value={overall} onPick={setOverall} />
       </div>
       <div className="flex items-center gap-2">
-        <AccessAction verb="submitFeedback" label="Submit 360 feedback">
+        <AccessAction verb="submitFeedback" can={request.access?.can} label="Submit 360 feedback">
           <Button size="sm" loading={busy === "submit"} onClick={run("submit", () => onSubmit({ comment: comment.trim(), overall_rating: overall }))} disabled={!comment.trim() && overall == null}>Submit feedback</Button>
         </AccessAction>
-        <AccessAction verb="decline" label="Decline feedback request">
+        <AccessAction verb="decline" can={request.access?.can} label="Decline feedback request">
           <Button variant="ghost" size="sm" className="text-muted-foreground" loading={busy === "decline"} onClick={run("decline", onDecline)}>Decline</Button>
         </AccessAction>
       </div>
@@ -846,6 +923,16 @@ function ManagerResult({ review, framework }: { review: Review; framework: Perfo
       </div>
       {review.manager_comment && <Section label="Feedback">{review.manager_comment}</Section>}
     </div>
+  );
+}
+
+// What the numbers on the picker mean, spelled out once per form: the buttons themselves are bare digits and
+// the label only appears after a pick, which is the wrong order for someone rating for the first time.
+function ScaleLegend({ scale }: { scale: { value: number; label: string }[] }) {
+  return (
+    <p className="text-xs text-muted-foreground">
+      {scale.map((s) => `${s.value} = ${s.label}`).join(" · ")}
+    </p>
   );
 }
 

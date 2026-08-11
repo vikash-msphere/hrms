@@ -97,6 +97,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "users", title: "Users", desc: "Sign-in accounts and the roles each person holds.", group: "Access & security", icon: Users, perm: "users.write", keywords: ["accounts", "login", "assign role"], target: { collection: "users", label: "Users" } },
   { key: "roles", title: "Roles", desc: "Create and rename the roles permissions attach to.", group: "Access & security", icon: Shield, perm: "users.write", target: { collection: "roles", label: "Roles" } },
   { key: "permissions", title: "Permissions", desc: "What each role can see and do, per collection.", group: "Access & security", icon: KeyRound, perm: "users.write", keywords: ["grants", "access rules", "capabilities"], target: { collection: "access-rules", label: "Roles & permissions" } },
+  { key: "api-keys", title: "API keys", desc: "Machine credentials for scripts and integrations, scoped below your own access.", group: "Access & security", icon: KeyRound, perm: "api-keys.read", keywords: ["token", "bearer", "integration", "machine", "service account"], target: { collection: "api-keys", label: "API keys" } },
   { key: "operations", title: "System operations", desc: "Cron runs, background jobs and system health.", group: "Access & security", icon: Wrench, perm: "cron-runs.read", keywords: ["cron", "jobs", "maintenance"], target: { collection: "operations", label: "Operations" } },
 ];
 

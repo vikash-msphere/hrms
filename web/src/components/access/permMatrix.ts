@@ -16,6 +16,12 @@ export type AccessRule = {
   verb?: string;
   effect: string;
   etag?: string;
+  // Lifecycle (server-set). `pending` / `pending_delete` are four-eyes changes waiting on a second access
+  // admin; `expire_time` is temporary access. Both are read here, never authored except at create time.
+  status?: "active" | "pending" | "pending_delete";
+  requested_by?: string;
+  expire_time?: string;
+  create_time?: string;
 };
 
 // Cell options: the read<write<admin ladder, "none" (no rule) and "deny" (blocks, wins).
@@ -122,12 +128,30 @@ export function scopesForCollection(collection: string, hasObject: boolean, caps
 // Human-readable scope of an existing rule (covers exact/subtree for display even though we don't author them here).
 export function scopeText(r: AccessRule): string {
   switch (r.scope) {
+    case "create": return "create only"; // the collection-level create gate - no access to existing objects
     case "self": return "own";
     case "dept": return "department";
     case "exact": return r.scope_ref ? `object ${r.scope_ref.split("/").pop()}` : "object";
     case "subtree": return "subtree";
     default: return "all";
   }
+}
+
+// Colour tone per access VALUE, so the access dropdowns are distinguishable at a glance instead of a column of
+// near-identical grey text ("can create" vs "cannot create" was indistinguishable without reading closely).
+// Grant-vs-no-grant is the distinction that matters, so it carries the colour: no access (`none`) is muted and
+// a deny is destructive, while every allow is coloured by how much it grants. In create mode `write` IS the
+// affirmative "can create" grant rather than the middle rung of the read/write/full ladder, so it reads
+// emerald (yes) instead of amber (the write tier).
+export function accessTone(value: string, createMode = false): { text: string; dot: string } {
+  const yes = { text: "text-emerald-700 dark:text-emerald-400", dot: "bg-emerald-500" };
+  if (value === "none") return { text: "text-muted-foreground", dot: "bg-muted-foreground/40" };
+  if (value === "deny") return { text: "text-destructive", dot: "bg-destructive" };
+  if (value === "allow") return yes; // a custom method's allow
+  if (createMode) return yes; // create mode offers only `write` = can create
+  if (value === "read") return { text: "text-sky-700 dark:text-sky-400", dot: "bg-sky-500" };
+  if (value === "write") return { text: "text-amber-700 dark:text-amber-400", dot: "bg-amber-500" };
+  return { text: "text-violet-700 dark:text-violet-400", dot: "bg-violet-500" }; // admin = full (delete + purge)
 }
 
 // Human-readable permission of a rule: the custom verb, the level, or a deny.

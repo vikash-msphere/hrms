@@ -187,15 +187,49 @@ export function repaidCreditStmt(deps: Deps, loanId: string, amount: number, at:
     .where(and(eq(schema.loans.uuid, loanId), eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
 }
 
+// The pay period a run is collecting for, as the installment rules need it: `periodEnd` decides whether recovery
+// has started, `payDate` is the month the installment is collected in (and the date its ledger row carries).
+export type LoanPeriod = { payDate?: Date | null; periodEnd?: Date | null; excludeRunId?: string };
+const monthKeyOf = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+
+// Has recovery started by this period? A loan carries the date agreed at approval, and collecting before it
+// takes money the employee was told would not be taken yet. No period (a run without one) collects as before.
+function startedBy(loan: LoanRow, periodEnd?: Date | null): boolean {
+  if (!loan.startDate || !periodEnd) return true;
+  return +new Date(loan.startDate) <= +new Date(periodEnd);
+}
+
 // Installments due from an employee's DISBURSED loans this run: EMI capped at the outstanding balance (pure
-// math in domain/loans.ts). The payroll build turns each into a "Loan repayment" deduction line. (Deferred:
-// skip during unpaid-leave months.)
-export async function dueLoanInstallments(deps: Deps, employeeId: string): Promise<{ loan: LoanRow; amount: number }[]> {
+// math in domain/loans.ts), collected only from the agreed start date and only once per calendar month. The
+// payroll build turns each into a "Loan repayment" deduction line, itself capped so net can't go negative -
+// which is also what stops a heavily docked (unpaid-leave) month from over-collecting.
+export async function dueLoanInstallments(deps: Deps, employeeId: string, period?: LoanPeriod): Promise<{ loan: LoanRow; amount: number }[]> {
   const loans = await deps.db
     .select()
     .from(schema.loans)
     .where(and(eq(schema.loans.employeeId, employeeId), eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
-  return loans.map((l) => ({ loan: l, amount: installmentAmount(l) })).filter((x) => x.amount > 0.005);
+  const collected = await collectedThisMonth(deps, period);
+  return loans
+    .filter((l) => startedBy(l, period?.periodEnd) && !collected.has(l.uuid))
+    .map((l) => ({ loan: l, amount: installmentAmount(l) }))
+    .filter((x) => x.amount > 0.005);
+}
+
+// Loans a RUN-DRIVEN repayment was already recorded against for the period's calendar month (this run's own
+// rows excluded - a rebuild re-collects its own installment). An EMI is monthly: two runs whose periods fall in
+// the same month (a correction run, a mid-month off-cycle run) must not each take one. Run-driven ledger rows are
+// dated by their pay period (payroll.ts), so this compares like with like whenever a run was built.
+async function collectedThisMonth(deps: Deps, period?: LoanPeriod): Promise<Set<string>> {
+  const out = new Set<string>();
+  const anchor = period?.payDate ?? period?.periodEnd;
+  if (!anchor) return out;
+  const from = new Date(Date.UTC(new Date(anchor).getUTCFullYear(), new Date(anchor).getUTCMonth(), 1));
+  const key = monthKeyOf(new Date(anchor));
+  for (const r of await deps.db.select().from(schema.loanRepayments).where(gte(schema.loanRepayments.at, from))) {
+    if (!r.runId || r.runId === period?.excludeRunId) continue; // manual repayments don't stand in for the EMI
+    if (monthKeyOf(new Date(r.at)) === key) out.add(r.loanId);
+  }
+  return out;
 }
 
 // An exiting employee's still-collectible loans and what each still owes. The FnF settlement recovers the
@@ -212,16 +246,33 @@ export async function outstandingLoans(deps: Deps, employeeId: string): Promise<
 }
 
 // Every employee's due installments in one read, keyed by employee - the run build's shape (one select for
-// the whole org instead of one per employee, to stay inside the per-invocation subrequest budget).
-export async function dueLoanInstallmentsAll(deps: Deps): Promise<Map<string, { loan: LoanRow; amount: number }[]>> {
+// the whole org instead of one per employee, to stay inside the per-invocation subrequest budget). Same two
+// period rules as dueLoanInstallments: recovery must have started by the period, and one EMI per calendar month.
+export async function dueLoanInstallmentsAll(deps: Deps, period?: LoanPeriod): Promise<Map<string, { loan: LoanRow; amount: number }[]>> {
   const loans = await deps.db.select().from(schema.loans).where(and(eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
+  const collected = await collectedThisMonth(deps, period);
   const out = new Map<string, { loan: LoanRow; amount: number }[]>();
   for (const l of loans) {
+    if (!startedBy(l, period?.periodEnd) || collected.has(l.uuid)) continue;
     const amount = installmentAmount(l);
     if (amount <= 0.005) continue;
     const arr = out.get(l.employeeId);
     if (arr) arr.push({ loan: l, amount });
     else out.set(l.employeeId, [{ loan: l, amount }]);
+  }
+  return out;
+}
+
+// Every employee's still-outstanding disbursed loans in one read, keyed by employee. Feeds the payroll build's
+// interest-concession perquisite (domain/loans.ts), which values the whole outstanding balance, not one EMI.
+export async function outstandingLoansAll(deps: Deps): Promise<Map<string, LoanRow[]>> {
+  const loans = await deps.db.select().from(schema.loans).where(and(eq(schema.loans.status, "DISBURSED"), isNull(schema.loans.deleteTime)));
+  const out = new Map<string, LoanRow[]>();
+  for (const l of loans) {
+    if (outstandingOf(l) <= 0.005) continue;
+    const arr = out.get(l.employeeId);
+    if (arr) arr.push(l);
+    else out.set(l.employeeId, [l]);
   }
   return out;
 }

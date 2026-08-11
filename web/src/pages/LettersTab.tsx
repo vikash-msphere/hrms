@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { cn, idOf } from "@/lib/utils";
 import type { Employee } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
@@ -347,175 +348,192 @@ export default function LettersTab({ toast }: { toast: Toast }) {
               </CardContent>
             </Card>
 
-            {/* Input fields (filled in by HR at generation time) */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Input fields</CardTitle></CardHeader>
-              <CardContent className="space-y-2">
-                <p className="text-xs text-muted-foreground">Values HR types when generating this letter. A text field is usable as <code className="rounded bg-muted px-1">{"{{key}}"}</code>; a multiline field is placed with an “HR-entered body” block.</p>
-                {(selected.inputs ?? []).map((f, i) => (
-                  <div key={i} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
-                    <Input className="h-8 w-28 font-mono text-xs" value={f.key} onChange={(e) => updateInput(i, { key: e.target.value })} placeholder="key" />
-                    <Input className="h-8 w-40 text-sm" value={f.label} onChange={(e) => updateInput(i, { label: e.target.value })} placeholder="Label" />
-                    <select className="h-8 rounded-md border bg-background px-2 text-xs" value={f.type ?? "text"} onChange={(e) => updateInput(i, { type: e.target.value as TemplateInput["type"] })}>
-                      <option value="text">Text</option>
-                      <option value="multiline">Multiline</option>
-                    </select>
-                    <label className="flex items-center gap-1 text-xs text-muted-foreground"><input type="checkbox" checked={!!f.required} onChange={(e) => updateInput(i, { required: e.target.checked })} /> Required</label>
-                    <Button variant="ghost" size="icon" className="ml-auto h-7 w-7 text-destructive" onClick={() => removeInput(i)}><Trash2 className="h-4 w-4" /></Button>
-                  </div>
-                ))}
-                <Button variant="outline" size="sm" onClick={addInput}><Plus className="h-4 w-4" /> Add input field</Button>
-              </CardContent>
-            </Card>
+            {/* One template is a long edit surface (blocks alone can run dozens of rows), so its parts are
+                tabbed rather than stacked - the draft lives in this component either way, so switching tabs
+                never loses an unsaved edit. */}
+            <Tabs defaultValue="blocks">
+              <TabsList variant="segmented">
+                <TabsTrigger value="blocks">Content blocks</TabsTrigger>
+                <TabsTrigger value="inputs">Input fields</TabsTrigger>
+                <TabsTrigger value="placeholders">Placeholders</TabsTrigger>
+                <TabsTrigger value="preview">Preview</TabsTrigger>
+              </TabsList>
 
-            {/* Blocks */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Content blocks</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                {selected.blocks.map((b, i) => (
-                  <div key={i} className="rounded-lg border p-3">
-                    <div className="mb-2 flex items-center justify-between">
-                      <Badge variant="secondary">{BLOCK_KINDS.find((k) => k.kind === b.kind)?.label ?? b.kind}</Badge>
-                      <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === 0} onClick={() => moveBlock(i, -1)}><ChevronUp className="h-4 w-4" /></Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === selected.blocks.length - 1} onClick={() => moveBlock(i, 1)}><ChevronDown className="h-4 w-4" /></Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deleteBlock(i)}><Trash2 className="h-4 w-4" /></Button>
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {(b.kind === "subject" || b.kind === "para" || b.kind === "note") && (
-                        <Textarea rows={b.kind === "para" ? 3 : 2} value={b.text ?? ""} onChange={(e) => updateBlock(i, { text: e.target.value })} placeholder="Text…" />
-                      )}
-                      {b.kind === "bullets" && (
-                        <Textarea rows={4} value={(b.items ?? []).join("\n")} onChange={(e) => updateBlock(i, { items: e.target.value.split("\n") })} placeholder="One bullet per line" />
-                      )}
-                      {b.kind === "signature" && (
-                        <div className="space-y-1">
-                          <Input value={b.closing ?? ""} onChange={(e) => updateBlock(i, { closing: e.target.value })} placeholder="Closing, e.g. For and on behalf of {{company}}," />
-                          <p className="text-xs text-muted-foreground">Company (1st-party) sign-off. Renders the authorized signatory name, title and e-signature image from Settings → Letter defaults.</p>
+              <TabsContent value="blocks">
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">Content blocks</CardTitle></CardHeader>
+                  <CardContent className="space-y-3">
+                    {selected.blocks.map((b, i) => (
+                      <div key={i} className="rounded-lg border p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <Badge variant="secondary">{BLOCK_KINDS.find((k) => k.kind === b.kind)?.label ?? b.kind}</Badge>
+                          <div className="flex items-center gap-1">
+                            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === 0} onClick={() => moveBlock(i, -1)}><ChevronUp className="h-4 w-4" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === selected.blocks.length - 1} onClick={() => moveBlock(i, 1)}><ChevronDown className="h-4 w-4" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deleteBlock(i)}><Trash2 className="h-4 w-4" /></Button>
+                          </div>
                         </div>
-                      )}
-                      {b.kind === "acceptance" && (
-                        <p className="text-xs text-muted-foreground">Recipient (2nd-party) wet-ink acceptance: a printed Name / Date / Signature line for the employee to sign by hand.</p>
-                      )}
-                      {b.kind === "computed" && (
-                        <select className="h-9 rounded-md border bg-background px-2 text-sm" value={b.ref ?? "ctc_annexure"} onChange={(e) => updateBlock(i, { ref: e.target.value as Block["ref"] })}>
-                          <option value="ctc_annexure">CTC annexure table</option>
-                          <option value="increment_table">Increment (old → new) table</option>
-                          <option value="settlement_table">Settlement (FnF) table</option>
-                        </select>
-                      )}
-                      {b.kind === "input" && (
-                        <select className="h-9 rounded-md border bg-background px-2 text-sm" value={b.field ?? ""} onChange={(e) => updateBlock(i, { field: e.target.value })}>
-                          <option value="" disabled>Select an input field…</option>
-                          {(selected.inputs ?? []).filter((f) => f.type === "multiline").map((f) => <option key={f.key} value={f.key}>{f.label} ({f.key})</option>)}
-                        </select>
-                      )}
-                      {b.kind === "gap" && (
-                        <Input type="number" className="w-28" value={b.height ?? 8} onChange={(e) => updateBlock(i, { height: Number(e.target.value) })} />
-                      )}
-                      {b.kind === "esignature" && (
                         <div className="space-y-2">
-                          <Input value={b.label ?? ""} onChange={(e) => updateBlock(i, { label: e.target.value })} placeholder="Caption under the line (default: Signature)" />
-                          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                            <input type="checkbox" checked={!!b.withDate} onChange={(e) => updateBlock(i, { withDate: e.target.checked })} /> Add a date line aligned with the signature
-                          </label>
-                          <div className="flex gap-2">
-                            {([["internal", "In-app signature"], ["cashfree", "Aadhaar e-Sign"]] as const).map(([val, label]) => (
-                              <button key={val} type="button" onClick={() => updateBlock(i, { method: val })}
-                                className={cn("flex-1 rounded-md border px-2.5 py-1.5 text-xs", (b.method ?? "internal") === val ? "border-primary bg-primary/10 font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
-                                {label}
-                              </button>
+                          {(b.kind === "subject" || b.kind === "para" || b.kind === "note") && (
+                            <Textarea rows={b.kind === "para" ? 3 : 2} value={b.text ?? ""} onChange={(e) => updateBlock(i, { text: e.target.value })} placeholder="Text…" />
+                          )}
+                          {b.kind === "bullets" && (
+                            <Textarea rows={4} value={(b.items ?? []).join("\n")} onChange={(e) => updateBlock(i, { items: e.target.value.split("\n") })} placeholder="One bullet per line" />
+                          )}
+                          {b.kind === "signature" && (
+                            <div className="space-y-1">
+                              <Input value={b.closing ?? ""} onChange={(e) => updateBlock(i, { closing: e.target.value })} placeholder="Closing, e.g. For and on behalf of {{company}}," />
+                              <p className="text-xs text-muted-foreground">Company (1st-party) sign-off. Renders the authorized signatory name, title and e-signature image from Settings → Letter defaults.</p>
+                            </div>
+                          )}
+                          {b.kind === "acceptance" && (
+                            <p className="text-xs text-muted-foreground">Recipient (2nd-party) wet-ink acceptance: a printed Name / Date / Signature line for the employee to sign by hand.</p>
+                          )}
+                          {b.kind === "computed" && (
+                            <select className="h-9 rounded-md border bg-background px-2 text-sm" value={b.ref ?? "ctc_annexure"} onChange={(e) => updateBlock(i, { ref: e.target.value as Block["ref"] })}>
+                              <option value="ctc_annexure">CTC annexure table</option>
+                              <option value="increment_table">Increment (old → new) table</option>
+                              <option value="settlement_table">Settlement (FnF) table</option>
+                            </select>
+                          )}
+                          {b.kind === "input" && (
+                            <select className="h-9 rounded-md border bg-background px-2 text-sm" value={b.field ?? ""} onChange={(e) => updateBlock(i, { field: e.target.value })}>
+                              <option value="" disabled>Select an input field…</option>
+                              {(selected.inputs ?? []).filter((f) => f.type === "multiline").map((f) => <option key={f.key} value={f.key}>{f.label} ({f.key})</option>)}
+                            </select>
+                          )}
+                          {b.kind === "gap" && (
+                            <Input type="number" className="w-28" value={b.height ?? 8} onChange={(e) => updateBlock(i, { height: Number(e.target.value) })} />
+                          )}
+                          {b.kind === "esignature" && (
+                            <div className="space-y-2">
+                              <Input value={b.label ?? ""} onChange={(e) => updateBlock(i, { label: e.target.value })} placeholder="Caption under the line (default: Signature)" />
+                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <input type="checkbox" checked={!!b.withDate} onChange={(e) => updateBlock(i, { withDate: e.target.checked })} /> Add a date line aligned with the signature
+                              </label>
+                              <div className="flex gap-2">
+                                {([["internal", "In-app signature"], ["cashfree", "Aadhaar e-Sign"]] as const).map(([val, label]) => (
+                                  <button key={val} type="button" onClick={() => updateBlock(i, { method: val })}
+                                    className={cn("flex-1 rounded-md border px-2.5 py-1.5 text-xs", (b.method ?? "internal") === val ? "border-primary bg-primary/10 font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                {(b.method ?? "internal") === "cashfree"
+                                  ? "Recipient signs via Aadhaar OTP on the vendor page. Requires the E-signature master switch and Aadhaar vendor settings (Settings → E-signature) plus an Aadhaar on file."
+                                  : "Recipient signs in the app using the signature image on their profile."}
+                                {" "}A letter with this block requires signing before it is complete.
+                              </p>
+                            </div>
+                          )}
+                          <div className="flex flex-wrap items-center gap-3 pt-1">
+                            {b.kind === "para" && (
+                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <input type="checkbox" checked={!!b.bold} onChange={(e) => updateBlock(i, { bold: e.target.checked })} /> Bold
+                              </label>
+                            )}
+                            {b.kind !== "pageBreak" && b.kind !== "gap" && (
+                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Show: {REQUIRES_SELECT(b.requires ?? "", (v) => updateBlock(i, { requires: v || undefined }))}</label>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-2 border-t pt-3">
+                      <span className="text-xs text-muted-foreground">Add block:</span>
+                      <Select value="" onValueChange={(v) => addBlock(v as Block["kind"])}>
+                        <SelectTrigger className="h-8 w-44 text-sm"><SelectValue placeholder="Choose a block…" /></SelectTrigger>
+                        <SelectContent>
+                          {BLOCK_KINDS.map((k) => <SelectItem key={k.kind} value={k.kind}>{k.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              {/* Values HR fills in at generation time. */}
+              <TabsContent value="inputs">
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">Input fields</CardTitle></CardHeader>
+                  <CardContent className="space-y-2">
+                    <p className="text-xs text-muted-foreground">Values HR types when generating this letter. A text field is usable as <code className="rounded bg-muted px-1">{"{{key}}"}</code>; a multiline field is placed with an “HR-entered body” block.</p>
+                    {(selected.inputs ?? []).map((f, i) => (
+                      <div key={i} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
+                        <Input className="h-8 w-28 font-mono text-xs" value={f.key} onChange={(e) => updateInput(i, { key: e.target.value })} placeholder="key" />
+                        <Input className="h-8 w-40 text-sm" value={f.label} onChange={(e) => updateInput(i, { label: e.target.value })} placeholder="Label" />
+                        <select className="h-8 rounded-md border bg-background px-2 text-xs" value={f.type ?? "text"} onChange={(e) => updateInput(i, { type: e.target.value as TemplateInput["type"] })}>
+                          <option value="text">Text</option>
+                          <option value="multiline">Multiline</option>
+                        </select>
+                        <label className="flex items-center gap-1 text-xs text-muted-foreground"><input type="checkbox" checked={!!f.required} onChange={(e) => updateInput(i, { required: e.target.checked })} /> Required</label>
+                        <Button variant="ghost" size="icon" className="ml-auto h-7 w-7 text-destructive" onClick={() => removeInput(i)}><Trash2 className="h-4 w-4" /></Button>
+                      </div>
+                    ))}
+                    <Button variant="outline" size="sm" onClick={addInput}><Plus className="h-4 w-4" /> Add input field</Button>
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              <TabsContent value="placeholders">
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">Placeholders</CardTitle></CardHeader>
+                  <CardContent className="space-y-3">
+                    <TooltipProvider delayDuration={150}>
+                      {PLACEHOLDERS.map((g) => (
+                        <div key={g.group}>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">{g.group}</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {g.tokens.map((tok) => (
+                              <span key={tok} className="inline-flex items-center overflow-hidden rounded border bg-muted/50 font-mono text-xs">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button onClick={() => copyToken(tok)} className="px-1.5 py-0.5 hover:bg-accent">{`{{${tok}}}`}</button>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="max-w-xs whitespace-normal font-sans normal-case">{TOKEN_DESC[tok] ?? "Insert this placeholder."}</TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button onClick={() => copyToken(tok)} aria-label="Copy" className="border-l px-1 py-0.5 hover:bg-accent"><Copy className="h-3 w-3 opacity-50" /></button>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="font-sans">Copy</TooltipContent>
+                                </Tooltip>
+                              </span>
                             ))}
                           </div>
-                          <p className="text-xs text-muted-foreground">
-                            {(b.method ?? "internal") === "cashfree"
-                              ? "Recipient signs via Aadhaar OTP on the vendor page. Requires the E-signature master switch and Aadhaar vendor settings (Settings → E-signature) plus an Aadhaar on file."
-                              : "Recipient signs in the app using the signature image on their profile."}
-                            {" "}A letter with this block requires signing before it is complete.
-                          </p>
                         </div>
-                      )}
-                      <div className="flex flex-wrap items-center gap-3 pt-1">
-                        {b.kind === "para" && (
-                          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                            <input type="checkbox" checked={!!b.bold} onChange={(e) => updateBlock(i, { bold: e.target.checked })} /> Bold
-                          </label>
-                        )}
-                        {b.kind !== "pageBreak" && b.kind !== "gap" && (
-                          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Show: {REQUIRES_SELECT(b.requires ?? "", (v) => updateBlock(i, { requires: v || undefined }))}</label>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                <div className="flex items-center gap-2 border-t pt-3">
-                  <span className="text-xs text-muted-foreground">Add block:</span>
-                  <Select value="" onValueChange={(v) => addBlock(v as Block["kind"])}>
-                    <SelectTrigger className="h-8 w-44 text-sm"><SelectValue placeholder="Choose a block…" /></SelectTrigger>
-                    <SelectContent>
-                      {BLOCK_KINDS.map((k) => <SelectItem key={k.kind} value={k.kind}>{k.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </CardContent>
-            </Card>
+                      ))}
+                    </TooltipProvider>
+                  </CardContent>
+                </Card>
+              </TabsContent>
 
-            {/* Placeholder palette */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Placeholders</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                <TooltipProvider delayDuration={150}>
-                  {PLACEHOLDERS.map((g) => (
-                    <div key={g.group}>
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">{g.group}</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {g.tokens.map((tok) => (
-                          <span key={tok} className="inline-flex items-center overflow-hidden rounded border bg-muted/50 font-mono text-xs">
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button onClick={() => copyToken(tok)} className="px-1.5 py-0.5 hover:bg-accent">{`{{${tok}}}`}</button>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-xs whitespace-normal font-sans normal-case">{TOKEN_DESC[tok] ?? "Insert this placeholder."}</TooltipContent>
-                            </Tooltip>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button onClick={() => copyToken(tok)} aria-label="Copy" className="border-l px-1 py-0.5 hover:bg-accent"><Copy className="h-3 w-3 opacity-50" /></button>
-                              </TooltipTrigger>
-                              <TooltipContent className="font-sans">Copy</TooltipContent>
-                            </Tooltip>
-                          </span>
-                        ))}
-                      </div>
+              <TabsContent value="preview">
+                <Card>
+                  <CardHeader className="pb-2"><CardTitle className="text-sm">Preview</CardTitle></CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex flex-wrap items-end gap-2">
+                      <Field label="Sample employee">
+                        <Select value={previewEmp} onValueChange={setPreviewEmp}>
+                          <SelectTrigger className="w-64"><SelectValue placeholder="Select an employee…" /></SelectTrigger>
+                          <SelectContent>
+                            {employees.filter((e) => !e.disabled).map((e) => (
+                              <SelectItem key={e.path} value={idOf(e.path)}>{e.first_name} {e.last_name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      <AccessAction collection="personal-documents" verb="previewLetter" label="Preview letter">
+                        <Button variant="outline" onClick={runPreview} loading={previewing} disabled={!previewEmp}>{!previewing && <Eye className="h-4 w-4" />} Preview</Button>
+                      </AccessAction>
+                      <span className="text-xs text-muted-foreground">Renders the current (unsaved) draft.</span>
                     </div>
-                  ))}
-                </TooltipProvider>
-              </CardContent>
-            </Card>
-
-            {/* Live preview */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="text-sm">Preview</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex flex-wrap items-end gap-2">
-                  <Field label="Sample employee">
-                    <Select value={previewEmp} onValueChange={setPreviewEmp}>
-                      <SelectTrigger className="w-64"><SelectValue placeholder="Select an employee…" /></SelectTrigger>
-                      <SelectContent>
-                        {employees.filter((e) => !e.disabled).map((e) => (
-                          <SelectItem key={e.path} value={idOf(e.path)}>{e.first_name} {e.last_name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                  <AccessAction collection="personal-documents" verb="previewLetter" label="Preview letter">
-                    <Button variant="outline" onClick={runPreview} loading={previewing} disabled={!previewEmp}>{!previewing && <Eye className="h-4 w-4" />} Preview</Button>
-                  </AccessAction>
-                  <span className="text-xs text-muted-foreground">Renders the current (unsaved) draft.</span>
-                </div>
-                {previewUrl && <iframe title="Letter preview" src={previewUrl} className="h-[640px] w-full rounded-md border" />}
-              </CardContent>
-            </Card>
+                    {previewUrl && <iframe title="Letter preview" src={previewUrl} className="h-[640px] w-full rounded-md border" />}
+                  </CardContent>
+                </Card>
+              </TabsContent>
+            </Tabs>
           </div>
         ) : (
           <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Select or add a letter type to edit.</CardContent></Card>

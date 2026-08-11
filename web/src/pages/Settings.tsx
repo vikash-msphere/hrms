@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { navigate } from "@/router";
-import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe } from "lucide-react";
+import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Type, Image as ImageIcon } from "lucide-react";
 import { get, patch, create, remove, list } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
 import { BoardConfigPanel } from "@/settings/BoardConfigPanel";
@@ -27,6 +27,7 @@ import { Field } from "@/components/common/Field";
 import { KudosLevelsTab } from "@/components/common/KudosLevelsTab";
 import { RolesPanel } from "@/components/common/RolesPanel";
 import { RolesManagePanel } from "@/components/common/RolesManagePanel";
+import { ApiKeysPanel } from "@/components/common/ApiKeysPanel";
 import { PermissionsPanel } from "@/components/common/PermissionsPanel";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -429,7 +430,7 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
     // Hiring & growth
     case "recruiting": return <AtsTab toast={toast} />;
     case "referrals": return <ReferralsTab toast={toast} />;
-    case "performance": return <div className="space-y-6"><PerformanceFramework /><ReviewCycles embedded /></div>;
+    case "performance": return <PerformancePanel />;
     case "onboarding-templates": return <TransitionTemplatesEditor />;
     case "benefit-plans": return <BenefitPlansAdmin openId={openId} />;
     // Comms & support
@@ -443,12 +444,28 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
     case "users": return <RolesPanel me={me} controlsSlot={slot} />;
     case "roles": return <RolesManagePanel controlsSlot={slot} />;
     case "permissions": return <PermissionsPanel controlsSlot={slot} />;
+    case "api-keys": return <ApiKeysPanel controlsSlot={slot} />;
     case "operations": return <Operations embedded />;
     default: return null;
   }
 }
 
 type Toast = ReturnType<typeof useToast>["toast"];
+
+// Performance: the rating framework and the review cycles are two unrelated editors - tabbed rather than
+// stacked so neither pushes the other off the fold.
+function PerformancePanel() {
+  return (
+    <Tabs defaultValue="framework">
+      <TabsList variant="segmented">
+        <TabsTrigger value="framework">Framework</TabsTrigger>
+        <TabsTrigger value="cycles">Review cycles</TabsTrigger>
+      </TabsList>
+      <TabsContent value="framework"><PerformanceFramework /></TabsContent>
+      <TabsContent value="cycles"><ReviewCycles embedded /></TabsContent>
+    </Tabs>
+  );
+}
 
 const MAX_LOGO_BYTES = 256 * 1024;
 const MAX_FAVICON_BYTES = 64 * 1024; // favicons are tiny; the data URL lives in the settings/organization blob
@@ -513,10 +530,13 @@ function EsignTab({ toast }: { toast: Toast }) {
 
 // Attendance schedule (settings/attendance): the shift window, grace, working days and timezone used to flag
 // late arrivals, early departures and absences across the Attendance feature.
-// Payroll policy: CTC provisions (gratuity + employer ESI), overtime pricing, and Professional Tax slabs.
-// Each is an independent settings blob (settings/ctc, settings/overtime, settings/professional-tax).
+// Payroll policy: the CTC split + PF wage basis, overtime pricing, Professional Tax slabs, statutory gratuity at
+// exit, and the loan-interest perquisite. Each is an independent settings blob (settings/ctc, settings/overtime,
+// settings/professional-tax, settings/gratuity, settings/loan-perquisite).
 function PayrollPolicyTab({ toast }: { toast: Toast }) {
-  const [ctc, setCtc] = useState({ basic_pct: 50, employer_pf_in_ctc: true });
+  const [ctc, setCtc] = useState<{ basic_pct: number; pf_wage_basis: string }>({ basic_pct: 50, pf_wage_basis: "basic" });
+  const [gratuity, setGratuity] = useState({ enabled: true, min_years: 5, days_per_year: 15, divisor: 26, exemption_cap: 2000000 });
+  const [perq, setPerq] = useState({ enabled: false, sbi_rate_pct: 0, interest_charged_pct: 0, exempt_principal_upto: 20000 });
   // Saving the CTC provisions changes how a stored annual CTC splits, so existing employees' cached splits can
   // go stale - shared signal with the pay-components / salary-structures panels.
   const { canReapply, staleCount, skippedCount, reapplying, reapply: doReapply, promptReapply } = useSplitStaleness();
@@ -528,6 +548,8 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
       get<{ value?: Partial<typeof ctc> }>("settings/ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
       get<{ value?: Partial<typeof ot> }>("settings/overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
       get<{ value?: { slabs?: { up_to: number | null; amount: number }[] } }>("settings/professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs }); }),
+      get<{ value?: Partial<typeof gratuity> }>("settings/gratuity").then((s) => { if (s.value) setGratuity((p) => ({ ...p, ...s.value })); }),
+      get<{ value?: Partial<typeof perq> }>("settings/loan-perquisite").then((s) => { if (s.value) setPerq((p) => ({ ...p, ...s.value })); }),
     ]).then(() => setReady(true));
   }, []);
   // Save the provisions, then offer to re-derive basic + Special Allowance for every current comp row under
@@ -548,6 +570,10 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
     const slabs = pt.slabs.map((s, i) => ({ up_to: i === pt.slabs.length - 1 ? null : Number(s.up_to) || 0, amount: Number(s.amount) || 0 }));
     try { await patch("settings/professional-tax", { value: { slabs } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
   };
+  const saveGratuity = async () => { try { await patch("settings/gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const savePerq = async () => { try { await patch("settings/loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const { markSaved: markGratuitySaved } = useUnsaved(gratuity, ready, saveGratuity);
+  const { markSaved: markPerqSaved } = useUnsaved(perq, ready, savePerq);
   const { markSaved: markCtcSaved } = useUnsaved(ctc, ready, saveCtc);
   const { markSaved: markOtSaved } = useUnsaved(ot, ready, saveOt);
   const { markSaved: markPtSaved } = useUnsaved(pt, ready, savePt);
@@ -559,21 +585,34 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
         <TabsTrigger value="ctc">CTC split</TabsTrigger>
         <TabsTrigger value="overtime">Overtime</TabsTrigger>
         <TabsTrigger value="pt">Professional Tax</TabsTrigger>
+        <TabsTrigger value="gratuity">Gratuity</TabsTrigger>
+        <TabsTrigger value="perquisite">Loan perquisite</TabsTrigger>
       </TabsList>
 
       <TabsContent value="ctc">
         <Card>
           <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/ctc" label="CTC provisions"><span>CTC provisions</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here.</p>
+            <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here, including whether each one counts inside CTC or is paid over and above it.</p>
             <SplitStaleBanner staleCount={staleCount} skippedCount={skippedCount} reapplying={reapplying} canReapply={canReapply} onReapply={doReapply} />
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Basic % of CTC" hint="Basic = this % of monthly CTC. New wage code wants ≥ 50%."><Input type="number" step="1" value={ctc.basic_pct} onChange={(e) => setCtc((c) => ({ ...c, basic_pct: Number(e.target.value) }))} /></Field>
+              {/* PF wage composition. "Basic only" is what most Indian payrolls run; "basic + allowances" follows
+                  the Supreme Court's Vivekananda Vidyamandir line, where universally-paid allowances are basic
+                  wages too. It moves both PF shares, EDLI and admin charges, so it re-solves the CTC split. */}
+              <Field label="PF wages" hint="What EPF, EDLI and PF admin charges are computed on. Above the ₹15,000 ceiling the two choices cost the same.">
+                <Select value={ctc.pf_wage_basis} onValueChange={(v) => setCtc((c) => ({ ...c, pf_wage_basis: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="basic">Basic only</SelectItem>
+                    <SelectItem value="basic_plus">Basic + Special Allowance + flagged allowances</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
             </div>
-            <label className="flex items-start gap-2 text-sm">
-              <Checkbox checked={ctc.employer_pf_in_ctc} onCheckedChange={(v) => setCtc((c) => ({ ...c, employer_pf_in_ctc: v === true }))} />
-              <span>Employer PF is part of CTC<br /><span className="text-xs text-muted-foreground">On (default): the employer PF share counts inside the CTC figure. Off: PF sits over and above CTC ("CTC + PF") - shown as a separate line and excluded from the CTC total, so the split solves the rest of the CTC and PF rides on top.</span></span>
-            </label>
+            {ctc.pf_wage_basis === "basic_plus" && (
+              <p className="text-xs text-muted-foreground">Which allowances count is per component: tick "Counts as PF wages" on each one in <a href="/pay-components" className="underline">pay components</a>. HRA, overtime and bonus are excluded by statute - leave them off.</p>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={saveCtc}><Save className="h-4 w-4" /> Save</Button>
               <AccessAction collection="compensation" verb="reapplySplit" label="re-apply the split to all employees">
@@ -625,6 +664,38 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
               <Button size="sm" variant="outline" onClick={() => setPt((p) => ({ slabs: [...p.slabs.slice(0, -1), { up_to: 0, amount: 0 }, p.slabs[p.slabs.length - 1]!] }))}><Plus className="h-4 w-4" /> Add slab</Button>
               <Button size="sm" onClick={savePt}><Save className="h-4 w-4" /> Save</Button>
             </div>
+          </CardContent>
+        </Card>
+      </TabsContent>
+      <TabsContent value="gratuity">
+        <Card>
+          <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/gratuity" label="Gratuity policy"><span>Gratuity at exit</span></AccessAction></CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">Statutory gratuity (Payment of Gratuity Act): 15 days' last-drawn basic per completed year of service, once the qualifying service is met, paid in the full &amp; final settlement and exempt u/s 10(10) up to the ceiling. Turn this off if gratuity is settled outside payroll (an LIC or trust policy) - otherwise the FnF would pay it twice.</p>
+            <label className="flex items-center gap-2 text-sm"><Checkbox checked={gratuity.enabled} onCheckedChange={(v) => setGratuity((c) => ({ ...c, enabled: v === true }))} /> Pay gratuity in the full &amp; final settlement</label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Qualifying service (years)" hint="Statutory minimum is 5. A part-year over six months counts as a full year."><Input type="number" step="1" value={gratuity.min_years} onChange={(e) => setGratuity((c) => ({ ...c, min_years: Number(e.target.value) }))} disabled={!gratuity.enabled} /></Field>
+              <Field label="Days per year" hint="Statutory 15 days' wages per completed year."><Input type="number" step="1" value={gratuity.days_per_year} onChange={(e) => setGratuity((c) => ({ ...c, days_per_year: Number(e.target.value) }))} disabled={!gratuity.enabled} /></Field>
+              <Field label="Monthly divisor" hint="Statutory 26 (working days in a month)."><Input type="number" step="1" value={gratuity.divisor} onChange={(e) => setGratuity((c) => ({ ...c, divisor: Number(e.target.value) }))} disabled={!gratuity.enabled} /></Field>
+              <Field label="Exemption ceiling" hint="s.10(10) lifetime exemption limit (₹20,00,000). The excess is taxed."><Input type="number" step="1000" value={gratuity.exemption_cap} onChange={(e) => setGratuity((c) => ({ ...c, exemption_cap: Number(e.target.value) }))} disabled={!gratuity.enabled} /></Field>
+            </div>
+            <Button size="sm" onClick={saveGratuity}><Save className="h-4 w-4" /> Save</Button>
+          </CardContent>
+        </Card>
+      </TabsContent>
+
+      <TabsContent value="perquisite">
+        <Card>
+          <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/loan-perquisite" label="Loan perquisite"><span>Loan interest concession</span></AccessAction></CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">An interest-free or cheap employer loan is a taxable perquisite (Rule 3(7)(i)): interest at the SBI rate on the outstanding balance, less any interest charged. When enabled, payroll adds the monthly value to the employee's taxable income only - it is never paid or deducted, so take-home changes solely through the extra TDS.</p>
+            <label className="flex items-center gap-2 text-sm"><Checkbox checked={perq.enabled} onCheckedChange={(v) => setPerq((c) => ({ ...c, enabled: v === true }))} /> Value loan interest concession as a perquisite</label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="SBI rate % (annual)" hint="The rate for this kind of loan as notified on 1 April of the financial year."><Input type="number" step="0.05" value={perq.sbi_rate_pct} onChange={(e) => setPerq((c) => ({ ...c, sbi_rate_pct: Number(e.target.value) }))} disabled={!perq.enabled} /></Field>
+              <Field label="Interest charged % (annual)" hint="What the company actually charges. 0 for an interest-free loan."><Input type="number" step="0.05" value={perq.interest_charged_pct} onChange={(e) => setPerq((c) => ({ ...c, interest_charged_pct: Number(e.target.value) }))} disabled={!perq.enabled} /></Field>
+              <Field label="Exempt up to (aggregate principal)" hint="Nothing is taxable while the total original loan amount is at or below this (₹20,000)."><Input type="number" step="1000" value={perq.exempt_principal_upto} onChange={(e) => setPerq((c) => ({ ...c, exempt_principal_upto: Number(e.target.value) }))} disabled={!perq.enabled} /></Field>
+            </div>
+            <Button size="sm" onClick={savePerq}><Save className="h-4 w-4" /> Save</Button>
           </CardContent>
         </Card>
       </TabsContent>
@@ -1412,11 +1483,86 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
   );
 }
 
+// One brand-image slot: preview swatch, choose/replace, remove. Every image here is stored as a data URL in the
+// settings/organization blob, so the size caps are what keeps that blob small. `dark` previews the slot on a dark
+// swatch (light-on-dark artwork is invisible on `bg-muted`, whichever theme the admin is using); `wide` swaps the
+// square tile for a full-width strip, matching how a wordmark actually renders in the sidebar.
+function BrandImageField({
+  value,
+  onChange,
+  choose,
+  hint,
+  accept = "image/*",
+  maxBytes,
+  dark,
+  wide,
+  icon: Icon,
+  toast,
+}: {
+  value?: string;
+  onChange: (v: string | undefined) => void;
+  choose: string;
+  hint: string;
+  accept?: string;
+  maxBytes: number;
+  dark?: boolean;
+  wide?: boolean;
+  icon: typeof Building;
+  toast: Toast;
+}) {
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // so re-picking the same file after a Remove still fires a change
+    if (!f) return;
+    if (f.size > maxBytes) {
+      toast({ variant: "destructive", title: "Image too large", description: `Use a file under ${Math.round(maxBytes / 1024)} KB.` });
+      return;
+    }
+    const r = new FileReader();
+    r.onload = () => onChange(r.result as string);
+    r.readAsDataURL(f);
+  }
+  return (
+    <div className="flex items-center gap-4">
+      <div
+        className={cn(
+          "flex h-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border",
+          wide ? "w-40" : "w-16",
+          dark ? "bg-slate-900" : "bg-muted",
+        )}
+      >
+        {value ? (
+          <img src={value} alt="" className={cn("h-full w-full", wide ? "object-contain p-2" : "object-cover")} />
+        ) : (
+          <Icon className={cn("h-6 w-6", dark ? "text-slate-500" : "text-muted-foreground")} />
+        )}
+      </div>
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
+            {value ? "Replace" : choose}
+            <input type="file" accept={accept} className="hidden" onChange={onFile} />
+          </label>
+          {value && (
+            <Button variant="ghost" size="sm" onClick={() => onChange(undefined)}>
+              <X className="h-4 w-4" /> Remove
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">{hint}</p>
+      </div>
+    </div>
+  );
+}
+
 function OrgIdentityPanel({ toast }: { toast: Toast }) {
   const { blob, save, saving } = useOrgBlob(toast);
   const [name, setName] = useState("");
   const [legalName, setLegalName] = useState("");
   const [logo, setLogo] = useState<string | undefined>(undefined);
+  const [logoDark, setLogoDark] = useState<string | undefined>(undefined); // optional dark-theme variant; blank = use `logo`
+  const [wordmark, setWordmark] = useState<string | undefined>(undefined); // wide logo+name artwork; set = replaces the square mark AND the name text in the sidebar
+  const [wordmarkDark, setWordmarkDark] = useState<string | undefined>(undefined);
   const [favicon, setFavicon] = useState<string | undefined>(undefined); // browser-tab icon (small data URL)
   const [logoText, setLogoText] = useState(""); // sidebar wordmark override (casing/spelling); blank = use name
   const [nameFont, setNameFont] = useState("default");
@@ -1438,6 +1584,9 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
     if (blob.name) setName(blob.name);
     if (blob.legal_name) setLegalName(blob.legal_name);
     if (blob.logo) setLogo(blob.logo);
+    if (blob.logo_dark) setLogoDark(blob.logo_dark);
+    if (blob.wordmark) setWordmark(blob.wordmark);
+    if (blob.wordmark_dark) setWordmarkDark(blob.wordmark_dark);
     if (blob.favicon) setFavicon(blob.favicon);
     if (blob.logo_text) setLogoText(blob.logo_text);
     if (blob.name_font) setNameFont(blob.name_font);
@@ -1450,38 +1599,14 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
     if (blob.email_logo_url) setEmailLogoUrl(blob.email_logo_url);
   }, [blob]);
 
-  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (f.size > MAX_LOGO_BYTES) {
-      toast({ variant: "destructive", title: "Logo too large", description: "Use an image under 256 KB." });
-      return;
-    }
-    const r = new FileReader();
-    r.onload = () => setLogo(r.result as string);
-    r.readAsDataURL(f);
-  }
-
-  function onFaviconFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    if (f.size > MAX_FAVICON_BYTES) {
-      toast({ variant: "destructive", title: "Favicon too large", description: "Use an image under 64 KB." });
-      return;
-    }
-    const r = new FileReader();
-    r.onload = () => setFavicon(r.result as string);
-    r.readAsDataURL(f);
-  }
-
   const { markSaved } = useUnsaved(
-    { name, legalName, logo, favicon, logoText, nameFont, nameWeight, nameSize, address, incorporationDate, defaultDept, primaryColor, emailLogoUrl },
+    { name, legalName, logo, logoDark, wordmark, wordmarkDark, favicon, logoText, nameFont, nameWeight, nameSize, address, incorporationDate, defaultDept, primaryColor, emailLogoUrl },
     ready,
     saveIdentity,
   );
   async function saveIdentity() {
     const ok = await save(
-      { name: name.trim(), legal_name: legalName.trim() || null, logo: logo ?? null, favicon: favicon ?? null, logo_text: logoText.trim() || null, name_font: nameFont, name_weight: nameWeight, name_size: nameSize, address: address.trim() || null, incorporation_date: incorporationDate || null, default_department: defaultDept === "none" ? null : defaultDept, primary_color: primaryColor || null, email_logo_url: emailLogoUrl.trim() || null },
+      { name: name.trim(), legal_name: legalName.trim() || null, logo: logo ?? null, logo_dark: logoDark ?? null, wordmark: wordmark ?? null, wordmark_dark: wordmarkDark ?? null, favicon: favicon ?? null, logo_text: logoText.trim() || null, name_font: nameFont, name_weight: nameWeight, name_size: nameSize, address: address.trim() || null, incorporation_date: incorporationDate || null, default_department: defaultDept === "none" ? null : defaultDept, primary_color: primaryColor || null, email_logo_url: emailLogoUrl.trim() || null },
       "Organization saved",
     );
     if (ok) markSaved();
@@ -1489,62 +1614,111 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
 
   return (
     <div>
-      {/* Identity: logo avatar + name on one centered row. */}
-      <Card>
-        <CardContent className="pt-6">
-          <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:gap-8">
-            <div className="space-y-5">
-              <div className="flex items-center gap-4">
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted">
-                  {logo ? <img src={logo} alt="" className="h-full w-full object-cover" /> : <Building className="h-6 w-6 text-muted-foreground" />}
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center gap-2">
-                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
-                      {logo ? "Replace" : "Choose logo"}
-                      <input type="file" accept="image/*" className="hidden" onChange={onFile} />
-                    </label>
-                    {logo && (
-                      <Button variant="ghost" size="sm" onClick={() => setLogo(undefined)}>
-                        <X className="h-4 w-4" /> Remove
-                      </Button>
-                    )}
-                  </div>
-                  <p className="text-xs text-muted-foreground">PNG or JPG, under 256 KB.</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted">
-                  {favicon ? <img src={favicon} alt="" className="h-8 w-8 object-contain" /> : <Globe className="h-6 w-6 text-muted-foreground" />}
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center gap-2">
-                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
-                      {favicon ? "Replace" : "Choose favicon"}
-                      <input type="file" accept="image/png,image/svg+xml,image/x-icon,image/vnd.microsoft.icon,image/jpeg" className="hidden" onChange={onFaviconFile} />
-                    </label>
-                    {favicon && (
-                      <Button variant="ghost" size="sm" onClick={() => setFavicon(undefined)}>
-                        <X className="h-4 w-4" /> Remove
-                      </Button>
-                    )}
-                  </div>
-                  <p className="text-xs text-muted-foreground">Browser-tab icon. PNG, SVG or ICO, under 64 KB.</p>
+      {/* Identity is one form split across tabs: artwork, then the name and its sidebar typography, then the
+          company facts other modules read. All tabs share the single Save below - switching tabs keeps edits. */}
+      <Tabs defaultValue="logos">
+        <TabsList>
+          <TabsTrigger value="logos"><ImageIcon className="h-4 w-4" /> Logos</TabsTrigger>
+          <TabsTrigger value="name"><Type className="h-4 w-4" /> Name</TabsTrigger>
+          <TabsTrigger value="details"><Building className="h-4 w-4" /> Company details</TabsTrigger>
+        </TabsList>
+        <TabsContent value="logos">
+          <Card>
+            <CardContent className="space-y-6 pt-6">
+              <div className="space-y-3">
+                <p className="text-sm font-medium">Square mark</p>
+                <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                  <BrandImageField
+                    value={logo}
+                    onChange={setLogo}
+                    choose="Choose logo"
+                    hint="Shown beside the name in the sidebar and in the collapsed rail. PNG, JPG or SVG, under 256 KB."
+                    maxBytes={MAX_LOGO_BYTES}
+                    icon={Building}
+                    toast={toast}
+                  />
+                  <BrandImageField
+                    value={logoDark}
+                    onChange={setLogoDark}
+                    choose="Choose dark logo"
+                    hint="Optional. Used while the dark theme is on. Blank = the logo beside it."
+                    maxBytes={MAX_LOGO_BYTES}
+                    dark
+                    icon={Building}
+                    toast={toast}
+                  />
                 </div>
               </div>
-            </div>
-            <div className="flex-1 space-y-6">
-              <Field label="Legal name" hint="Registered legal entity name. Leave blank to use the organization name.">
-                <Input value={legalName} onChange={(e) => setLegalName(e.target.value)} placeholder="e.g. Acme Technologies Private Limited" />
-              </Field>
+              <div className="space-y-3 border-t pt-6">
+                <div>
+                  <p className="text-sm font-medium">Wordmark</p>
+                  <p className="text-xs text-muted-foreground">Wide artwork carrying the name. Set one and it spans the sidebar in place of the square mark and the name text; the collapsed rail keeps using the square mark.</p>
+                </div>
+                <div className="space-y-5">
+                  <BrandImageField
+                    value={wordmark}
+                    onChange={setWordmark}
+                    choose="Choose wordmark"
+                    hint="Optional. PNG, JPG or SVG, under 256 KB."
+                    maxBytes={MAX_LOGO_BYTES}
+                    wide
+                    icon={Type}
+                    toast={toast}
+                  />
+                  <BrandImageField
+                    value={wordmarkDark}
+                    onChange={setWordmarkDark}
+                    choose="Choose dark wordmark"
+                    hint="Optional. Used while the dark theme is on. Blank = the wordmark above."
+                    maxBytes={MAX_LOGO_BYTES}
+                    dark
+                    wide
+                    icon={Type}
+                    toast={toast}
+                  />
+                </div>
+              </div>
+              <div className="space-y-3 border-t pt-6">
+                <p className="text-sm font-medium">Elsewhere</p>
+                <BrandImageField
+                  value={favicon}
+                  onChange={setFavicon}
+                  choose="Choose favicon"
+                  hint="Browser-tab icon. PNG, SVG or ICO, under 64 KB."
+                  accept="image/png,image/svg+xml,image/x-icon,image/vnd.microsoft.icon,image/jpeg"
+                  maxBytes={MAX_FAVICON_BYTES}
+                  icon={Globe}
+                  toast={toast}
+                />
+                <div className="grid grid-cols-1 gap-4 pt-2 sm:grid-cols-2">
+                  <Field label="Brand colour" hint="Accent for email headers and buttons.">
+                    <div className="flex items-center gap-2">
+                      <input type="color" aria-label="Brand colour" value={/^#[0-9a-fA-F]{6}$/.test(primaryColor) ? primaryColor : "#1D4C91"} onChange={(e) => setPrimaryColor(e.target.value)} className="h-9 w-12 shrink-0 cursor-pointer rounded-md border bg-background p-1" />
+                      <Input value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} placeholder="#1D4C91" className="font-mono" />
+                    </div>
+                  </Field>
+                  <Field label="Email logo URL" hint="Public https image shown in email headers. The uploaded logos are data URLs, which email clients block, so email uses this URL instead; blank shows the name.">
+                    <Input value={emailLogoUrl} onChange={(e) => setEmailLogoUrl(e.target.value)} placeholder="https://cdn.example.com/logo.png" />
+                  </Field>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="name">
+          <Card>
+            <CardContent className="space-y-6 pt-6">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Organization name" hint="Shown across the app and on payslips.">
                   <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Acme Corp" />
                 </Field>
-                <Field label="Sidebar display name" hint="Logo wordmark only (casing/spelling). Blank uses the organization name.">
-                  <Input value={logoText} onChange={(e) => setLogoText(e.target.value)} placeholder={name || "e.g. acme"} />
+                <Field label="Legal name" hint="Registered legal entity name. Leave blank to use the organization name.">
+                  <Input value={legalName} onChange={(e) => setLegalName(e.target.value)} placeholder="e.g. Acme Technologies Private Limited" />
                 </Field>
               </div>
+              <Field label="Sidebar display name" hint="Sidebar logo only (casing/spelling). Blank uses the organization name.">
+                <Input value={logoText} onChange={(e) => setLogoText(e.target.value)} placeholder={name || "e.g. acme"} className="sm:max-w-sm" />
+              </Field>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:items-start">
                 <Field label="Font">
                   <select className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={nameFont} onChange={(e) => setNameFont(e.target.value)}>
@@ -1563,12 +1737,23 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                 </Field>
                 <Field label="Preview" hint="Styles the sidebar logo only.">
                   <div className="flex h-9 items-center rounded-md bg-sidebar px-3">
-                    <span className="truncate text-white" style={{ fontFamily: orgNameFontStack(nameFont), fontWeight: orgNameWeight(nameWeight), fontSize: orgNameSizePx(nameSize) }}>{logoText.trim() || name || "Acme Corp"}</span>
+                    <span className="truncate text-foreground" style={{ fontFamily: orgNameFontStack(nameFont), fontWeight: orgNameWeight(nameWeight), fontSize: orgNameSizePx(nameSize) }}>{logoText.trim() || name || "Acme Corp"}</span>
                   </div>
                 </Field>
               </div>
+              {wordmark && (
+                <p className="text-xs text-muted-foreground">
+                  A wordmark is set, so the sidebar draws that artwork and none of this text. The display name stays the wordmark's alt text, and the organization name is still used everywhere else (payslips, letters, emails).
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="details">
+          <Card>
+            <CardContent className="space-y-6 pt-6">
               <Field label="Address" hint="Printed in the payslip header. One line per row.">
-                <Textarea rows={3} value={address} onChange={(e) => setAddress(e.target.value)} placeholder={"Street address\nArea or landmark\nCity, State PIN"} />
+                <Textarea rows={3} value={address} onChange={(e) => setAddress(e.target.value)} placeholder={"Street address\nArea or landmark\nCity, State PIN"} className="sm:max-w-md" />
               </Field>
               <Field label="Incorporation date" hint="Used to celebrate the company anniversary.">
                 <Input type="date" className="w-44" value={incorporationDate} onChange={(e) => setIncorporationDate(e.target.value)} />
@@ -1582,21 +1767,10 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                   </SelectContent>
                 </Select>
               </Field>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Field label="Brand colour" hint="Accent for email headers and buttons.">
-                  <div className="flex items-center gap-2">
-                    <input type="color" aria-label="Brand colour" value={/^#[0-9a-fA-F]{6}$/.test(primaryColor) ? primaryColor : "#1D4C91"} onChange={(e) => setPrimaryColor(e.target.value)} className="h-9 w-12 shrink-0 cursor-pointer rounded-md border bg-background p-1" />
-                    <Input value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} placeholder="#1D4C91" className="font-mono" />
-                  </div>
-                </Field>
-                <Field label="Email logo URL" hint="Public https image shown in email headers. The uploaded logo above is embedded (data URL) which email clients block, so email uses this URL instead; blank shows the name.">
-                  <Input value={emailLogoUrl} onChange={(e) => setEmailLogoUrl(e.target.value)} placeholder="https://cdn.example.com/logo.png" />
-                </Field>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
       <Button className="mt-4" onClick={saveIdentity} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save</Button>
     </div>
   );
@@ -1745,10 +1919,16 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
 
   return (
     <div>
-      <Card>
-        <CardContent className="pt-6">
-          <div className="grid gap-6 sm:grid-cols-2">
-            <div className="space-y-4">
+      <Tabs defaultValue="signatory">
+        <TabsList variant="segmented">
+          <TabsTrigger value="signatory">Signatory</TabsTrigger>
+          <TabsTrigger value="hr">HR contact</TabsTrigger>
+          <TabsTrigger value="terms">Offer terms</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="signatory">
+          <Card>
+            <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
               <Field label="Signatory name" hint="Signs generated letters.">
                 <Input value={letter.signatory_name ?? ""} onChange={(e) => setLetterField("signatory_name", e.target.value)} placeholder="Full name of the signatory" />
               </Field>
@@ -1783,6 +1963,13 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
                   </div>
                 </div>
               </Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="hr">
+          <Card>
+            <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
               <Field label="HR contact name">
                 <Input value={letter.hr_name ?? ""} onChange={(e) => setLetterField("hr_name", e.target.value)} placeholder="e.g. HR Department" />
               </Field>
@@ -1792,8 +1979,13 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
               <Field label="HR contact phone">
                 <Input value={letter.hr_phone ?? ""} onChange={(e) => setLetterField("hr_phone", e.target.value)} placeholder="Optional" />
               </Field>
-            </div>
-            <div className="space-y-4">
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="terms">
+          <Card>
+            <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
               <Field label="Working hours" hint="Shown in the offer letter.">
                 <Input value={letter.working_hours ?? ""} onChange={(e) => setLetterField("working_hours", e.target.value)} placeholder="e.g. 10:00 AM to 7:00 PM" />
               </Field>
@@ -1818,10 +2010,11 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
               <Field label="Offer validity (days)" hint="Offer letters expire this many days after issue.">
                 <Input type="number" min={0} value={letter.offer_validity_days ?? ""} onChange={(e) => setLetterField("offer_validity_days", e.target.value)} placeholder="e.g. 7" />
               </Field>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+      {/* One blob, one Save: it persists every tab, not just the visible one. */}
       <Button className="mt-4" onClick={saveLetterDefaults} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save</Button>
     </div>
   );
@@ -2289,155 +2482,170 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
 
   if (!loaded) return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader><CardTitle className="text-base">Tag pattern</CardTitle></CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Assets without a tag get one generated in this pattern when queued for printing (the tag is saved onto the asset). Existing tags are never rewritten.
-          </p>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="Prefix" hint={`Blank = your org initials (${resolveTagConfig(org.name).prefix}).`}>
-              <Input value={cfg.prefix ?? ""} onChange={(e) => set({ prefix: e.target.value })} placeholder={resolveTagConfig(org.name).prefix} />
-            </Field>
-            <Field label="Separator">
-              <Input value={cfg.separator ?? DEFAULT_TAG_SETTINGS.separator} onChange={(e) => set({ separator: e.target.value })} placeholder="-" />
-            </Field>
-            <Field label="Number width" hint="Zero-padded, e.g. 3 → 042.">
-              <Input type="number" min={1} max={6} value={cfg.digits ?? DEFAULT_TAG_SETTINGS.digits} onChange={(e) => set({ digits: Number(e.target.value) })} />
-            </Field>
-          </div>
-          <div className="rounded-lg border bg-muted/40 p-3 text-sm">
-            <span className="text-muted-foreground">Preview: </span>
-            <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 1)}</span>
-            <span className="mx-2 text-muted-foreground">→</span>
-            <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 2)}</span>
-            <span className="mx-2 text-muted-foreground">→</span>
-            <span className="font-mono font-medium">{formatTag(resolved, "Monitor", 1)}</span>
-          </div>
-          <div>
-            <div className="mb-1 text-sm font-medium">Category codes</div>
-            <p className="mb-2 text-xs text-muted-foreground">
-              The short code the tag uses per category. Unlisted categories fall back to their first three letters. Built-ins: {Object.entries(DEFAULT_CATEGORY_CODES).map(([k, v]) => `${k} → ${v}`).join(", ")}.
-            </p>
-            <div className="space-y-2">
-              {codeRows.map(([cat, code], i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <Input className="flex-1" value={cat} placeholder="Category, e.g. Tablet" onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [e.target.value, v] : [k, v]))) })} />
-                  <Input className="w-28 font-mono uppercase" value={code} placeholder="TAB" maxLength={6} onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [k, e.target.value] : [k, v]))) })} />
-                  <Button variant="ghost" size="sm" aria-label="Remove code" onClick={() => set({ category_codes: Object.fromEntries(codeRows.filter((_, j) => j !== i)) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
-                </div>
-              ))}
-              <Button variant="outline" size="sm" onClick={() => set({ category_codes: { ...(cfg.category_codes ?? {}), "": "" } })}><Plus className="h-4 w-4" /> Add code</Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+    <div className="space-y-4">
+      <Tabs defaultValue="pattern">
+        <TabsList variant="segmented">
+          <TabsTrigger value="pattern">Tag pattern</TabsTrigger>
+          <TabsTrigger value="sheets">Sticker sheets & label</TabsTrigger>
+          <TabsTrigger value="found">Found-it page</TabsTrigger>
+        </TabsList>
 
-      <Card>
-        <CardHeader><CardTitle className="text-base">Sticker sheets & label</CardTitle></CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Default sheet format" hint="What the printer opens with.">
-              <Select value={cfg.default_format ?? DEFAULT_TAG_SETTINGS.default_format} onValueChange={(v) => set({ default_format: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{allFormats(cfg).map((f) => <SelectItem key={f.id} value={f.id}>{f.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </Field>
-            <Field label="Code type" hint="Code 128 suits existing 1D laser scanners; it always encodes the plain tag.">
-              <Select value={cfg.code_type ?? "qr"} onValueChange={(v) => set({ code_type: v as "qr" | "code128" })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="qr">QR code</SelectItem>
-                  <SelectItem value="code128">Code 128 barcode</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label="QR code encodes" hint="Deep link opens the asset in the app when scanned.">
-              <Select value={cfg.qr_mode ?? DEFAULT_TAG_SETTINGS.qr_mode} onValueChange={(v) => set({ qr_mode: v as AssetTagSettings["qr_mode"] })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="link">Link to the asset record</SelectItem>
-                  <SelectItem value="found">Public found-it page</SelectItem>
-                  <SelectItem value="tag">Tag text only</SelectItem>
-                  <SelectItem value="tag_serial">Tag + serial number</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label="Label footer (optional)" hint='Small last line on every label, e.g. "If found: hr@company.com".'>
-              <Input maxLength={120} value={cfg.label?.footer ?? ""} onChange={(e) => set({ label: { ...(cfg.label ?? {}), footer: e.target.value || undefined } })} />
-            </Field>
-          </div>
-          <div>
-            <div className="mb-1 text-sm font-medium">Label shows</div>
-            <div className="grid gap-1.5 text-sm sm:grid-cols-2">
-              <label className="flex items-center gap-2"><Checkbox checked={label.name} onCheckedChange={(v) => set({ label: { ...label, name: v === true } })} /> Asset name</label>
-              <label className="flex items-center gap-2"><Checkbox checked={label.serial} onCheckedChange={(v) => set({ label: { ...label, serial: v === true } })} /> Serial number</label>
-              <label className="flex items-center gap-2"><Checkbox checked={label.org} onCheckedChange={(v) => set({ label: { ...label, org: v === true } })} /> Organization name</label>
-              <label className="flex items-center gap-2"><Checkbox checked={label.logo} onCheckedChange={(v) => set({ label: { ...label, logo: v === true } })} /> Logo instead of the name</label>
-            </div>
-          </div>
-          <div>
-            <div className="mb-1 text-sm font-medium">Custom sheet formats</div>
-            <p className="mb-2 text-xs text-muted-foreground">
-              For sticker stock the presets don't cover. All measurements in mm; reusing a preset's id ({SHEET_FORMATS.map((f) => f.id).join(", ")}) replaces that preset's geometry.
-            </p>
-            <div className="space-y-3">
-              {customs.map((f, i) => (
-                <div key={i} className="rounded-md border p-3">
-                  <div className="mb-2 flex items-center gap-2">
-                    <Input className="w-32 font-mono" value={f.id} placeholder="id" onChange={(e) => setCustom(i, { id: e.target.value })} />
-                    <Input className="flex-1" value={f.label} placeholder="Shown in the format picker" onChange={(e) => setCustom(i, { label: e.target.value })} />
-                    <Button variant="ghost" size="sm" aria-label="Remove format" onClick={() => set({ custom_formats: customs.filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
-                  </div>
-                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-                    {([["cols", "Cols"], ["rows", "Rows"], ["w", "W"], ["h", "H"], ["marginX", "Mgn X"], ["marginY", "Mgn Y"], ["gapX", "Gap X"], ["gapY", "Gap Y"]] as const).map(([k, lbl]) => (
-                      <label key={k} className="text-xs text-muted-foreground">
-                        {lbl}
-                        <Input type="number" step={k === "cols" || k === "rows" ? 1 : 0.05} value={f[k]} onChange={(e) => setCustom(i, { [k]: Number(e.target.value) } as Partial<SheetFormat>)} />
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              <Button variant="outline" size="sm" onClick={() => set({ custom_formats: [...customs, { id: "", label: "", cols: 3, rows: 8, w: 63.5, h: 33.9, marginX: 7.25, marginY: 12.9, gapX: 2.5, gapY: 0 }] })}>
-                <Plus className="h-4 w-4" /> Add format
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle className="text-base">Public "found it" page</CardTitle></CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            When enabled, a sticker's QR can point at a public page (no sign-in) showing the org name, the tag and a return contact - so a stranger who finds lost hardware knows where to send it.
-            The link is unguessable per asset; nothing else about the asset is exposed.
-          </p>
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox checked={cfg.found_page?.enabled ?? false} onCheckedChange={(v) => set({ found_page: { ...(cfg.found_page ?? {}), enabled: v === true } })} />
-            Enable the public found-it page
-          </label>
-          {cfg.found_page?.enabled && (
-            <>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="Return contact" hint="Email or phone shown to the finder.">
-                  <Input maxLength={200} value={cfg.found_page?.contact ?? ""} onChange={(e) => set({ found_page: { ...(cfg.found_page ?? {}), contact: e.target.value } })} placeholder="hr@company.com" />
-                </Field>
-                <label className="flex items-center gap-2 self-end pb-2 text-sm">
-                  <Checkbox checked={cfg.found_page?.show_name ?? false} onCheckedChange={(v) => set({ found_page: { ...(cfg.found_page ?? {}), show_name: v === true } })} />
-                  Also show the asset's display name
-                </label>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Deployments behind Cloudflare Access need a bypass rule for <span className="font-mono">/found/*</span> in the Access app config, or outsiders hit the login wall instead of the page.
+        <TabsContent value="pattern">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Tag pattern</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Assets without a tag get one generated in this pattern when queued for printing (the tag is saved onto the asset). Existing tags are never rewritten.
               </p>
-            </>
-          )}
-        </CardContent>
-      </Card>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Field label="Prefix" hint={`Blank = your org initials (${resolveTagConfig(org.name).prefix}).`}>
+                  <Input value={cfg.prefix ?? ""} onChange={(e) => set({ prefix: e.target.value })} placeholder={resolveTagConfig(org.name).prefix} />
+                </Field>
+                <Field label="Separator">
+                  <Input value={cfg.separator ?? DEFAULT_TAG_SETTINGS.separator} onChange={(e) => set({ separator: e.target.value })} placeholder="-" />
+                </Field>
+                <Field label="Number width" hint="Zero-padded, e.g. 3 → 042.">
+                  <Input type="number" min={1} max={6} value={cfg.digits ?? DEFAULT_TAG_SETTINGS.digits} onChange={(e) => set({ digits: Number(e.target.value) })} />
+                </Field>
+              </div>
+              <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+                <span className="text-muted-foreground">Preview: </span>
+                <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 1)}</span>
+                <span className="mx-2 text-muted-foreground">→</span>
+                <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 2)}</span>
+                <span className="mx-2 text-muted-foreground">→</span>
+                <span className="font-mono font-medium">{formatTag(resolved, "Monitor", 1)}</span>
+              </div>
+              <div>
+                <div className="mb-1 text-sm font-medium">Category codes</div>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  The short code the tag uses per category. Unlisted categories fall back to their first three letters. Built-ins: {Object.entries(DEFAULT_CATEGORY_CODES).map(([k, v]) => `${k} → ${v}`).join(", ")}.
+                </p>
+                <div className="space-y-2">
+                  {codeRows.map(([cat, code], i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <Input className="flex-1" value={cat} placeholder="Category, e.g. Tablet" onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [e.target.value, v] : [k, v]))) })} />
+                      <Input className="w-28 font-mono uppercase" value={code} placeholder="TAB" maxLength={6} onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [k, e.target.value] : [k, v]))) })} />
+                      <Button variant="ghost" size="sm" aria-label="Remove code" onClick={() => set({ category_codes: Object.fromEntries(codeRows.filter((_, j) => j !== i)) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                    </div>
+                  ))}
+                  <Button variant="outline" size="sm" onClick={() => set({ category_codes: { ...(cfg.category_codes ?? {}), "": "" } })}><Plus className="h-4 w-4" /> Add code</Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
+        <TabsContent value="sheets">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Sticker sheets & label</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Default sheet format" hint="What the printer opens with.">
+                  <Select value={cfg.default_format ?? DEFAULT_TAG_SETTINGS.default_format} onValueChange={(v) => set({ default_format: v })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>{allFormats(cfg).map((f) => <SelectItem key={f.id} value={f.id}>{f.label}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Code type" hint="Code 128 suits existing 1D laser scanners; it always encodes the plain tag.">
+                  <Select value={cfg.code_type ?? "qr"} onValueChange={(v) => set({ code_type: v as "qr" | "code128" })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="qr">QR code</SelectItem>
+                      <SelectItem value="code128">Code 128 barcode</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="QR code encodes" hint="Deep link opens the asset in the app when scanned.">
+                  <Select value={cfg.qr_mode ?? DEFAULT_TAG_SETTINGS.qr_mode} onValueChange={(v) => set({ qr_mode: v as AssetTagSettings["qr_mode"] })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="link">Link to the asset record</SelectItem>
+                      <SelectItem value="found">Public found-it page</SelectItem>
+                      <SelectItem value="tag">Tag text only</SelectItem>
+                      <SelectItem value="tag_serial">Tag + serial number</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Label footer (optional)" hint='Small last line on every label, e.g. "If found: hr@company.com".'>
+                  <Input maxLength={120} value={cfg.label?.footer ?? ""} onChange={(e) => set({ label: { ...(cfg.label ?? {}), footer: e.target.value || undefined } })} />
+                </Field>
+              </div>
+              <div>
+                <div className="mb-1 text-sm font-medium">Label shows</div>
+                <div className="grid gap-1.5 text-sm sm:grid-cols-2">
+                  <label className="flex items-center gap-2"><Checkbox checked={label.name} onCheckedChange={(v) => set({ label: { ...label, name: v === true } })} /> Asset name</label>
+                  <label className="flex items-center gap-2"><Checkbox checked={label.serial} onCheckedChange={(v) => set({ label: { ...label, serial: v === true } })} /> Serial number</label>
+                  <label className="flex items-center gap-2"><Checkbox checked={label.org} onCheckedChange={(v) => set({ label: { ...label, org: v === true } })} /> Organization name</label>
+                  <label className="flex items-center gap-2"><Checkbox checked={label.logo} onCheckedChange={(v) => set({ label: { ...label, logo: v === true } })} /> Logo instead of the name</label>
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-sm font-medium">Custom sheet formats</div>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  For sticker stock the presets don't cover. All measurements in mm; reusing a preset's id ({SHEET_FORMATS.map((f) => f.id).join(", ")}) replaces that preset's geometry.
+                </p>
+                <div className="space-y-3">
+                  {customs.map((f, i) => (
+                    <div key={i} className="rounded-md border p-3">
+                      <div className="mb-2 flex items-center gap-2">
+                        <Input className="w-32 font-mono" value={f.id} placeholder="id" onChange={(e) => setCustom(i, { id: e.target.value })} />
+                        <Input className="flex-1" value={f.label} placeholder="Shown in the format picker" onChange={(e) => setCustom(i, { label: e.target.value })} />
+                        <Button variant="ghost" size="sm" aria-label="Remove format" onClick={() => set({ custom_formats: customs.filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                      </div>
+                      <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                        {([["cols", "Cols"], ["rows", "Rows"], ["w", "W"], ["h", "H"], ["marginX", "Mgn X"], ["marginY", "Mgn Y"], ["gapX", "Gap X"], ["gapY", "Gap Y"]] as const).map(([k, lbl]) => (
+                          <label key={k} className="text-xs text-muted-foreground">
+                            {lbl}
+                            <Input type="number" step={k === "cols" || k === "rows" ? 1 : 0.05} value={f[k]} onChange={(e) => setCustom(i, { [k]: Number(e.target.value) } as Partial<SheetFormat>)} />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  <Button variant="outline" size="sm" onClick={() => set({ custom_formats: [...customs, { id: "", label: "", cols: 3, rows: 8, w: 63.5, h: 33.9, marginX: 7.25, marginY: 12.9, gapX: 2.5, gapY: 0 }] })}>
+                    <Plus className="h-4 w-4" /> Add format
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="found">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Public "found it" page</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                When enabled, a sticker's QR can point at a public page (no sign-in) showing the org name, the tag and a return contact - so a stranger who finds lost hardware knows where to send it.
+                The link is unguessable per asset; nothing else about the asset is exposed.
+              </p>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox checked={cfg.found_page?.enabled ?? false} onCheckedChange={(v) => set({ found_page: { ...(cfg.found_page ?? {}), enabled: v === true } })} />
+                Enable the public found-it page
+              </label>
+              {cfg.found_page?.enabled && (
+                <>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="Return contact" hint="Email or phone shown to the finder.">
+                      <Input maxLength={200} value={cfg.found_page?.contact ?? ""} onChange={(e) => set({ found_page: { ...(cfg.found_page ?? {}), contact: e.target.value } })} placeholder="hr@company.com" />
+                    </Field>
+                    <label className="flex items-center gap-2 self-end pb-2 text-sm">
+                      <Checkbox checked={cfg.found_page?.show_name ?? false} onCheckedChange={(v) => set({ found_page: { ...(cfg.found_page ?? {}), show_name: v === true } })} />
+                      Also show the asset's display name
+                    </label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Deployments behind Cloudflare Access need a bypass rule for <span className="font-mono">/found/*</span> in the Access app config, or outsiders hit the login wall instead of the page.
+                  </p>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {/* One blob, one Save: it persists every tab, not just the visible one. */}
       <Button onClick={save} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save asset tag settings</Button>
     </div>
   );

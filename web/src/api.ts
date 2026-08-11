@@ -1,5 +1,6 @@
 // Single API client. /v1 base, Access cookie, CSRF header, RFC 9457 error parsing.
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
+import { getViewAs, stopViewAs } from "@/lib/viewAsStore";
 
 export class ApiError extends Error {
   status: number;
@@ -61,10 +62,45 @@ export function setForbiddenHandler(fn: ((collection: string) => void) | null) {
   forbiddenHandler = fn;
 }
 
-export async function api<T>(path: string, init: RequestInit & { skipForbiddenHandler?: boolean } = {}): Promise<T> {
+// ---- "View as" (access-mode simulation) -----------------------------------------------------------------
+// While a simulation is open every request carries `X-View-As` and the SERVER answers as that person
+// (src/lib/viewAs.ts) - the browser no longer pretends. Two carve-outs:
+//   - the access-management endpoints are the admin's own tools (ACL modal, preview, the people picker), so
+//     they always run as the real caller; asking the simulated user whether they may manage access would be
+//     both wrong and self-locking (it would hide the exit),
+//   - `asRealCaller` lets a caller opt out explicitly (App re-reads /users/me as the admin for the pill).
+const REAL_CALLER_PATHS = /^\/access-rules/;
+export type ApiInit = RequestInit & { skipForbiddenHandler?: boolean; asRealCaller?: boolean };
+
+function viewAsHeader(path: string, init: ApiInit): Record<string, string> {
+  const va = getViewAs();
+  return va && !init.asRealCaller && !REAL_CALLER_PATHS.test(path) ? { "X-View-As": va.subject } : {};
+}
+
+// The server refuses every write while simulating; failing here keeps a stray button from surfacing a bare
+// 403 and says what to do instead. `batch:run` is the read transport, so it passes.
+function guardReadOnly(path: string, init: ApiInit): void {
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method === "GET" || path === "/batch:run") return;
+  if (!getViewAs() || init.asRealCaller || REAL_CALLER_PATHS.test(path)) return;
+  throw new ApiError("Stop “view as” before making changes", 403, {
+    title: "Read-only while viewing as someone else",
+    status: 403,
+    detail: "You're viewing the app as another user. Stop the simulation to act as yourself.",
+  });
+}
+
+// A 403 whose detail is prefixed "view as:" means the SIMULATION is invalid (not permitted, subject gone,
+// account disabled) - every request would fail the same way, so drop it and reload as the real caller.
+function bailOnBrokenSimulation(status: number, problem: Problem | null): void {
+  if (status === 403 && getViewAs() && problem?.detail?.startsWith("view as:")) stopViewAs();
+}
+
+export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
+  guardReadOnly(path, init);
   const res = await fetch(`/v1${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...(init.headers ?? {}) },
+    headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...viewAsHeader(path, init), ...(init.headers ?? {}) },
     credentials: "include",
   });
   if (res.status === 401) handle401();
@@ -78,6 +114,7 @@ export async function api<T>(path: string, init: RequestInit & { skipForbiddenHa
       if (collection) forbiddenHandler(collection);
     }
     const problem = (await res.json().catch(() => null)) as Problem | null;
+    bailOnBrokenSimulation(res.status, problem);
     throw new ApiError(problem?.detail ?? problem?.title ?? res.statusText, res.status, problem);
   }
   return res.status === 204 ? (undefined as T) : res.json();
@@ -223,6 +260,9 @@ type BinaryOpts = { verb?: string; params?: Record<string, string>; body?: Recor
 /** POST a binary-returning custom method and hand back the raw bytes. Shared by `download` (save to disk) and
  *  `blobUrl` (view inline), so both speak the same auth/CSRF/Problem-error contract. */
 async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
+  // Binary methods are POSTs, so a simulation cannot carry them (the server is read-only there). Refuse with
+  // the same message the other writes get rather than letting a download 403 opaquely.
+  guardReadOnly(`/${path}`, { method: "POST" });
   const qs = opts.params ? `?${new URLSearchParams(opts.params).toString()}` : "";
   const res = await fetch(`/v1/${path}:${opts.verb ?? "download"}${qs}`, {
     method: "POST",
@@ -233,6 +273,7 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
   if (res.status === 401) handle401();
   if (!res.ok) {
     const problem = (await res.json().catch(() => null)) as Problem | null;
+    bailOnBrokenSimulation(res.status, problem);
     throw new ApiError(problem?.detail ?? problem?.title ?? res.statusText, res.status, problem);
   }
   return res.blob();

@@ -58,7 +58,7 @@ type AlwaysPresent = {
   department: "display_name" | "managers";
   dependent: "name" | "relationship";
   employee: "first_name" | "last_name" | "work_email" | "epf_enrolled";
-  event: "title" | "start_time" | "end_time" | "all_day" | "count_as_work" | "attendees";
+  event: "title" | "start_time" | "end_time" | "all_day" | "count_as_work" | "requires_clock_in" | "attendees";
   expense: "amount" | "tax_amount" | "reimbursable" | "recurring";
   "expense-budget": "period_type" | "period_key" | "amount";
   "expense-category": "display_name" | "requires_receipt";

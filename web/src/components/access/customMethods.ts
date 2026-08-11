@@ -3,6 +3,7 @@
 // Mirrored here because the web bundle can't import from src/; kept in lock-step by test/customMethodsDrift.
 // A custom method is fail-closed: allowed ONLY by an explicit verb-allow grant; a verb-deny always wins.
 export const CUSTOM_METHODS: Record<string, string[]> = {
+  "api-keys": ["revoke"],
   employees: ["enrollDefaultBenefits"],
   departments: [],
   attendance: ["clockIn", "clockOut"],
@@ -56,7 +57,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   offers: ["approve", "extend", "accept", "decline", "rescind"],
   expenses: ["submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["enable", "disable", "test"],
-  "access-rules": ["preview", "requestAccess"],
+  "access-rules": ["preview", "requestAccess", "approve", "reject"],
 };
 
 // The standard methods that live on the level ladder (read/write/admin), NOT grantable as custom methods.

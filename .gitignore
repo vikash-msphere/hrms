@@ -20,3 +20,4 @@ cf.txt
 
 # downloaded source archive; extracted assets are committed
 web/public/assets/illustrations.zip
+.repowise/

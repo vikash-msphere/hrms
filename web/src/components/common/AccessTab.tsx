@@ -19,12 +19,17 @@ export function AccessTab({
   children: React.ReactNode;
   className?: string;
 }) {
+  // The key is OVERLAID on the tab's trailing edge rather than laid out after it: an in-flow icon widened
+  // every tab the moment the mode turned on, which re-flowed the whole tab bar (and on a crowded workspace
+  // pushed the last tab to a second row) just from toggling a UX-only affordance. Overlaid, the bar is
+  // byte-identical in both modes and only the icon appears. The trigger keeps a little end padding so the
+  // key never lands on the label.
   return (
-    <span className="inline-flex items-center">
+    <span className="relative inline-flex items-center">
       <TabsTrigger value={value} className={className}>
         {children}
       </TabsTrigger>
-      <AccessTarget target={target} className="-ml-0.5 h-5 w-5" />
+      <AccessTarget target={target} className="absolute -right-1 top-0 h-5 w-5 -translate-y-1/3 bg-background/85 backdrop-blur-sm" />
     </span>
   );
 }

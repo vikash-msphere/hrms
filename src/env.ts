@@ -17,6 +17,17 @@ export type AppUser = {
   // Set true by audit() (request-actor path) so the authz write backstop knows the handler already logged this
   // request and skips its generic activity row. Reset per request in authz (batch reuses one user object).
   audited?: boolean;
+  // Present ONLY on a "view as" simulation (lib/viewAs.ts): this whole AppUser is the SIMULATED subject, and
+  // this field carries the real access admin driving it. Audit rows are written against the real human (with
+  // the simulated email as `viewing_as` meta), so the trail never credits a read to the person being watched.
+  simulatedBy?: { uuid: string; email: string; employeeId: string | null; name: string | null };
+  // Present ONLY when the caller authenticated with an API key (middleware/auth.ts). The principal is still
+  // the key's OWNER - `grant` above has already been narrowed by the key's scope - so nothing downstream has
+  // to special-case machine callers to be safe. This field exists for the three places that legitimately
+  // care: the authz ceiling gate (a second check that survives per-object rule merges), audit attribution
+  // (the trail must distinguish a human from their key), and the rules a key may not perform at all
+  // (simulating another user, minting further keys).
+  apiKey?: { uuid: string; code: string | null; name: string; prefix: string; scope: import("./domain/keyScope").KeyScope };
 };
 
 export type Bindings = {

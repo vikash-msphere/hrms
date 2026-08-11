@@ -94,7 +94,6 @@ const STATUS_DOT: Record<DayStatus, string | null> = {
   insufficient: "bg-red-400",
   absent: "bg-red-400",
   on_leave: null,
-  on_event: null,
   holiday: null,
 };
 const STATUS_LABEL: Record<DayStatus, string> = {
@@ -107,7 +106,6 @@ const STATUS_LABEL: Record<DayStatus, string> = {
   insufficient: "Too short to count",
   absent: "No log",
   on_leave: "On leave",
-  on_event: "At an event",
   holiday: "Holiday",
 };
 // The single neutral leave colour shown to viewers without the leave-type breakdown affordance (everyone but
@@ -124,7 +122,6 @@ const STATUS_TEXT: Record<DayStatus, string> = {
   insufficient: "text-red-600 dark:text-red-400",
   absent: "text-red-600 dark:text-red-400",
   on_leave: "text-brand-neutral-500 dark:text-brand-neutral-400",
-  on_event: "text-indigo-600 dark:text-indigo-400",
   holiday: "text-violet-600 dark:text-violet-400",
 };
 const upper = (s?: string) => (s ?? "").toUpperCase();
@@ -322,21 +319,23 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       const leaveRanges = (leavesByEmp.get(eid) ?? []).map((l) => ({ start: l.start_date.slice(0, 10), end: l.end_date.slice(0, 10) }));
       const onLeaveDay = (day: string) => leaveRanges.some((r) => r.start <= day && day <= r.end);
       // Split the employee's events: count-as-work events credit per-day worked minutes; the rest just mark
-      // the days excused (unavailable). An all-day work event (off-site) credits every attendee a full day.
-      // A timed/partial work event (e.g. a team lunch) only credits attendees who were at work that day - they
-      // clocked out for it - so the day earns its overlap with the event window (capped at a full day). Credit
-      // only lands once the event has ended, and never for absent (no punch) or on-leave attendees.
-      const eventRanges: { start: string; end: string }[] = [];
+      // Only count_as_work events touch attendance, and only as credited minutes: an event that doesn't count
+      // as work leaves the day exactly as it was, so an attendee who never punched is absent (and docked).
+      // An all-day work event (off-site) credits every attendee a full day; a timed one credits the day's
+      // overlap with the event window (capped at a full day). Credit lands once the event has ended, and -
+      // when the event requires a clock-in (e.g. a team lunch they punched out for) - only for attendees who
+      // were actually at work that day. Never for on-leave attendees. Mirrors eventCreditByDay in
+      // src/domain/attendance.ts, which is what payroll charges LOP from; keep the two in step.
       const workMinutesByDay = new Map<string, number>();
       for (const ev of eventsByEmp.get(eid) ?? []) {
+        if (!ev.count_as_work) continue;
+        if (!ev.all_day && +new Date(ev.end_time) >= nowMs) continue; // timed event still running / upcoming
         const sDay = ev.all_day ? ev.start_time.slice(0, 10) : localDay(ev.start_time, schedule.timezone);
         const eDay = ev.all_day ? ev.end_time.slice(0, 10) : localDay(ev.end_time, schedule.timezone);
-        if (!ev.count_as_work) { eventRanges.push({ start: sDay, end: eDay }); continue; }
-        if (!ev.all_day && +new Date(ev.end_time) >= nowMs) continue; // timed event still running / upcoming
         for (const day of enumerateDays(sDay, eDay)) {
           if (!workDays.includes(weekdayOf(day))) continue; // credit working days only
           if (ev.all_day && day >= todayYmd) continue; // all-day: only days that have fully ended
-          if (!ev.all_day && !punchedDays.has(day)) continue; // partial event: only for those actually at work
+          if (ev.requires_clock_in && !punchedDays.has(day)) continue; // credit only those actually at work
           if (onLeaveDay(day)) continue; // never credit an on-leave attendee
           let m: number;
           if (ev.all_day) m = schedule.full_day_minutes;
@@ -348,7 +347,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
           workMinutesByDay.set(day, (workMinutesByDay.get(day) ?? 0) + m);
         }
       }
-      const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, sched: schedule, summaries, holidays: holSet, leaveRanges, eventRanges, workMinutesByDay });
+      const rows = buildAttendanceRows({ fromYmd: empFrom, toYmd, todayYmd, sched: schedule, summaries, holidays: holSet, leaveRanges, workMinutesByDay });
       out.set(eid, new Map(rows.map((r) => [r.day, r] as const)));
     }
     return out;

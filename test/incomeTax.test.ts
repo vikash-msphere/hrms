@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeAnnualTax, monthlyTds, DEFAULT_TAX_CONFIG } from "../src/domain/incomeTax";
+import { computeAnnualTax, monthlyTds, allowedDeductions, COMMON_SECTION_CAPS, DEFAULT_TAX_CONFIG, type RegimeConfig } from "../src/domain/incomeTax";
 
 // New-regime numbers cross-checked against the official incometaxindia.gov.in calculator (AY 2026-27).
 const NEW = DEFAULT_TAX_CONFIG.regimes.new!;
@@ -57,5 +57,31 @@ describe("monthlyTds - distribute the balance over remaining months, clamp at 0"
   });
   it("zero remaining months -> 0", () => {
     expect(monthlyTds(120000, 0, 0)).toBe(0);
+  });
+});
+
+// Chapter VI-A: a VERIFIED declaration reduces withholding, but only for the sections the regime allows and only
+// up to each section's cap. The new regime keeps 80CCD(2)/80CCH and nothing else.
+describe("allowedDeductions", () => {
+  it("drops sections the regime disallows and keeps the ones it lists", () => {
+    const { total, rows } = allowedDeductions({ "80C": 150000, "80CCD(2)": 40000 }, NEW);
+    expect(total).toBe(40000);
+    expect(rows.find((r) => r.section === "80C")).toEqual({ section: "80C", declared: 150000, allowed: 0 });
+    expect(rows.find((r) => r.section === "80CCD(2)")!.allowed).toBe(40000);
+  });
+  it("caps a section at its statutory limit when the regime allows it", () => {
+    const old: RegimeConfig = { ...NEW, label: "Old regime", standardDeduction: 50000, deductionSections: undefined, sectionCaps: COMMON_SECTION_CAPS };
+    const { total, rows } = allowedDeductions({ "80C": 200000, "80D": 30000, "80G": 5000 }, old);
+    expect(rows.find((r) => r.section === "80C")!.allowed).toBe(150000); // capped
+    expect(rows.find((r) => r.section === "80D")!.allowed).toBe(25000); // capped
+    expect(rows.find((r) => r.section === "80G")!.allowed).toBe(5000); // no cap configured
+    expect(total).toBe(180000);
+  });
+  it("comes off taxable income, so it moves the tax", () => {
+    const bare = computeAnnualTax(1500000, NEW);
+    const withNps = computeAnnualTax(1500000, NEW, 100000);
+    expect(withNps.chapterVIA).toBe(100000);
+    expect(withNps.taxableIncome).toBe(bare.taxableIncome - 100000);
+    expect(withNps.totalTax).toBeLessThan(bare.totalTax);
   });
 });

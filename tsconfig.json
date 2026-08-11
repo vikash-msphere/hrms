@@ -9,7 +9,14 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "jsx": "react-jsx",
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    // The web bundle's alias (web/tsconfig.json + web/vite.config.ts + vitest.config.ts), so a test in
+    // test/ can import a PURE web module (the access-rule sentence/lint logic) without that module having to
+    // avoid the alias every other web file uses. Worker sources never import through it.
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./web/src/*"]
+    }
   },
   "include": ["src", "test"]
 }

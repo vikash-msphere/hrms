@@ -1,7 +1,7 @@
 import { allocOwnedCode } from "./codeAlloc";
 import { and, eq, isNull, inArray } from "drizzle-orm";
 import { applyScope } from "./listScope";
-import { applyStructure, splitCtc, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
+import { applyStructure, splitCtc, pfWagesOf, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { structureLinesById } from "./salaryStructures";
 import { monthlyRecurringGross } from "./taxProjection";
@@ -148,6 +148,15 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
     ? monthlyRecurringGross(current.basePay, applyStructure(components, await structureLinesById(deps, current.structureId)), current.specialAllowance)
     : 0;
   const arrears = paidPeriods > 0 ? Math.max(0, round2((newGross - oldGross) * paidPeriods)) : 0;
+  // The PF-wage slice of those arrears: the rise in BASIC (plus, under the "basic_plus" wage basis, the same
+  // allowances PF counts) over the same months. PF is due on arrears of basic wages while ESI is due on the whole
+  // amount, so the run needs the two figures apart - deriving it later from a single lump is guesswork.
+  const pfBasis = cfg.pf_wage_basis ?? "basic";
+  const newPfWages = pfWagesOf(basePay, specialAllowance, effective, pfBasis);
+  const oldPfWages = current
+    ? pfWagesOf(current.basePay, current.specialAllowance, applyStructure(components, await structureLinesById(deps, current.structureId)), pfBasis)
+    : 0;
+  const arrearsBase = paidPeriods > 0 ? Math.max(0, round2((newPfWages - oldPfWages) * paidPeriods)) : 0;
   const row = (await deps.db
     .insert(schema.compensation)
     .values({
@@ -162,6 +171,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
       effectiveFrom: new Date(from),
       effectiveTo: null,
       arrearsAmount: arrears,
+      arrearsBaseAmount: arrearsBase,
     })
     .returning())[0]!;
   await audit(deps, actor, "compensation.revise", "compensation", row.uuid, { employee: `employees/${employeeId}` });
@@ -176,7 +186,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
 // cached basic/special no longer matches what the live catalog derives), `unchanged`, or `skipped` (the CTC no
 // longer fits - e.g. committed cost now exceeds it). Shared by the dry-run status check and the actual reapply,
 // so the count you preview is exactly what a reapply would change.
-type SplitPlanRow = { uuid: string; basePay: number; specialAllowance: number; status: "stale" | "unchanged" | "skipped" };
+type SplitPlanRow = { uuid: string; employeeId: string; basePay: number; specialAllowance: number; status: "stale" | "unchanged" | "skipped" };
 async function splitPlan(deps: Deps): Promise<SplitPlanRow[]> {
   const cfg = await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG);
   const components = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.disabled && !c.deleteTime);
@@ -187,11 +197,27 @@ async function splitPlan(deps: Deps): Promise<SplitPlanRow[]> {
   for (const row of rows) {
     const effective = applyStructure(components, await structureLinesById(deps, row.structureId));
     const split = splitCtc(row.ctcAnnual / 12, effective, epfById.get(row.employeeId) ?? true, cfg);
-    if (!split) { plan.push({ uuid: row.uuid, basePay: row.basePay, specialAllowance: row.specialAllowance, status: "skipped" }); continue; }
+    if (!split) { plan.push({ uuid: row.uuid, employeeId: row.employeeId, basePay: row.basePay, specialAllowance: row.specialAllowance, status: "skipped" }); continue; }
     const changed = split.basePay !== row.basePay || split.specialAllowance !== row.specialAllowance;
-    plan.push({ uuid: row.uuid, basePay: split.basePay, specialAllowance: split.specialAllowance, status: changed ? "stale" : "unchanged" });
+    plan.push({ uuid: row.uuid, employeeId: row.employeeId, basePay: split.basePay, specialAllowance: split.specialAllowance, status: changed ? "stale" : "unchanged" });
   }
   return plan;
+}
+
+// Which of `employeeIds` currently hold a split the live catalog no longer produces. Used by a payroll run to
+// warn that it priced a stale split: the run's numbers come from the CACHED basic / Special Allowance on each
+// compensation row, so a row solved under an older catalog pays a gross that no longer reconciles to the CTC the
+// employee was promised - and neither the build time nor any input's updatedAt reveals it, because the drift
+// usually predates the build. Scoped to the run's own people, so an unrelated employee's stale split is not
+// reported as this run's problem. `skipped` = no split fits that CTC any more; a re-apply cannot fix those.
+export async function splitDriftFor(deps: Deps, employeeIds: string[]): Promise<{ stale: string[]; skipped: string[] }> {
+  if (!employeeIds.length) return { stale: [], skipped: [] };
+  const wanted = new Set(employeeIds);
+  const plan = (await splitPlan(deps)).filter((p) => wanted.has(p.employeeId));
+  return {
+    stale: plan.filter((p) => p.status === "stale").map((p) => p.employeeId),
+    skipped: plan.filter((p) => p.status === "skipped").map((p) => p.employeeId),
+  };
 }
 
 // Dry run: how many current splits are out of date under the live catalog. Drives the "N employees' splits are

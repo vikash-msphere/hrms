@@ -8,6 +8,7 @@ import { resourceRoute, opensExactRecord } from "@/lib/resourceRoute";
 import type { Activity, ActivityPage, Employee } from "@/types";
 import { actionIcon, actionLabel, actionTone, TONE_ICON, TONE_LABEL, timeAgo, type ActionTone } from "@/lib/activity";
 import { entityLabel, iconOf } from "@/lib/entityKinds";
+import { BASE_COLLECTIONS } from "@/components/access/permMatrix";
 import { PhotoAvatar } from "./PhotoAvatar";
 import { PersonAvatar } from "./PersonAvatar";
 import { Input } from "@/components/ui/input";
@@ -39,14 +40,16 @@ const TONE_CLS: Record<ActionTone, string> = {
 
 // `resource` = one entity's trail (`<collection>/<id>`). `global` = the org-wide feed (every collection;
 // gated by the `audit` capability) — it adds an entity-type filter and shows each row's touched record.
-export function ActivityFeed({ resource, global = false }: { resource?: string; global?: boolean }) {
+// `initialEntity` pre-selects the object-type filter (the Activity page's "Permission changes" view opens the
+// feed already narrowed to access-rules); the filter itself stays fully editable afterwards.
+export function ActivityFeed({ resource, global = false, initialEntity }: { resource?: string; global?: boolean; initialEntity?: string }) {
   const { rows: employees } = useCollection<Employee>("employees");
   const [rows, setRows] = useState<Activity[] | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [q, setQ] = useState(""); // typed text
   const [submittedQ, setSubmittedQ] = useState(""); // committed query (applied on Enter / search button)
   const [tone, setTone] = useState<string>("all");
-  const [entity, setEntity] = useState<string>("all"); // global feed: narrow to one collection
+  const [entity, setEntity] = useState<string>(initialEntity ?? "all"); // global feed: narrow to one collection
   const [actor, setActor] = useState<string>("all"); // global feed: narrow to one actor (employee path)
   const [drill, setDrill] = useState<{ resource: string; label: string | null } | null>(null); // global feed: open one record's own trail
   const [nextToken, setNextToken] = useState<string | undefined>();
@@ -67,7 +70,7 @@ export function ActivityFeed({ resource, global = false }: { resource?: string; 
   // Initial (unfiltered) load. Establishes whether the log is paginated.
   useEffect(() => {
     let live = true;
-    setState("loading"); setRows(null); setNextToken(undefined); setPaginated(false); setQ(""); setSubmittedQ(""); setTone("all"); setEntity("all"); setActor("all");
+    setState("loading"); setRows(null); setNextToken(undefined); setPaginated(false); setQ(""); setSubmittedQ(""); setTone("all"); setEntity(initialEntity ?? "all"); setActor("all");
     fetchKey.current = `${scope}||all|all|all|`;
     get<ActivityPage>(params({ max_page_size: String(pageSize) }))
       .then((p) => { if (!live) return; setRows(p.results); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}||all|all|all|${!!p.next_page_token}`; setState("ready"); })
@@ -187,11 +190,24 @@ export function ActivityFeed({ resource, global = false }: { resource?: string; 
     if (global && entity !== "all" && a.entity !== entity) return false;
     if (global && actor !== "all" && !(a.actor && idOf(a.actor) === idOf(actor))) return false;
     const needle = submittedQ.trim().toLowerCase();
-    if (needle && !`${nameOf(a)} ${actionLabel(a.action)} ${a.entity ?? ""} ${JSON.stringify(a.meta ?? {})}`.toLowerCase().includes(needle)) return false;
+    // Same haystack the server LIKEs (actor + action + the touched OBJECT), plus the object's user-facing type
+    // word and its resolved employee name — so "leave request" / "Asha Rao" match here as well as server-side.
+    const hay = [nameOf(a), a.actor_email, actionLabel(a.action), a.entity, a.entity && entityLabel(a.entity), targetLabel(a), a.entity_ref, JSON.stringify(a.meta ?? {})];
+    if (needle && !hay.filter(Boolean).join(" ").toLowerCase().includes(needle)) return false;
     return true;
   };
   const tonesPresent = useMemo(() => [...new Set((rows ?? []).map((a) => actionTone(a.action)))], [rows]);
+  // Object-type options. A single-page log filters client-side, so only the types actually present are offerable.
+  // A paginated log filters SERVER-side across all history — there the whole collection catalog is selectable
+  // (union'd with whatever the page shows, so an unlisted collection still appears if it has activity).
   const entitiesPresent = useMemo(() => [...new Set((rows ?? []).map((a) => a.entity).filter(Boolean) as string[])].sort(), [rows]);
+  const entityOptions = useMemo(() => {
+    // BASE_COLLECTIONS ends with the VIRTUAL capabilities (`activity`, `export`) — they gate affordances and are
+    // never a touched record, so they'd be dead filter options.
+    const catalog = BASE_COLLECTIONS.filter((c) => c !== "activity" && c !== "export");
+    const base = paginated ? [...new Set([...catalog, ...entitiesPresent])] : entitiesPresent;
+    return base.map((c) => ({ value: c, label: entityLabel(c) })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [paginated, entitiesPresent]);
   // Actor options for the global filter: every non-disabled employee, by name (the audit anchors on employee id).
   const actorOptions = useMemo(() => employees.filter((e) => !e.disabled).map((e) => ({ path: e.path, name: `${e.first_name} ${e.last_name}`.trim() })).sort((a, b) => a.name.localeCompare(b.name)), [employees]);
   // The touched record for a global row: employee -> name, else "<Type> · <short id>" (no per-collection reads).
@@ -217,16 +233,16 @@ export function ActivityFeed({ resource, global = false }: { resource?: string; 
           <button type="button" aria-label="Search" onClick={() => setSubmittedQ(q)} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
             <Search className="h-3.5 w-3.5" />
           </button>
-          <Input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") setSubmittedQ(q); }} placeholder={global ? "Search activity or actor… (Enter)" : "Search activity… (Enter)"} className="h-8 pl-7" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") setSubmittedQ(q); }} placeholder={global ? "Search action, person or record… (Enter)" : "Search activity or record… (Enter)"} className="h-8 pl-7" />
         </div>
         {global && (
           <Select value={entity} onValueChange={setEntity}>
             <SelectTrigger className="h-8 w-40"><SelectValue placeholder="All types" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All types</SelectItem>
-              {entitiesPresent.map((en) => {
-                const Icon = iconOf(en);
-                return <SelectItem key={en} value={en}><span className="inline-flex items-center gap-2"><Icon className="h-3.5 w-3.5 opacity-70" />{entityLabel(en)}</span></SelectItem>;
+              {entityOptions.map((o) => {
+                const Icon = iconOf(o.value);
+                return <SelectItem key={o.value} value={o.value}><span className="inline-flex items-center gap-2"><Icon className="h-3.5 w-3.5 opacity-70" />{o.label}</span></SelectItem>;
               })}
             </SelectContent>
           </Select>

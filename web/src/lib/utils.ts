@@ -62,6 +62,17 @@ export function probationLabel(endDate: string): string {
   return days === 0 ? "On probation · ends today" : `On probation · ${days}d left`;
 }
 
+// Round to 2 decimal places (paise), decimal-half-correct - the browser-side twin of the server's one rounding
+// helper (src/domain/money.ts). `Math.round(n * 100) / 100` multiplies in float, so a decimal half-case rounds
+// the WRONG way (`1.005 * 100` is `100.4999…` → 1.00 instead of 1.01); scaling through the decimal string makes
+// the parser produce the nearest double to the intended decimal, so the half-case rounds as a human expects.
+// Every mirrored money computation in the UI (the CTC breakdown, the top-down split preview) goes through this,
+// so a previewed figure can't disagree with the server's by a paise.
+export function round2(n: number): number {
+  if (!Number.isFinite(n) || Math.abs(n) < 1e-6) return 0;
+  return Number(`${Math.round(Number(`${n}e2`))}e-2`);
+}
+
 // Format an amount in a currency. `decimals` sets the shown precision (both min and max fraction digits) so
 // the currency's configured minor-unit count is honoured everywhere - e.g. INR at 0 renders ₹1,800, not
 // ₹1,800.00. Omit `decimals` to fall back to the currency's Intl default. Money is stored full-precision;

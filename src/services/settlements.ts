@@ -7,7 +7,13 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
-import { currentComp, monthlyRecurringGross } from "./taxProjection";
+import {
+  currentComp, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals,
+  assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
+} from "./taxProjection";
+import { encashmentRateConfig } from "./leaveEncashments";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, lopDayUnits, eventCreditByDay } from "../domain/attendance";
+import { esiEmployeeContribution, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettled, releaseReimbursementsSettled } from "./reimbursements";
 import { unpaidBonuses, markBonusesSettled, releaseBonusesSettled } from "./bonuses";
 import { approvedUnpaidEncashments, markEncashmentsSettled, releaseEncashmentsSettled } from "./leaveEncashments";
@@ -17,7 +23,10 @@ import { outstandingLoans, repaidCreditStmt, recomputeRepaidStmt } from "./loans
 import { getSettingValue } from "./settings";
 import { applyStructure, overtimePay, DEFAULT_OVERTIME_CONFIG, type OvertimeConfig } from "../domain/payroll";
 import { structureLinesById } from "./salaryStructures";
-import { computeSettlement } from "../domain/settlement";
+import {
+  computeSettlement, completedYearsOfService, gratuityAmount, gratuityExemption, leaveEncashmentExemption,
+  DEFAULT_GRATUITY_CONFIG, type GratuityConfig, type SettlementLine,
+} from "../domain/settlement";
 import { round2, sum2 } from "../domain/money";
 import { notify } from "./notifications";
 
@@ -92,6 +101,117 @@ async function releaseSettlement(deps: Deps, row: typeof schema.settlements.$inf
   }
 }
 
+// Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
+// uses (holidays, approved leave, attendance punches) so the exit month is docked the same way every other
+// month is. Scoped to one employee and one month, so it stays a handful of reads.
+async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number, toMs: number, att: AttendanceConfig): Promise<number> {
+  const tz = att.timezone || "Asia/Kolkata";
+  const startYmd = localDay(fromMs, tz);
+  const endYmd = localDay(toMs, tz);
+  const holidays = new Set(
+    (await deps.db.select().from(schema.holidays))
+      .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= fromMs && +new Date(h.date) <= toMs)
+      .map((h) => localDay(+new Date(h.date), tz)),
+  );
+  const leaveRanges = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.employeeId, employeeId)))
+    .filter((l) => l.state === "APPROVED" && +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
+    .map((l) => ({ start: localDay(+new Date(l.startDate), tz), end: localDay(+new Date(l.endDate), tz) }));
+  const workedByDay = new Map<string, number>();
+  for (const s of await deps.db.select().from(schema.attendanceSessions).where(eq(schema.attendanceSessions.employeeId, employeeId))) {
+    const ms = +new Date(s.clockIn);
+    if (ms < fromMs || ms > toMs + 86_400_000) continue;
+    const day = localDay(ms, tz);
+    const minutes = s.clockOut ? Math.max(0, Math.round((+new Date(s.clockOut) - ms) / 60000)) : 0;
+    workedByDay.set(day, (workedByDay.get(day) ?? 0) + minutes);
+  }
+  // Same event credit the payroll build applies, so a leaver's final settlement doesn't dock days they spent
+  // at a count_as_work event (see assembleLop in services/payroll.ts).
+  const nowMs = +deps.clock.now();
+  const events: WorkEvent[] = [];
+  for (const e of await deps.db.select().from(schema.events)) {
+    if (e.deleteTime || !e.countAsWork) continue;
+    if (+new Date(e.endTime) < fromMs - 86_400_000 || +new Date(e.startTime) > toMs + 86_400_000) continue;
+    try {
+      if (!(JSON.parse(e.attendeeIds ?? "[]") as string[]).includes(employeeId)) continue;
+    } catch { continue; }
+    events.push({ startMs: +new Date(e.startTime), endMs: +new Date(e.endTime), allDay: !!e.allDay, requiresClockIn: !!e.requiresClockIn });
+  }
+  const credit = eventCreditByDay({
+    events, tz, workDays: att.work_days,
+    fullDayMinutes: att.full_day_minutes ?? 480,
+    todayYmd: localDay(nowMs, tz),
+    nowMs,
+    punchedDays: new Set(workedByDay.keys()), // before the merge, so credit never counts as a punch
+    onLeave: (d) => leaveRanges.some((r) => r.start <= d && d <= r.end),
+  });
+  for (const [day, m] of credit) workedByDay.set(day, (workedByDay.get(day) ?? 0) + m);
+
+  return lopDayUnits({
+    startYmd, endYmd, workDays: att.work_days, holidays, leaveRanges, workedByDay,
+    fullDayMinutes: att.full_day_minutes ?? 480,
+    halfDayMinutes: att.half_day_minutes ?? 240,
+  });
+}
+
+// PF / ESI / PT withheld on the exit payout, from the org's own pay components - the same opt-in components and
+// the same pure statutory maths the payroll build uses, so the two never disagree about a rate or a ceiling.
+async function settlementStatutoryLines(
+  deps: Deps,
+  f: { components: typeof schema.payComponents.$inferSelect[]; epfEnrolled: boolean; monthlyGross: number; pfWages: number; esiWages: number },
+): Promise<SettlementLine[]> {
+  const out: SettlementLine[] = [];
+  const live = f.components.filter((c) => !c.disabled && !c.deleteTime && c.recurring);
+  const epfComp = live.find((c) => c.method === "epf" && c.kind === "deduction");
+  if (epfComp && f.epfEnrolled && f.pfWages > 0) {
+    const epf = round2(Math.min(f.pfWages, epfComp.cap ?? Infinity) * ((epfComp.rate ?? 12) / 100));
+    if (epf > 0) out.push({ name: epfComp.name, kind: "deduction", amount: epf });
+  }
+  const esiComp = live.find((c) => c.method === "esi" && c.kind === "deduction");
+  if (esiComp && f.esiWages > 0) {
+    // Eligibility on the monthly wage rate (the ceiling test), contribution on the wages actually paid.
+    const eligible = f.monthlyGross > 0 && f.monthlyGross <= (esiComp.cap ?? 21000);
+    const esi = eligible ? esiEmployeeContribution(f.esiWages, esiComp.rate ?? 0.75, Infinity) : 0;
+    if (esi > 0) out.push({ name: esiComp.name, kind: "deduction", amount: esi });
+  }
+  const ptComp = live.find((c) => c.method === "pt" && c.kind === "deduction");
+  if (ptComp && f.esiWages > 0) {
+    const pt = professionalTax(f.monthlyGross, await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG));
+    if (pt > 0) out.push({ name: ptComp.name, kind: "deduction", amount: pt });
+  }
+  return out;
+}
+
+// Income tax to withhold on the exit payout: the year's whole liability (salary already paid + this payout,
+// less the tax already deducted and any verified prior-employer credit), collected NOW because there is no later
+// month to spread it over. Nothing is withheld when the org hasn't configured a TDS component.
+async function settlementTds(
+  deps: Deps,
+  emp: typeof schema.employees.$inferSelect,
+  settlementDate: Date,
+  taxableEarnings: number,
+  components: typeof schema.payComponents.$inferSelect[],
+): Promise<number> {
+  const tdsComp = tdsComponent(components);
+  if (!tdsComp || taxableEarnings <= 0) return 0;
+  const fy = fyWindow(settlementDate);
+  const paid = (await finalizedTotals(deps, fy, undefined, emp.uuid)).get(emp.uuid) ?? EMPTY_FINALIZED_TOTALS();
+  const proj = assembleProjection({
+    cfg: await loadTaxConfig(deps),
+    regime: tdsComp.regime ?? "new",
+    tdsConfigured: true,
+    employedMonths: employedMonthsInFy(emp.startDate ?? null, fy, emp.endDate ?? settlementDate),
+    paidGross: paid.taxableGross,
+    paidTax: paid.tax,
+    // One collection month: the exit payout carries the entire remaining balance, there is no later payroll.
+    collectMonths: 1,
+    projectedGross: 0, // the employee earns nothing further this year from this employer
+    currentRunGross: taxableEarnings,
+    decl: await readDeclarations(deps, emp.taxDetailsEnc),
+    declaredDeductions: await verifiedDeductions(deps, emp.uuid, fy.financialYear),
+  });
+  return proj.monthlyTds;
+}
+
 export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, input: SettlementInput) {
   const employeeId = idFromPath(input.employee);
   if (!employeeId) throw invalidArgument("employee is required");
@@ -118,12 +238,16 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const settleMs = !Number.isNaN(dayMs(input.settlement_date)) ? dayMs(input.settlement_date) : +(emp.endDate ?? deps.clock.now());
   const settlementDate = new Date(settleMs);
 
-  // Encashable leave: explicit override, else the sum of the employee's leave balances.
+  // Encashable leave: explicit override, else the balance of the ENCASHABLE leave types only. The same
+  // `encashable` / `disabled` flags a mid-employment cashout enforces apply at exit - summing every balance row
+  // cashed out sick and casual leave that the policy says is not encashable at all.
+  const encashableTypes = new Set(
+    (await deps.db.select().from(schema.leaveTypes)).filter((t) => t.encashable && !t.disabled && !t.deleteTime).map((t) => t.uuid),
+  );
+  const encashableBalances = (await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, employeeId)))
+    .filter((b) => encashableTypes.has(b.leaveTypeId));
   let leaveDays = input.leave_days;
-  if (typeof leaveDays !== "number") {
-    const bals = await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, employeeId));
-    leaveDays = Math.max(0, sum2(bals.map((b) => b.balanceDays)));
-  }
+  if (typeof leaveDays !== "number") leaveDays = Math.max(0, sum2(encashableBalances.map((b) => b.balanceDays)));
   const noticeShortfallDays = Math.max(0, input.notice_shortfall_days ?? 0);
   const reimbClaims = await approvedUnpaidReimbursements(deps, employeeId);
   const reimbursements = sum2(reimbClaims.map((r) => r.amount));
@@ -159,16 +283,74 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
     amount: l.outstanding,
   }));
 
-  const settlement = computeSettlement({
+  // ---- Final month: days actually worked, and the absences inside them -------------------------------------
+  // Not simply "the day of the month": a mid-month JOINER never earned the days before their start date, and
+  // unexcused absences in the exit month are loss of pay exactly as they are in a payroll run. Both would
+  // otherwise be paid in full on the way out.
+  const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
+  const daysInMonth = daysInMonthUTC(settlementDate);
+  const monthStartMs = Date.UTC(settlementDate.getUTCFullYear(), settlementDate.getUTCMonth(), 1);
+  const startedThisMonth = emp.startDate && +new Date(emp.startDate) > monthStartMs ? +new Date(emp.startDate) : monthStartMs;
+  const daysWorkedInMonth = Math.max(0, Math.round((settleMs - startedThisMonth) / 86_400_000) + 1);
+  // Absences are only countable up to today: a settlement computed BEFORE the last working day must not dock days
+  // that haven't happened yet (the same clamp the payroll build applies to a mid-period build).
+  const lopUntilMs = Math.min(settleMs, +deps.clock.now());
+  const lopDaysInFinalMonth = att.lop_enabled && lopUntilMs >= startedThisMonth
+    ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, att)
+    : 0;
+
+  // ---- Exit benefits --------------------------------------------------------------------------------------
+  // Statutory gratuity, and the s.10(10AA) exemption on the leave being encashed, both need completed service.
+  const serviceYears = completedYearsOfService(+(emp.startDate ?? settlementDate), settleMs);
+  const gratuityCfg = await getSettingValue<GratuityConfig>(deps, "gratuity", DEFAULT_GRATUITY_CONFIG);
+  const gratuityPay = gratuityAmount(comp.basePay, serviceYears, gratuityCfg);
+  // Leave encashment at exit is priced from the SAME settings a mid-employment cashout uses (basis base/gross,
+  // per-day divisor), so one concept has exactly one rate. Its exempt slice is s.10(10AA).
+  const { basis: encashBasisKind, divisor: encashDivisor } = await encashmentRateConfig(deps);
+  const encashBasis = encashBasisKind === "gross" ? monthlyGross : comp.basePay;
+  const encashGross = round2((leaveDays * encashBasis) / (encashDivisor > 0 ? encashDivisor : 30));
+
+  const facts = {
     monthlyGross,
     basePay: comp.basePay,
-    daysWorkedInMonth: settlementDate.getUTCDate(),
-    daysInMonth: daysInMonthUTC(settlementDate),
+    daysWorkedInMonth,
+    daysInMonth,
+    lopDaysInFinalMonth,
     leaveDays,
+    encashBasis,
+    encashDivisor,
+    encashExempt: leaveEncashmentExemption(encashGross, comp.basePay, leaveDays, serviceYears),
     noticeShortfallDays,
     reimbursements,
+    gratuity: gratuityPay > 0 ? { amount: gratuityPay, exempt: gratuityExemption(gratuityPay, comp.basePay, serviceYears, gratuityCfg) } : undefined,
     extraEarnings,
     extraDeductions,
+  };
+
+  // ---- Withholding on the exit payout -------------------------------------------------------------------
+  // The FnF is salary income - and usually the year's largest single payment - so it withholds like a run does:
+  // PF and ESI on the wages it pays, PT for the month, and income tax on the chargeable part. Priced in two
+  // passes because the tax base is what the first pass computes.
+  const pass1 = computeSettlement(facts);
+  const salaryEarned = pass1.lines.find((l) => l.name.startsWith("Salary"))?.amount ?? 0;
+  const arrearsTotal = sum2(arrearsRows.map((c) => c.arrearsAmount));
+  const arrearsPfWages = sum2(arrearsRows.map((c) => c.arrearsBaseAmount));
+  const statutory = await settlementStatutoryLines(deps, {
+    components: effective,
+    epfEnrolled: emp.epfEnrolled,
+    monthlyGross,
+    // PF wages for the final month: the basic actually earned (the same day fraction the salary was paid on),
+    // plus the basic slice of any arrears the FnF pays.
+    pfWages: round2((comp.basePay * (daysInMonth > 0 ? Math.max(0, daysWorkedInMonth - lopDaysInFinalMonth) / daysInMonth : 0)) + arrearsPfWages),
+    // ESI wages: the wage actually paid for the month plus arrears and overtime. Leave encashment, gratuity,
+    // bonus and reimbursements are not ESI wages.
+    esiWages: round2(salaryEarned + arrearsTotal + otAmount),
+  });
+  const tds = await settlementTds(deps, emp, settlementDate, pass1.totalTaxableEarnings, effective);
+  const settlement = computeSettlement({
+    ...facts,
+    // Statutory and tax first, then the recoveries: the deduction order the payslip uses.
+    extraDeductions: [...statutory, ...(tds > 0 ? [{ name: "Income tax (TDS)", kind: "deduction" as const, amount: tds }] : []), ...extraDeductions],
   });
 
   const row = (await deps.db
@@ -184,6 +366,10 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
       totalEarnings: settlement.totalEarnings,
       totalDeductions: settlement.totalDeductions,
       net: settlement.net,
+      // The chargeable slice + the tax withheld on it: Form 16 and the year's projection read the exit payout
+      // from here, since a leaver appears in no payroll run.
+      taxableEarnings: settlement.totalTaxableEarnings,
+      tds,
     })
     .returning())[0]!;
 
@@ -215,9 +401,11 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   }
   // Encashing the leave balance CONSUMES it: without this the days stay on the books, so a recomputed
   // settlement (or a rehire) would encash the same days again.
+  // Only ENCASHABLE types are debited - they are the only ones being paid out. An explicit `leave_days` override
+  // larger than those balances pays the days HR asked for but can debit no more than the employee holds.
   let toDebit = round2(leaveDays);
   if (toDebit > 0) {
-    for (const b of await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, employeeId))) {
+    for (const b of encashableBalances) {
       if (toDebit <= 0.005 || b.balanceDays <= 0) continue;
       const take = round2(Math.min(b.balanceDays, toDebit));
       await deps.db

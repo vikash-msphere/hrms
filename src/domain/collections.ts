@@ -5,6 +5,8 @@
 export const COLLECTIONS: ReadonlySet<string> = new Set([
   // code-bearing resources (mirror authzResolve TABLES) + the config collections
   "letter-templates",
+  // machine credentials (super-only by default): an API key acts as its owner, narrowed by its scope
+  "api-keys",
   "employees", "departments", "leave-requests", "leave-types", "leave-balances", "holidays",
   "holiday-selections", "org-documents", "personal-documents", "announcements", "pay-components", "pay-grades", "salary-structures",
   "pay-periods", "payroll-runs", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "settlements",

@@ -4,16 +4,27 @@ import { esiEmployerContribution } from "./statutory";
 
 // `taxable` defaults to true; a line set `taxable: false` (e.g. a reimbursement payout) is paid in net but
 // excluded from the income-tax base.
-export type Line = { code: string; name: string; kind: "earning" | "deduction"; amount: number; taxable?: boolean };
+// An EARNING may be negative: loss of pay is priced as a negative earning, not a deduction, because it is pay
+// the employee never earned - so it has to leave gross, the taxable base AND the statutory bases together
+// (withholding income tax, ESI and PT on docked wage over-collects from the people who can least afford it).
+// `employer_contribution` lines are the employer's own cost for the period (employer PF/ESI/gratuity/EDLI). They
+// are NEITHER paid nor withheld - they never touch gross, deductions or net - and are carried on the item so the
+// payslip, the run review and the statutory report all report the same figures the run computed. `aboveCtc`
+// marks a contribution whose component is set to sit over and above CTC rather than inside it.
+// `perquisite` lines are taxable value the employee never receives in cash (e.g. the interest concession on a
+// cheap employer loan, Rule 3(7)(i)): they lift the income-tax base and nothing else - not gross, not net.
+export type Line = { code: string; name: string; kind: "earning" | "deduction" | "employer_contribution" | "perquisite"; amount: number; taxable?: boolean; aboveCtc?: boolean };
 
 import { round2 } from "./money";
 
-// net = sum(earnings) - sum(deductions). Statutory deductions are just input lines with amounts. taxableGross
-// is the slice of gross that counts toward income tax (earnings where taxable !== false).
+// net = sum(earnings) - sum(deductions); employer_contribution and perquisite lines are not paid and enter
+// neither gross nor net. Statutory deductions are just input lines with amounts. taxableGross is the slice of
+// gross that counts toward income tax (earnings where taxable !== false) PLUS any perquisite value.
 export function computeRunItem(lines: Line[]): { gross: number; taxableGross: number; totalDeductions: number; net: number } {
   const earnings = lines.filter((l) => l.kind === "earning");
   const gross = round2(earnings.reduce((s, l) => s + l.amount, 0));
-  const taxableGross = round2(earnings.filter((l) => l.taxable !== false).reduce((s, l) => s + l.amount, 0));
+  const perquisites = lines.filter((l) => l.kind === "perquisite").reduce((s, l) => s + l.amount, 0);
+  const taxableGross = round2(earnings.filter((l) => l.taxable !== false).reduce((s, l) => s + l.amount, 0) + perquisites);
   const totalDeductions = round2(lines.filter((l) => l.kind === "deduction").reduce((s, l) => s + l.amount, 0));
   return { gross, taxableGross, totalDeductions, net: round2(gross - totalDeductions) };
 }
@@ -57,29 +68,104 @@ export function overtimePay(minutes: number, basePay: number, cfg: OvertimeConfi
 
 // `basic_pct` drives the TOP-DOWN split (enter a target CTC -> basic = basic_pct% of monthly CTC, and a
 // balancing Special Allowance absorbs the remainder); the wage code wants basic at least 50% of pay. Which
-// employer contributions exist (PF/ESI/gratuity/...) and at what rate is pure data (employer_contribution pay
-// components), never hardcoded. `employer_pf_in_ctc` is the one contribution-specific policy: whether the
-// employer PF share counts INSIDE the CTC figure (true, the common Indian convention) or sits OVER AND ABOVE
-// it (false - "CTC + PF"). Off-CTC PF is still shown as a line, just excluded from the CTC total, so the
-// top-down split solves gross + other contributions to the target and lets PF ride on top.
-export type CtcConfig = { basic_pct: number; employer_pf_in_ctc: boolean };
-export const DEFAULT_CTC_CONFIG: CtcConfig = { basic_pct: 50, employer_pf_in_ctc: true };
+// employer contributions exist (PF/ESI/gratuity/...), at what rate, and whether each counts inside CTC is pure
+// data (employer_contribution pay components), never config and never hardcoded.
+// `pf_wage_basis` is the org's PF wage composition (see pfWagesOf): "basic" (default) or "basic_plus".
+export type CtcConfig = { basic_pct: number; pf_wage_basis?: PfWageBasis };
+export const DEFAULT_CTC_CONFIG: CtcConfig = { basic_pct: 50, pf_wage_basis: "basic" };
 
-// A pay component as the CTC math needs it (structural, so this stays pure - no schema import).
-export type CtcComponent = { kind: "earning" | "deduction" | "employer_contribution"; method: string; name: string; rate: number | null; cap: number | null; recurring?: boolean; disabled?: boolean; deleteTime?: unknown };
-// `aboveCtc` marks a line shown in the breakdown but NOT summed into the CTC total (employer PF when the org
-// puts it over and above CTC). Absent/false = counted in CTC as normal.
+// A pay component as the CTC math needs it (structural, so this stays pure - no schema import). `inCtc` is the
+// employer-contribution CTC choice: true (default) = counted INSIDE the CTC figure, the common Indian
+// convention; false = paid OVER AND ABOVE CTC ("CTC + PF"), still a company cost but outside the CTC number.
+// Per component, so employer PF, employer ESI and gratuity can each sit on either side independently.
+export type CtcComponent = { kind: "earning" | "deduction" | "employer_contribution"; method: string; name: string; rate: number | null; cap: number | null; recurring?: boolean; disabled?: boolean; deleteTime?: unknown; inCtc?: boolean; pfWages?: boolean };
+// `aboveCtc` marks a line shown in the breakdown but NOT summed into the CTC total (a contribution whose
+// component is set to sit over and above CTC). Absent/false = counted in CTC as normal.
 export type CtcLine = { name: string; monthly: number; annual: number; aboveCtc?: boolean };
 
-// One component's monthly amount, dispatched purely by its `method`. `basic`/`gross` are the two statutory
-// bases: percent_base and epf sit on basic (epf capped at its wage ceiling); esi sits on gross while within
-// the ceiling; fixed is a flat rupee amount. Shared by every CTC row so an earning and its mirror employer
-// contribution compute identically. Nothing about gratuity/PF/ESI is special-cased - each is just a row.
-function componentMonthly(c: CtcComponent, basic: number, gross: number): number {
+// A component counts only while it is live: enabled, not soft-deleted, and recurring (one-offs are inputs).
+const liveComponent = (c: CtcComponent) => !c.disabled && !c.deleteTime && !!c.recurring;
+
+// Stable line codes for the employer's own contributions, so the payslip/statutory surfaces can find the PF and
+// ESI shares by code instead of by (renameable) component name. Distinct from the employee-side "EPF"/"ESI".
+export function employerLineCode(c: CtcComponent): string {
+  return c.method === "epf" ? "ER_EPF"
+    : c.method === "esi" ? "ER_ESI"
+    : c.method === "edli" ? "ER_EDLI"
+    : c.method === "pf_admin" ? "ER_PF_ADMIN"
+    : `ER_${c.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "")}`;
+}
+
+// ---- PF wages -------------------------------------------------------------------------------------------
+// WHICH wage PF (both shares, EDLI and admin charges) is computed on. Default "basic": the contractual basic
+// only, the convention most Indian payrolls run. "basic_plus" follows the Supreme Court's Vivekananda
+// Vidyamandir line - allowances paid universally to everyone are "basic wages" too - by adding the Special
+// Allowance plug and every earning component HR has flagged `pfWages`. HRA, overtime and bonus are excluded by
+// statute, so they simply stay unflagged. Org policy, never hardcoded: settings/ctc `pf_wage_basis`.
+export type PfWageBasis = "basic" | "basic_plus";
+export function pfWagesOf(basic: number, specialAllowance: number, components: CtcComponent[], basis: PfWageBasis = "basic"): number {
+  if (basis !== "basic_plus") return round2(basic);
+  let extra = specialAllowance;
+  for (const c of components) {
+    if (!liveComponent(c) || c.kind !== "earning" || !c.pfWages) continue;
+    extra += componentMonthly(c, basic, 0);
+  }
+  return round2(basic + extra);
+}
+
+// THE single source of the employer's on-top cost for one employee: every live employer_contribution component
+// priced by its own method/rate/cap off this employee's basic + gross. Each line carries its component's own
+// CTC choice (`inCtc === false` -> `aboveCtc`), so the CTC breakdown, the payroll run, the payslip and the
+// letters all classify a contribution the same way without re-reading policy anywhere.
+// `esiEligible` overrides the plain ceiling test for the ESI-method row: payroll passes the run's sticky
+// eligibility verdict (a mid-period raise past the ceiling keeps contributing to the contribution-period end),
+// while CTC views leave it undefined and let the ceiling decide.
+// `pfWages` is the wage the PF-family methods (epf / edli / pf_admin) are priced on - the payroll run passes
+// the period's actual PF wages (basic net of loss of pay, plus arrears of basic, per the configured basis),
+// while CTC views leave it undefined and let plain basic stand in.
+export type EmployerCostLine = { code: string; name: string; monthly: number; aboveCtc: boolean };
+export function employerCostLines(
+  basic: number,
+  gross: number,
+  components: CtcComponent[],
+  epfEnrolled: boolean,
+  esiEligible?: boolean,
+  pfWages?: number,
+): EmployerCostLine[] {
+  const out: EmployerCostLine[] = [];
+  const pf = pfWages ?? basic;
+  for (const c of components) {
+    if (!liveComponent(c) || c.kind !== "employer_contribution") continue;
+    // The whole PF family is opt-in per employee, same gate as the employee side: no membership, no EPF, no
+    // EDLI and no administration charge (they are all levied on PF wages of MEMBERS).
+    if ((c.method === "epf" || c.method === "edli" || c.method === "pf_admin") && !epfEnrolled) continue;
+    // ESI: an explicit eligibility verdict wins over the ceiling (sticky within a contribution period); gate
+    // with Infinity then so a raise past the ceiling doesn't zero the employer share mid-period.
+    const monthly =
+      c.method === "esi" && esiEligible !== undefined
+        ? (esiEligible ? esiEmployerContribution(gross, c.rate ?? 0, Infinity) : 0)
+        : componentMonthly(c, basic, gross, pf);
+    if (monthly <= 0) continue;
+    out.push({ code: employerLineCode(c), name: c.name, monthly: round2(monthly), aboveCtc: c.inCtc === false });
+  }
+  return out;
+}
+
+// One component's monthly amount, dispatched purely by its `method`. `basic`/`gross`/`pfWages` are the
+// statutory bases: percent_base sits on basic; the PF family (epf, EDLI, administration charges) sits on PF
+// wages, each capped at the wage ceiling; esi sits on gross while within the ceiling; fixed is a flat rupee
+// amount. `pfWages` defaults to basic (the default wage basis). Shared by every CTC row so an earning and its
+// mirror employer contribution compute identically. Nothing about gratuity/PF/ESI is special-cased - each is
+// just a row.
+function componentMonthly(c: CtcComponent, basic: number, gross: number, pfWages = basic): number {
   switch (c.method) {
     case "fixed": return c.rate ?? 0;
     case "percent_base": return basic * ((c.rate ?? 0) / 100);
-    case "epf": return Math.min(basic, c.cap ?? Infinity) * ((c.rate ?? 12) / 100);
+    case "epf": return Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 12) / 100);
+    // EDLI (0.5% by default) and PF administration charges (0.5%) - the employer's PF cost beyond the 12%
+    // share. Same wage and same ceiling as EPF, so the three always agree on the base.
+    case "edli": return Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 0.5) / 100);
+    case "pf_admin": return Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 0.5) / 100);
     case "esi": return esiEmployerContribution(gross, c.rate ?? 0, c.cap ?? 21000);
     default: return 0;
   }
@@ -96,11 +182,11 @@ export function ctcLines(
   basePay: number,
   components: CtcComponent[],
   epfEnrolled: boolean,
-  cfg: CtcConfig,
   specialAllowance = 0,
+  pfBasis: PfWageBasis = "basic",
 ): { lines: CtcLine[]; ctcMonthly: number } {
   const line = (name: string, monthly: number, aboveCtc = false): CtcLine => ({ name, monthly: round2(monthly), annual: round2(monthly * 12), ...(aboveCtc ? { aboveCtc } : {}) });
-  const live = (c: CtcComponent) => !c.disabled && !c.deleteTime && c.recurring;
+  const live = liveComponent;
   const lines: CtcLine[] = [line("Basic", basePay)];
   let earnings = 0;
   for (const c of components) {
@@ -112,16 +198,11 @@ export function ctcLines(
   // contributions land exactly on the target CTC. Zero for a bottom-up (basic-in) row, so nothing shows.
   if (specialAllowance > 0) { lines.push(line("Special Allowance", specialAllowance)); earnings += specialAllowance; }
   const grossEarnings = round2(basePay + earnings);
-  // Employer contributions ON TOP of gross. esi-method rows read gross; epf/percent_base rows read basic.
-  for (const c of components) {
-    if (!live(c) || c.kind !== "employer_contribution") continue;
-    if (c.method === "epf" && !epfEnrolled) continue; // PF is opt-in per employee, same gate as the employee side
-    const monthly = componentMonthly(c, basePay, grossEarnings);
-    // Employer PF rides ON TOP of CTC (excluded from the total) when the org puts it over and above; every
-    // other contribution, and PF under the default, counts inside CTC.
-    const aboveCtc = c.method === "epf" && !cfg.employer_pf_in_ctc;
-    if (monthly > 0) lines.push(line(c.name, monthly, aboveCtc));
-  }
+  // Employer contributions ON TOP of gross, from the same helper the payroll run and the payslip use, so the
+  // amounts AND each contribution's CTC side are decided in exactly one place. PF wages follow the org's
+  // configured basis, so the CTC the split solves for is the CTC the run will actually cost.
+  const pfWages = pfWagesOf(basePay, specialAllowance, components, pfBasis);
+  for (const ec of employerCostLines(basePay, grossEarnings, components, epfEnrolled, undefined, pfWages)) lines.push(line(ec.name, ec.monthly, ec.aboveCtc));
   const ctcMonthly = round2(lines.reduce((s, l) => s + (l.aboveCtc ? 0 : l.monthly), 0)); // gross + in-CTC employer contributions
   return { lines, ctcMonthly };
 }
@@ -137,7 +218,7 @@ export function splitCtc(
   cfg: CtcConfig,
 ): { basePay: number; specialAllowance: number } | null {
   const basePay = round2(targetMonthlyCtc * (cfg.basic_pct / 100));
-  const ctcOf = (special: number) => ctcLines(basePay, components, epfEnrolled, cfg, special).ctcMonthly;
+  const ctcOf = (special: number) => ctcLines(basePay, components, epfEnrolled, special, cfg.pf_wage_basis ?? "basic").ctcMonthly;
   if (ctcOf(0) > targetMonthlyCtc + 0.5) return null; // infeasible: committed cost already exceeds the target
   let lo = 0, hi = targetMonthlyCtc; // root is in [0, target] since d(ctc)/d(special) >= 1
   for (let i = 0; i < 48; i++) {

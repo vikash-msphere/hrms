@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 // The workers pool boots Miniflare from wrangler.toml, and wrangler validates `[assets].directory` even
@@ -7,6 +8,10 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 mkdirSync("web/dist", { recursive: true });
 
 export default defineWorkersConfig({
+  // The web bundle's `@/…` alias (web/vite.config.ts), mirrored here so a PURE web module - the access-rule
+  // sentence/lint logic, quick-action config, and anything else worth unit-testing without a browser - can be
+  // imported straight from a test instead of being kept artificially import-free.
+  resolve: { alias: { "@": fileURLToPath(new URL("./web/src", import.meta.url)) } },
   test: {
     poolOptions: {
       workers: {

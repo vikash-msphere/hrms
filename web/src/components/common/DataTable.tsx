@@ -307,7 +307,9 @@ export function DataTable<T>({
         cell: (row: T) => {
           // Scope provenance (access.why) rides along generically from the row's hint - no per-table wiring.
           const why = (row as { access?: { why?: AccessTargetRef["why"] } }).access?.why;
-          return <AccessTarget target={{ collection: accessCollection, why, ...(accessTargetOf?.(row) ?? {}) }} />;
+          // `.access-row-key` (index.css) makes the key hover-reveal on pointer devices: the column keeps its
+          // width, but a 50-row table stops stamping 50 amber boxes down its left edge.
+          return <AccessTarget target={{ collection: accessCollection, why, ...(accessTargetOf?.(row) ?? {}) }} className="access-row-key" />;
         },
       };
       cols = [accessCol, ...cols];

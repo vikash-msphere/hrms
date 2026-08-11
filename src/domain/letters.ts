@@ -8,7 +8,10 @@ import type { LetterContent, LetterBlock, LetterTable, Run } from "../lib/letter
 import type { EsignMethod } from "./esign";
 import { amountInWords, moneyWhole } from "../lib/pdfPrimitives";
 
-export type CtcLine = { name: string; monthly: number; annual: number };
+// One CTC annexure row. `aboveCtc` marks a contribution the org puts OVER AND ABOVE CTC (employer PF when
+// its component's `in_ctc` is false): stated in the letter, but outside the Cost to Company total. Structurally
+// identical to domain/payroll.ts CtcLine, which is what feeds it.
+export type CtcLine = { name: string; monthly: number; annual: number; aboveCtc?: boolean };
 
 // Configurable, non-employee-derived values (signatory, contact, working pattern, validity). Sourced from
 // the organization settings "letter_defaults" block; every field is optional and degrades gracefully.
@@ -252,13 +255,25 @@ function parseRuns(text: string): Run[] {
 }
 
 // The two named computed blocks: tables built from data, not hand-authored.
-function ctcAnnexureBlock(comp: NonNullable<LetterContext["comp"]>): LetterBlock {
+// CTC annexure. Only the lines that COUNT INSIDE CTC are tabled, so the rows add up to the stated Cost to
+// Company. A contribution whose component is set to sit over and above CTC (`in_ctc` false) is
+// not part of that figure, so it is stated after the table as what the company pays IN ADDITION - the wording an
+// offer/increment letter needs for a "CTC + PF" structure.
+function ctcAnnexureBlocks(comp: NonNullable<LetterContext["comp"]>): LetterBlock[] {
+  const above = comp.lines.filter((l) => l.aboveCtc);
   const table: LetterTable = {
     columns: ["Particulars", "Monthly", "Annually"],
-    rows: comp.lines.map((l) => [l.name, inr(l.monthly), inr(l.annual)]),
+    rows: comp.lines.filter((l) => !l.aboveCtc).map((l) => [l.name, inr(l.monthly), inr(l.annual)]),
     total: ["Total Cost to Company", inr(comp.ctcMonthly), inr(comp.ctcAnnual)],
   };
-  return { kind: "table", table };
+  const blocks: LetterBlock[] = [{ kind: "table", table }];
+  for (const l of above) {
+    blocks.push({
+      kind: "note",
+      text: `In addition, the Company contributes ${l.name} of ${inr(l.monthly)} per month (${inr(l.annual)} annually), over and above the Cost to Company stated above.`,
+    });
+  }
+  return blocks;
 }
 function incrementTableBlock(inc: NonNullable<LetterContext["increment"]>): LetterBlock {
   const table: LetterTable = {
@@ -327,7 +342,7 @@ export function resolveLetter(template: LetterTemplate, ctx: LetterContext, inpu
         blocks.push({ kind: "esignature", name: v.recipient_legal_name!, label: b.label, withDate: b.withDate, method: b.method });
         break;
       case "computed":
-        if (b.ref === "ctc_annexure" && ctx.comp) blocks.push(ctcAnnexureBlock(ctx.comp));
+        if (b.ref === "ctc_annexure" && ctx.comp) blocks.push(...ctcAnnexureBlocks(ctx.comp));
         else if (b.ref === "increment_table" && ctx.increment) blocks.push(incrementTableBlock(ctx.increment));
         else if (b.ref === "settlement_table" && ctx.settlement) blocks.push(settlementTableBlock(ctx.settlement));
         break;

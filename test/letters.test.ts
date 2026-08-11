@@ -61,6 +61,25 @@ describe("resolveLetter", () => {
     }
   });
 
+  it("keeps an over-and-above-CTC contribution out of the annexure total and states it separately", () => {
+    const ctx = baseCtx({
+      comp: {
+        ctcAnnual: 1800000, ctcMonthly: 150000,
+        lines: [
+          { name: "Basic", monthly: 90000, annual: 1080000 },
+          { name: "HRA", monthly: 60000, annual: 720000 },
+          { name: "Employer PF", monthly: 1800, annual: 21600, aboveCtc: true },
+        ],
+      },
+    });
+    const { content } = resolveLetter(byId("offer"), ctx);
+    const table = content.blocks.find((b) => b.kind === "table");
+    // The tabled rows are exactly the in-CTC lines, so they add up to the stated Cost to Company.
+    expect(table && table.kind === "table" && table.table.rows.map((r) => r[0])).toEqual(["Basic", "HRA"]);
+    expect(table && table.kind === "table" && table.table.total).toEqual(["Total Cost to Company", "INR 1,50,000", "INR 18,00,000"]);
+    // PF is stated as what the company pays IN ADDITION - the wording a "CTC + PF" structure needs.
+    expect(flat(content.blocks)).toContain("In addition, the Company contributes Employer PF of INR 1,800 per month (INR 21,600 annually), over and above the Cost to Company stated above.");
+  });
   it("increment: shows the old->new table when two comp rows exist", () => {
     const { content } = resolveLetter(byId("increment"), baseCtx());
     const table = content.blocks.find((b) => b.kind === "table");

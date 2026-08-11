@@ -9,6 +9,7 @@ import type { Deps } from "../deps";
 
 // Collection name -> table, for resources that carry an authz-relevant `code`.
 const TABLES: Record<string, any> = {
+  "api-keys": schema.apiKeys,
   employees: schema.employees,
   departments: schema.departments,
   "leave-requests": schema.leaveRequests,

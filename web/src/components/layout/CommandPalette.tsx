@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2 } from "lucide-react";
+import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2, KeyRound } from "lucide-react";
+import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { NAV, itemVisible, navPerm } from "@/nav";
 import { SETTINGS_REGISTRY } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
@@ -138,7 +139,19 @@ export function CommandPalette({
   const listRef = useRef<HTMLDivElement>(null);
   const { org } = useOrg();
   const quickCfg = org.quick_actions;
-  const local = useMemo(() => buildLocal(me, quickCfg), [me, quickCfg]);
+  const am = useAccessMode();
+  const local = useMemo(() => {
+    const built = buildLocal(me, quickCfg);
+    // Access mode used to be reachable only from the user menu - a mode you had to know about to find. It is
+    // an action like any other, so it belongs in ⌘K for the people who may use it.
+    if (am.available) {
+      built.actions = [
+        ...built.actions,
+        { key: "action:access-mode", label: am.enabled ? "Turn off access mode" : "Turn on access mode (manage who can see what)", badge: "Action", tone: "action", icon: KeyRound, run: am.toggle },
+      ];
+    }
+    return built;
+  }, [me, quickCfg, am.available, am.enabled, am.toggle]);
   // Directory is server-scoped to who the caller may see, so people results never leak hidden employees. It is
   // already cached for the rest of the app, so matching it locally gives instant people hits while the
   // cross-collection search is still in flight; identical server hits are deduped below.

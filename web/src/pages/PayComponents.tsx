@@ -36,7 +36,13 @@ const METHOD_LABEL: Record<string, string> = {
   epf: "EPF (Provident Fund)",
   esi: "ESI (state insurance)",
   pt: "Professional Tax",
+  edli: "EDLI charges (employer)",
+  pf_admin: "PF admin charges (employer)",
 };
+
+// Methods priced on PF wages (the employer's EDLI + administration charges alongside EPF itself): employer-only
+// for the two charges, and all three capped by the same wage ceiling.
+const PF_CHARGE_METHODS = ["edli", "pf_admin"];
 
 const KIND_LABEL: Record<string, string> = {
   earning: "Earning",
@@ -48,8 +54,8 @@ const KIND_LABEL: Record<string, string> = {
 // regime can be added (config block + calc path) later without changing this list's shape.
 const REGIMES: { value: string; label: string }[] = [{ value: "new", label: "New regime (AY 2026-27)" }];
 
-type Form = { name: string; kind: string; method: string; rate: string; cap: string; regime: string; recurring: boolean };
-const EMPTY: Form = { name: "", kind: "earning", method: "fixed", rate: "", cap: "", regime: "new", recurring: true };
+type Form = { name: string; kind: string; method: string; rate: string; cap: string; regime: string; recurring: boolean; in_ctc: boolean; pf_wages: boolean };
+const EMPTY: Form = { name: "", kind: "earning", method: "fixed", rate: "", cap: "", regime: "new", recurring: true, in_ctc: true, pf_wages: false };
 
 export default function PayComponents({ embedded, openId }: { me?: Me; embedded?: boolean; openId?: string }) {
   const { rows, state, error, reload } = useCollection<PayComponent>("pay-components", { showDeleted: true });
@@ -62,17 +68,29 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
   // Staleness of employee salary splits vs the live component catalog (shared hook - same banner/prompt on the
   // salary-structure and CTC panels). Changing an earning or employer contribution shifts the CTC build-up, so
   // every current employee's cached basic / Special-Allowance split (annual CTC held fixed) needs re-solving.
-  const { canReapply, staleCount, skippedCount, reapplying, refresh: refreshSplitStatus, reapply: doReapply, promptReapply } = useSplitStaleness();
+  const { canReapply, staleCount, skippedCount, reapplying, reapply: doReapply, promptReapply } = useSplitStaleness();
 
   // Delete / enable / disable / restore all funnel through here: reload the table AND recheck staleness so the
   // banner reflects the change immediately (these paths don't prompt - the banner is the signal).
-  const afterMutation = useCallback(() => { reload(); refreshSplitStatus(); }, [reload, refreshSplitStatus]);
+  // Delete / enable / disable / restore change the live catalog just as much as an edit does, so they prompt to
+  // propagate too. promptReapply runs the server dry-run and returns SILENTLY when nothing actually moved, so
+  // acting on a component that can't affect any split (a deduction, say) costs a check and shows nothing.
+  const afterMutation = useCallback(() => { reload(); void promptReapply(); }, [reload, promptReapply]);
   const sd = useSoftDelete("pay-components", "pay component", afterMutation);
   const lc = useLifecycle("pay-components", "pay component", afterMutation);
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<PayComponent | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
+
+  // EPF/ESI: the server keeps one component per side (a second would double-charge that side). Which side is
+  // already held - by whom - so the dialog can offer it as taken instead of letting the save 400.
+  const sideHolder = (kind: string) =>
+    ["epf", "esi", "edli", "pf_admin"].includes(form.method)
+      ? rows.find((r) => r.method === form.method && r.kind === kind && !r.delete_time && r.path !== editing?.path)
+      : undefined;
+  const sideTaken = (kind: string) => !!sideHolder(kind);
+  const sideOwner = (kind: string) => sideHolder(kind)?.display_name ?? "";
 
   function openCreate(kind: Form["kind"] = "earning") {
     setEditing(null);
@@ -81,7 +99,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
   }
   function openEdit(pc: PayComponent) {
     setEditing(pc);
-    setForm({ name: pc.display_name, kind: pc.kind, method: pc.method, rate: String(pc.rate ?? ""), cap: String(pc.cap ?? ""), regime: pc.regime ?? "new", recurring: pc.recurring });
+    setForm({ name: pc.display_name, kind: pc.kind, method: pc.method, rate: String(pc.rate ?? ""), cap: String(pc.cap ?? ""), regime: pc.regime ?? "new", recurring: pc.recurring, in_ctc: pc.in_ctc !== false, pf_wages: pc.pf_wages === true });
     setOpen(true);
   }
 
@@ -92,18 +110,26 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
       const isEpf = form.method === "epf";
       const isEsi = form.method === "esi";
       const isPt = form.method === "pt";
-      // TDS + PT are employee-only (forced deduction). EPF/ESI can be the employee share (deduction) OR the
-      // employer share (employer_contribution) - the user picks, so the kind is honoured.
+      const isPfCharge = PF_CHARGE_METHODS.includes(form.method);
+      // TDS + PT are employee-only (forced deduction), EDLI + PF admin charges employer-only (an employer levy).
+      // EPF/ESI can be the employee share (deduction) OR the employer share (employer_contribution) - the user
+      // picks, so the kind is honoured.
       const employeeOnly = isTax || isPt;
       const body = {
         display_name: form.name,
-        kind: (employeeOnly ? "deduction" : form.kind) as "earning" | "deduction" | "employer_contribution",
-        method: form.method as "fixed" | "percent_base" | "rate_qty" | "income_tax" | "epf" | "esi" | "pt",
-        // TDS + PT are engine-computed (no rate); EPF defaults 12%, ESI defaults 0.75%.
-        rate: isTax || isPt ? null : isEpf ? (form.rate ? Number(form.rate) : 12) : isEsi ? (form.rate ? Number(form.rate) : (form.kind === "employer_contribution" ? 3.25 : 0.75)) : form.rate ? Number(form.rate) : null,
-        cap: isEpf ? (form.cap ? Number(form.cap) : null) : isEsi ? (form.cap ? Number(form.cap) : 21000) : null,
+        kind: (employeeOnly ? "deduction" : isPfCharge ? "employer_contribution" : form.kind) as "earning" | "deduction" | "employer_contribution",
+        method: form.method as "fixed" | "percent_base" | "rate_qty" | "income_tax" | "epf" | "esi" | "pt" | "edli" | "pf_admin",
+        // TDS + PT are engine-computed (no rate); EPF defaults 12%, ESI 0.75%, EDLI/admin charges 0.5% each.
+        rate: isTax || isPt ? null : isEpf ? (form.rate ? Number(form.rate) : 12) : isEsi ? (form.rate ? Number(form.rate) : (form.kind === "employer_contribution" ? 3.25 : 0.75)) : isPfCharge ? (form.rate ? Number(form.rate) : 0.5) : form.rate ? Number(form.rate) : null,
+        cap: isEpf || isPfCharge ? (form.cap ? Number(form.cap) : null) : isEsi ? (form.cap ? Number(form.cap) : 21000) : null,
         regime: isTax ? form.regime : null,
         recurring: form.recurring,
+        // Which side of CTC an employer contribution lands on. Only meaningful for that kind; the server pins
+        // everything else to "inside CTC".
+        in_ctc: form.kind === "employer_contribution" || isPfCharge ? form.in_ctc : true,
+        // Whether this allowance counts as PF wages - only meaningful for an earning, and only under the
+        // "basic_plus" PF wage basis (Settings → CTC).
+        pf_wages: form.kind === "earning" && !employeeOnly && !isPfCharge ? form.pf_wages : false,
       };
       if (editing) {
         await patch("pay-components/" + idOf(editing.path), body, editing.etag);
@@ -114,9 +140,10 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
       }
       setOpen(false);
       reload();
-      // Earning / employer-contribution changes shift the CTC split; offer to propagate. Deductions don't.
-      if (body.kind === "earning" || body.kind === "employer_contribution") await promptReapply();
-      else refreshSplitStatus();
+      // Always ask the dry-run rather than guessing from the SAVED kind: an edit that moves a component OFF
+      // employer_contribution (or off earning) shifts the CTC build-up exactly as much as one that moves it on,
+      // and so does flipping a contribution's CTC side. The prompt stays silent when no split actually moved.
+      await promptReapply();
     } catch (e) {
       toast({ title: "Couldn't save component", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -126,7 +153,18 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
 
   const columns: Column<PayComponent>[] = [
     { id: "name", header: "Name", accessor: (pc) => pc.display_name, cell: (pc) => <span className="font-medium">{pc.display_name}</span> },
-    { id: "kind", header: "Kind", filter: "select", accessor: (pc) => KIND_LABEL[pc.kind] ?? "Earning", cell: (pc) => <Badge variant={pc.kind === "deduction" ? "warning" : pc.kind === "employer_contribution" ? "info" : "success"}>{KIND_LABEL[pc.kind] ?? "Earning"}</Badge> },
+    {
+      id: "kind", header: "Kind", filter: "select",
+      // Employer contributions carry their CTC side here: the two states differ in every CTC figure, so the
+      // catalog says which one this row is rather than making you open it.
+      accessor: (pc) => (pc.kind === "employer_contribution" && pc.in_ctc === false ? "Employer contribution (over & above CTC)" : KIND_LABEL[pc.kind] ?? "Earning"),
+      cell: (pc) => (
+        <div className="flex flex-wrap items-center gap-1">
+          <Badge variant={pc.kind === "deduction" ? "warning" : pc.kind === "employer_contribution" ? "info" : "success"}>{KIND_LABEL[pc.kind] ?? "Earning"}</Badge>
+          {pc.kind === "employer_contribution" && <Badge variant={pc.in_ctc === false ? "warning" : "muted"}>{pc.in_ctc === false ? "over & above CTC" : "in CTC"}</Badge>}
+        </div>
+      ),
+    },
     { id: "method", header: "Method", filter: "select", accessor: (pc) => METHOD_LABEL[pc.method] ?? pc.method },
     {
       id: "amount",
@@ -139,7 +177,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
         if (pc.method === "income_tax") return <span className="text-muted-foreground">computed</span>;
         const isDeduction = pc.kind === "deduction";
         const cls = isDeduction ? "text-destructive" : pc.kind === "employer_contribution" ? "text-blue-600 dark:text-blue-400" : "text-emerald-600 dark:text-emerald-400";
-        if (pc.method === "epf") return <span className={cls}>{isDeduction ? "−" : "+"}{pc.rate ?? 12}%{pc.cap ? ` (cap ${pc.cap})` : ""}</span>;
+        if (pc.method === "epf" || PF_CHARGE_METHODS.includes(pc.method)) return <span className={cls}>{isDeduction ? "−" : "+"}{pc.rate ?? (pc.method === "epf" ? 12 : 0.5)}%{pc.cap ? ` (cap ${pc.cap})` : ""}</span>;
         if (pc.rate == null) return "-";
         const unit = pc.method === "percent_base" ? "%" : "";
         return <span className={cls}>{isDeduction ? "−" : "+"}{pc.rate}{unit}</span>;
@@ -195,19 +233,21 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Kind">
-              <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v })} disabled={["income_tax", "pt"].includes(form.method)}>
+              <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v })} disabled={["income_tax", "pt", ...PF_CHARGE_METHODS].includes(form.method)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {/* EPF/ESI can be the employee share (deduction) or the employer share (employer_contribution),
                       never an earning; fixed/percent_base can be any kind (gratuity = percent_base employer). */}
-                  {!["epf", "esi"].includes(form.method) && <SelectItem value="earning">Earning</SelectItem>}
-                  <SelectItem value="deduction">Deduction</SelectItem>
-                  <SelectItem value="employer_contribution">Employer contribution</SelectItem>
+                  {!["epf", "esi", ...PF_CHARGE_METHODS].includes(form.method) && <SelectItem value="earning">Earning</SelectItem>}
+                  {/* EPF/ESI allow one component per side, so a side another component already holds is offered
+                      as taken rather than as a choice the save would reject. */}
+                  <SelectItem value="deduction" disabled={sideTaken("deduction")}>Deduction{sideTaken("deduction") ? ` - taken by ${sideOwner("deduction")}` : ""}</SelectItem>
+                  <SelectItem value="employer_contribution" disabled={sideTaken("employer_contribution")}>Employer contribution{sideTaken("employer_contribution") ? ` - taken by ${sideOwner("employer_contribution")}` : ""}</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
             <Field label="Method">
-              <Select value={form.method} onValueChange={(v) => setForm({ ...form, method: v, kind: ["income_tax", "pt"].includes(v) ? "deduction" : (["epf", "esi"].includes(v) && form.kind === "earning") ? "deduction" : form.kind })}>
+              <Select value={form.method} onValueChange={(v) => setForm({ ...form, method: v, kind: ["income_tax", "pt"].includes(v) ? "deduction" : PF_CHARGE_METHODS.includes(v) ? "employer_contribution" : (["epf", "esi"].includes(v) && form.kind === "earning") ? "deduction" : form.kind })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="fixed">Fixed amount</SelectItem>
@@ -217,10 +257,26 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
                   <SelectItem value="epf">EPF (Provident Fund)</SelectItem>
                   <SelectItem value="esi">ESI (state insurance)</SelectItem>
                   <SelectItem value="pt">Professional Tax</SelectItem>
+                  <SelectItem value="edli">EDLI charges (employer)</SelectItem>
+                  <SelectItem value="pf_admin">PF admin charges (employer)</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
           </div>
+          {/* The CTC question for an employer contribution: inside the CTC figure (the common Indian convention)
+              or paid over and above it. Per component, so employer PF, employer ESI and gratuity can differ. It
+              changes every CTC surface (comp tab, letters, run totals, payslip) but never the employee's net. */}
+          {form.kind === "employer_contribution" && (
+            <Field label="Cost to company" hint="Either way the company pays it and payroll costs it - this only decides whether it sits inside the CTC number.">
+              <Select value={form.in_ctc ? "in" : "above"} onValueChange={(v) => setForm({ ...form, in_ctc: v === "in" })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="in">Included in CTC</SelectItem>
+                  <SelectItem value="above">Over &amp; above CTC (excluded from CTC)</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           {form.method === "income_tax" ? (
             <Field label="Tax regime" hint="The amount is computed each payroll run from the employee's projected annual income.">
               <Select value={form.regime} onValueChange={(v) => setForm({ ...form, regime: v })}>
@@ -248,12 +304,33 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
                 <Input type="number" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} placeholder="21000" />
               </Field>
             </div>
+          ) : PF_CHARGE_METHODS.includes(form.method) ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Rate %" hint="Statutory EDLI and PF administration charges are 0.5% of PF wages each.">
+                <Input type="number" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="0.5" />
+              </Field>
+              <Field label="Wage ceiling" hint="Cap on PF wages, e.g. 15000 - the same ceiling EPF uses.">
+                <Input type="number" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} placeholder="15000" />
+              </Field>
+            </div>
           ) : form.method === "pt" ? (
             <p className="rounded-md border bg-muted/40 p-2 text-xs text-muted-foreground">Professional Tax is computed each run from the configured state slabs (default: nil up to ₹25,000/month, ₹200 above); this component just enables the deduction.</p>
           ) : (
             <Field label="Rate" hint="Amount, percentage, or per-unit rate depending on the method.">
               <Input type="number" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} />
             </Field>
+          )}
+          {/* PF wages: only asked for an earning, and only bites when Settings → CTC sets the PF wage basis to
+              "basic + universally-paid allowances". HRA, overtime and bonus are excluded from PF wages by statute,
+              so they stay off. */}
+          {form.kind === "earning" && !["income_tax", "pt"].includes(form.method) && (
+            <div className="flex items-start gap-2">
+              <Checkbox id="pf_wages" checked={form.pf_wages} onCheckedChange={(v) => setForm({ ...form, pf_wages: v === true })} />
+              <div className="grid gap-0.5">
+                <Label htmlFor="pf_wages">Counts as PF wages</Label>
+                <span className="text-xs text-muted-foreground">Applies only when the PF wage basis is "basic + allowances" (Settings → CTC). Never tick HRA.</span>
+              </div>
+            </div>
           )}
           <div className="flex items-center gap-2">
             <Checkbox id="recurring" checked={form.recurring} onCheckedChange={(v) => setForm({ ...form, recurring: v === true })} />

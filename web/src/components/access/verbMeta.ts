@@ -108,6 +108,8 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
   "access-rules": {
     preview: { label: "Preview access", description: "Ask the engine what a person can do (view-as)." },
     requestAccess: { label: "Request access", description: "Let people ask access admins for a missing grant (grant to Everyone to enable the flow)." },
+    approve: { label: "Approve permission changes", description: "Apply a pending grant or removal queued by four-eyes approval. Nobody can approve their own request." },
+    reject: { label: "Reject permission changes", description: "Turn down a pending grant or removal queued by four-eyes approval." },
   },
 };
 

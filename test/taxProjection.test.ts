@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { collectibleMonths, assembleProjection, fyWindow, employedMonthsInFy } from "../src/services/taxProjection";
+import { collectibleMonths, assembleProjection, fyWindow, employedMonthsInFy, unpaidEarningMonths, projectedGrossForMonths, compAsOf } from "../src/services/taxProjection";
 import { DEFAULT_TAX_CONFIG } from "../src/domain/incomeTax";
 
 // FY 2026-27: Apr 2026 .. Mar 2027.
@@ -25,6 +25,56 @@ describe("collectibleMonths - calendar months left to collect TDS in", () => {
   });
 });
 
+describe("mid-year revision - each month priced at the salary in force then", () => {
+  // One employee, raised from 1,00,000 to 2,00,000/month effective 1 Oct 2026 (inside FY 2026-27).
+  const oct = Date.UTC(2026, 9, 1);
+  const timeline = [
+    { uuid: "old", effectiveFrom: new Date(Date.UTC(2025, 3, 1)), effectiveTo: new Date(oct), basePay: 100000, specialAllowance: 0, structureId: null },
+    { uuid: "new", effectiveFrom: new Date(oct), effectiveTo: null, basePay: 200000, specialAllowance: 0, structureId: null },
+  ];
+  const grossFor = (r: (typeof timeline)[number]) => r.basePay;
+
+  it("splits the year at the effective date instead of repainting it at the new rate", () => {
+    const months = unpaidEarningMonths(fy, null, null, none);
+    expect(months).toHaveLength(12);
+    // Apr..Sep at 1,00,000 + Oct..Mar at 2,00,000 = 18,00,000 (not 12 x 2,00,000 = 24,00,000).
+    expect(projectedGrossForMonths(months, timeline, grossFor)).toBe(1800000);
+  });
+
+  it("a FUTURE-dated raise leaves the months before it at the old salary", () => {
+    // Projected in July, before the raise takes effect: the open row is already the new one, so pricing off
+    // "current compensation" would inflate Jul..Sep too.
+    const months = unpaidEarningMonths(fy, null, null, new Set(["2026-04", "2026-05", "2026-06"]));
+    expect(projectedGrossForMonths(months, timeline, grossFor)).toBe(300000 + 1200000); // Jul..Sep old + Oct..Mar new
+  });
+
+  it("months a finalized run already paid, and the run being built, are left out", () => {
+    const months = unpaidEarningMonths(fy, null, null, new Set(["2026-04"]), "2026-05");
+    expect(months.map((m) => m.getUTCMonth())).toEqual([5, 6, 7, 8, 9, 10, 11, 0, 1, 2]); // Jun..Mar
+  });
+
+  it("a leaver's months stop at the leaving month", () => {
+    const months = unpaidEarningMonths(fy, null, new Date(Date.UTC(2026, 7, 15)), none);
+    expect(months).toHaveLength(5); // Apr..Aug
+    expect(projectedGrossForMonths(months, timeline, grossFor)).toBe(500000); // all at the old rate
+  });
+
+  it("compAsOf picks the row in force, and the open row when no date is given", () => {
+    expect(compAsOf(timeline, Date.UTC(2026, 8, 30))?.uuid).toBe("old");
+    expect(compAsOf(timeline, oct)?.uuid).toBe("new"); // half-open: the new row owns its effective date
+    expect(compAsOf(timeline, undefined)?.uuid).toBe("new");
+  });
+
+  it("the projected split flows into the year's tax", () => {
+    const p = assembleProjection({
+      cfg: DEFAULT_TAX_CONFIG, regime: "new", tdsConfigured: true, decl: {},
+      employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9,
+      projectedGross: projectedGrossForMonths(unpaidEarningMonths(fy, null, null, none), timeline, grossFor),
+    });
+    expect(p.annualGross).toBe(1800000);
+  });
+});
+
 describe("assembleProjection - income months vs collection months", () => {
   const base = {
     cfg: DEFAULT_TAX_CONFIG,
@@ -34,18 +84,18 @@ describe("assembleProjection - income months vs collection months", () => {
   };
   it("projects income over unpaid EMPLOYED months but spreads tax over calendar collectMonths", () => {
     // Employed all year (12), zero runs finalized, asOf July -> 9 collectible months.
-    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 0, paidTax: 0, paidMonths: 0, collectMonths: 9, recurringMonthly: 200000 });
+    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 });
     expect(p.annualGross).toBe(2400000); // income still counts all 12 months
     expect(p.remainingMonths).toBe(9); // but only 9 months remain to collect in
     expect(p.monthlyTds).toBe(Math.round(p.breakdown.totalTax / 9));
   });
   it("build context: the current run is one of the collect months", () => {
-    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 600000, paidTax: 30000, paidMonths: 3, collectMonths: 9, recurringMonthly: 200000, currentRunGross: 200000 });
+    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 600000, paidTax: 30000, collectMonths: 9, projectedGross: 1600000, currentRunGross: 200000 });
     expect(p.annualGross).toBe(2400000); // 3 paid + this run + 8 future at the recurring rate
     expect(p.monthlyTds).toBe(Math.round((p.breakdown.totalTax - 30000) / 9));
   });
   it("zero collect months -> no TDS line", () => {
-    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 2400000, paidTax: 100000, paidMonths: 12, collectMonths: 0, recurringMonthly: 200000 });
+    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 2400000, paidTax: 100000, collectMonths: 0, projectedGross: 0 });
     expect(p.monthlyTds).toBe(0);
   });
   it("employedMonthsInFy clamps a mid-year joiner", () => {
@@ -53,7 +103,7 @@ describe("assembleProjection - income months vs collection months", () => {
   });
 
   it("bounds a self-declared prior-employer TDS by the prior income (can't zero out withholding with no income)", () => {
-    const args = { ...base, employedMonths: 12, paidGross: 0, paidTax: 0, paidMonths: 0, collectMonths: 9, recurringMonthly: 200000 };
+    const args = { ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 };
     const baseline = assembleProjection(args);
     // Absurd prior TDS but NO prior income: TDS can't exceed the income it was withheld from, so the ceiling is
     // 0 and withholding is unchanged. This is the sanity guard (real fraud gate is HR verification upstream).
@@ -66,7 +116,7 @@ describe("assembleProjection - income months vs collection months", () => {
     // Mid-year joiner: 5,00,000 prior income (in isolation the new-regime 87A rebate zeros its tax), with
     // 30,000 actually withheld by the ex-employer. Combined with this job it's well over the rebate limit, so the
     // 30,000 must be credited - the old "tax on prior income alone" clamp wrongly discarded it (double taxation).
-    const args = { ...base, employedMonths: 12, paidGross: 0, paidTax: 0, paidMonths: 0, collectMonths: 9, recurringMonthly: 200000 };
+    const args = { ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 };
     const credited = assembleProjection({ ...args, decl: { priorEmployerIncome: 500000, priorEmployerTds: 30000 } });
     const noCredit = assembleProjection({ ...args, decl: { priorEmployerIncome: 500000, priorEmployerTds: 0 } });
     expect(credited.priorEmployerTds).toBe(30000); // fully credited, not zeroed
@@ -78,7 +128,7 @@ describe("assembleProjection - income months vs collection months", () => {
     // The ex-employer may over-withhold relative to what the prior income adds to THIS return; the money is still
     // remitted, so it's credited in full (excess -> ITR refund, never negative payroll). 1,00,000 prior income
     // with 28,275 withheld: the marginal-cap would have clipped it, the income ceiling (1,00,000) does not.
-    const args = { ...base, employedMonths: 12, paidGross: 0, paidTax: 0, paidMonths: 0, collectMonths: 9, recurringMonthly: 200000 };
+    const args = { ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 };
     const credited = assembleProjection({ ...args, decl: { priorEmployerIncome: 100000, priorEmployerTds: 28275 } });
     expect(credited.priorEmployerTds).toBe(28275);
     expect(credited.monthlyTds).toBe(Math.round((credited.breakdown.totalTax - 28275) / 9));

@@ -27,6 +27,13 @@ function sampleData(orgName: string, address: string | undefined, logo: string |
     { name: "Professional Tax", kind: "deduction" as const, amount: 200 },
     { name: "TDS", kind: "deduction" as const, amount: 6500 },
   ];
+  // Employer contributions, with one line deliberately over and above CTC, so the design's employerCost block
+  // shows both states (in-CTC rows + the CTC total, then the over-and-above row + the all-in total).
+  const employerLines = [
+    { name: "Employer ESI", amount: 2600 },
+    { name: "Gratuity", amount: 1924 },
+    { name: "Employer PF", amount: 1800, aboveCtc: true },
+  ];
   const gross = lines.filter((l) => l.kind === "earning").reduce((s, l) => s + l.amount, 0);
   const totalDeductions = lines.filter((l) => l.kind === "deduction").reduce((s, l) => s + l.amount, 0);
   return {
@@ -37,6 +44,7 @@ function sampleData(orgName: string, address: string | undefined, logo: string |
     payment: { mode: "Bank Transfer", bankName: "Sample Bank", ifsc: "SMPL0000123", accountMasked: "•••• 4242" },
     attendance: { actualDays: 21, workingDays: 22, lopDays: 1, daysPayable: 21 },
     lines,
+    employerLines,
     gross,
     totalDeductions,
     net: gross - totalDeductions,

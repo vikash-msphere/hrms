@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "./api";
+import { getViewAs } from "./lib/viewAsStore";
 import { idOf } from "./lib/utils";
 import type { Me, User } from "./types";
 
@@ -19,10 +20,41 @@ export function fetchMeRaw(): Promise<User | null> {
     throw e;
   }));
 }
+const toMe = (u: User | null): Me | null =>
+  u ? { email: u.email, role: u.role, employee_id: u.employee ? idOf(u.employee) : null, capabilities: u.caller_access?.capabilities ?? [] } : null;
+
 function fetchMe(): Promise<Me | null> {
-  return fetchMeRaw().then((u) =>
-    u ? { email: u.email, role: u.role, employee_id: u.employee ? idOf(u.employee) : null, capabilities: u.caller_access?.capabilities ?? [] } : null,
-  );
+  return fetchMeRaw().then(toMe);
+}
+
+// While a "view as" simulation is open, EVERY request answers as the subject - including /users/me, which is
+// what makes the whole shell theirs. The access-mode chrome must still judge by the REAL admin (a simulated
+// user without access-rules.write would otherwise hide the pill that ends the simulation), so identity is
+// fetched a second time with the simulation suppressed. No extra request when nothing is being simulated.
+let realMePromise: Promise<User | null> | null = null;
+function fetchRealMe(): Promise<Me | null> {
+  if (!getViewAs()) return fetchMe();
+  return (realMePromise ??= api<User>("/users/me", { asRealCaller: true }).catch((e) => {
+    realMePromise = null;
+    if (e instanceof ApiError && e.status === 401) return null;
+    throw e;
+  })).then(toMe);
+}
+
+/** The signed-in admin behind the shell: the same person as `useMe()` unless a simulation is running. */
+export function useRealMe(): Me | null {
+  const [real, setReal] = useState<Me | null>(null);
+  useEffect(() => {
+    let active = true;
+    fetchRealMe().then(
+      (m) => active && setReal(m),
+      () => active && setReal(null),
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+  return real;
 }
 
 export function useMe() {

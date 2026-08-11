@@ -9,12 +9,135 @@ import type { Grant } from "../domain/permissions";
 import type { Policy } from "../domain/manifests";
 import { mergeGrants } from "../domain/compileGrants";
 import { loadRoleGrant, loadUserGrant, loadManifest } from "../lib/policyLoad";
+import { resolveViewAs, VIEW_AS_HEADER } from "../lib/viewAs";
 import { unauthenticated, forbidden } from "../lib/errors";
 import { getCookie } from "hono/cookie";
 import { openSession } from "../lib/session";
 import { SESSION_COOKIE } from "../routes/authRoutes";
+import type { SQL } from "drizzle-orm";
+import { hasApiKeyBearer, parseToken } from "../lib/apiKeyToken";
+import { findLiveKeyByPrefix, shouldTouchLastUsed, touchLastUsed } from "../services/apiKeys";
+import { narrowGrant, parseScope } from "../domain/keyScope";
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+
+type UserRow = {
+  uuid: string;
+  email: string;
+  role: string;
+  status: "active" | "disabled";
+  employeeId: string | null;
+  employeeCode: string | null;
+  firstName: string | null;
+  lastName: string | null;
+};
+
+// The one caller read, shared by every lane: user + their employee `code` (the dept-scope key) in a single
+// left join. The browser lanes look the caller up by email; the API-key lane already holds the owner's uuid.
+async function loadUserRow(deps: Deps, where: SQL | undefined): Promise<UserRow | undefined> {
+  return (
+    await deps.db
+      .select({
+        uuid: schema.users.uuid,
+        email: schema.users.email,
+        role: schema.users.role,
+        status: schema.users.status,
+        employeeId: schema.users.employeeId,
+        employeeCode: schema.employees.code,
+        firstName: schema.employees.firstName,
+        lastName: schema.employees.lastName,
+      })
+      .from(schema.users)
+      .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
+      .where(where)
+      .limit(1)
+  )[0];
+}
+
+// The caller's broad authority: their role grant (which already folds in `everyone`) merged with their own
+// broad user rules. Both cached, so warm this costs ~0 reads.
+async function loadAuthority(deps: Deps, user: UserRow): Promise<{ grant: Grant; policy: Policy }> {
+  const [roleGrant, userGrant, policy] = await Promise.all([loadRoleGrant(deps, user.role), loadUserGrant(deps, user.uuid), loadManifest(deps)]);
+  return { grant: mergeGrants(roleGrant, userGrant), policy };
+}
+
+// ---- API-key lane ----------------------------------------------------------------------------------------
+//
+// A key acts as its OWNER, narrowed by its scope (domain/keyScope.ts). Everything downstream - authz, list
+// scopes, search scopes, capability hints - therefore works unchanged, because what it sees is an ordinary
+// AppUser whose grant happens to be smaller.
+//
+// INVARIANT (the CSRF middleware depends on this): a request carrying an `hrms_`-shaped bearer is resolved
+// HERE or it fails 401. It must never fall through to the cookie/JWT lanes, because csrf.ts skips its check
+// on the mere PRESENCE of that header - a fall-through would let an attacker suppress CSRF with a junk
+// bearer and then ride the victim's session.
+async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], deps: Deps): Promise<AppUser> {
+  const parsed = parseToken(c.req.header("Authorization"));
+  if (!parsed) throw unauthenticated("malformed API key");
+
+  // Refuse simulation loudly rather than ignoring the header. This lane never calls resolveViewAs, so an
+  // X-View-As here would otherwise be silently dropped and the request would succeed as the key's owner -
+  // a caller could believe they were reading as someone else while actually reading as themselves. A
+  // security-relevant header must never be quietly discarded.
+  if (c.req.header(VIEW_AS_HEADER)) throw forbidden("view as: not available to API keys");
+
+  // Live read, deliberately NOT cached: revocation and expiry must bite on the very next request. One
+  // indexed lookup by prefix, so this costs the same as the JWT verify it replaces.
+  const now = deps.clock.now();
+  const key = (await findLiveKeyByPrefix(deps, parsed.prefix, now))[0];
+  if (!key) throw unauthenticated("invalid API key");
+  if (!(await deps.apiKeySigner.verify(parsed.secret, key.hash))) throw unauthenticated("invalid API key");
+
+  const scope = parseScope(safeParse(key.scopeJson));
+  if (!scope) throw unauthenticated("API key scope is unreadable"); // corrupt scope = no authority, never full authority
+
+  // No auto-provisioning on this lane: a key can never mint a user. The owner must already exist and be
+  // active - disabling a user therefore kills every key they own, with no extra bookkeeping.
+  const user = await loadUserRow(deps, eq(schema.users.uuid, key.ownerUserId));
+  if (!user) throw unauthenticated("API key owner no longer exists");
+  if (user.status !== "active") throw forbidden("user disabled");
+
+  const { grant, policy } = await loadAuthority(deps, user);
+
+  // Convenience column, not an audit record: written at most once per throttle window so a busy integration
+  // does not add a D1 write to every call. Off the response path, and never fatal.
+  if (shouldTouchLastUsed(key.lastUsedAt, +now) && !c.env.__sharedCtx) {
+    const write = touchLastUsed(deps, key.uuid, now).catch(() => {});
+    // `c.executionCtx` THROWS when the context has none (the test runner, and any in-process dispatch)
+    // rather than returning undefined, so this cannot be an optional-chain. Without an execution context
+    // there is nothing to hand the promise to, so settle it inline - it is one small write, and dropping it
+    // unawaited would surface as an unhandled rejection.
+    let scheduled = false;
+    try {
+      c.executionCtx.waitUntil(write);
+      scheduled = true;
+    } catch {
+      /* no execution context */
+    }
+    if (!scheduled) await write;
+  }
+
+  return {
+    uuid: user.uuid,
+    email: user.email,
+    role: user.role,
+    status: user.status,
+    employeeId: user.employeeId,
+    employeeCode: user.employeeCode,
+    name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || null,
+    grant: narrowGrant(grant, scope),
+    policy,
+    apiKey: { uuid: key.uuid, code: key.code, name: key.name, prefix: key.prefix, scope },
+  };
+}
+
+function safeParse(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
 
 // Authenticates the caller (Cloudflare Access JWT, or the app's own Google-OIDC session cookie - see
 // routes/authRoutes.ts for the mode split), resolves them, auto-provisions on first login.
@@ -29,6 +152,16 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     return;
   }
   const deps = c.get("deps");
+
+  // Machine lane FIRST, and terminal: see authenticateApiKey. `hasApiKeyBearer` is deliberately the loose
+  // test (any `hrms_`-shaped bearer counts, valid or not) so a malformed key 401s here rather than silently
+  // continuing to the browser lanes below.
+  if (hasApiKeyBearer(c.req.header("Authorization"))) {
+    c.set("user", await authenticateApiKey(c, deps));
+    await next();
+    return;
+  }
+
   const team = c.env.CF_ACCESS_TEAM_DOMAIN;
 
   let email: string;
@@ -63,23 +196,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // authz needs no extra caller lookup. The role grant + global manifest are loaded from the compiled
   // `access_rules` / `policy` store (cached per role / globally, short TTL), so the hot path reads them
   // from the isolate cache (~0 reads warm) and the decision needs no per-request policy join.
-  let user = (
-    await deps.db
-      .select({
-        uuid: schema.users.uuid,
-        email: schema.users.email,
-        role: schema.users.role,
-        status: schema.users.status,
-        employeeId: schema.users.employeeId,
-        employeeCode: schema.employees.code,
-        firstName: schema.employees.firstName,
-        lastName: schema.employees.lastName,
-      })
-      .from(schema.users)
-      .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
-      .where(eq(schema.users.email, email))
-      .limit(1)
-  )[0];
+  let user = await loadUserRow(deps, eq(schema.users.email, email));
   if (!user) {
     // First-login auto-provisioning. Optional second perimeter (Access is primary): if ALLOWED_EMAIL_DOMAINS
     // is configured, only those domains may mint a new user, so a too-broad Access policy can't silently create
@@ -124,11 +241,9 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // is EMPTY_GRANT, so mergeGrants is a no-op.
   // The role grant already includes the `everyone` pseudo-role (unioned inside loadRoleGrant in the SAME query,
   // super-exempt), so the broad authority is just role + the caller's own user rules - no extra `everyone` read.
-  const [roleGrant, userGrant] = await Promise.all([loadRoleGrant(deps, user.role), loadUserGrant(deps, user.uuid)]);
-  const grant: Grant = mergeGrants(roleGrant, userGrant);
-  const policy: Policy = await loadManifest(deps);
+  const { grant, policy } = await loadAuthority(deps, user);
 
-  c.set("user", {
+  const caller: AppUser = {
     uuid: user.uuid,
     email: user.email,
     role: user.role,
@@ -138,6 +253,11 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || null,
     grant,
     policy,
-  });
+  };
+
+  // "View as": an access admin can ask the app to answer as another user (read-only, audited). This swaps the
+  // PRINCIPAL, not just the UI's capability set - every decision, list scope and redaction downstream is the
+  // simulated person's, so the simulation shows exactly what they would see and nothing more. See lib/viewAs.ts.
+  c.set("user", (await resolveViewAs(c, deps, caller)) ?? caller);
   await next();
 };

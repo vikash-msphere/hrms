@@ -65,10 +65,20 @@ export function diffMeta(before: Record<string, unknown> | undefined, after: Rec
 }
 
 async function writeAudit(deps: Deps, actor: AppUser | string, action: string, entity: string, entityId?: string, meta?: unknown, entityName?: string) {
-  const actorEmail = typeof actor === "string" ? actor : actor.email;
-  const actorId = typeof actor === "string" ? null : actor.employeeId ?? null;
-  const actorName = typeof actor === "string" ? null : actor.name ?? null;
+  // "View as" (lib/viewAs.ts) makes the request principal the SIMULATED subject, so the actor here would name
+  // the person being watched. The row must name the human who ran the request: attribute it to the real admin
+  // and record whose eyes they were borrowing as `viewing_as`.
+  const sim = typeof actor === "string" ? null : actor.simulatedBy ?? null;
+  const actorEmail = sim ? sim.email : typeof actor === "string" ? actor : actor.email;
+  const actorId = sim ? sim.employeeId : typeof actor === "string" ? null : actor.employeeId ?? null;
+  const actorName = sim ? sim.name : typeof actor === "string" ? null : actor.name ?? null;
   const reqMeta = typeof actor === "string" ? undefined : actor.reqMeta;
+  if (sim && typeof actor !== "string") meta = { ...(meta && typeof meta === "object" && !Array.isArray(meta) ? meta : meta === undefined ? {} : { meta }), viewing_as: actor.email };
+  // An API key acts AS its owner, so the actor columns correctly name the human - but the trail has to be
+  // able to tell "Priya" apart from "Priya's CI key", both for incident response and for knowing which
+  // credential to revoke. Same meta-stamping shape as `viewing_as` above.
+  const key = typeof actor === "string" ? null : actor.apiKey ?? null;
+  if (key) meta = { ...(meta && typeof meta === "object" && !Array.isArray(meta) ? meta : meta === undefined ? {} : { meta }), via_api_key: { name: key.name, prefix: key.prefix } };
   // Mark the request actor as having logged an activity row, so the authz write backstop doesn't add a
   // duplicate generic one for this request. String actors (system/cron) have no request-scoped flag.
   if (typeof actor !== "string") actor.audited = true;

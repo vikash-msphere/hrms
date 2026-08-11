@@ -79,6 +79,58 @@ export function workingDaysInRange(startYmd: string, endYmd: string, workDays: n
   return enumerate(startYmd, endYmd).filter((d) => workDays.includes(weekdayOf(d)) && !holidays.has(d)).length;
 }
 
+// Wall-clock minutes since midnight of an instant, read in the org timezone.
+export function localMinutes(ms: number, tz: string): number {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(ms));
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  return h * 60 + m;
+}
+
+// A count_as_work calendar event as payroll sees it. All-day events are date-anchored at UTC midnight, so
+// their calendar days come off the instant directly rather than through the org timezone.
+export type WorkEvent = { startMs: number; endMs: number; allDay: boolean; requiresClockIn: boolean };
+
+// Minutes each day is credited by one employee's count_as_work events. Mirrors the client derivation in
+// web/src/components/common/TeamTimeline.tsx - keep the two in step, or the timeline shows a day as present
+// that payroll then docks. Credit lands only once the event has ended, only on scheduled working days, never
+// on an on-leave day, and - when the event requires it - only on a day the employee actually punched. Each
+// event credits at most one full day per day; an event crediting less than the half-day minimum leaves the
+// day short, exactly as a brief punch would.
+export function eventCreditByDay(opts: {
+  events: WorkEvent[];
+  tz: string;
+  workDays: number[];
+  fullDayMinutes: number;
+  todayYmd: string;
+  nowMs: number;
+  punchedDays: Set<string>;
+  onLeave: (day: string) => boolean;
+}): Map<string, number> {
+  const { events, tz, workDays, fullDayMinutes, todayYmd, nowMs, punchedDays, onLeave } = opts;
+  const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const out = new Map<string, number>();
+  for (const ev of events) {
+    if (!ev.allDay && ev.endMs >= nowMs) continue; // timed event still running / upcoming
+    const sDay = ev.allDay ? utcDay(ev.startMs) : localDay(ev.startMs, tz);
+    const eDay = ev.allDay ? utcDay(ev.endMs) : localDay(ev.endMs, tz);
+    for (const day of enumerate(sDay, eDay)) {
+      if (!workDays.includes(weekdayOf(day))) continue; // credit scheduled working days only
+      if (ev.allDay && day >= todayYmd) continue; // all-day: only days that have fully ended
+      if (ev.requiresClockIn && !punchedDays.has(day)) continue; // credit only those actually at work
+      if (onLeave(day)) continue; // never credit an on-leave attendee
+      let m: number;
+      if (ev.allDay) m = fullDayMinutes;
+      else if (sDay === eDay) m = localMinutes(ev.endMs, tz) - localMinutes(ev.startMs, tz);
+      else if (day === sDay) m = 1440 - localMinutes(ev.startMs, tz);
+      else if (day === eDay) m = localMinutes(ev.endMs, tz);
+      else m = 1440;
+      out.set(day, (out.get(day) ?? 0) + Math.min(fullDayMinutes, Math.max(0, m)));
+    }
+  }
+  return out;
+}
+
 // Unexcused loss-of-pay DAY-UNITS over the period for one employee (fractional). For each scheduled working
 // day that is not a holiday and not covered by approved leave: no punch is a full absence (1.0); worked below
 // the half-day minimum is also a full absence (the session is too short to count); worked from the half-day

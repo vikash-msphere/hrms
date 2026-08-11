@@ -8,6 +8,7 @@ import {
   type PayslipAttendanceCell, type PayslipBlock, type PayslipBlockKind, type PayslipBlockStyle, type PayslipTemplate,
 } from "@/lib/payslipTemplate";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -22,7 +23,7 @@ import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
 type Toast = (t: { title: string; description?: string; variant?: "success" | "destructive" }) => void;
 
 const BLOCK_ORDER: PayslipBlockKind[] = [
-  "orgHeader", "identity", "kvGrid", "attendance", "earningsDeductions", "netBox", "note", "rule", "gap", "footer",
+  "orgHeader", "identity", "kvGrid", "attendance", "earningsDeductions", "netBox", "employerCost", "note", "rule", "gap", "footer",
 ];
 
 // The payslip layout as data: one active design org-wide, stored in the `payslip` setting and rendered by the
@@ -167,48 +168,16 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
         </div>
       </div>
 
-      {/* Stacked, not side-by-side: the settings panel is narrow (and narrower still in the inline Sheet), so
-          two columns would squeeze both the block fields and the page preview. */}
-      <div className="space-y-4">
-        {/* Blocks + document options */}
-        <div className="space-y-3">
-          <Card>
-            <CardHeader className="pb-2"><CardTitle className="text-sm">Document</CardTitle></CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-2">
-              <Field label="Typeface" hint="Serif reads like a formal statement; sans is plainer. Money always uses a monospaced face.">
-                <Select
-                  value={template.options?.font ?? "serif"}
-                  onValueChange={(v) => setOptions({ font: v as "serif" | "sans" })}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="serif">Serif (Times)</SelectItem>
-                    <SelectItem value="sans">Sans (Helvetica)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Page size">
-                <Select value={template.options?.pageSize ?? "a4"} onValueChange={(v) => setOptions({ pageSize: v as "a4" | "letter" })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="a4">A4</SelectItem>
-                    <SelectItem value="letter">US Letter</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Margin (points)" hint="24 to 96. The content box is the page minus this on each side.">
-                <Input type="number" min="24" max="96" value={template.options?.margin ?? STOCK_DEFAULTS.margin} onChange={(e) => setOptions({ margin: Number(e.target.value) })} />
-              </Field>
-              <Field label="Text scale" hint="0.8 to 1.25, multiplies every default size. A size set on a block wins over this.">
-                <Input type="number" step="0.05" min="0.8" max="1.25" value={template.options?.scale ?? STOCK_DEFAULTS.scale} onChange={(e) => setOptions({ scale: Number(e.target.value) })} />
-              </Field>
-              <ColorField label="Accent" hint="Heavy rules, column totals, net-pay box border." value={template.options?.accent} fallback={STOCK_DEFAULTS.ink} onChange={(accent) => setOptions({ accent })} />
-              <ColorField label="Ink" hint="Primary text." value={template.options?.ink} fallback={STOCK_DEFAULTS.ink} onChange={(ink) => setOptions({ ink })} />
-              <ColorField label="Secondary text" hint="Captions and small-caps labels." value={template.options?.muted} fallback={STOCK_DEFAULTS.muted} onChange={(muted) => setOptions({ muted })} />
-              <ColorField label="Lines" hint="Rules, boxes and dividers." value={template.options?.hairline} fallback={STOCK_DEFAULTS.hairline} onChange={(hairline) => setOptions({ hairline })} />
-            </CardContent>
-          </Card>
+      {/* Tabbed, not stacked: the settings panel is narrow (narrower still in the inline Sheet), and the three
+          editors are long enough that stacking them buried the preview far below the fold. */}
+      <Tabs defaultValue="blocks">
+        <TabsList variant="segmented">
+          <TabsTrigger value="blocks">Blocks</TabsTrigger>
+          <TabsTrigger value="document">Document</TabsTrigger>
+          <TabsTrigger value="preview">Preview</TabsTrigger>
+        </TabsList>
 
+        <TabsContent value="blocks">
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm">Blocks <span className="ml-1 font-normal text-muted-foreground">({blocks.length})</span></CardTitle>
@@ -251,31 +220,71 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
               </p>
             </CardContent>
           </Card>
-        </div>
+        </TabsContent>
 
-        {/* Live preview, full width below the blocks. The A4 aspect ratio keeps the page shape honest at any
-            panel width, so what you judge here is what prints. */}
-        <Card>
-          <CardHeader className="flex-row items-center justify-between gap-2 pb-2">
-            <CardTitle className="text-sm">Preview <span className="ml-1 font-normal text-muted-foreground">sample data</span></CardTitle>
-            {previewing && <span className="text-xs text-muted-foreground">Rendering…</span>}
-          </CardHeader>
-          <CardContent>
-            {previewError ? (
-              <p className="py-8 text-sm text-destructive">{previewError}</p>
-            ) : previewUrl ? (
-              <iframe
-                title="Payslip design preview"
-                src={previewUrl}
-                className="mx-auto w-full max-w-[820px] rounded-md border bg-muted/30"
-                style={{ aspectRatio: "595 / 842", minHeight: 520 }}
-              />
-            ) : (
-              <p className="py-8 text-sm text-muted-foreground">Rendering…</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+        <TabsContent value="document">
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">Document</CardTitle></CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+              <Field label="Typeface" hint="Serif reads like a formal statement; sans is plainer. Money always uses a monospaced face.">
+                <Select
+                  value={template.options?.font ?? "serif"}
+                  onValueChange={(v) => setOptions({ font: v as "serif" | "sans" })}
+                >
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="serif">Serif (Times)</SelectItem>
+                    <SelectItem value="sans">Sans (Helvetica)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Page size">
+                <Select value={template.options?.pageSize ?? "a4"} onValueChange={(v) => setOptions({ pageSize: v as "a4" | "letter" })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="a4">A4</SelectItem>
+                    <SelectItem value="letter">US Letter</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Margin (points)" hint="24 to 96. The content box is the page minus this on each side.">
+                <Input type="number" min="24" max="96" value={template.options?.margin ?? STOCK_DEFAULTS.margin} onChange={(e) => setOptions({ margin: Number(e.target.value) })} />
+              </Field>
+              <Field label="Text scale" hint="0.8 to 1.25, multiplies every default size. A size set on a block wins over this.">
+                <Input type="number" step="0.05" min="0.8" max="1.25" value={template.options?.scale ?? STOCK_DEFAULTS.scale} onChange={(e) => setOptions({ scale: Number(e.target.value) })} />
+              </Field>
+              <ColorField label="Accent" hint="Heavy rules, column totals, net-pay box border." value={template.options?.accent} fallback={STOCK_DEFAULTS.ink} onChange={(accent) => setOptions({ accent })} />
+              <ColorField label="Ink" hint="Primary text." value={template.options?.ink} fallback={STOCK_DEFAULTS.ink} onChange={(ink) => setOptions({ ink })} />
+              <ColorField label="Secondary text" hint="Captions and small-caps labels." value={template.options?.muted} fallback={STOCK_DEFAULTS.muted} onChange={(muted) => setOptions({ muted })} />
+              <ColorField label="Lines" hint="Rules, boxes and dividers." value={template.options?.hairline} fallback={STOCK_DEFAULTS.hairline} onChange={(hairline) => setOptions({ hairline })} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* The A4 aspect ratio keeps the page shape honest at any panel width, so what you judge here is what prints. */}
+        <TabsContent value="preview">
+          <Card>
+            <CardHeader className="flex-row items-center justify-between gap-2 pb-2">
+              <CardTitle className="text-sm">Preview <span className="ml-1 font-normal text-muted-foreground">sample data</span></CardTitle>
+              {previewing && <span className="text-xs text-muted-foreground">Rendering…</span>}
+            </CardHeader>
+            <CardContent>
+              {previewError ? (
+                <p className="py-8 text-sm text-destructive">{previewError}</p>
+              ) : previewUrl ? (
+                <iframe
+                  title="Payslip design preview"
+                  src={previewUrl}
+                  className="mx-auto w-full max-w-[820px] rounded-md border bg-muted/30"
+                  style={{ aspectRatio: "595 / 842", minHeight: 520 }}
+                />
+              ) : (
+                <p className="py-8 text-sm text-muted-foreground">Rendering…</p>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -367,7 +376,7 @@ function StyleFields({ block, onChange }: { block: PayslipBlock; onChange: (patc
 
 // Per-kind field editors. Every input maps 1:1 to a property the server's block validator accepts.
 function BlockFields({ block, onChange }: { block: PayslipBlock; onChange: (patch: Partial<PayslipBlock>) => void }) {
-  const check = (label: string, key: "showLogo" | "showAddress" | "showDesignation" | "showWords" | "emphasis", dflt: boolean) => (
+  const check = (label: string, key: "showLogo" | "showAddress" | "showDesignation" | "showWords" | "showTotals" | "emphasis", dflt: boolean) => (
     <label className="flex items-center gap-2 text-sm">
       <Checkbox checked={block[key] ?? dflt} onCheckedChange={(v) => onChange({ [key]: !!v } as Partial<PayslipBlock>)} />
       {label}
@@ -502,6 +511,18 @@ function BlockFields({ block, onChange }: { block: PayslipBlock; onChange: (patc
             <ColorField label="Fill" hint="Leave empty for no fill." value={block.fill} fallback="#eef2ff" onChange={(fill) => onChange({ fill })} />
           </div>
           {check("Show amount in words", "showWords", true)}
+        </>
+      );
+    case "employerCost":
+      return (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Heading"><Input value={block.title ?? ""} onChange={(e) => onChange({ title: e.target.value })} /></Field>
+            <Field label="Cost-to-company total label" hint="Gross + the contributions that count inside CTC."><Input value={block.totalLabel ?? ""} onChange={(e) => onChange({ totalLabel: e.target.value })} /></Field>
+            <Field label="All-in total label" hint="Shown only when a contribution sits over and above CTC."><Input value={block.grandTotalLabel ?? ""} onChange={(e) => onChange({ grandTotalLabel: e.target.value })} /></Field>
+            <Field label="Over-and-above-CTC suffix" hint="Appended to a contribution the org keeps outside CTC."><Input value={block.aboveCtcSuffix ?? ""} onChange={(e) => onChange({ aboveCtcSuffix: e.target.value })} /></Field>
+          </div>
+          {check("Show the total rows", "showTotals", true)}
         </>
       );
     case "note":

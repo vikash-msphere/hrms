@@ -14,12 +14,13 @@ import { requestId } from "./middleware/requestId";
 import { runScheduled } from "./cron";
 
 import { users } from "./routes/users";
+import { apiKeys } from "./routes/apiKeys";
 import { preferences } from "./routes/preferences";
 import { settings } from "./routes/settings";
 import { roles } from "./routes/roles";
 import { policy } from "./routes/policy";
 import { accessRules } from "./routes/accessRules";
-import { accessPreviewRoute, accessRequestRoute } from "./routes/accessPreview";
+import { accessPreviewRoute, accessRequestRoute, accessApproveRoute, accessRejectRoute } from "./routes/accessPreview";
 import { employees } from "./routes/employees";
 import { departments } from "./routes/departments";
 import { leaveRequests } from "./routes/leaveRequests";
@@ -161,12 +162,16 @@ app.use("/v1/*", auth);
 app.use("/v1/*", authz); // ENFORCE: path-based authz is the sole gate; fail-closed (null/error/unmatched -> deny)
 
 app.route("/v1/users", users);
+app.route("/v1/api-keys", apiKeys); // machine credentials: a key acts as its owner, narrowed by its scope
+
 app.route("/v1/preferences", preferences);
 app.route("/v1/settings", settings);
 app.route("/v1/roles", roles);
 app.route("/v1/policy", policy);
 app.route("/v1/access-rules:preview", accessPreviewRoute); // effective-access preview (collection verb, before the collection mount)
 app.route("/v1/access-rules:requestAccess", accessRequestRoute); // ask access admins for a missing grant
+app.route("/v1/access-rules:approve", accessApproveRoute); // four-eyes: apply a pending permission change
+app.route("/v1/access-rules:reject", accessRejectRoute); // four-eyes: turn down a pending permission change
 app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service

@@ -14,6 +14,9 @@ import {
 // pdfPrimitives.ts (reused by the letter renderer).
 
 export type PayslipLine = { name: string; kind: "earning" | "deduction"; amount: number };
+// The employer's own cost for the period. `aboveCtc` = the org puts this contribution over and above CTC
+// (its pay component's `in_ctc` is false), so it is excluded from the CTC figure.
+export type PayslipEmployerLine = { name: string; amount: number; aboveCtc?: boolean };
 
 export type PayslipData = {
   org: { name: string; address?: string; logo?: string };
@@ -23,6 +26,7 @@ export type PayslipData = {
   payment: { mode?: string; bankName?: string; ifsc?: string; accountMasked?: string };
   attendance?: { actualDays: number; workingDays: number; lopDays: number; daysPayable: number };
   lines: PayslipLine[];
+  employerLines?: PayslipEmployerLine[]; // employer PF/ESI/gratuity - drives the employerCost block
   gross: number;
   totalDeductions: number;
   net: number;
@@ -271,6 +275,45 @@ export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate
     y -= boxH + 16;
   }
 
+  // The employer's on-top cost: one row per contribution, then the CTC total (gross + the contributions that
+  // count INSIDE CTC). Contributions the org puts over and above CTC are drawn after that total, suffixed, and a
+  // second total states the all-in company cost - so the slip says the same thing about employer PF that the
+  // compensation tab and the CTC letter do, in whichever of the two states the org is in.
+  function employerCost(b: Extract<PayslipBlock, { kind: "employerCost" }>) {
+    const all = d.employerLines ?? [];
+    if (!all.length) return; // no employer contributions on this run - the block is simply absent
+    const st = b.style;
+    const inCtc = all.filter((l) => !l.aboveCtc);
+    const above = all.filter((l) => l.aboveCtc);
+    const showTotals = b.showTotals !== false;
+    const rowSize = sizeOf(st, 9);
+    const pitch = ds(15);
+    const rowInk = colorOf(st, BODY);
+    room(ds(24) + all.length * pitch + (showTotals ? ds(20) + (above.length ? ds(18) : 0) : 0) + ds(12));
+    at((b.title ?? "Employer Contributions").toUpperCase(), ML, y, { f: bold, size: ds(7), color: SOFT });
+    y -= 6;
+    rule(ML, y, MR, 1.5, ACCENT);
+    y -= pitch;
+    const suffix = b.aboveCtcSuffix ?? "(over & above CTC)";
+    const row = (name: string, amount: number) => {
+      at(name, ML, y, { f: fontOf(st, font), size: rowSize, color: rowInk });
+      right(money(amount, dp), MR, y, { f: mono, size: rowSize, color: rowInk });
+      y -= pitch;
+    };
+    const total = (label: string, amount: number) => {
+      rule(ML, y + 9, MR);
+      at(label, ML, y - 3, { f: bold, size: rowSize, color: colorOf(st, INK) });
+      right(money(amount, dp), MR, y - 3, { f: monoBold, size: rowSize, color: colorOf(st, INK) });
+      y -= pitch + 3;
+    };
+    for (const l of inCtc) row(l.name, l.amount);
+    const ctc = d.gross + inCtc.reduce((s, l) => s + l.amount, 0);
+    if (showTotals) total(b.totalLabel ?? "Cost to Company (CTC)", ctc);
+    for (const l of above) row(`${l.name} ${suffix}`.trim(), l.amount);
+    if (showTotals && above.length) total(b.grandTotalLabel ?? "Total Company Cost", ctc + above.reduce((s, l) => s + l.amount, 0));
+    y -= 6;
+  }
+
   function note(b: Extract<PayslipBlock, { kind: "note" }>) {
     const st = b.style;
     const text = fill(b.text);
@@ -307,6 +350,7 @@ export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate
       case "attendance": attendance(b); break;
       case "earningsDeductions": earningsDeductions(b); break;
       case "netBox": netBox(b); break;
+      case "employerCost": employerCost(b); break;
       case "note": note(b); break;
       case "rule": {
         const weight = b.weight ?? 0.5;

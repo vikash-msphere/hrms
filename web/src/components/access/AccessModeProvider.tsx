@@ -1,10 +1,11 @@
 import * as React from "react";
-import { KeyRound, X, Eye } from "lucide-react";
+import { KeyRound, X, Eye, SlidersHorizontal } from "lucide-react";
 import { CapabilitiesContext, hasCapability } from "@/lib/perm";
-import { setViewAs, useViewAs } from "@/lib/viewAsStore";
+import { navigate } from "@/router";
+import { startViewAs, stopViewAs, useViewAs } from "@/lib/viewAsStore";
 import { AclModal } from "./AclModal";
 import { fetchAllAccessRules, type AccessRule } from "./permMatrix";
-import { fetchPreview, fetchSubjectOptions } from "./PreviewPanel";
+import { fetchSubjectOptions } from "./PreviewPanel";
 import { Combobox } from "@/components/ui/combobox";
 
 // A target the access-management UI can act on. `objectPath` ("collection/uuid") is present when the target is
@@ -31,6 +32,10 @@ type AccessModeCtx = {
   // silent lockouts are FINDABLE without opening every modal - it flags "a deny lives here, look", it does
   // not adjudicate (the engine does that; broad self/dept/all denies are counted for any object).
   denyFor: (t: AccessTargetRef) => boolean;
+  // Every rendered key icon registers itself while the mode is on, so the pill can say how many manageable
+  // things are actually on THIS page ("nothing here is grantable" and "42 targets" look identical otherwise).
+  registerTarget: () => () => void;
+  targetCount: number;
 };
 
 const Ctx = React.createContext<AccessModeCtx | null>(null);
@@ -42,11 +47,13 @@ export function useAccessMode(): AccessModeCtx {
 }
 
 const lsKey = (user: string | undefined) => `am:${user || "anon"}:enabled`;
+const coachKey = (user: string | undefined) => `am:${user || "anon"}:coached`;
 
-// `capabilities` are the admin's REAL capabilities, passed as a prop (not read from context) on purpose:
-// while "view as" is active, App swaps the CapabilitiesContext under the entire shell to the simulated
-// user's set - the access-mode machinery must keep judging by the real one, or the simulation could hide
-// its own exit (a simulated user without access-rules.write would kill the pill, the icons, the modal).
+// `capabilities` are the admin's REAL capabilities (App re-reads /users/me as the real caller for them),
+// passed as a prop rather than read from context on purpose: while "view as" is active the whole shell -
+// context included - belongs to the simulated user, and the access-mode machinery must keep judging by the
+// real one, or the simulation could hide its own exit (a simulated user without access-rules.write would
+// kill the pill, the icons and the modal).
 export function AccessModeProvider({ userEmail, capabilities, children }: { userEmail?: string; capabilities: string[]; children: React.ReactNode }) {
   const available = hasCapability(capabilities, "access-rules.write");
   // One unified capability governs managing access rules for both subjects (post role/user unification).
@@ -69,11 +76,24 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     }
   }, [available, userEmail]);
 
+  // First time an admin turns the mode on, explain what the key icons are - the affordance is discoverable
+  // only once you know it exists. Dismissed forever (per user, per browser) after the first look.
+  const [coach, setCoach] = React.useState(false);
+  const dismissCoach = React.useCallback(() => {
+    setCoach(false);
+    try {
+      localStorage.setItem(coachKey(userEmail), "1");
+    } catch {
+      /* ignore */
+    }
+  }, [userEmail]);
+
   const toggle = React.useCallback(() => {
     setEnabled((e) => {
       const next = !e;
       try {
         localStorage.setItem(lsKey(userEmail), next ? "1" : "0");
+        if (next && localStorage.getItem(coachKey(userEmail)) !== "1") setCoach(true);
       } catch {
         /* ignore */
       }
@@ -103,10 +123,10 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     [rules],
   );
 
-  // App-wide "view as": writes the selected user's server-computed capability set to the viewAs store;
-  // App reads it and swaps the capabilities on the `me` it prop-drills through the shell (nav, pages,
-  // buttons - everything gated). Data stays the admin's own; per-row access.can hints also stay the
-  // admin's, so per-record buttons can differ (the pill says so). Requires access-rules.preview.
+  // App-wide "view as": a SERVER-side simulation (src/lib/viewAs.ts). Picking a person persists the choice
+  // and reloads; from then on every request carries the subject and the app answers as them - their nav,
+  // their rows, their redactions - read-only, with the audit trail still naming this admin. Requires
+  // access-rules.preview, which is what the server checks too.
   const viewAs = useViewAs();
   const [people, setPeople] = React.useState<{ value: string; label: string }[] | null>(null);
   const [picking, setPicking] = React.useState(false);
@@ -115,52 +135,35 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     // misses people is a trap.
     if (picking && people === null) fetchSubjectOptions().then(setPeople).catch(() => setPeople([]));
   }, [picking, people]);
-  // The selection survives a hard refresh: the subject ref is stored per admin; capabilities are ALWAYS
-  // re-fetched (rules may have changed while away), never persisted.
-  const vaKey = `viewas:${userEmail || "anon"}`;
   const pickViewAs = React.useCallback(
-    (subject: string) => {
-      fetchPreview({ include_capabilities: true }, [subject])
-        .then(([v]) => {
-          if (v) {
-            setViewAs({ subject, email: v.email, role: v.role, capabilities: v.capabilities ?? [] });
-            try {
-              localStorage.setItem(vaKey, subject);
-            } catch { /* ignore */ }
-          }
-        })
-        .catch(() => setViewAs(null));
-    },
-    [vaKey],
+    (subject: string, label: string) => startViewAs({ subject, label, admin: userEmail || "anon" }),
+    [userEmail],
   );
-  const clearViewAs = React.useCallback(() => {
-    setViewAs(null);
-    try {
-      localStorage.removeItem(vaKey);
-    } catch { /* ignore */ }
-  }, [vaKey]);
-  // Rehydrate once the mode is on: a stored subject resumes the simulation after a hard refresh. Turning
-  // the mode OFF ends the simulation and forgets the selection.
-  const hydrated = React.useRef(false);
-  React.useEffect(() => {
-    if (!on) {
-      if (viewAs) clearViewAs();
-      setPicking(false);
-      hydrated.current = false;
-      return;
-    }
-    if (hydrated.current || !canPreview) return;
-    hydrated.current = true;
-    try {
-      const stored = localStorage.getItem(vaKey);
-      if (stored) pickViewAs(stored);
-    } catch { /* ignore */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [on, canPreview]);
+
+  // Live count of mounted key icons. Kept in a ref and flushed once per tick: a page can mount a hundred
+  // targets in one render pass, and a setState per icon would re-render the tree a hundred times.
+  const countRef = React.useRef(0);
+  const flushRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [targetCount, setTargetCount] = React.useState(0);
+  const registerTarget = React.useCallback(() => {
+    const flush = () => {
+      if (flushRef.current) return;
+      flushRef.current = setTimeout(() => {
+        flushRef.current = null;
+        setTargetCount(countRef.current);
+      }, 0);
+    };
+    countRef.current += 1;
+    flush();
+    return () => {
+      countRef.current -= 1;
+      flush();
+    };
+  }, []);
 
   const value = React.useMemo<AccessModeCtx>(
-    () => ({ enabled: on, available, canManageUsers, canManageRoles, toggle, open, denyFor }),
-    [on, available, canManageUsers, canManageRoles, toggle, open, denyFor],
+    () => ({ enabled: on, available, canManageUsers, canManageRoles, toggle, open, denyFor, registerTarget, targetCount }),
+    [on, available, canManageUsers, canManageRoles, toggle, open, denyFor, registerTarget, targetCount],
   );
 
   return (
@@ -172,20 +175,43 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
             state unmistakable and gives a one-click exit without reopening the menu. Always ONE line: the
             row never wraps, the only flexible cell (the label) truncates, and every control is shrink-0, so
             the exit X can never be pushed onto a second row. */}
-        {enabled && available && (
+        {/* A running simulation ALWAYS shows the pill, even with access mode toggled off or the capability
+            gone - it is the only exit, and an invisible simulation is a trap. */}
+        {/* Screen readers get told the mode flipped: without this the whole UI silently grows key icons and
+            nothing is announced. Polite, so it never interrupts what is being read. */}
+        <span aria-live="polite" className="sr-only">
+          {viewAs ? `Viewing the app as ${viewAs.label}` : on ? "Access management mode on" : "Access management mode off"}
+        </span>
+        {/* One-time explainer, anchored above the pill so it reads as part of the same mode. */}
+        {coach && on && !viewAs && (
+          <div className="fixed bottom-16 left-1/2 z-50 w-[min(24rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-amber-400/60 bg-background p-3 text-sm shadow-xl">
+            <p className="mb-1 flex items-center gap-1.5 font-semibold">
+              <KeyRound className="h-4 w-4 text-amber-600" /> Access mode is on
+            </p>
+            <p className="text-muted-foreground">
+              Every table row, button, field and tab now carries a small key. Click one to say who can see or do exactly that thing. A red key means an explicit deny is in force there. Nothing you see here changes what the server enforces.
+            </p>
+            <div className="mt-2 flex justify-end">
+              <button type="button" onClick={dismissCoach} className="rounded-md bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-800 hover:bg-amber-500/25 dark:text-amber-200">
+                Got it
+              </button>
+            </div>
+          </div>
+        )}
+        {(viewAs || (enabled && available)) && (
           <div className="fixed bottom-4 left-1/2 z-50 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2">
             <div className="flex min-w-0 items-center gap-2 whitespace-nowrap rounded-full border border-amber-400/60 bg-amber-50 py-1.5 pl-3 pr-1.5 text-sm text-amber-800 shadow-lg dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
               <KeyRound className="h-4 w-4 shrink-0" />
               {viewAs ? (
                 <>
                   <Eye className="h-4 w-4 shrink-0" />
-                  <span className="min-w-0 truncate" title={`Viewing as ${viewAs.email} - their access, your data (per-row buttons may still reflect you)`}>
-                    Viewing as <span className="font-semibold">{viewAs.email}</span>
-                    <span className="hidden lg:inline"> · their access, your data</span>
+                  <span className="min-w-0 truncate" title={`Viewing the app as ${viewAs.label} - their access AND their data, read-only`}>
+                    Viewing as <span className="font-semibold">{viewAs.label}</span>
+                    <span className="hidden lg:inline"> · their data, read-only</span>
                   </span>
                   <button
                     type="button"
-                    onClick={clearViewAs}
+                    onClick={stopViewAs}
                     className="shrink-0 rounded-full px-1.5 py-0.5 text-xs font-medium underline-offset-2 hover:underline"
                   >
                     stop
@@ -193,11 +219,26 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
                 </>
               ) : (
                 <>
-                  <span className="hidden min-w-0 truncate sm:inline">Access mode - click any key icon to manage who can see or do what</span>
-                  <span className="sm:hidden">Access mode</span>
+                  <span className="hidden min-w-0 truncate lg:inline">Access mode - click any key icon to manage who can see or do what</span>
+                  <span className="lg:hidden">Access mode</span>
+                  {/* "Nothing on this page is grantable" and "there are keys, keep looking" are the same
+                      picture without a number. */}
+                  <span className="shrink-0 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-semibold tabular-nums" title={`${targetCount} manageable targets on this page`}>
+                    {targetCount}
+                  </span>
+                  {/* Straight to the org-wide picture (roles x collections) - the one place the per-icon
+                      approach can't show you, and the reason admins were leaving the mode to hunt Settings. */}
+                  <button
+                    type="button"
+                    onClick={() => navigate("settings/permissions")}
+                    title="Open the org-wide roles x collections view"
+                    className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium underline-offset-2 hover:underline"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" /> <span className="hidden sm:inline">all permissions</span>
+                  </button>
                   {canPreview && !picking && (
-                    <button type="button" onClick={() => setPicking(true)} className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-xs font-medium underline-offset-2 hover:underline">
-                      <Eye className="h-3.5 w-3.5" /> view as…
+                    <button type="button" onClick={() => setPicking(true)} className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-xs font-medium underline-offset-2 hover:underline">
+                      <Eye className="h-3.5 w-3.5" /> <span className="hidden sm:inline">view as…</span>
                     </button>
                   )}
                   {canPreview && picking && (
@@ -206,7 +247,7 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
                         value=""
                         onValueChange={(v) => {
                           setPicking(false);
-                          pickViewAs(v);
+                          pickViewAs(v, people?.find((p) => p.value === v)?.label ?? v);
                         }}
                         options={people ?? []}
                         placeholder={people === null ? "Loading people…" : "View app as…"}
@@ -217,8 +258,8 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
               )}
               <button
                 type="button"
-                onClick={toggle}
-                aria-label="Turn off access mode"
+                onClick={viewAs ? stopViewAs : toggle}
+                aria-label={viewAs ? "Stop viewing as another user" : "Turn off access mode"}
                 className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-amber-200 dark:hover:bg-amber-900"
               >
                 <X className="h-3.5 w-3.5" />

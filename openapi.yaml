@@ -454,6 +454,17 @@ components:
         tds_configured: { type: boolean, readOnly: true }
         annual_gross: { type: number, readOnly: true }
         standard_deduction: { type: number, readOnly: true }
+        chapter_via: { type: number, readOnly: true, description: "Total Chapter VI-A deduction this regime allows, from the employee's VERIFIED investment declarations. 0 under the new regime except 80CCD(2)/80CCH." }
+        deductions:
+          type: array
+          readOnly: true
+          description: "Per-section view of those declarations: what was verified and how much this regime actually allows (0 for a disallowed section, so the employee can see why)."
+          items:
+            type: object
+            properties:
+              section: { type: string, readOnly: true }
+              declared: { type: number, readOnly: true }
+              allowed: { type: number, readOnly: true }
         taxable_income: { type: number, readOnly: true }
         slabs: { type: array, readOnly: true, items: { $ref: '#/components/schemas/tax-slab' } }
         income_tax: { type: number, readOnly: true }
@@ -544,16 +555,17 @@ components:
         type: hrms.example.com/payroll-debit-account
     payroll-line:
       type: object
-      description: One earning or deduction line on an employee's payroll.
+      description: One earning, deduction, employer-contribution or perquisite line on an employee's payroll.
       properties:
         code: { type: string }
         name: { type: string }
-        kind: { type: string, enum: [earning, deduction] }
+        kind: { type: string, enum: [earning, deduction, employer_contribution, perquisite], description: "employer_contribution = the employer's own cost for the period (employer PF/ESI/gratuity/EDLI); never paid or withheld, so it enters neither gross, deductions nor net. perquisite = taxable value the employee never receives in cash (e.g. the interest concession on a cheap employer loan); it lifts the taxable gross only. An EARNING may be negative - loss of pay is docked pay, so it leaves gross and every statutory/tax base." }
         amount: { type: number }
-        taxable: { type: boolean, description: "Earnings only; false excludes the line from the taxable gross (e.g. reimbursements)." }
+        taxable: { type: boolean, description: "Earnings only; false excludes the line from the taxable gross (e.g. reimbursements, the payout rounding adjustment)." }
+        above_ctc: { type: boolean, description: "Employer contributions only; true when the contribution's pay component is set to sit over and above CTC (in_ctc false), so it is excluded from the CTC figure." }
     payroll-run-item:
       type: object
-      required: [employee, employee_name, code, gross, taxable_gross, total_deductions, tax, net, lines]
+      required: [employee, employee_name, code, gross, taxable_gross, total_deductions, tax, net, employer_cost, above_ctc_cost, lines]
       description: One employee's computed payroll for a run - the per-employee review breakdown.
       properties:
         employee: { type: string, readOnly: true, description: Employee resource reference. }
@@ -564,6 +576,8 @@ components:
         total_deductions: { type: number, readOnly: true }
         tax: { type: number, readOnly: true, description: TDS withheld (also part of total_deductions). }
         net: { type: number, readOnly: true }
+        employer_cost: { type: number, readOnly: true, description: "Employer contributions for the period that count INSIDE CTC (gross + this = cost to company)." }
+        above_ctc_cost: { type: number, readOnly: true, description: "Employer contributions the org puts OVER AND ABOVE CTC (employer PF under a \"CTC + PF\" policy)." }
         lines: { type: array, readOnly: true, items: { $ref: '#/components/schemas/payroll-line' } }
     personal-info:
       type: object
@@ -775,7 +789,8 @@ components:
         start_time: { type: string, format: date-time, description: "Event start instant (a bare YYYY-MM-DD is also accepted on write when all_day)." }
         end_time: { type: string, format: date-time, description: "Event end instant (a bare YYYY-MM-DD is also accepted on write when all_day)." }
         all_day: { type: boolean, description: "All-day (date-only) event; time-of-day is ignored. Defaults to true." }
-        count_as_work: { type: boolean, description: "Count the event's time toward attendees' worked minutes (vs. just marking them unavailable). Defaults to false." }
+        count_as_work: { type: boolean, description: "Count the event's time toward attendees' worked minutes, so it can make a day count as present or half day. When false the event does not excuse the day: an attendee who never clocked in is still absent (loss of pay). Defaults to false." }
+        requires_clock_in: { type: boolean, description: "Only meaningful with count_as_work. When true the credit lands only for attendees who actually punched that day; when false it lands regardless. Defaults to false." }
         color: { type: string, description: "Hex color for the timeline band (e.g. #6366f1)." }
         description: { type: string }
         attendees:
@@ -1128,9 +1143,11 @@ components:
         currency_code: { type: string }
         leave_days: { type: number, description: "Encashable leave days (defaults to the leave balance)." }
         notice_shortfall_days: { type: number, description: "Notice days not served (recovery)." }
-        lines: { type: array, readOnly: true, items: { type: object }, description: "Computed settlement line items (earning/deduction)." }
+        lines: { type: array, readOnly: true, items: { type: object }, description: "Computed settlement line items (earning/deduction). An earning may carry `taxable` - its chargeable slice, less than the amount for a partly exempt gratuity or exit leave encashment." }
         total_earnings: { type: number, readOnly: true }
+        taxable_earnings: { type: number, readOnly: true, description: "The chargeable part of the earnings (exempt gratuity / leave-encashment slices excluded). The FnF withholds income tax on this and Form 16 reads it." }
         total_deductions: { type: number, readOnly: true }
+        tds: { type: number, readOnly: true, description: "Income tax withheld on this settlement (the year's remaining balance - the exit payout is the last chance to collect it)." }
         net: { type: number, readOnly: true, description: "Net payable." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -2664,12 +2681,14 @@ components:
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
         display_name: { type: string }
-        kind: { type: string, description: "Component kind: earning (paid, in gross), deduction (withheld, employee side), or employer_contribution (employer's on-top cost e.g. employer PF/ESI/gratuity - CTC-only, never on the payslip)." }
-        method: { type: string, description: "Computation method fixed/percent_base/rate_qty/income_tax/epf/esi/pt. esi + pt are engine-computed statutory deductions." }
+        kind: { type: string, description: "Component kind: earning (paid, in gross), deduction (withheld, employee side), or employer_contribution (employer's on-top cost e.g. employer PF/ESI/gratuity - cost to company, never paid to the employee or withheld from their gross)." }
+        method: { type: string, description: "Computation method fixed/percent_base/rate_qty/income_tax/epf/esi/pt/edli/pf_admin. esi + pt are engine-computed statutory deductions; edli + pf_admin are the employer's PF side-charges (EDLI + administration), priced on PF wages like epf." }
         rate: { type: number, description: "Amount/percent/per-unit rate; for epf the contribution % (default 12); for esi the % of gross (employee default 0.75, employer default 3.25); for a percent_base employer_contribution like gratuity, the % of basic. Ignored for income_tax + pt (engine-computed)." }
-        cap: { type: number, description: "For method epf: wage ceiling on the base (e.g. 15000). For method esi: the monthly-gross eligibility ceiling (default 21000) - no ESI above it. Omit otherwise." }
+        cap: { type: number, description: "For methods epf/edli/pf_admin: wage ceiling on PF wages (e.g. 15000). For method esi: the monthly-gross eligibility ceiling (default 21000) - no ESI above it. Omit otherwise." }
         regime: { type: string, description: "For method income_tax: the tax regime block to use (e.g. new)." }
         recurring: { type: boolean }
+        in_ctc: { type: boolean, description: "employer_contribution only: true (default) counts this contribution INSIDE the CTC figure; false pays it OVER AND ABOVE CTC (\"CTC + PF\") - still a company cost, still costed by payroll, but excluded from the CTC number. Always true for earnings/deductions." }
+        pf_wages: { type: boolean, description: "earning only: does this allowance count as PF wages when settings/ctc pf_wage_basis is basic_plus? Ignored under the default basic basis (PF wages = basic). Always false for deductions/employer contributions." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true }
@@ -2793,6 +2812,13 @@ components:
         built_time: { type: string, format: date-time, readOnly: true, description: "When the run's line items were last (re)built from live inputs; null if never built. Detail GET only." }
         stale: { type: boolean, readOnly: true, description: "True when an income-affecting input (compensation, pay components, bonuses, leave encashments, reimbursements, overtime, loans, tax verifications, settings, joiners) changed after built_time, so the built numbers are out of date and the run should be rebuilt. Only ever true while editable (DRAFT/REVIEW). Detail GET only." }
         changes: { type: array, readOnly: true, items: { type: string }, description: "Human-readable categories of inputs that changed since the build, when stale. Detail GET only." }
+        split_drift:
+          type: object
+          readOnly: true
+          description: "Employees this run priced whose cached basic / Special Allowance no longer solves their promised CTC (the split was derived under an earlier pay-component setup). Distinct from `stale`, which only sees inputs that moved AFTER the build - split drift usually predates it. A warning, not a block: fix with compensation:reapplySplit then rebuild. Absent when nothing drifted. Detail GET only, editable runs only."
+          properties:
+            stale: { type: array, items: { type: string }, description: "Names whose split a re-apply would change." }
+            skipped: { type: array, items: { type: string }, description: "Names whose CTC no longer fits the components at all - a re-apply cannot fix these; raise the CTC or trim components." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2868,12 +2894,21 @@ components:
         subject_kind: { type: string, description: "'role' or 'user'." }
         subject: { type: string, description: "Role name (subject_kind=role) or users/{user_id} (subject_kind=user)." }
         collection: { type: string, description: The collection this rule applies to. }
-        scope: { type: string, description: "all | self | dept | subtree | exact." }
+        scope: { type: string, description: "create | all | self | dept | subtree | exact. `create` is the collection-level create gate (no field/verb)." }
         scope_ref: { type: string, description: "For scope=exact: the {collection}/{id} the rule is anchored to (server resolves to a code)." }
         field: { type: string, description: "Optional protected field this rule governs (field-level write)." }
         level: { type: string, description: "Standard-method level (read|write|admin). Mutually exclusive with verb; omit when effect=deny." }
         verb: { type: string, description: "Custom-method name (e.g. approve, download). Mutually exclusive with level. No ladder; fail-closed." }
         effect: { type: string, description: "'allow' (default) or 'deny' (deny wins outright, for a level or a verb)." }
+        expire_time: { type: string, format: date-time, description: "Optional expiry for temporary access. Must be in the future; the rule stops deciding the moment it lapses and the nightly cron deletes it." }
+        status:
+          type: string
+          readOnly: true
+          description: >-
+            active | pending | pending_delete. With four-eyes approval on (settings key access-approval), a
+            new rule lands `pending` (inert) and a removal marks the rule `pending_delete` (still enforcing)
+            until a SECOND access admin approves it via :approve / :reject.
+        requested_by: { type: string, readOnly: true, description: "users/{user_id} that requested the pending change; that person may not approve it." }
       x-aep-resource:
         singular: access-rule
         plural: access-rules
@@ -2902,11 +2937,142 @@ components:
         patterns:
           - 'policy/{policy_id}'
         type: hrms.example.com/policy
+    api-key:
+      type: object
+      description: >-
+        A machine credential. An API key ACTS AS its owner (a user) and may only narrow that user's
+        authority, never widen it - the effective authority is the owner's grant restricted by `scope`.
+        The plaintext token is returned exactly once, in the create response, and is never retrievable
+        afterwards.
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        display_name: { type: string, description: Human label for the key. }
+        owner:
+          type: string
+          description: "Resource path of the user this key acts as: users/{user_id}. Defaults to the caller."
+        prefix: { type: string, readOnly: true, description: "Public lookup handle, also the way to identify a key after its secret is gone." }
+        masked_token: { type: string, readOnly: true, description: "Display form, e.g. hrms_ab12cd34_..." }
+        scope:
+          type: object
+          description: The ceiling applied to the owner's authority. Every axis intersects; an empty list denies that axis entirely.
+          properties:
+            collections:
+              description: Allowed collections, or "*" for no restriction.
+              oneOf:
+                - { type: string, enum: ['*'] }
+                - { type: array, items: { type: string } }
+            max_level:
+              type: string
+              enum: [read, write, admin]
+              description: Ceiling on the standard-method level. read = the key cannot mutate anything.
+            verbs:
+              description: Allowed custom methods, or "*" for no restriction.
+              oneOf:
+                - { type: string, enum: ['*'] }
+                - { type: array, items: { type: string } }
+        expire_time: { type: string, format: date-time, description: When the key stops working. Omit for a key that never expires. }
+        last_used_time: { type: string, format: date-time, readOnly: true, description: "Best-effort, updated at most once every 15 minutes." }
+        revoke_time: { type: string, format: date-time, readOnly: true, description: Set by :revoke. A revoked key is retained so the audit trail still resolves it. }
+        secret:
+          type: string
+          readOnly: true
+          description: The plaintext token. Present ONLY in the create response - it is stored as an HMAC and can never be shown again.
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: api-key
+        plural: api-keys
+        patterns:
+          - 'api-keys/{api_key_id}'
+        type: hrms.example.com/api-key
+  securitySchemes:
+    accessJwt:
+      type: apiKey
+      in: header
+      name: Cf-Access-Jwt-Assertion
+      description: Cloudflare Access identity token (browser lane, default deployment mode).
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: hrms_session
+      description: Signed session cookie (browser lane, direct Google sign-in mode).
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        API key, as `Authorization: Bearer hrms_<prefix>_<secret>`. The machine lane. A request carrying an
+        `hrms_`-shaped bearer is ALWAYS resolved as that key: it never falls back to the browser lanes, so an
+        invalid key is a 401 rather than a silent downgrade to the caller's session.
   responses:
     Problem:
       description: Error
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+security:
+  - accessJwt: []
+  - sessionCookie: []
+  - bearerAuth: []
 paths:
+  /v1/api-keys:
+    get:
+      description: List method for api-key.
+      operationId: ListApiKeys
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/api-key' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for api-key. The response carries the plaintext `secret` exactly once.
+      operationId: CreateApiKey
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/api-keys/{api_key_id}:
+    parameters: [ { in: path, name: api_key_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for api-key.
+      operationId: GetApiKey
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for api-key. Permanently removes the credential.
+      operationId: DeleteApiKey
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/api-keys/{api_key_id}:revoke:
+    post:
+      description: "Custom method revoke for api-key. Stops the credential working immediately, keeping the row so the audit trail still resolves it."
+      operationId: ":RevokeApiKey"
+      parameters: [ { in: path, name: api_key_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/users:
     get:
       description: List method for user.
@@ -3201,6 +3367,42 @@ paths:
                   notified: { type: integer }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+  /v1/access-rules:approve:
+    post:
+      description: "Custom method approve: apply a pending permission change (a pending grant goes live; a pending removal deletes the rule). Four eyes - the person who requested the change cannot approve it."
+      operationId: ":ApproveAccessRules"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule]
+              properties:
+                rule: { type: string, description: "access-rules/{access_rule_id} awaiting a decision." }
+      responses:
+        '200': { description: The decided rule, content: { application/json: { schema: { $ref: '#/components/schemas/access-rule' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/access-rules:reject:
+    post:
+      description: "Custom method reject: turn down a pending permission change (a pending grant is dropped; a pending removal is restored). Four eyes - the requester cannot decide their own request."
+      operationId: ":RejectAccessRules"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule]
+              properties:
+                rule: { type: string, description: "access-rules/{access_rule_id} awaiting a decision." }
+      responses:
+        '200': { description: The decided rule, content: { application/json: { schema: { $ref: '#/components/schemas/access-rule' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/access-rules/{access_rule_id}:
     parameters: [ { in: path, name: access_rule_id, required: true, schema: { type: string } } ]
     get:
@@ -4345,7 +4547,7 @@ paths:
         - { in: query, name: actor, schema: { type: string }, description: "Org-wide feed only: filter by actor email (substring)." }
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
-        - { in: query, name: q, schema: { type: string }, description: "Free-text filter over action / actor / change values." }
+        - { in: query, name: q, schema: { type: string }, description: "Free-text filter over the action, the actor (name/email), the touched object (its name, collection and id) and the change values." }
         - { in: query, name: tone, schema: { type: string }, description: "Action category filter (create/update/move/assign/remove/positive/comment/read/denied/other)." }
       responses:
         '200':

@@ -8,23 +8,24 @@ import { audit } from "../lib/audit";
 import { notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { notFound, failedPrecondition, aborted } from "../lib/errors";
-import { computeRunItem, canTransition, isEditable, applyStructure, overtimePay, DEFAULT_OVERTIME_CONFIG, type Line, type RunState, type OvertimeConfig } from "../domain/payroll";
+import { computeRunItem, canTransition, isEditable, applyStructure, overtimePay, employerCostLines, pfWagesOf, DEFAULT_OVERTIME_CONFIG, DEFAULT_CTC_CONFIG, type Line, type RunState, type OvertimeConfig, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
-import { decimalsFor, type CurrencyDecimals } from "../domain/currency";
+import { decimalsFor, roundMoney, type CurrencyDecimals } from "../domain/currency";
+import { loanPerquisiteMonthly, DEFAULT_LOAN_PERQUISITE_CONFIG, type LoanPerquisiteConfig } from "../domain/loans";
 import { allStructureLines } from "./salaryStructures";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
-import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthlyRecurringGross, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations } from "./taxProjection";
+import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthKey, compAsOf, compGrossPricer, unpaidEarningMonths, projectedGrossForMonths, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations, verifiedDeductions, EMPTY_FINALIZED_TOTALS } from "./taxProjection";
 import { reimbursementPayoutMode, approvedUnpaidReimbursementsAll, resetReimbursementsPaidByRun, markReimbursementsPaidByRun } from "./reimbursements";
 import { approvedUnpaidEncashmentsAll, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
 import { unpaidBonusesAll, markBonusesPaidByRun, resetBonusesPaidByRun } from "./bonuses";
-import { dueLoanInstallmentsAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
+import { dueLoanInstallmentsAll, outstandingLoansAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
 import { runBatch, runBatchChecked, chunk, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
-import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun } from "./compensation";
+import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } from "./compensation";
 import { renderPayslipPdf } from "../lib/pdf";
 import { payslipTemplateOrDefault, type PayslipTemplate } from "../domain/payslipTemplate";
 import { etagOf } from "../http/serialize";
@@ -64,7 +65,10 @@ export async function getRun(deps: Deps, id: string) {
 }
 
 // Per-employee breakdown of a run (the review surface): each item's computed totals + its earning/deduction
-// lines, with the employee's name, ordered by employee code. Reading rides the run's own access gate.
+// lines and the employer's own contributions for the period, with the employee's name, ordered by employee code.
+// `employer_cost` is the in-CTC part of those contributions and `above_ctc_cost` the part paid over and above CTC
+// (each component's own choice), so the reviewer sees total company cost either way.
+// Reading rides the run's own access gate.
 export async function listRunItems(deps: Deps, runId: string) {
   await getRun(deps, runId); // 404 if the run doesn't exist
   const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
@@ -72,6 +76,9 @@ export async function listRunItems(deps: Deps, runId: string) {
   return items
     .map((it) => {
       const e = emps.get(it.employeeId);
+      const lines = JSON.parse(it.linesJson) as Line[];
+      const employer = lines.filter((l) => l.kind === "employer_contribution");
+      const sum = (ls: Line[]) => round2(ls.reduce((s, l) => s + l.amount, 0));
       return {
         employee: `employees/${it.employeeId}`,
         employee_name: e ? `${e.firstName} ${e.lastName}` : it.employeeId,
@@ -81,7 +88,10 @@ export async function listRunItems(deps: Deps, runId: string) {
         total_deductions: it.totalDeductions,
         tax: it.tax,
         net: it.net,
-        lines: JSON.parse(it.linesJson) as Line[],
+        employer_cost: sum(employer.filter((l) => !l.aboveCtc)),
+        above_ctc_cost: sum(employer.filter((l) => l.aboveCtc)),
+        // Wire lines are snake_case; `aboveCtc` is the stored (internal) spelling.
+        lines: lines.map(({ aboveCtc, ...l }) => ({ ...l, ...(aboveCtc ? { above_ctc: true } : {}) })),
       };
     })
     .sort((a, b) => a.code.localeCompare(b.code) || a.employee_name.localeCompare(b.employee_name));
@@ -109,13 +119,8 @@ function assertEtag(row: { updatedAt: Date }, ifMatch?: string) {
 // when there's no period. A backdated raise's delta for ALREADY-PUBLISHED periods is paid via arrears
 // (reviseCompensation); unpublished/future periods pick up the new comp directly here, so nothing double-counts.
 // Pure over one employee's (prefetched) compensation rows - the build reads the whole table once and picks
-// per employee here, instead of one query per employee.
-function compForPeriodFrom(rows: (typeof schema.compensation.$inferSelect)[], asOfMs: number | undefined) {
-  if (asOfMs === undefined) return rows.find((r) => r.effectiveTo === null);
-  return rows
-    .filter((r) => +new Date(r.effectiveFrom) <= asOfMs && (r.effectiveTo === null || +new Date(r.effectiveTo) > asOfMs))
-    .sort((a, b) => +new Date(b.effectiveFrom) - +new Date(a.effectiveFrom))[0];
-}
+// per employee here, instead of one query per employee. The lookup itself is `compAsOf` (taxProjection.ts), so
+// the run and the year's tax projection price a month by exactly the same rule.
 
 // Gather the period's attendance facts once (holidays, approved leave, punches) so the per-employee LOP
 // in buildRunItems is pure map lookups. `endYmd` is clamped to today so a mid-period build never charges
@@ -151,6 +156,41 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     if (!m) workedByEmp.set(s.employeeId, (m = new Map<string, number>()));
     m.set(day, (m.get(day) ?? 0) + minutes);
   }
+  // count_as_work events credit their attendees' worked minutes, so a day spent off-site isn't docked as an
+  // absence. Merged into workedByEmp rather than handled inside lopDayUnits because the credit rules need to
+  // know which days the employee actually punched - which is what workedByEmp's keys already record.
+  const nowMs = +deps.clock.now();
+  const eventsByEmp = new Map<string, WorkEvent[]>();
+  for (const e of await deps.db.select().from(schema.events)) {
+    if (e.deleteTime || !e.countAsWork) continue;
+    if (+new Date(e.endTime) < startMs - 86_400_000 || +new Date(e.startTime) > endMs + 86_400_000) continue;
+    const ev: WorkEvent = { startMs: +new Date(e.startTime), endMs: +new Date(e.endTime), allDay: !!e.allDay, requiresClockIn: !!e.requiresClockIn };
+    let ids: string[];
+    try { ids = JSON.parse(e.attendeeIds ?? "[]") as string[]; } catch { continue; }
+    for (const id of ids) {
+      const arr = eventsByEmp.get(id) ?? [];
+      arr.push(ev);
+      eventsByEmp.set(id, arr);
+    }
+  }
+  for (const [empId, events] of eventsByEmp) {
+    const worked = workedByEmp.get(empId) ?? new Map<string, number>();
+    const ranges = leaveByEmp.get(empId) ?? [];
+    const credit = eventCreditByDay({
+      events,
+      tz,
+      workDays: att.work_days,
+      fullDayMinutes: att.full_day_minutes ?? 480,
+      todayYmd,
+      nowMs,
+      punchedDays: new Set(worked.keys()), // taken before the merge below, so credit never counts as a punch
+      onLeave: (d) => ranges.some((r) => r.start <= d && d <= r.end),
+    });
+    if (!credit.size) continue;
+    for (const [day, m] of credit) worked.set(day, (worked.get(day) ?? 0) + m);
+    workedByEmp.set(empId, worked);
+  }
+
   const workingDaysInPeriod = workingDaysInRange(startYmd, periodEndYmd, att.work_days, holidays);
   return { startYmd, endYmd, holidays, leaveByEmp, workedByEmp, workingDaysInPeriod };
 }
@@ -168,9 +208,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   assertEtag(run, ifMatch);
   if (!isEditable(run.state as RunState)) throw failedPrecondition("run is not editable");
 
-  // Active AND not soft-deleted: deleteEmployee only stamps `deleteTime` (status stays "active"), so filtering
-  // on status alone would keep paying a deleted employee - salary, statutory contributions and all.
-  const employees = (await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"))).filter((e) => !e.deleteTime);
+  // EVERY employee who has not left, and not soft-deleted. Excluding `terminated` rather than including only
+  // `active` is the fail-safe direction: the status enum also carries `on_leave`, and paying only "active" would
+  // silently drop those people from payroll the day anything starts setting it. deleteEmployee only stamps
+  // `deleteTime` (status stays as-is), so filtering on status alone would keep paying a deleted employee -
+  // salary, statutory contributions and all. (Leavers are out of runs deliberately: the FnF is their payout.)
+  const employees = (await deps.db.select().from(schema.employees)).filter((e) => !e.deleteTime && e.status !== "terminated");
   // Apply every component that's enabled (not disabled) and not soft-deleted.
   const components = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.disabled && !c.deleteTime);
   // Salary structures (lines by id), loaded once: an employee with an assigned structure gets only that
@@ -185,6 +228,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const fy = fyWindow(period?.payDate ?? new Date());
   const cfg = tds ? await loadTaxConfig(deps) : null;
   const paidTotals = tds ? await finalizedTotals(deps, fy, runId) : new Map();
+  // Prices any compensation row's monthly gross, so the months still to be earned this FY can each be valued
+  // at the salary in force in THAT month rather than at this period's rate.
+  const grossFor = compGrossPricer(components, structById);
+  // The month whose SALARY this run prices (its period), which is what the projection must exclude from the
+  // still-to-be-earned months. Distinct from the pay-date month, which is when the tax is collected.
+  const runEarnedMonthKey = monthKey(period?.periodStart ?? new Date());
 
   // A rebuild first releases everything the PREVIOUS build of this run marked paid (idempotency), and drops
   // the old items. All of it goes in ONE atomic batch - one subrequest, and a crash can't leave the run
@@ -218,7 +267,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const bonusByEmp = groupBy(await unpaidBonusesAll(deps), (r) => r.employeeId);
   const otByEmp = otCfg.enabled ? groupBy(await approvedUnpaidOvertimeAll(deps, periodEndMs), (r) => r.employeeId) : new Map<string, never[]>();
   const reimbByEmp = payViaPayroll ? groupBy(await approvedUnpaidReimbursementsAll(deps), (r) => r.employeeId) : new Map<string, never[]>();
-  const dueLoansByEmp = await dueLoanInstallmentsAll(deps);
+  // Loans due IN THIS PERIOD: not started yet, or already collected by another run whose period covers the same
+  // month, and nothing is due (see dueLoanInstallmentsAll).
+  const dueLoansByEmp = await dueLoanInstallmentsAll(deps, { payDate: period?.payDate, periodEnd: period?.periodEnd, excludeRunId: runId });
+  // Interest concession on a cheap employer loan is a taxable perquisite (Rule 3(7)(i)) - opt-in policy data.
+  const perqCfg = await getSettingValue<LoanPerquisiteConfig>(deps, "loan-perquisite", DEFAULT_LOAN_PERQUISITE_CONFIG);
+  const perqLoansByEmp = perqCfg.enabled ? await outstandingLoansAll(deps) : new Map<string, { principal: number; installments: number; monthlyAmount: number; repaid: number }[]>();
 
   // What the loop decides, collected for the single write batch after it.
   const paidEncashIds: string[] = [];
@@ -250,15 +304,23 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // The payslip is rendered in the org currency, and every line total is summed as a bare number. The app is
   // single-currency: guard the invariant so an employee's comp - or any payable - in a different currency fails
   // the build loudly instead of silently corrupting the totals (e.g. adding a USD bonus as if it were rupees).
-  const orgCurrency = (await getSettingValue<{ default_currency?: string }>(deps, "organization", {})).default_currency || "INR";
+  const orgSettings = await getSettingValue<{ default_currency?: string; currency_decimals?: CurrencyDecimals }>(deps, "organization", {});
+  const orgCurrency = orgSettings.default_currency || "INR";
+  // The precision the money is actually DISBURSED at (whole rupees for INR by default). Each item's net is
+  // settled to it with an explicit rounding line, so the payslip, the ledger and the bank file all state the
+  // same figure instead of differing by up to half a rupee per employee with nothing to reconcile the gap.
+  const payoutDp = decimalsFor(orgCurrency, orgSettings.currency_decimals);
+  // Which wage PF is computed on (basic, or basic + universally-paid allowances) - org policy, settings/ctc.
+  const pfBasis = (await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG)).pf_wage_basis ?? "basic";
 
   // Statutory deductions on the regular monthly gross (computed per employee below, after earnings): ESI (% of
   // gross up to an eligibility ceiling) and Professional Tax (a state slab). Each is an opt-in single component;
   // PT slabs come from settings. Loaded once.
-  // Employee-side ESI/PT (kind "deduction"); the employer-contribution ESI row (same method) is CTC-only.
+  // Employee-side ESI/PT (kind "deduction"); the employer-contribution ESI row (same method) is costed below.
   const esiComp = components.find((c) => c.method === "esi" && c.kind === "deduction" && c.recurring);
   const ptComp = components.find((c) => c.method === "pt" && c.kind === "deduction" && c.recurring);
   const ptCfg = ptComp ? await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG) : null;
+
 
   // ESI is "sticky" within a contribution period (Apr-Sep / Oct-Mar): a worker eligible at the period start
   // keeps contributing to period-end even after a raise past the ceiling. Practical proxy: anyone who already
@@ -282,7 +344,8 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   }
 
   for (const e of employees) {
-    const comp = compForPeriodFrom(compByEmp.get(e.uuid) ?? [], periodEndMs);
+    const compRows = compByEmp.get(e.uuid) ?? [];
+    const comp = compAsOf(compRows, periodEndMs);
     if (!comp) continue;
     if ((comp.currency || "INR") !== orgCurrency) {
       throw failedPrecondition(`${e.firstName} ${e.lastName}'s compensation is in ${comp.currency || "INR"}, but payroll runs in ${orgCurrency}`);
@@ -300,7 +363,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const base = comp.basePay * factor;
     const special = comp.specialAllowance * factor;
     // Base pay is the contractual BASIC (prorated for partial employment). The employer's PF share is an
-    // employer-side cost that lives only in CTC views (letters, comp tab) - never on the payslip.
+    // employer-side cost, costed separately at the end of the item - it is never withheld from this base pay.
     const lines: Line[] = [{ code: "BASIC", name: "Basic", kind: "earning", amount: round2(base) }];
     // Special Allowance: the balancing plug of a top-down (CTC-in) comp row. A taxable fixed earning, so it
     // rides in gross (and thus the ESI/PT statutory base below) and taxable gross. 0 for basic-in rows.
@@ -308,43 +371,43 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     for (const co of effective) {
       // Base pay comes from compensation (the "BASIC" line above); components are extra earnings/deductions.
       // income_tax is engine-computed below, not a flat/percent line.
-      if (co.kind === "employer_contribution") continue; // employer PF/ESI/gratuity are CTC-only, never on the payslip
-      if (!co.recurring || co.method === "income_tax" || co.method === "esi" || co.method === "pt") continue; // esi/pt computed from gross below
-      if (co.method === "epf" && !e.epfEnrolled) continue; // EPF is opt-in; skip unless this employee is enrolled
-      // EPF: employee contribution = rate% (default 12) of the (prorated) base, capped at the wage ceiling if set.
+      if (co.kind === "employer_contribution") continue; // employer PF/ESI/gratuity: costed separately at the end of the item
+      // esi/pt/epf are computed further down, once the period's statutory bases (net of loss of pay, plus
+      // arrears and overtime) are known - they cannot be priced off the undocked wage here.
+      if (!co.recurring || co.method === "income_tax" || co.method === "esi" || co.method === "pt" || co.method === "epf") continue;
+      if (co.method === "edli" || co.method === "pf_admin") continue; // employer-side PF charges, costed at the end
       // A fixed EARNING is prorated for partial employment; a fixed DEDUCTION is charged in full.
       const amount =
         co.method === "fixed" ? (co.rate ?? 0) * (co.kind === "earning" ? factor : 1)
         : co.method === "percent_base" ? base * ((co.rate ?? 0) / 100)
-        : co.method === "epf" ? Math.min(base, co.cap ?? Infinity) * ((co.rate ?? 12) / 100)
         : 0;
-      // Payslip line label is the component name; EPF carries a stable code so statutory reports can find it.
-      if (amount) lines.push({ code: co.method === "epf" ? "EPF" : co.name, name: co.name, kind: co.kind, amount: round2(amount) });
+      if (amount) lines.push({ code: co.name, name: co.name, kind: co.kind, amount: round2(amount) });
     }
-    // Regular monthly gross (base + recurring earnings) is the base for statutory deductions. Snapshot it
-    // BEFORE one-offs/bonuses/encashment so ESI eligibility + PT slab key off the steady wage, not a one-time spike.
-    const statutoryBase = round2(lines.filter((l) => l.kind === "earning").reduce((s, l) => s + l.amount, 0));
-    // Statutory ELIGIBILITY (ESI ceiling) and the PT slab key off the FULL monthly wage rate, not the prorated
-    // partial-month amount - else a high-wage mid-period joiner drops under the ESI ceiling and is wrongly
-    // charged ESI, or falls into a lower PT slab. The ESI CONTRIBUTION is on the wage actually paid this period
-    // (prorated). factor is 1 for a full-period employee, so fullMonthlyBase == statutoryBase then (no-op).
-    const fullMonthlyBase = factor > 0 ? round2(statutoryBase / factor) : statutoryBase;
-    if (esiComp) {
-      const ceiling = esiComp.cap ?? 21000;
-      // Eligible if within the ceiling on the full monthly wage, OR already contributing earlier this
-      // contribution period (sticky - a mid-period raise past the ceiling doesn't stop ESI till period end).
-      const eligible = (fullMonthlyBase > 0 && fullMonthlyBase <= ceiling) || esiContributing.has(e.uuid);
-      const esi = eligible && statutoryBase > 0 ? esiEmployeeContribution(statutoryBase, esiComp.rate ?? 0.75, Infinity) : 0;
-      if (esi > 0) lines.push({ code: "ESI", name: esiComp.name, kind: "deduction", amount: esi });
-    }
-    if (ptComp && ptCfg) {
-      const pt = professionalTax(fullMonthlyBase, ptCfg); // PT is a monthly slab on the full wage bracket
-      if (pt > 0) lines.push({ code: "PT", name: ptComp.name, kind: "deduction", amount: pt });
-    }
+    // The regular monthly wage (base + recurring earnings), BEFORE loss of pay and before any one-off, bonus or
+    // encashment: statutory ELIGIBILITY (the ESI ceiling) and the PT slab key off the steady wage rate, not off a
+    // docked month or a one-time spike. The CONTRIBUTION bases are assembled after the docking below.
+    const regularGross = round2(lines.filter((l) => l.kind === "earning").reduce((s, l) => s + l.amount, 0));
+    // Eligibility and the PT slab use the FULL monthly wage rate, not the prorated partial-month amount - else a
+    // high-wage mid-period joiner drops under the ESI ceiling and is wrongly charged ESI, or falls into a lower PT
+    // slab. factor is 1 for a full-period employee, so fullMonthlyBase == regularGross then (no-op).
+    const fullMonthlyBase = factor > 0 ? round2(regularGross / factor) : regularGross;
 
-    lines.push(...(oneOffs[e.uuid] ?? [])); // bonuses, OT, statutory deduction inputs, manual LOP
+    // One-off inputs the caller passed for this employee (manual adjustments, statutory deduction inputs, a
+    // manually keyed loss of pay). A manual LOP arrives as a deduction line coded "LOP"; it is normalised to a
+    // NEGATIVE EARNING for exactly the reason the automatic one is (below): docked pay must leave gross and every
+    // statutory/tax base, not sit beside them as a deduction.
+    let manualLop = 0;
+    for (const l of oneOffs[e.uuid] ?? []) {
+      if (l.kind === "deduction" && l.code === "LOP" && l.amount > 0) {
+        manualLop = round2(manualLop + l.amount);
+        lines.push({ ...l, kind: "earning", amount: round2(-l.amount) });
+      } else {
+        lines.push(l);
+      }
+    }
 
     // Automatic loss-of-pay: per-day base pay x unexcused day-units (absent=1, half day=0.5) in the period.
+    let autoLop = 0;
     if (lop) {
       // Clamp the absence window to employment: pre-joining / post-leaving days are handled by proration above,
       // not counted as unauthorised absences here (else a joiner is docked twice).
@@ -360,9 +423,19 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         fullDayMinutes: att.full_day_minutes ?? 480,
         halfDayMinutes: att.half_day_minutes ?? 240,
       });
-      const amt = lopAmount(comp.basePay, dayUnits, att.lop_basis ?? "working_days", lop.workingDaysInPeriod);
-      if (amt > 0) lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "deduction", amount: amt });
+      // Never dock more than the period's regular wage (a full-month absence zeroes the salary, it doesn't turn
+      // it negative - which a prorated part-month at the full daily rate could otherwise do).
+      const amt = Math.min(lopAmount(comp.basePay, dayUnits, att.lop_basis ?? "working_days", lop.workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
+      // Loss of pay is a NEGATIVE EARNING, not a deduction: it is wage the employee never earned, so it has to
+      // leave gross, the income-tax base AND the PF/ESI bases together. As a deduction line it left every one of
+      // those bases at the undocked wage, so a docked month withheld income tax, ESI and PT on pay that was never
+      // made - and the inflated taxableGross then skewed the whole year's projection and Form 16.
+      if (amt > 0) {
+        autoLop = amt;
+        lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "earning", amount: round2(-amt) });
+      }
     }
+    const lopTotal = round2(autoLop + manualLop);
 
     // Leave encashment payouts: TAXABLE earning (encashment is salary income, so it lifts the TDS base below).
     const encashments = encashByEmp.get(e.uuid) ?? [];
@@ -384,10 +457,11 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     paidBonusIds.push(...empBonuses.map((b) => b.uuid));
 
     // Overtime pay: approved-unpaid overtime (up to the period end) priced from base pay, as a TAXABLE earning.
+    let otAmt = 0;
     if (otCfg.enabled) {
       const ot = otByEmp.get(e.uuid) ?? [];
       const otMinutes = ot.reduce((s, r) => s + Math.max(0, Math.round((+new Date(r.endTime) - +new Date(r.startTime)) / 60000)), 0);
-      const otAmt = overtimePay(otMinutes, comp.basePay, otCfg);
+      otAmt = overtimePay(otMinutes, comp.basePay, otCfg);
       if (otAmt > 0) {
         const h = Math.floor(otMinutes / 60), m = otMinutes % 60;
         lines.push({ code: "OT", name: `Overtime (${h}h${m ? ` ${m}m` : ""})`, kind: "earning", amount: otAmt });
@@ -403,6 +477,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const unpaidArrears = (compByEmp.get(e.uuid) ?? []).filter((c) => c.arrearsAmount > 0 && !c.arrearsPaidRunId && !c.arrearsPaidAt);
     for (const c of unpaidArrears) if ((c.currency || "INR") !== orgCurrency) throw failedPrecondition(`salary arrears for ${e.firstName} ${e.lastName} are in ${c.currency || "INR"}, not ${orgCurrency}`);
     const arrearsTotal = round2(unpaidArrears.reduce((s, c) => s + c.arrearsAmount, 0));
+    // The PF-wage slice of those arrears (the rise in BASIC over the same months): PF is due on arrears of basic
+    // wages, ESI on the whole arrears amount.
+    const arrearsPfWages = round2(unpaidArrears.reduce((s, c) => s + c.arrearsBaseAmount, 0));
     if (arrearsTotal > 0) {
       lines.push({ code: "ARREARS", name: "Salary arrears", kind: "earning", amount: arrearsTotal });
       paidArrearIds.push(...unpaidArrears.map((c) => c.uuid));
@@ -418,21 +495,74 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       }
     }
 
+    // ---- Statutory contribution bases -------------------------------------------------------------------
+    // The two bases are DIFFERENT wages, and each is now the wage actually paid this period:
+    //  - ESI wages: the regular wage net of loss of pay, PLUS arrears and overtime (both are wages under the ESI
+    //    Act, and remittance on them is due in the month they are paid). Bonus, leave encashment and
+    //    reimbursements are excluded - they are not ESI wages.
+    //  - PF wages: basic (or basic + the allowances HR flagged, per the configured basis) net of loss of pay, plus
+    //    the BASIC slice of any arrears. Overtime and bonus are excluded from basic wages by statute.
+    const esiWages = Math.max(0, round2(regularGross - lopTotal + arrearsTotal + otAmt));
+    const pfWages = Math.max(0, round2(pfWagesOf(base, special, effective, pfBasis) - lopTotal + arrearsPfWages));
+    // EPF employee share: rate% (default 12) of PF wages, capped at the wage ceiling when the component sets one.
+    // Opt-in per employee; the employer's mirror share is costed at the end of the item off the same figure.
+    const epfComp = effective.find((c) => c.method === "epf" && c.kind === "deduction" && c.recurring);
+    if (epfComp && e.epfEnrolled) {
+      const epf = round2(Math.min(pfWages, epfComp.cap ?? Infinity) * ((epfComp.rate ?? 12) / 100));
+      // The stable "EPF" code is what the statutory report + ECR find the member's contribution by.
+      if (epf > 0) lines.push({ code: "EPF", name: epfComp.name, kind: "deduction", amount: epf });
+    }
+    // ESI eligibility for this employee this period. Decided once: the employee's own deduction and the
+    // employer's share (below) must never disagree about whether this worker is in ESI.
+    let esiEligible: boolean | undefined;
+    if (esiComp) {
+      const ceiling = esiComp.cap ?? 21000;
+      // Eligible if within the ceiling on the full monthly wage, OR already contributing earlier this
+      // contribution period (sticky - a mid-period raise past the ceiling doesn't stop ESI till period end).
+      esiEligible = (fullMonthlyBase > 0 && fullMonthlyBase <= ceiling) || esiContributing.has(e.uuid);
+      const esi = esiEligible && esiWages > 0 ? esiEmployeeContribution(esiWages, esiComp.rate ?? 0.75, Infinity) : 0;
+      if (esi > 0) lines.push({ code: "ESI", name: esiComp.name, kind: "deduction", amount: esi });
+    }
+    if (ptComp && ptCfg) {
+      // PT is a monthly slab on the wage bracket. A month with no wage at all (fully docked) attracts none.
+      const pt = esiWages > 0 || regularGross <= 0 ? professionalTax(fullMonthlyBase, ptCfg) : 0;
+      if (pt > 0) lines.push({ code: "PT", name: ptComp.name, kind: "deduction", amount: pt });
+    }
+
+    // Interest concession on an employer loan: taxable VALUE, never paid in cash (Rule 3(7)(i)). A perquisite
+    // line lifts the income-tax base only - gross, deductions and net are untouched.
+    const perqLoans = perqLoansByEmp.get(e.uuid) ?? [];
+    if (perqLoans.length) {
+      const perq = loanPerquisiteMonthly(perqLoans, perqCfg);
+      if (perq > 0) lines.push({ code: "PERQ_LOAN", name: "Loan interest concession (perquisite)", kind: "perquisite", amount: perq });
+    }
+
     let tax = 0;
     if (tds && cfg) {
-      // TDS is computed on the TAXABLE gross only - reimbursement (taxable:false) lines never lift it.
-      const taxableEarnings = lines.filter((l) => l.kind === "earning" && l.taxable !== false).reduce((s, l) => s + l.amount, 0);
+      // TDS is computed on the TAXABLE base: earnings less the non-taxable ones (reimbursements), less loss of
+      // pay (a negative earning), plus any perquisite value. computeRunItem is that one definition.
+      const taxableEarnings = computeRunItem(lines).taxableGross;
       const decl = await readDeclarations(deps, e.taxDetailsEnc);
-      const paid = paidTotals.get(e.uuid) ?? { gross: 0, taxableGross: 0, tax: 0, months: 0, paidMonths: new Set<string>() };
+      const paid = paidTotals.get(e.uuid) ?? EMPTY_FINALIZED_TOTALS();
       const proj = assembleProjection({
         cfg, regime: tds.regime ?? "new", tdsConfigured: true,
         employedMonths: employedMonthsInFy(e.startDate ?? null, fy, e.endDate ?? null),
-        paidGross: paid.taxableGross, paidTax: paid.tax, paidMonths: paid.months,
-        // Spread the balance over the calendar months left from this run's pay month (inclusive - this run
-        // collects the first installment), skipping months another finalized run already covered.
+        paidGross: paid.taxableGross, paidTax: paid.tax,
+        // Spread the balance over the calendar months left from this run's PAY month (inclusive - this run
+        // collects the first installment), skipping months another finalized run already collected in.
         collectMonths: collectibleMonths(period?.payDate ?? new Date(), e.startDate ?? null, fy, paid.paidMonths),
-        recurringMonthly: monthlyRecurringGross(comp.basePay, effective, comp.specialAllowance),
+        // Every FY month whose salary is neither already priced by a finalized run nor being priced by THIS run,
+        // each valued off the employee's compensation timeline - a raise later in the year lifts only the months
+        // on or after it, and the months before it stay at the old salary instead of being repainted at the
+        // current rate. Keyed on EARNING months (the run's PERIOD), not on pay dates: with a payment lag (April
+        // salary paid in May) a pay-date test excludes the wrong month and prices one month at the wrong salary.
+        projectedGross: projectedGrossForMonths(
+          unpaidEarningMonths(fy, e.startDate ?? null, e.endDate, paid.earnedMonths, runEarnedMonthKey),
+          compRows,
+          grossFor,
+        ),
         currentRunGross: taxableEarnings, decl,
+        declaredDeductions: await verifiedDeductions(deps, e.uuid, fy.financialYear),
       });
       tax = proj.monthlyTds;
       if (tax > 0) lines.push({ code: "TDS", name: tds.name, kind: "deduction", amount: tax });
@@ -457,6 +587,27 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       }
     }
 
+    // The employer's own cost for this period - employer PF/ESI/gratuity, or anything else HR configured as an
+    // employer_contribution component. Priced off the PRORATED basic and this period's recurring gross (the same
+    // statutory base the employee-side lines used), so a mid-month joiner's cost is prorated too, and carrying
+    // the ESI verdict keeps both sides of ESI in step. Appended LAST and never part of gross/deductions/net:
+    // computeRunItem ignores the kind, so the payslip's take-home maths is untouched. The lines exist so the
+    // payslip, the run review and the statutory report can state the employer cost - and whether employer PF is
+    // inside CTC or over and above it - from the run's own frozen figures.
+    for (const ec of employerCostLines(base, esiWages, effective, e.epfEnrolled, esiEligible, pfWages)) {
+      lines.push({ code: ec.code, name: ec.name, kind: "employer_contribution", amount: ec.monthly, ...(ec.aboveCtc ? { aboveCtc: true } : {}) });
+    }
+
+    // Settle the net to the precision the money is actually paid at (whole rupees for INR by default) with an
+    // explicit line, so the payslip, this stored item and the bank file all state the SAME figure. Rounding only
+    // in the bank file left up to half a rupee per employee per run leaving the account without anything on the
+    // ledger to reconcile it against. Non-taxable: rounding is not income.
+    const preRound = computeRunItem(lines);
+    const adj = round2(roundMoney(preRound.net, payoutDp) - preRound.net);
+    if (Math.abs(adj) >= 0.005) {
+      lines.push({ code: "ROUND", name: "Rounding adjustment", kind: adj > 0 ? "earning" : "deduction", amount: Math.abs(adj), taxable: false });
+    }
+
     const totals = computeRunItem(lines);
     itemRows.push({ runId, employeeId: e.uuid, linesJson: JSON.stringify(lines), ...totals, tax });
   }
@@ -466,7 +617,10 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // payout paid without the item that pays it (and it all costs one subrequest). IN-lists and multi-row
   // inserts are chunked under D1's 100-bound-params-per-statement cap; chunks ride in the same batch.
   const loansById = new Map([...dueLoansByEmp.values()].flat().map((d) => [d.loan.uuid, d.loan]));
-  const loanWrites = loanRepaymentWrites(deps, loansById, loanEntries, runId, now);
+  // The loan ledger is dated by the PAY PERIOD, not by when someone pressed Build: an installment belongs to the
+  // month it was recovered from, which is also what makes "one EMI per calendar month" checkable (a run built
+  // late, or an old period rebuilt today, must not read as this month's collection).
+  const loanWrites = loanRepaymentWrites(deps, loansById, loanEntries, runId, period?.payDate ?? now);
   // Every paid-by-this-run marker is CHECKED: its guard only matches a payable that is STILL eligible, and the
   // queues above were read at the start of the build, so a payable can have left the queue since (an
   // encashment cancelled and its days credited back, a claim paid separately, another run claiming the same
@@ -518,10 +672,27 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
 // real change - a rebuild is idempotent, so an occasional false positive (e.g. an unrelated profile edit
 // bumping employees.updatedAt) is harmless, whereas a MISSED change would silently ship a wrong payslip.
 // Only meaningful while editable (DRAFT/REVIEW); a published run is immutable and self-corrects in the next run.
-export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[] };
+// `stale`/`changes` = an income input moved SINCE the build (rebuild fixes it). `split_drift` is a different
+// failure: the cached basic / Special Allowance the run priced no longer solves the employee's promised CTC, so
+// the numbers are wrong even on a freshly built run. It needs a split re-apply and THEN a rebuild, so it is
+// reported separately rather than folded into `changes`. Warning only - the run still submits/approves, because
+// paying the contracted stored split can be deliberate; the reviewer decides.
+export type SplitDrift = { stale: string[]; skipped: string[] }; // employee display names
+export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[]; split_drift?: SplitDrift };
 export async function runStaleness(deps: Deps, run: { uuid: string; state: string; itemsBuiltAt: Date | null }): Promise<RunStaleness> {
   const builtAt = run.itemsBuiltAt;
   if (!isEditable(run.state as RunState) || !builtAt) return { built_time: builtAt ? builtAt.toISOString() : null, stale: false, changes: [] };
+  // Split drift for the people this run actually priced, named for the reviewer. Editable runs only: an approved
+  // or published run is a historical record, and re-solving splits under it would say nothing actionable.
+  const items = await deps.db.select({ employeeId: schema.payrollRunItems.employeeId }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, run.uuid));
+  const drift = await splitDriftFor(deps, items.map((i) => i.employeeId));
+  let split_drift: SplitDrift | undefined;
+  if (drift.stale.length || drift.skipped.length) {
+    const named = new Map((await deps.db.select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName }).from(schema.employees))
+      .map((e) => [e.uuid, `${e.firstName} ${e.lastName}`]));
+    const names = (ids: string[]) => ids.map((id) => named.get(id) ?? id).sort();
+    split_drift = { stale: names(drift.stale), skipped: names(drift.skipped) };
+  }
   // Each source: does any row's updatedAt post-date the build? `updatedAt` also bumps on create + soft-delete
   // + enable/disable, so joiners, removals and toggles are all covered by the same comparison.
   const changedSince = async (table: { updatedAt: unknown }): Promise<boolean> =>
@@ -536,6 +707,8 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
     { label: "Reimbursements", table: schema.reimbursements },
     { label: "Overtime requests", table: schema.overtimeRequests },
     { label: "Loans", table: schema.loans },
+    // A verified investment declaration reduces withholding, so it moves the TDS on an already-built run.
+    { label: "Investment / tax declarations", table: schema.taxDeclarations },
     { label: "Pay-run settings (CTC / tax / overtime / PT)", table: schema.settings },
     // Holidays shift the working-days denominator that prorates mid-period joiners/leavers, so they move the
     // money even with LOP off.
@@ -551,7 +724,7 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   }
   const changes: string[] = [];
   for (const s of sources) if (await changedSince(s.table)) changes.push(s.label);
-  return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes };
+  return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}) };
 }
 
 // :submit / :approve / :lock map here. Maker-checker enforced on approve.
@@ -746,7 +919,11 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
     employee: { name: `${emp.firstName} ${emp.lastName}`, designation: emp.jobTitle ?? undefined, empNo: emp.code ?? undefined, department: emp.departmentId ? ctx.depts.get(emp.departmentId) : undefined },
     payment: { mode: onFile ? "Bank Transfer" : undefined, bankName: bank.bank_name, ifsc: bank.ifsc_code, accountMasked: maskAccount(bank.account_number) },
     attendance,
-    lines,
+    // Employee-side money columns: earnings + deductions only. The employer's own contributions are their own
+    // block (they are not paid to the employee, so they must never sit in Earnings), and a perquisite is taxable
+    // value rather than money paid, so it belongs in neither column. All from the item's frozen lines.
+    lines: lines.filter((l) => l.kind === "earning" || l.kind === "deduction") as { name: string; kind: "earning" | "deduction"; amount: number }[],
+    employerLines: lines.filter((l) => l.kind === "employer_contribution").map((l) => ({ name: l.name, amount: l.amount, ...(l.aboveCtc ? { aboveCtc: true } : {}) })),
     gross: it.gross,
     totalDeductions: it.totalDeductions,
     net: it.net,

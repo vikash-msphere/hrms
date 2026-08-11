@@ -4,6 +4,8 @@ import type { Wire } from "./wire";
 import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
 import { round2 } from "../domain/money";
 import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
+import { parseScope, scopeToWire } from "../domain/keyScope";
+import { maskedToken } from "../lib/apiKeyToken";
 
 // Entities whose id resolves via uuidToCode (the same set the activity authz gate uses). An activity row's
 // drill-ref is only emitted for these, so the feed never links to a non-resource entity (settings, batch,
@@ -60,6 +62,34 @@ export function toUserResource(r: any): Wire<"user"> {
     employee: ref("employees", r.employeeId),
   };
 }
+
+// A machine credential. NEVER emits `hash` (the verifier) - the plaintext secret exists only in the create
+// response, where the service attaches it to this resource once and it is then unrecoverable by design.
+export function toApiKeyResource(r: any): Wire<"api-key"> {
+  return {
+    ...baseResource(r, "api-keys"),
+    display_name: r.name,
+    owner: ref("users", r.ownerUserId),
+    prefix: r.prefix,
+    masked_token: maskedToken(r.prefix),
+    scope: (() => {
+      const s = parseScope(safeJson(r.scopeJson));
+      return s ? scopeToWire(s) : undefined;
+    })(),
+    expire_time: r.expiresAt ? iso(r.expiresAt) : undefined,
+    last_used_time: r.lastUsedAt ? iso(r.lastUsedAt) : undefined,
+    revoke_time: r.revokedAt ? iso(r.revokedAt) : undefined,
+    // Present on create only; the service passes the freshly minted token through on that one response.
+    ...(r.secret ? { secret: r.secret } : {}),
+  };
+}
+const safeJson = (s: string | null | undefined): unknown => {
+  try {
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+};
 
 export function toEmployeeResource(r: any): Wire<"employee"> {
   return {
@@ -166,6 +196,7 @@ export function toEventResource(r: any): Wire<"event"> {
     end_time: iso(r.endTime),
     all_day: !!r.allDay,
     count_as_work: !!r.countAsWork,
+    requires_clock_in: !!r.requiresClockIn,
     color: r.color ?? undefined,
     description: r.description ?? undefined,
     // attendeeIds is stored as a JSON array of employee uuids; emit as employee refs (tokenized on the wire).
@@ -221,6 +252,12 @@ export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"a
   // <col>.<id>.<field...>.** - the field is everything between the id token and the `**` tail, so a sub-resource
   // field path (identity.uan) round-trips whole (not just its last token).
   const field = toks.length >= 4 && tail === "**" ? toks.slice(2, -1).join(".") : undefined;
+  // The CREATE gate is the bare 1-token collection pattern (`<collection>`). It is stored with scope_kind "all"
+  // (a broad rule on the narrowing lane, like every non-exact rule), so scope_kind alone cannot tell it apart
+  // from `<collection>.**` (write on every object) - it has to be read back from the pattern. Without this, a
+  // create-gate rule round-trips as scope "all": the ACL modal's create dropdown never matches its own rule
+  // (stuck on "cannot create") and the rule shows up under the all-objects target instead.
+  const createGate = toks.length === 1 && tail !== "**";
   return {
     path: `access-rules/${r.id}`,
     create_time: iso(r.createdAt),
@@ -229,12 +266,17 @@ export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"a
     subject_kind: r.subjectKind,
     subject: r.subjectKind === "user" ? `users/${r.subject}` : r.subject,
     collection: r.namespace,
-    scope: r.scopeKind, // all | self | dept | subtree | exact
+    scope: createGate ? "create" : r.scopeKind, // create | all | self | dept | subtree | exact
     ...(r.scopeKind === "exact" && objectUuid ? { scope_ref: `${r.namespace}/${objectUuid}` } : {}),
     ...(field ? { field } : {}),
     ...(r.level ? { level: r.level } : {}),
     ...(verb ? { verb } : {}),
     effect: r.effect,
+    // Lifecycle: `active` decides; `pending` / `pending_delete` are four-eyes changes awaiting a second
+    // admin, and `requested_by` names who asked (they may not approve it themselves).
+    status: r.status ?? "active",
+    ...(r.requestedBy ? { requested_by: `users/${r.requestedBy}` } : {}),
+    ...(r.expiresAt ? { expire_time: iso(r.expiresAt) } : {}),
   };
 }
 
@@ -792,7 +834,9 @@ export function toSettlementResource(r: any): Wire<"settlement"> {
     notice_shortfall_days: r.noticeShortfallDays,
     lines: JSON.parse(r.linesJson),
     total_earnings: r.totalEarnings,
+    taxable_earnings: r.taxableEarnings,
     total_deductions: r.totalDeductions,
+    tds: r.tds,
     net: r.net,
   };
 }
@@ -1352,6 +1396,8 @@ export function toPayComponentResource(r: any): Wire<"pay-component"> {
     cap: r.cap ?? undefined,
     regime: r.regime ?? undefined,
     recurring: r.recurring,
+    in_ctc: r.inCtc,
+    pf_wages: r.pfWages,
   };
 }
 

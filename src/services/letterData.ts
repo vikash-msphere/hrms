@@ -42,7 +42,9 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
   const components = await deps.db.select().from(schema.payComponents);
 
   const epfEnrolled = !!emp.epfEnrolled;
-  const ctcCfg = await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG);
+  // PF wages follow the org's configured basis (settings/ctc), so the annexure states the same employer PF the
+  // payroll run will actually cost.
+  const pfBasis = (await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG)).pf_wage_basis ?? "basic";
   // Each comp row may carry its own salary structure; the CTC breakdown uses that row's effective earnings.
   const effFor = async (row: typeof current) => applyStructure(components, await structureLinesById(deps, row?.structureId));
   // The headline CTC is the stored authoritative figure (the promise the employee agreed to), not the sum of
@@ -52,7 +54,7 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
   const annualOf = (row: { ctcAnnual: number }, ctcMonthly: number) => (row.ctcAnnual > 0 ? round2(row.ctcAnnual) : round2(ctcMonthly * 12));
   let comp: LetterContext["comp"];
   if (current) {
-    const { lines, ctcMonthly } = ctcLines(current.basePay, await effFor(current), epfEnrolled, ctcCfg, current.specialAllowance);
+    const { lines, ctcMonthly } = ctcLines(current.basePay, await effFor(current), epfEnrolled, current.specialAllowance, pfBasis);
     comp = { lines, ctcMonthly, ctcAnnual: annualOf(current, ctcMonthly) };
   }
 
@@ -62,8 +64,8 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
   if (comps.length >= 2 && comps[0] && comps[1]) {
     const [next, prev] = comps;
     increment = {
-      oldAnnual: annualOf(prev, ctcLines(prev.basePay, await effFor(prev), epfEnrolled, ctcCfg, prev.specialAllowance).ctcMonthly),
-      newAnnual: annualOf(next, ctcLines(next.basePay, await effFor(next), epfEnrolled, ctcCfg, next.specialAllowance).ctcMonthly),
+      oldAnnual: annualOf(prev, ctcLines(prev.basePay, await effFor(prev), epfEnrolled, prev.specialAllowance, pfBasis).ctcMonthly),
+      newAnnual: annualOf(next, ctcLines(next.basePay, await effFor(next), epfEnrolled, next.specialAllowance, pfBasis).ctcMonthly),
       effectiveDate: next.effectiveFrom,
     };
   }

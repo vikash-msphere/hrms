@@ -66,7 +66,7 @@ const defaultTimed = () => {
   return { start_dt, end_dt: toLocalInput(d.toISOString()) };
 };
 const EMPTY = {
-  title: "", all_day: true, count_as_work: false, color: EVENT_COLORS[0], description: "",
+  title: "", all_day: true, count_as_work: false, requires_clock_in: false, color: EVENT_COLORS[0], description: "",
   start_date: todayStr(), end_date: todayStr(), // used when all_day
   ...defaultTimed(), // used when timed
 };
@@ -137,6 +137,7 @@ export default function Events({ me: _me, openId }: { me: Me; openId?: string })
       title: ev.title,
       all_day: ev.all_day,
       count_as_work: ev.count_as_work,
+      requires_clock_in: !!ev.requires_clock_in,
       color: ev.color ?? EVENT_COLORS[0],
       description: ev.description ?? "",
       start_date: ev.start_time.slice(0, 10),
@@ -160,7 +161,7 @@ export default function Events({ me: _me, openId }: { me: Me; openId?: string })
     const times = form.all_day
       ? { start_time: form.start_date, end_time: form.end_date }
       : { start_time: new Date(form.start_dt).toISOString(), end_time: new Date(form.end_dt).toISOString() };
-    const body = { title: form.title, all_day: form.all_day, count_as_work: form.count_as_work, ...times, color: form.color, description: form.description || null, attendees };
+    const body = { title: form.title, all_day: form.all_day, count_as_work: form.count_as_work, requires_clock_in: form.count_as_work && form.requires_clock_in, ...times, color: form.color, description: form.description || null, attendees };
     try {
       if (editing) await patch(`events/${idOf(editing.path)}`, body, editing.etag);
       else await create<Event>("events", body);
@@ -283,9 +284,22 @@ export default function Events({ me: _me, openId }: { me: Me; openId?: string })
             </label>
             <p className="mt-1 text-xs text-muted-foreground">
               {form.count_as_work
-                ? "The event's duration is credited to attendees' worked minutes (so it can make their day count as present). An all-day event credits every attendee; a timed event only credits attendees who clocked in that day - i.e. stepped out of work for it."
-                : "Attendees are just marked unavailable (excused) for these dates - the time is not counted as work."}
+                ? "The event's duration is credited to attendees' worked minutes, so it can make their day count as present."
+                : "The time is not counted as work, and the event does not excuse the day: an attendee who never clocks in is absent, and loses pay for it."}
             </p>
+            {form.count_as_work && (
+              <label className="mt-3 flex items-center gap-2 border-t pt-3 text-sm font-medium">
+                <Checkbox checked={form.requires_clock_in} onCheckedChange={(v) => setForm({ ...form, requires_clock_in: !!v })} />
+                Only credit attendees who clocked in
+              </label>
+            )}
+            {form.count_as_work && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {form.requires_clock_in
+                  ? "For events during the workday (a team lunch, an on-site workshop): attendees who never punched that day get no credit and stay absent."
+                  : "For events away from the office (an off-site, a conference): every attendee is credited whether or not they punched."}
+              </p>
+            )}
           </div>
           <Field label="Color">
             <div className="flex flex-wrap gap-2">

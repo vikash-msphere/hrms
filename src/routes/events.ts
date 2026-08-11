@@ -19,6 +19,7 @@ const writeSchema = z
     end_time: z.string().optional(),
     all_day: z.boolean().optional(),
     count_as_work: z.boolean().optional(),
+    requires_clock_in: z.boolean().optional(),
     color: z.string().nullable().optional(),
     description: z.string().nullable().optional(),
     attendees: z.array(z.string()).nullable().optional(),

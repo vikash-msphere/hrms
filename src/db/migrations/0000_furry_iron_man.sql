@@ -9,6 +9,9 @@ CREATE TABLE `access_rules` (
 	`match_code` text,
 	`level` text,
 	`effect` text NOT NULL,
+	`status` text DEFAULT 'active' NOT NULL,
+	`requested_by` text,
+	`expires_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL
 );
@@ -112,6 +115,27 @@ CREATE TABLE `announcements` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `announcements_code_unique` ON `announcements` (`code`);--> statement-breakpoint
+CREATE TABLE `api_keys` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`code` text,
+	`name` text NOT NULL,
+	`owner_user_id` text NOT NULL,
+	`prefix` text NOT NULL,
+	`hash` text NOT NULL,
+	`scope_json` text NOT NULL,
+	`expires_at` integer,
+	`last_used_at` integer,
+	`revoked_at` integer,
+	`created_by` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`uuid`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`created_by`) REFERENCES `users`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `api_keys_code_unique` ON `api_keys` (`code`);--> statement-breakpoint
+CREATE UNIQUE INDEX `api_keys_prefix_unique` ON `api_keys` (`prefix`);--> statement-breakpoint
+CREATE INDEX `api_keys_owner_idx` ON `api_keys` (`owner_user_id`);--> statement-breakpoint
 CREATE TABLE `applications` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -525,6 +549,7 @@ CREATE TABLE `compensation` (
 	`effective_from` integer NOT NULL,
 	`effective_to` integer,
 	`arrears_amount` real DEFAULT 0 NOT NULL,
+	`arrears_base_amount` real DEFAULT 0 NOT NULL,
 	`arrears_paid_run_id` text,
 	`arrears_paid_at` integer,
 	`created_at` integer NOT NULL,
@@ -716,6 +741,7 @@ CREATE TABLE `events` (
 	`end_date` integer NOT NULL,
 	`all_day` integer DEFAULT true NOT NULL,
 	`count_as_work` integer DEFAULT false NOT NULL,
+	`requires_clock_in` integer DEFAULT false NOT NULL,
 	`color` text,
 	`description` text,
 	`attendee_ids` text,
@@ -1207,6 +1233,8 @@ CREATE TABLE `pay_components` (
 	`cap` real,
 	`regime` text,
 	`recurring` integer DEFAULT true NOT NULL,
+	`pf_wages` integer DEFAULT false NOT NULL,
+	`in_ctc` integer DEFAULT true NOT NULL,
 	`delete_time` integer,
 	`disabled` integer DEFAULT false NOT NULL,
 	`locked` integer DEFAULT false NOT NULL,
@@ -1595,6 +1623,8 @@ CREATE TABLE `settlements` (
 	`total_earnings` real NOT NULL,
 	`total_deductions` real NOT NULL,
 	`net` real NOT NULL,
+	`taxable_earnings` real DEFAULT 0 NOT NULL,
+	`tds` real DEFAULT 0 NOT NULL,
 	`settled_json` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,

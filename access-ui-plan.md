@@ -9,7 +9,8 @@ every request regardless of what the UI shows.
 ## The model
 
 One resource - `access-rules` - expresses everything. A rule is
-`subject (role|user) × collection × scope × [field] × [verb] → level|allow|deny`.
+`subject (role|user) × collection × scope × [field] × [verb] → level|allow|deny`, plus a lifecycle
+(`status`, `expires_at`) that decides whether the row is loaded at all.
 
 - **Levels** nest: read ⊂ write ⊂ admin ("full" in the UI; adds delete + purge). `deny` wins.
 - **Custom methods** (AEP `:verb`) are fail-closed: allowed only by an explicit verb-allow; verb `*` = all
@@ -25,6 +26,16 @@ One resource - `access-rules` - expresses everything. A rule is
   record / your department / …" in the modal).
 - Virtual capabilities ride the same rails: `activity` (per-entity audit trail) and `export` (table data
   export).
+- **Lifecycle** (`src/lib/policyLoad.ts` `live`, the ONE predicate every load path ANDs in): a rule decides
+  only while it is `active` and unexpired.
+  - **Expiring grants**: optional `expires_at` (must be in the future). The rule stops deciding the instant it
+    lapses; the nightly cron (`purgeExpiredAccessRules`) then deletes the row, so a skipped tick can never
+    leave access alive. Authored from the ACL modal's add form and the fine-rules editor; shown as an
+    "expires in 3d" badge wherever the rule appears.
+  - **Four-eyes approval** (opt-in, settings key `access-approval`): while on, a new rule lands `pending`
+    (inert) and a removal marks the rule `pending_delete` (still enforcing) until a DIFFERENT access admin
+    calls `access-rules:approve` / `:reject`. A pending change never applies itself in either direction. The
+    requester may withdraw their own pending row; a one-admin org unblocks by turning the setting off.
 
 ## Where affordances come from (coverage by construction)
 
@@ -81,6 +92,8 @@ access affordance, and every file calling `invoke()`/`upload()` references `Acce
 - `web/src/components/access/permMatrix.ts` `BASE_COLLECTIONS`: every grantable collection, grouped by
   module - the row set of the Permissions matrix and the fine-rules editor. Add new collections here
   (see the add-collection checklist).
+- `src/domain/notificationConfig.ts` `NOTIFICATION_CATEGORIES` + `web/src/lib/notificationMeta.ts`
+  `CATEGORY_META`: the `access` category (requests, grants, four-eyes decisions) lives in both.
 
 ## Human context layer
 
@@ -141,7 +154,17 @@ pre-selected chip that reads as a broken picker.
   methods (generic verbs + per-collection overrides), used by the modal's chips/badges/sentences and the
   key-icon tooltips.
 - **Findability**: modal user picker is a typeahead combobox; role/user rule lists grow filter boxes past
-  one page; the per-subject permissions matrix is grouped by module (`COLLECTION_GROUPS`) with a filter.
+  one page; both permissions matrices (per-subject dialog and the org-wide roles × collections grid) are
+  grouped by module (`COLLECTION_GROUPS`) with a filter box.
+- **Rule reading + lint** (`web/src/components/access/ruleLogic.ts`, unit-tested in `test/ruleLogic.test.ts`):
+  the pure counterpart to `accessRuleScope.ts` (which authors rules). It renders a rule as one sentence
+  ("HR Admin has write access to their department's leave requests"), and judges whether it does anything:
+  - `denied` - a deny covering the same target beats it (including an `everyone` deny, which the engine
+    unions into every role);
+  - `shadowed` - a broader allow already grants at least as much;
+  - lifecycle notes (pending approval, expiry).
+  The fine-rules table leads with the sentence and strikes through dead rules; the ACL modal uses the same
+  logic for its author-time "a deny is already in place" warning and its commit line.
 
 ## Render + request gating (least-privilege UI)
 
@@ -168,66 +191,49 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
 
 ## Access-mode UX
 
-- Toggle lives in the user menu (visible only to `access-rules.write` holders); state is per-user in
-  localStorage.
-- While ON, a fixed amber pill (bottom-center) names the mode and offers one-click exit.
-- The ACL modal shows: the human-readable target ("the *approve* method on their department's loans"),
-  the caller's own `can`/`why` context, scope chips (narrowest-first, backend-driven), custom-method
-  drill-in chips, and Users/Roles tabs with the reserved **Everyone** role pinned first.
+- Entry points: the user menu (visible only to `access-rules.write` holders) and a ⌘K action ("Turn on
+  access mode"); state is per-user in localStorage. Toggling announces itself on an `aria-live` region, and
+  the first time an admin turns it on a one-time coach card explains what the keys are.
+- While ON, a fixed amber pill (bottom-center) names the mode, counts the manageable targets on the current
+  page, links to the org-wide permissions grid, offers "view as…", and exits in one click.
+- Icon density: table row keys hold their column but fade back until the row is hovered (`.access-row-key`);
+  tab keys are overlaid, not laid out, so toggling the mode never re-flows a tab bar; on touch every key gets
+  a finger-sized hit area (`.access-key`).
+- The ACL modal shows, top to bottom: the human-readable target ("the *approve* method on their department's
+  loans"), the caller's own `can`/`why` context, **who currently holds it** ("2 roles + 1 person can see
+  this", plus anything awaiting approval) with a "recent changes" strip read from the audit trail, the
+  collection note, scope chips (narrowest-first, backend-driven), any deny in force on this exact target,
+  presets, the view-as panel, custom-method drill-in chips, and Users/Roles tabs with the reserved
+  **Everyone** role pinned first. Every rule row carries who added it and when, its expiry, and - for a
+  pending four-eyes change - approve/reject.
+- Authoring: the user tab grants to SEVERAL people at once (chips), takes an optional expiry, warns before
+  writing an allow a deny would nullify, echoes the exact rule as a sentence on the Add button ("Grant: ana@…
+  has read access to all leave requests"), explains create-vs-write in create mode, and follows every change
+  with an 8-second **Undo** that restores the previous rules exactly.
+- The modal caps its height against the dynamic viewport and scrolls internally, so it stays usable on a phone.
 
-## Remaining opportunities (not yet built)
+## Org-wide views (Settings → Permissions)
 
-### 1. Seeing the current state
+- **Roles × collections grid**: the editable org-wide level per cell, grouped by module with a filter, plus
+  the effective-access context the cell alone can't show - `+all:<level>` when the `everyone` role already
+  grants it, `+N` when narrower (own/department/field/method/object) rules exist - and a key on every cell
+  that opens the full ACL modal for that collection.
+- **Pending changes queue**: everything awaiting four-eyes approval across every collection, with the
+  approve/reject buttons (each a grantable verb target of its own) and the switch that turns the
+  requirement on.
+- **Compare roles**: two roles side by side, differing collections first, with one-click copy of either
+  role's rules onto the other.
+- **Export / import**: every rule as JSON for review, backup or promotion between environments. Import
+  replays the bodies through the same POST endpoint, so validation, the four-eyes queue and the audit trail
+  all apply; it only ever ADDS (duplicates are skipped, nothing is removed).
+- **Permission-change feed**: Activity → "Permission changes" is the org-wide audit feed pre-filtered to
+  `access-rules`. Every rule event carries meta (rule id, collection, pattern, effect, a readable sentence),
+  which is also what the modal's provenance lines and history strip read.
 
-- **Current-holders summary line** in the modal header: "2 roles + 1 person can approve" before the tabs,
-  so the state is readable without scanning eight selects per page.
-- **Org access overview page**: a collections × roles heatmap (effective level per cell, click-through to
-  the modal). The per-subject matrix exists; there is no whole-org view.
-- **Access-change feed**: the audit log already records access-rules writes; surface "what changed in
-  permissions recently" as a filtered activity view + a "recent changes to this target" link in the modal.
-- **Rule metadata in the modal**: who added a rule and when (joinable from the audit log) - "added by
-  Vikash, 2w ago" turns mystery rules into accountable ones.
+## Notifications
 
-### 2. Authoring flow in the modal
-
-- **Bulk grant**: select several users in one add.
-- **Conflict warnings at author time**: adding an allow where a deny exists silently authors a dead rule -
-  say "a deny is in place; this allow has no effect until it is removed". (The red key + "also" chips make
-  the deny visible; the authoring-time warning is still missing.)
-- **Undo toast** after every rule change (the app already has an undo-toast pattern).
-- **Commit sentence**: the modal already builds "who can …" sentences - echo the final sentence on the add
-  button ("Grant: managers can approve their department's leave requests") so the rule reads before it lands.
-- **Create-vs-write note**: the create gate's relation to write on existing objects is a recurring
-  confusion; one meta-note line in create mode.
-
-### 3. Access-mode ergonomics
-
-- **Discoverability**: the toggle lives only in the user menu - add a ⌘K action ("Toggle access mode"),
-  and a one-time coach mark for fresh admins.
-- **Icon density**: busy tables render a key per row plus keys per action; consider hover-reveal for row
-  icons (the column stays, icons fade in per-row) to cut visual noise while keeping targets discoverable.
-- **Pill upgrades**: a "Manage roles" shortcut on the floating pill; possibly a count of manageable
-  targets on the current page.
-- **Tab-bar stability**: AccessTab icons widen tabs when the mode toggles; reserve the space or overlay.
-- **Mobile**: hover tooltips don't exist on touch; the pill can collide with small viewports - audit tap
-  targets and modal scrolling.
-- **Mode-change announcement**: aria-live on toggle so screen readers hear the mode flip.
-
-### 4. Matrix & fine-rules editors
-
-- **Group + search the matrix**: the per-subject "By collection" list is now ~65 flat rows - add the
-  module group headers (the data is already grouped in BASE_COLLECTIONS) and a filter box.
-- **Sentence-rendered rules**: the fine-rules table shows Collection/Scope/Field/Permission columns;
-  render each rule as its sentence ("HR · write on their department's employees · bank-account field").
-- **Role diff / copy**: compare two roles side by side; clone a role's grants to a new role or a user.
-- **Rules export/import**: JSON dump + load for review, backup, and env promotion.
-- **Dead-rule lint**: flag rules shadowed by a broader allow or nullified by a deny.
-
-### 5. Model extensions (server + UI)
-
-- **Expiring grants**: optional `expires_at` on a rule (contractor/temp access) + cron cleanup + "expires
-  in 3d" badge.
-- **Grant notifications**: notify a user when they gain meaningful new access ("You can now approve
-  leave requests") - the notification rail exists.
-- **Permission-change approval**: route access-rules writes through the existing approval/workflow engine
-  for orgs that want four-eyes on grants.
+Access changes announce themselves on the existing rail (category `access`, default priority high):
+`access.requested` (someone hit a wall and asked), `access.granted` ("You now have write access to …",
+allows only, `everyone` grants excluded so an org-wide rule doesn't page the whole company),
+`access.changePending` (a four-eyes change needs a second admin) and `access.changeDecided` (the requester
+hears the outcome).

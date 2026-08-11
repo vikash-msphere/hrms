@@ -28,6 +28,7 @@ import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
 import { useToast } from "@/components/ui/use-toast";
+import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { useConfirm } from "@/components/common/confirm";
 import PayPeriods from "@/pages/PayPeriods";
 import { PayrollBonuses } from "@/components/common/PayrollBonuses";
@@ -82,12 +83,15 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
   // Per-employee breakdown review (opened from a run row).
   const [reviewRun, setReviewRun] = useState<PayrollRun | null>(null);
   const [items, setItems] = useState<PayrollRunItem[] | null>(null);
-  const [reviewStale, setReviewStale] = useState<{ stale: boolean; changes: string[] } | null>(null);
+  type SplitDrift = { stale: string[]; skipped: string[] };
+  const [reviewStale, setReviewStale] = useState<{ stale: boolean; changes: string[]; split_drift?: SplitDrift } | null>(null);
+  // Re-apply machinery for the split-drift warning below (prompt-only; the banner here is the surface).
+  const { canReapply, reapplying, reapply: doReapply } = useSplitStaleness({ auto: false });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [itemQuery, setItemQuery] = useState("");
   // Fetch the run DETAIL (carries staleness: inputs changed since the last build) + the per-employee breakdown.
   // The detail response has a fresh etag, so it's stored as reviewRun and drives an in-place rebuild.
-  type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null };
+  type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift };
   async function openReview(run: PayrollRun) {
     setReviewRun(run);
     setItems(null);
@@ -100,7 +104,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
         get<{ results: PayrollRunItem[] }>("payroll-runs/" + idOf(run.path) + "/items"),
       ]);
       setReviewRun(detail);
-      setReviewStale({ stale: !!detail.stale, changes: detail.changes ?? [] });
+      setReviewStale({ stale: !!detail.stale, changes: detail.changes ?? [], split_drift: detail.split_drift });
       setItems(r.results ?? []);
     } catch (e) {
       setItems([]);
@@ -125,6 +129,14 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
       setActing(null);
     }
   }
+  // Split drift needs BOTH steps and in this order: re-apply re-solves each employee's basic / Special Allowance
+  // from their (unchanged) annual CTC, then the rebuild re-prices the run off the corrected rows. Re-applying
+  // alone would leave the run's stored items on the old numbers.
+  async function reapplyAndRebuild() {
+    await doReapply();
+    await rebuildReview();
+  }
+
   // Pre-publish payslip preview: render one employee's slip from the run's computed lines, exactly as it will
   // be issued, without persisting anything. Gated per run by the `previewPayslip` custom method.
   const [slipPreview, setSlipPreview] = useState<PdfSource | null>(null);
@@ -140,9 +152,15 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
     });
   }
 
+  // Run totals. `employer_cost` / `above_ctc_cost` are the employer's own contributions for the period (in-CTC
+  // and over-and-above-CTC respectively), so the reviewer sees what the run actually costs the company, not just
+  // what leaves as net pay.
   const totals = useMemo(() => {
-    const t = { gross: 0, total_deductions: 0, tax: 0, net: 0 };
-    for (const it of items ?? []) { t.gross += it.gross; t.total_deductions += it.total_deductions; t.tax += it.tax; t.net += it.net; }
+    const t = { gross: 0, total_deductions: 0, tax: 0, net: 0, employer_cost: 0, above_ctc_cost: 0 };
+    for (const it of items ?? []) {
+      t.gross += it.gross; t.total_deductions += it.total_deductions; t.tax += it.tax; t.net += it.net;
+      t.employer_cost += it.employer_cost ?? 0; t.above_ctc_cost += it.above_ctc_cost ?? 0;
+    }
     return t;
   }, [items]);
   // The bank file is super-admin-only (it exposes every employee's account number), so only super needs the
@@ -535,6 +553,45 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
               )}
             </div>
           )}
+          {/* Split drift: the run priced a CACHED basic / Special Allowance that the current pay-component setup no
+              longer produces, so these people's gross doesn't reconcile to the CTC they were promised. Invisible to
+              the staleness check above (that only sees inputs touched AFTER the build; this usually predates it).
+              A warning, not a block - paying the contracted stored split can be deliberate. */}
+          {reviewStale?.split_drift?.stale?.length ? (
+            <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40">
+              <div className="flex items-start gap-2 text-amber-800 dark:text-amber-200">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">
+                    This run priced an out-of-date pay split for {reviewStale.split_drift.stale.length} employee{reviewStale.split_drift.stale.length === 1 ? "" : "s"}.
+                  </p>
+                  <p className="mt-0.5 text-xs">
+                    {reviewStale.split_drift.stale.join(", ")} - their basic / Special Allowance was derived under an earlier pay-component setup, so it no
+                    longer solves the CTC they were promised. Re-apply the split (each annual CTC stays fixed), then rebuild.
+                    {canReapply ? "" : " Ask Payroll to re-apply the split."}
+                  </p>
+                </div>
+              </div>
+              {canReapply && reviewRun?.access?.can?.includes("build") && (
+                <AccessAction collection="compensation" verb="reapplySplit" label="re-apply the split">
+                  <Button size="sm" onClick={reapplyAndRebuild} disabled={reapplying || acting === idOf(reviewRun.path)}>
+                    {reapplying || acting === idOf(reviewRun.path) ? "Working…" : "Re-apply & rebuild"}
+                  </Button>
+                </AccessAction>
+              )}
+            </div>
+          ) : null}
+          {/* Rows whose CTC no longer fits the components at all: a re-apply changes nothing, so this needs a CTC
+              raise or a trimmed catalog. Separate colour because the action is different. */}
+          {reviewStale?.split_drift?.skipped?.length ? (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium">{reviewStale.split_drift.skipped.length} employee{reviewStale.split_drift.skipped.length === 1 ? "'s" : "s'"} CTC no longer fits the components.</p>
+                <p className="mt-0.5 text-xs">{reviewStale.split_drift.skipped.join(", ")} - no split fits that CTC, so re-applying can't fix it. Raise the CTC or trim components.</p>
+              </div>
+            </div>
+          ) : null}
           {items === null ? (
             <p className="flex items-center gap-2 py-8 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p>
           ) : items.length === 0 ? (
@@ -579,12 +636,53 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                           <tr className="border-b bg-muted/30">
                             <td colSpan={6} className="px-6 py-2">
                               <div className="space-y-1">
-                                {it.lines.map((l, i) => (
+                                {/* Pay lines: earnings (loss of pay rides here as a negative earning - it is pay
+                                    that was never earned, so it leaves gross and every tax/statutory base) and
+                                    deductions. */}
+                                {it.lines.filter((l) => l.kind === "earning" || l.kind === "deduction").map((l, i) => (
                                   <div key={i} className="flex justify-between text-xs">
                                     <span className={l.kind === "deduction" ? "text-destructive" : ""}>{l.name}{l.kind === "earning" && l.taxable === false ? " (non-taxable)" : ""}</span>
                                     <span className="tabular-nums">{l.kind === "deduction" ? "-" : ""}{money(l.amount)}</span>
                                   </div>
                                 ))}
+                                {/* Perquisites: taxable VALUE the employee never receives in cash (e.g. the interest
+                                    concession on a cheap employer loan). They lift the taxable gross - and so the
+                                    TDS - and touch nothing else, which is worth saying explicitly on the review. */}
+                                {it.lines.some((l) => l.kind === "perquisite") && (
+                                  <div className="mt-2 space-y-1 border-t pt-2">
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Taxable perquisites (not paid in cash)</p>
+                                    {it.lines.filter((l) => l.kind === "perquisite").map((l, i) => (
+                                      <div key={i} className="flex justify-between text-xs">
+                                        <span>{l.name}</span>
+                                        <span className="tabular-nums">{money(l.amount)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {/* Employer's own cost for the period: paid by the company, not to the employee, so
+                                    it sits apart from the pay lines. A contribution the org keeps outside CTC is
+                                    labelled and left out of the cost-to-company subtotal, mirroring the payslip. */}
+                                {it.lines.some((l) => l.kind === "employer_contribution") && (
+                                  <div className="mt-2 space-y-1 border-t pt-2">
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Employer contributions (not paid to the employee)</p>
+                                    {it.lines.filter((l) => l.kind === "employer_contribution").map((l, i) => (
+                                      <div key={i} className="flex justify-between text-xs text-blue-700 dark:text-blue-400">
+                                        <span>{l.name}{l.above_ctc ? " (over & above CTC)" : ""}</span>
+                                        <span className="tabular-nums">{money(l.amount)}</span>
+                                      </div>
+                                    ))}
+                                    <div className="flex justify-between text-xs font-semibold">
+                                      <span>Cost to company{it.above_ctc_cost ? " (CTC)" : ""}</span>
+                                      <span className="tabular-nums">{money(it.gross + it.employer_cost)}</span>
+                                    </div>
+                                    {it.above_ctc_cost > 0 && (
+                                      <div className="flex justify-between text-xs font-semibold">
+                                        <span>Total company cost</span>
+                                        <span className="tabular-nums">{money(it.gross + it.employer_cost + it.above_ctc_cost)}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -605,6 +703,15 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                 </tfoot>
               </table>
             </div>
+            {/* What the run costs the company: gross + the employer contributions that count inside CTC, plus any
+                the org keeps over and above CTC (employer PF under a "CTC + PF" policy). */}
+            {(totals.employer_cost > 0 || totals.above_ctc_cost > 0) && (
+              <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 border-t pt-2 text-xs text-muted-foreground">
+                <span>Employer contributions <span className="font-medium tabular-nums text-foreground">{money(totals.employer_cost)}</span></span>
+                {totals.above_ctc_cost > 0 && <span>Over &amp; above CTC <span className="font-medium tabular-nums text-foreground">{money(totals.above_ctc_cost)}</span></span>}
+                <span>Cost to company <span className="font-semibold tabular-nums text-foreground">{money(totals.gross + totals.employer_cost + totals.above_ctc_cost)}</span></span>
+              </div>
+            )}
             </div>
           )}
           {reviewRun && <ActivitySection resource={reviewRun.path} className="border-t pt-3" />}

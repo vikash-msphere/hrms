@@ -53,7 +53,10 @@ export type SelfContext = { employeeCode: string | null }; // caller's employee 
 
 export type Decision = { allow: true } | { allow: false; reason: string };
 
-const LVL: Record<Level, number> = { read: 1, write: 2, admin: 3 };
+// The level ladder. Exported because the API-key ceiling (domain/keyScope.ts) must clamp granted levels
+// against the SAME ordering the matcher decides with - a second, drifting copy of this ladder would be an
+// authorization bug waiting to happen.
+export const LVL: Record<Level, number> = { read: 1, write: 2, admin: 3 };
 
 // my-dept = the caller's employee code minus its own last segment (the dept subtree prefix). Null if
 // the caller has no employee code or it has no dept segment.

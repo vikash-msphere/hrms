@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNotNull, notInArray } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -22,6 +22,11 @@ export async function listReviews(deps: Deps, scope: ListScope, maxPageSize: num
   const cycleId = idFromPath(cycle);
   if (cycleId) conds.push(eq(schema.reviews.cycleId, cycleId));
   if (stateFilter) conds.push(eq(schema.reviews.state, stateFilter as State));
+  // Reviews have no delete_time of their own: they live and die with their cycle. Soft-deleting a cycle must
+  // therefore take its reviews off the list too, or every enrolled employee keeps a nameless, un-dated review
+  // card for a cycle that no longer exists (restoring the cycle brings them back).
+  const dead = (await deps.db.select({ uuid: schema.reviewCycles.uuid }).from(schema.reviewCycles).where(isNotNull(schema.reviewCycles.deleteTime))).map((c) => c.uuid);
+  if (dead.length) conds.push(notInArray(schema.reviews.cycleId, dead));
   return keysetPage(deps, schema.reviews, "reviews", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 

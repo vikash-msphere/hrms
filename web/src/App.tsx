@@ -4,8 +4,8 @@ import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/ui/dialog";
 import { api, setSessionExpiredHandler, setForbiddenHandler } from "./api";
 import { useToast } from "./components/ui/use-toast";
-import { useViewAs } from "./lib/viewAsStore";
-import { useMe } from "./useMe";
+import { useViewAs, stopViewAs } from "./lib/viewAsStore";
+import { useMe, useRealMe } from "./useMe";
 import { useRoute } from "./router";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
@@ -227,6 +227,7 @@ export default function App() {
   const route = useRoute();
   const { toast } = useToast();
   const viewAs = useViewAs();
+  const realMe = useRealMe(); // the signed-in admin (= `me` unless a simulation is running)
   const [mobileOpen, setMobileOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
@@ -235,6 +236,13 @@ export default function App() {
 
   // Namespace the table-prefs cache by user before any table mounts.
   setTablePrefsUser(me?.email);
+
+  // A simulation belongs to the admin who started it: if someone else is signed in on this browser now, drop
+  // it rather than showing them a shell they never asked for. (The server re-checks permission per request
+  // anyway - this is hygiene, not the gate.)
+  useEffect(() => {
+    if (viewAs && realMe && viewAs.admin !== realMe.email) stopViewAs();
+  }, [viewAs, realMe]);
 
   // Pull cross-device preferences once the user is known.
   useEffect(() => {
@@ -353,12 +361,12 @@ export default function App() {
   }
   booted.current = true;
 
-  // Access-mode "view as": when active, the WHOLE shell (nav, pages, gated buttons - everything this
-  // component prop-drills `me` into) gates on the simulated user's capability set and role (role feeds
-  // audience-style UX branches like dashboard KPI visibility). Identity (email/employee_id) stays the
-  // admin's, so every data query still runs as the admin. The access-mode chrome re-provides the REAL
-  // capabilities for itself inside AccessModeProvider.
-  const gme = viewAs ? { ...me!, capabilities: viewAs.capabilities, role: viewAs.role } : me!;
+  // Access-mode "view as" is a SERVER-side simulation now (src/lib/viewAs.ts): while it runs, /users/me and
+  // every other read already answer as the subject, so `me` IS the simulated person - identity, role,
+  // capabilities and data all agree, and nothing leaks in that they couldn't open themselves. The access-mode
+  // chrome re-fetches the real admin for itself (useRealMe) so the pill that ends the simulation can never be
+  // hidden by the simulated user's own permissions.
+  const gme = me!;
 
   function renderPage() {
     switch (route.page) {
@@ -495,7 +503,7 @@ export default function App() {
     <CapabilitiesContext.Provider value={gme.capabilities}>
     <ConfirmProvider>
     <OrgProvider>
-    <AccessModeProvider userEmail={me.email} capabilities={me.capabilities}>
+    <AccessModeProvider userEmail={realMe?.email ?? me.email} capabilities={realMe?.capabilities ?? []}>
     <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(gme.capabilities, c))}>
     <NotificationsProvider>
       <NotificationClearOnLeave page={route.page} />

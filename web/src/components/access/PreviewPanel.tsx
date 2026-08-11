@@ -63,7 +63,7 @@ const WHY_TEXT: Record<string, string> = {
   all: "via an org-wide rule",
 };
 
-export function PreviewPanel({ target, activeVerb, createMode }: { target: AccessTargetRef; activeVerb?: string; createMode: boolean }) {
+export function PreviewPanel({ target, activeVerb, createMode, rulesVersion = 0 }: { target: AccessTargetRef; activeVerb?: string; createMode: boolean; rulesVersion?: number }) {
   const canPreview = usePermission("access-rules.preview");
   const [open, setOpen] = React.useState(false);
   const [subjects, setSubjects] = React.useState<{ value: string; label: string }[] | null>(null);
@@ -81,6 +81,14 @@ export function PreviewPanel({ target, activeVerb, createMode }: { target: Acces
   }, [open, subjects]);
   // Target or drill-in changed -> the shown verdict no longer describes it.
   React.useEffect(() => setVerdict(null), [target.collection, target.objectPath, target.field, activeVerb]);
+  // A rule edit in the lists below CHANGES the answer, so re-ask the engine for the person already on screen.
+  // Leaving the old verdict up is worse than showing nothing: the panel is the ground truth admins check their
+  // edit against, and a stale "can create" reads as confirmation that the edit did nothing. Only fires when a
+  // person is selected (who === "" on mount), so it costs one preview call per edit, not per open.
+  React.useEffect(() => {
+    if (who) void check(who);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rulesVersion]);
 
   async function check(subject: string) {
     setWho(subject);

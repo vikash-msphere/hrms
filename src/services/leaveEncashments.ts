@@ -50,10 +50,12 @@ export type EncashmentInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 import { round2 } from "../domain/money";
 
-// Rate config (data, configurable in Settings). basis "base" => basePay / divisor (parity with FnF); "gross"
-// => monthly recurring gross / divisor. divisor defaults to 30 (per-day rate basis), matching settlements.
-type RateConfig = { rate_basis?: RateBasis; per_day_divisor?: number };
-async function rateConfig(deps: Deps): Promise<{ basis: RateBasis; divisor: number }> {
+// Rate config (data, configurable in Settings). basis "base" => basePay / divisor; "gross" => monthly recurring
+// gross / divisor. divisor defaults to 30 (per-day rate basis). Exported because the FnF prices exit encashment
+// from the SAME config: one concept, one rate - the FnF used to hard-wire basePay/30 and quietly disagree with
+// every mid-employment cashout the org had configured.
+export type RateConfig = { rate_basis?: RateBasis; per_day_divisor?: number };
+export async function encashmentRateConfig(deps: Deps): Promise<{ basis: RateBasis; divisor: number }> {
   const v = await getSettingValue<RateConfig>(deps, "leave_encashment", {});
   return { basis: v.rate_basis === "gross" ? "gross" : "base", divisor: v.per_day_divisor && v.per_day_divisor > 0 ? v.per_day_divisor : 30 };
 }
@@ -143,7 +145,7 @@ export async function computeAndStoreEncashment(deps: Deps, actor: AppUser, inpu
 
   const comp = await currentComp(deps, employeeId);
   if (!comp) throw invalidArgument("the employee has no compensation on record");
-  const { basis, divisor } = await rateConfig(deps);
+  const { basis, divisor } = await encashmentRateConfig(deps);
   let perBasis = comp.basePay;
   if (basis === "gross") {
     const components = await deps.db.select().from(schema.payComponents);
@@ -180,7 +182,7 @@ export async function createAutoEncashment(deps: Deps, employeeId: string, leave
   if (!(days > 0)) return false;
   const comp = await currentComp(deps, employeeId);
   if (!comp) return false;
-  const { basis, divisor } = await rateConfig(deps);
+  const { basis, divisor } = await encashmentRateConfig(deps);
   let perBasis = comp.basePay;
   if (basis === "gross") {
     const components = await deps.db.select().from(schema.payComponents);

@@ -23,6 +23,10 @@ const COMMON_READ: Record<string, Level> = {
   "shifts.**": "read", // everyone reads the shift catalog (your roster assignment names one)
   "projects.**": "read", // everyone reads the project catalog to log time against
   "events.**": "read", // org calendar (conferences, off-sites); availability views read it
+  // Everyone reads the review-cycle catalog: your own review names its cycle and carries that cycle's due
+  // dates and period. Without it the reviews page can't title a card, date a stage, or scope "this cycle's"
+  // goals/delivered work - HR was the only role that could read it.
+  "review-cycles.**": "read",
   // Operations are employee-owned: collection read = "may list" (rows scoped to own by applyScope);
   // `operations.me.**` = your own items. super_admin sees all via `**`. Closes the org-wide-read BOLA.
   operations: "read",

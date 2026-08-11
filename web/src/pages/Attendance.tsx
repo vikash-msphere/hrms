@@ -460,7 +460,6 @@ function StatusPill({ status, lateBy, earlyBy }: { status: DayStatus; lateBy?: n
     case "half_day": return <Badge variant="warning">Half day</Badge>;
     case "insufficient": return <Badge variant="destructive">Under hours</Badge>;
     case "on_leave": return <Badge variant="secondary">On leave</Badge>;
-    case "on_event": return <Badge variant="secondary">On event</Badge>;
     case "holiday": return <Badge variant="muted">Holiday</Badge>;
     case "absent": return <Badge variant="destructive">Absent</Badge>;
   }

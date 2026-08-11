@@ -3,6 +3,8 @@
 // placeholder the customer fills in. Fixed key/value rows, no Ctx needed.
 import { T0, q, j } from "../lib";
 import { DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG } from "../../src/domain/payroll";
+import { DEFAULT_GRATUITY_CONFIG } from "../../src/domain/settlement";
+import { DEFAULT_LOAN_PERQUISITE_CONFIG } from "../../src/domain/loans";
 import { DEFAULT_TAX_CONFIG } from "../../src/domain/incomeTax";
 import { DEFAULT_PT_CONFIG } from "../../src/domain/statutory";
 import { DEFAULT_ATTENDANCE } from "../../src/domain/attendance";
@@ -20,6 +22,13 @@ const SETTINGS: Array<[string, unknown]> = [
   ["professional-tax", DEFAULT_PT_CONFIG],
   ["attendance", DEFAULT_ATTENDANCE],
   ["overtime", DEFAULT_OVERTIME_CONFIG],
+  // Statutory gratuity at exit (15 days' wages per completed year after 5 years, exempt to ₹20L). Enabled: the
+  // entitlement is statutory. An org that settles gratuity through an LIC/trust policy instead sets enabled
+  // false, so the full-and-final doesn't pay it a second time.
+  ["gratuity", DEFAULT_GRATUITY_CONFIG],
+  // Interest concession on an employer loan as a taxable perquisite (Rule 3(7)(i)). Off until HR sets the SBI
+  // rate as on 1 April of the financial year - a guessed rate would silently over-withhold.
+  ["loan-perquisite", DEFAULT_LOAN_PERQUISITE_CONFIG],
   ["transition-templates", DEFAULT_TRANSITION_TEMPLATES],
   // e-signature: ships on DEFAULT_ESIGN (enabled, no vendor config) so in-app signature signing works out of
   // the box with no external dependency. The signing METHOD is chosen per e-signature block on a template
@@ -30,6 +39,10 @@ const SETTINGS: Array<[string, unknown]> = [
   // Choosing Aadhaar on a template/document without those secrets makes signing throw. See
   // docs/05-add-esign-provider.md.
   ["esign", DEFAULT_ESIGN],
+  // Four-eyes on permission changes. OFF: most orgs want an access admin's edit to land immediately. Turned
+  // on, every access-rule write queues as a pending change a SECOND access admin has to approve
+  // (services/accessRules.ts) - the row carries the pending state, so nothing takes effect meanwhile.
+  ["access-approval", { enabled: false }],
 ];
 
 export function settings(): string {

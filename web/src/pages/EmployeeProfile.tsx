@@ -46,6 +46,7 @@ import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
 import { AccessTab } from "@/components/common/AccessTab";
 import { SettingsButton } from "@/components/common/SettingsButton";
 import { useToast } from "@/components/ui/use-toast";
+import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 
 const NONE = "__none__";
 
@@ -180,6 +181,8 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   // --- edit: employment dates ---
   const [empOpen, setEmpOpen] = useState(false);
   const [empForm, setEmpForm] = useState({ start_date: "", probation_end_date: "", epf_enrolled: false });
+  // Offer to re-solve pay splits when a change here moves one (EPF enrolment). Silent for everything else.
+  const { promptReapply } = useSplitStaleness({ auto: false });
   function openEmp() {
     setEmpForm({ start_date: emp?.start_date ?? "", probation_end_date: emp?.probation_end_date ?? "", epf_enrolled: !!emp?.epf_enrolled });
     setEmpOpen(true);
@@ -219,12 +222,18 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
     );
   // Value-based check: only complain once both dates are set and out of order.
   const empDatesOk = !empForm.start_date || !empForm.probation_end_date || empForm.probation_end_date >= empForm.start_date;
-  const saveEmp = () =>
-    savePatch(
+  // EPF enrolment is a split INPUT for this employee: enrolling adds the employer PF share to their CTC build-up
+  // (un-enrolling removes it), so their cached basic / Special Allowance no longer solves the CTC they were
+  // promised. Prompt to propagate the moment it changes, instead of leaving the profile quietly inconsistent.
+  const saveEmp = async () => {
+    const enrolmentChanged = !!emp?.epf_enrolled !== empForm.epf_enrolled;
+    await savePatch(
       { start_date: empForm.start_date || null, probation_end_date: empForm.probation_end_date || null, epf_enrolled: empForm.epf_enrolled },
       "Employment updated",
       () => setEmpOpen(false),
     );
+    if (enrolmentChanged) await promptReapply();
+  };
 
   // Right-aligned gear row for a tab's inline settings; nothing renders when the caller can't configure.
   const tabGears = (tab: string) => {

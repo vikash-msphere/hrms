@@ -15,6 +15,12 @@ export type RegimeConfig = {
   rebate87A: { taxableLimit: number; maxRebate: number; marginalRelief: boolean };
   surcharge: { over: number; rate: number }[]; // ascending by `over`; rate is a percent
   cessRate: number; // percent
+  // Chapter VI-A: which sections this regime allows a VERIFIED declaration to reduce income by, and the annual
+  // cap per section. `deductionSections` omitted = every declared section counts (an old-regime block);
+  // `[]` = none at all. The new regime lists only the handful that survive it (80CCD(2), 80CCH). A section with
+  // no entry in `sectionCaps` is uncapped, so an org can add one without touching this code.
+  deductionSections?: string[];
+  sectionCaps?: Record<string, number>;
 };
 export type TaxConfig = {
   assessmentYear: string; // e.g. "2026-27"
@@ -48,8 +54,26 @@ export const DEFAULT_TAX_CONFIG: TaxConfig = {
         { over: 20000000, rate: 25 },
       ],
       cessRate: 4,
+      // The new regime disallows Chapter VI-A save for the employer's NPS contribution u/s 80CCD(2) and the
+      // Agniveer Corpus Fund u/s 80CCH, so only those two reduce withholding here.
+      deductionSections: ["80CCD(2)", "80CCH"],
+      sectionCaps: {},
     },
   },
+};
+
+// Sections whose statutory annual cap is fixed enough to seed. Used by any regime that allows Chapter VI-A
+// (an "old" regime block added to the settings row can point `sectionCaps` at these).
+export const COMMON_SECTION_CAPS: Record<string, number> = {
+  "80C": 150000,
+  "80CCC": 150000,
+  "80CCD(1B)": 50000,
+  "80D": 25000,
+  "80DD": 75000,
+  "80DDB": 40000,
+  "80TTA": 10000,
+  "80TTB": 50000,
+  "80U": 75000,
 };
 
 const r0 = (n: number) => Math.round(n);
@@ -111,9 +135,28 @@ export function surcharge(taxAfterRebate: number, taxable: number, cfg: RegimeCo
   return r0(Math.max(0, capped));
 }
 
+// The Chapter VI-A deduction a regime actually allows, from the employee's VERIFIED declarations keyed by
+// section. Sections the regime doesn't list are dropped; the rest are capped by `sectionCaps`. Pure, so the
+// projection, the payroll build and the Tax page all reduce income by exactly the same figure.
+export type DeductionRow = { section: string; declared: number; allowed: number };
+export function allowedDeductions(bySection: Record<string, number>, cfg: RegimeConfig): { total: number; rows: DeductionRow[] } {
+  const rows: DeductionRow[] = [];
+  for (const [section, declared] of Object.entries(bySection)) {
+    const amount = Math.max(0, declared);
+    if (!amount) continue;
+    const permitted = !cfg.deductionSections || cfg.deductionSections.includes(section);
+    const cap = cfg.sectionCaps?.[section];
+    const allowed = !permitted ? 0 : cap != null ? Math.min(amount, cap) : amount;
+    rows.push({ section, declared: amount, allowed: r0(allowed) });
+  }
+  rows.sort((a, b) => a.section.localeCompare(b.section));
+  return { total: r0(rows.reduce((s, r) => s + r.allowed, 0)), rows };
+}
+
 export type TaxBreakdown = {
   grossForYear: number;
   standardDeduction: number;
+  chapterVIA: number; // Chapter VI-A deductions allowed by the regime (0 when none apply)
   taxableIncome: number;
   slabRows: SlabRow[];
   incomeTax: number; // slab tax before rebate
@@ -124,10 +167,13 @@ export type TaxBreakdown = {
   totalTax: number;
 };
 
-// The full annual computation for one regime, mirroring the gov calculator's order.
-export function computeAnnualTax(grossForYear: number, cfg: RegimeConfig): TaxBreakdown {
+// The full annual computation for one regime, mirroring the gov calculator's order. `chapterVIA` is the already
+// regime-filtered, already-capped deduction total (see allowedDeductions) and comes off after the standard
+// deduction, before the slab walk.
+export function computeAnnualTax(grossForYear: number, cfg: RegimeConfig, chapterVIA = 0): TaxBreakdown {
   const gross = Math.max(0, r0(grossForYear));
-  const taxableIncome = Math.max(0, gross - cfg.standardDeduction);
+  const deductions = Math.max(0, r0(chapterVIA));
+  const taxableIncome = Math.max(0, gross - cfg.standardDeduction - deductions);
   const { tax: incomeTax, rows } = slabTax(taxableIncome, cfg);
   const rebate = rebate87A(incomeTax, taxableIncome, cfg);
   const incomeTaxAfterRebate = Math.max(0, incomeTax - rebate);
@@ -136,6 +182,7 @@ export function computeAnnualTax(grossForYear: number, cfg: RegimeConfig): TaxBr
   return {
     grossForYear: gross,
     standardDeduction: cfg.standardDeduction,
+    chapterVIA: deductions,
     taxableIncome,
     slabRows: rows,
     incomeTax,

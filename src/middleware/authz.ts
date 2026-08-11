@@ -15,6 +15,7 @@ import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
 import { ancestorsOf } from "../domain/codes";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
 import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
+import { inScope } from "../domain/keyScope";
 import { accessAudit, mutationAudit } from "../domain/auditAccess";
 import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
 import { audit } from "../lib/audit";
@@ -162,6 +163,23 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       user.audited = false;
       const self = { employeeCode: user.employeeCode };
       const collection = pathname.replace(/^\/v1\//, "").split("/").filter(Boolean)[0] ?? "";
+
+      // ---- API-key ceiling ---------------------------------------------------------------------------
+      // A key's scope has ALREADY narrowed user.grant at auth time, which is what makes every grant-derived
+      // answer below correct (list scopes, search scopes, capability hints). This is the second, independent
+      // gate on the request itself, and it is not redundant: the lanes below merge per-object exception rules
+      // onto the grant at decision time (mergeGrants, further down), and that merge can re-widen past the
+      // ceiling. Checking the resolved request here means no merge can ever escape it.
+      //
+      // Deliberately no exemption for the transports (search, dashboard-summary, activity, batch). A key
+      // scoped to specific collections simply cannot use them; one scoped to "*" can, subject to max_level.
+      // Uniform beats special-cased when the thing being decided is authority.
+      if (user.apiKey) {
+        // Resolved off the raw pathname: the collection token and the level/verb do not depend on the
+        // id -> code substitution that the coded path below performs.
+        const asked = resolveRequest(c.req.method, pathname, url.searchParams.get("force") === "true");
+        if (!inScope(asked, user.apiKey.scope)) throw forbidden("outside api key scope");
+      }
 
       // Global search: `search` is a TRANSPORT, not a resource - it owns no data and widens nothing, like the
       // /v1/batch:run envelope. So the ENVELOPE is allowed for any authenticated caller, and the real gating

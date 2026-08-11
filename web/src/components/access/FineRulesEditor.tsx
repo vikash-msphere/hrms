@@ -1,9 +1,10 @@
 import * as React from "react";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, AlertTriangle, Clock } from "lucide-react";
 import { create, remove } from "@/api";
 import { roleLabel } from "@/lib/roles";
 import { customMethodsFor } from "./customMethods";
 import { type AccessRule, BASE_COLLECTIONS, collectionsForRules, labelOf, scopesForCollection, fetchScopeCapabilities, scopeText, permText } from "./permMatrix";
+import { ruleSentence, ruleFlags } from "./ruleLogic";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,10 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
+
+// A Select item can never carry an empty value (Radix reserves "" for "cleared"), so the "any collection"
+// choice in activity's target picker travels under a sentinel and maps back to "" on the rule.
+const ANY_COLLECTION = "__any__";
 
 type RoleOption = { name: string; label: string };
 type UserOption = { path: string; email: string };
@@ -64,6 +69,7 @@ export function FineRulesEditor({
     level: "read",
     verb: "",
     effect: "allow",
+    expires: "", // optional expiry (temporary access); "" = permanent
   });
   const verbs = customMethodsFor(add.collection);
   // The relevant subject-relative scopes for the selected collection (object-less form -> hasObject=false).
@@ -98,6 +104,7 @@ export function FineRulesEditor({
         scope: add.scope,
         ...(add.field.trim() ? { field: add.field.trim() } : {}),
         ...perm,
+        ...(add.expires && add.effect !== "deny" ? { expire_time: new Date(`${add.expires}T23:59:59`).toISOString() } : {}),
       });
       toast({ title: "Rule added" });
       await reload();
@@ -110,10 +117,42 @@ export function FineRulesEditor({
 
   const columns: Column<AccessRule>[] = [
     ...(multi ? [{ id: "subject", header: "Subject", filter: "select", accessor: (r: AccessRule) => subjLabel(r) } as Column<AccessRule>] : []),
+    // The rule AS A SENTENCE, first and widest: five coded columns (collection/scope/field/permission/effect)
+    // made every row a decoding exercise. The coded columns stay for filtering and sorting.
+    {
+      id: "rule",
+      header: "Rule",
+      filter: "text",
+      accessor: (r) => ruleSentence(r, subjLabel(r)),
+      cell: (r) => {
+        // Dead-rule lint: a rule beaten by a deny, or already covered by a broader one, looks exactly like a
+        // working rule in the table. Flagging it is the difference between "access is configured" and
+        // "access works".
+        const flags = ruleFlags(r, rules);
+        const bad = flags.find((f) => f.kind === "denied" || f.kind === "shadowed");
+        const life = flags.find((f) => f.kind === "pending" || f.kind === "expiring");
+        return (
+          <div className="min-w-64 space-y-0.5">
+            <span className={bad ? "text-muted-foreground line-through decoration-muted-foreground/40" : undefined}>{ruleSentence(r, subjLabel(r))}</span>
+            {bad && (
+              <span className="flex items-start gap-1 text-[11px] text-amber-700 dark:text-amber-400" title={bad.note}>
+                <AlertTriangle className="mt-px h-3 w-3 shrink-0" /> {bad.kind === "denied" ? "no effect - a deny overrides this" : "no effect - already covered by a broader rule"}
+              </span>
+            )}
+            {life && (
+              <span className="flex items-center gap-1 text-[11px] text-muted-foreground" title={life.note}>
+                <Clock className="h-3 w-3 shrink-0" /> {life.note}
+              </span>
+            )}
+          </div>
+        );
+      },
+    },
     { id: "collection", header: "Collection", filter: "select", accessor: (r) => labelOf(r.collection), cell: (r) => <span className="font-medium">{labelOf(r.collection)}</span> },
     { id: "scope", header: "Scope", filter: "select", accessor: (r) => scopeText(r) },
     { id: "field", header: "Field", filter: "select", accessor: (r) => r.field ?? "-" },
     { id: "perm", header: "Permission", filter: "select", accessor: (r) => permText(r), cell: (r) => <Badge variant={r.effect === "deny" ? "destructive" : r.verb ? "default" : "secondary"}>{permText(r)}</Badge> },
+    { id: "state", header: "State", filter: "select", accessor: (r) => (r.status && r.status !== "active" ? "awaiting approval" : r.expire_time ? "temporary" : "live") },
     ...(canWrite
       ? [{ id: "actions", header: "", sortable: false, filter: "none", align: "right", cell: (r: AccessRule) => <Button variant="ghost" size="icon" className="h-8 w-8" disabled={busy} onClick={() => del(r)}><Trash2 className="h-4 w-4" /></Button> } as Column<AccessRule>]
       : []),
@@ -153,7 +192,7 @@ export function FineRulesEditor({
           {add.collection === "activity" ? (
             // Activity's "field" slot is the TARGET collection: empty = all collections' activity, else scope
             // the trail to one collection (compiles to `activity.<scope>.<collection>`).
-            <Picker label="For collection" value={add.field} onChange={(v) => setAdd({ ...add, field: v })} options={[["", "All collections"], ...BASE_COLLECTIONS.filter((c) => c !== "activity").map((c) => [c, labelOf(c)] as [string, string])]} wide />
+            <Picker label="For collection" value={add.field || ANY_COLLECTION} onChange={(v) => setAdd({ ...add, field: v === ANY_COLLECTION ? "" : v })} options={[[ANY_COLLECTION, "All collections"], ...BASE_COLLECTIONS.filter((c) => c !== "activity").map((c) => [c, labelOf(c)] as [string, string])]} wide />
           ) : (
             <div className="w-24">
               <label className="mb-1 block text-xs font-medium">Field</label>
@@ -167,6 +206,14 @@ export function FineRulesEditor({
             <Picker label="Level" value={add.level} onChange={(v) => setAdd({ ...add, level: v })} options={[["read", "read"], ["write", "write"], ["admin", "admin"]]} />
           )}
           <Picker label="Effect" value={add.effect} onChange={(v) => setAdd({ ...add, effect: v })} options={[["allow", "allow"], ["deny", "deny"]]} />
+          {add.effect !== "deny" && (
+            // Temporary access (contractor, cover during leave): the rule revokes itself at the end of that
+            // day instead of relying on someone remembering.
+            <div className="w-36">
+              <label className="mb-1 block text-xs font-medium" title="Leave empty for permanent access.">Expires</label>
+              <Input type="date" className="h-9" value={add.expires} min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)} onChange={(e) => setAdd({ ...add, expires: e.target.value })} />
+            </div>
+          )}
           <Button disabled={busy || (multi && !add.subject) || (add.kind === "verb" && !(add.verb || verbs[0]))} onClick={addRule}><Plus className="h-4 w-4" /> Add</Button>
         </div>
       )}

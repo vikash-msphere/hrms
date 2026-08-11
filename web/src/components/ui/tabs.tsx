@@ -20,7 +20,8 @@ const TabsList = React.forwardRef<
       className={cn(
         variant === "underline"
           ? "no-scrollbar mb-6 flex items-center gap-1 overflow-x-auto border-b text-muted-foreground"
-          : "inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
+          // max-w-full + scroll: a settings panel's tab bar has to survive a narrow inline Sheet and a phone.
+          : "no-scrollbar inline-flex h-9 max-w-full items-center justify-start overflow-x-auto rounded-lg bg-muted p-1 text-muted-foreground",
         className
       )}
       {...props}
@@ -41,7 +42,7 @@ const TabsTrigger = React.forwardRef<
         "inline-flex items-center justify-center gap-1.5 whitespace-nowrap text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
         variant === "underline"
           ? "-mb-px border-b-2 border-transparent px-3 py-2.5 text-muted-foreground hover:border-border hover:text-foreground data-[state=active]:border-primary data-[state=active]:text-foreground"
-          : "rounded-md px-3 py-1 data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
+          : "shrink-0 rounded-md px-3 py-1 data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
         className
       )}
       {...props}

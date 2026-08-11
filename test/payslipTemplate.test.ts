@@ -89,6 +89,9 @@ describe("payslip template validation", () => {
     expect(() => parsePayslipTemplate({ blocks: [{ kind: "attendance", cells: ["overtime"] }] })).toThrow(/cells\[0\] must be one of actual, working, lop, payable/);
     expect(() => parsePayslipTemplate({ blocks: [{ kind: "orgHeader", logoAlign: "middle" }] })).toThrow(/logoAlign must be one of left, right/);
     expect(() => parsePayslipTemplate({ blocks: [{ kind: "netBox", fill: "#ffff" }] })).toThrow(/fill must be a #rrggbb/);
+    expect(() => parsePayslipTemplate({ blocks: [{ kind: "employerCost", showTotals: "yes" }] })).toThrow(/showTotals must be a boolean/);
+    expect(parsePayslipTemplate({ blocks: [{ kind: "employerCost", title: "Employer cost", aboveCtcSuffix: "(outside CTC)", showTotals: false }] }).blocks[0])
+      .toEqual({ kind: "employerCost", title: "Employer cost", aboveCtcSuffix: "(outside CTC)", showTotals: false });
   });
   it("keeps style alongside the block's own properties on the way through", () => {
     const t = parsePayslipTemplate({ blocks: [{ kind: "netBox", label: "Take home", style: { size: 20, color: "#AABBCC" } }] });
@@ -152,6 +155,27 @@ describe("payslip renderer walks the template", () => {
     const without = await renderPayslipPdf(noAtt as PayslipData);
     expect(isPdf(without)).toBe(true);
     expect(without.byteLength).toBeLessThan(withStrip.byteLength); // the strip's drawing ops are gone
+  });
+  // The employer-contribution block is the payslip's side of the CTC-inclusion policy: contributions counted
+  // inside CTC total to Cost to Company; one the org keeps outside it is listed after that total, suffixed, with
+  // an all-in total below. With no contributions on the run the block draws nothing at all.
+  it("draws employer contributions, the CTC total and the all-in total; skips the block when there are none", async () => {
+    const only = { blocks: [{ kind: "employerCost" as const }] };
+    const withEmployer = await renderPayslipPdf({
+      ...DATA,
+      employerLines: [{ name: "Gratuity", amount: 1924 }, { name: "Employer PF", amount: 1800, aboveCtc: true }],
+    }, only);
+    // pdf-lib writes standard-font text as an UPPERCASE hex string, so assert on the hex of each caption.
+    const hexOf = (s: string) => [...s].map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("").toUpperCase();
+    const ops = await drawingOps(withEmployer);
+    expect(ops).toContain(hexOf("Gratuity"));
+    expect(ops).toContain(hexOf("Employer PF (over & above CTC)"));
+    expect(ops).toContain(hexOf("Cost to Company (CTC)"));
+    expect(ops).toContain(hexOf("57,924")); // gross 56000 + in-CTC gratuity 1924
+    expect(ops).toContain(hexOf("Total Company Cost"));
+    expect(ops).toContain(hexOf("59,724")); // + employer PF 1800, which sits outside CTC
+    // No employer contributions on the run -> no block, no totals.
+    expect(await drawingOps(await renderPayslipPdf(DATA, only))).not.toContain(hexOf("Cost to Company"));
   });
   it("applies per-block style without disturbing an unstyled template", async () => {
     const plain = await renderPayslipPdf(DATA);

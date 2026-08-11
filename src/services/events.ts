@@ -17,6 +17,7 @@ export type EventInput = {
   end_time?: string;
   all_day?: boolean;
   count_as_work?: boolean;
+  requires_clock_in?: boolean; // only meaningful with count_as_work: credit only attendees who punched that day
   color?: string | null;
   description?: string | null;
   attendees?: string[] | null; // employee paths/ids (decoded to internal ids by the inbound edge)
@@ -74,6 +75,7 @@ export async function createEvent(deps: Deps, actor: AppUser, input: EventInput,
       endTime: new Date(end),
       allDay,
       countAsWork: !!input.count_as_work,
+      requiresClockIn: !!input.requires_clock_in,
       color: input.color ?? null,
       description: input.description ?? null,
       attendeeIds: attendeesJson(input.attendees),
@@ -97,6 +99,7 @@ export async function updateEvent(deps: Deps, actor: AppUser, id: string, patch:
   if (has("color")) set.color = patch.color ?? null;
   if (has("description")) set.description = patch.description ?? null;
   if (has("count_as_work")) set.countAsWork = !!patch.count_as_work;
+  if (has("requires_clock_in")) set.requiresClockIn = !!patch.requires_clock_in;
   if (has("attendees")) set.attendeeIds = attendeesJson(patch.attendees);
   // all_day may change alongside the times; resolve the effective flag then re-parse any supplied bound.
   const allDay = has("all_day") ? patch.all_day !== false : row.allDay;

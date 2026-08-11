@@ -19,9 +19,10 @@ import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements
 import { computeAndStoreSettlement } from "../src/services/settlements";
 import { createSalaryStructure } from "../src/services/salaryStructures";
 import { reviseCompensation, reapplySplitCurrent, splitStatus } from "../src/services/compensation";
-import { createPayComponent } from "../src/services/payComponents";
+import { createPayComponent, updatePayComponent } from "../src/services/payComponents";
 import { createPayPeriod } from "../src/services/payPeriods";
 import { getTaxDetails, setTaxDetails, listPendingTaxVerifications } from "../src/services/taxDetails";
+import { finalizedTotals, settlementTotals, fyWindow } from "../src/services/taxProjection";
 import { acceptOffer } from "../src/services/ats";
 
 // DB-backed regression tests for the money-handling service logic. Real D1 (miniflare); each test seeds only
@@ -47,9 +48,11 @@ const TABLES = [
   schema.loanRepayments, schema.payrollRunItems, schema.payslips, schema.payrollRuns, schema.payPeriods,
   schema.loans, schema.bonuses, schema.leaveEncashments, schema.leaveBalances, schema.leaveRequests, schema.leaveTypes,
   schema.reimbursements, schema.settlements, schema.compensation, schema.salaryStructures, schema.payComponents,
+  schema.taxDeclarations,
   schema.offers, schema.applications, schema.candidates, schema.jobRequisitions,
   schema.transitions, schema.jobs, schema.notifications, schema.eventLog, schema.automationRuns, schema.workflowInstances,
   schema.users, schema.employees, schema.roles,
+  schema.settings, // org policy blobs (e.g. settings/ctc) - a test that sets one must not leak it into the next
 ];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
@@ -87,13 +90,19 @@ async function seedPeriod(): Promise<string> {
   });
   return uuid;
 }
-async function seedComponent(over: { name: string; kind?: "earning" | "deduction" | "employer_contribution"; method?: string; rate?: number | null }): Promise<string> {
+async function seedComponent(over: { name: string; kind?: "earning" | "deduction" | "employer_contribution"; method?: string; rate?: number | null; cap?: number | null; pfWages?: boolean; regime?: string }): Promise<string> {
   const uuid = genId();
   await deps.db.insert(schema.payComponents).values({
     uuid, code: short("pc"), name: over.name, kind: over.kind ?? "earning",
-    method: (over.method ?? "fixed") as typeof schema.payComponents.$inferInsert.method, rate: over.rate ?? null, recurring: true,
+    method: (over.method ?? "fixed") as typeof schema.payComponents.$inferInsert.method, rate: over.rate ?? null,
+    cap: over.cap ?? null, regime: over.regime ?? null, pfWages: over.pfWages ?? false, recurring: true,
   });
   return uuid;
+}
+
+// Write an org policy blob directly (the beforeEach clears settings, so nothing leaks between tests).
+async function seedSetting(key: string, value: unknown) {
+  await deps.db.insert(schema.settings).values({ key, value: JSON.stringify(value), updatedAt: new Date() }).onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify(value) } });
 }
 
 // Directly seed a compensation row with an explicit effective window.
@@ -214,6 +223,140 @@ describe("payroll: ESI eligibility keys off the FULL monthly wage, not the prora
   });
 });
 
+describe("payroll: employer contributions ride on the item and follow each component's CTC side", () => {
+  // The CTC side is data on the component: in_ctc true = counted inside CTC, false = paid over and above it.
+  const setInCtc = async (name: string, inCtc: boolean) => {
+    await deps.db.update(schema.payComponents).set({ inCtc }).where(eq(schema.payComponents.name, name));
+  };
+  it("costs employer PF/gratuity per employee, leaves gross+net alone, and marks a contribution above CTC when its component says so", async () => {
+    const actor = await seedActor(await seedEmployee());
+    await seedComponent({ name: "Provident Fund", kind: "deduction", method: "epf", rate: 12 }); // employee share
+    await seedComponent({ name: "Employer PF", kind: "employer_contribution", method: "epf", rate: 12 });
+    await seedComponent({ name: "Gratuity", kind: "employer_contribution", method: "percent_base", rate: 4.81 });
+    const emp = await seedEmployee({ code: short("04"), epfEnrolled: true });
+    const optedOut = await seedEmployee({ code: short("04") }); // epfEnrolled defaults false -> no PF either side
+    await seedComp(emp, { basePay: 30000 });
+    await seedComp(optedOut, { basePay: 30000 });
+
+    const itemFor = async (runId: string, id: string) => (await listRunItems(deps, runId)).find((i) => i.employee === `employees/${id}`)!;
+
+    // Default: every contribution counts INSIDE CTC.
+    const inRun = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, inRun.uuid);
+    const inItem = await itemFor(inRun.uuid, emp);
+    expect(inItem.lines.find((l) => l.code === "ER_EPF")).toMatchObject({ name: "Employer PF", kind: "employer_contribution", amount: 3600 });
+    expect(inItem.lines.find((l) => l.code === "ER_EPF")).not.toHaveProperty("above_ctc");
+    expect(inItem.employer_cost).toBe(5043); // 3600 employer PF + 1443 gratuity, all inside CTC
+    expect(inItem.above_ctc_cost).toBe(0);
+    // Cost to company never leaks into the employee's pay: gross = basic, net = basic - the 12% employee share.
+    expect(inItem.gross).toBe(30000);
+    expect(inItem.net).toBe(26400);
+    // Opted out of PF: no employee deduction and no employer share, gratuity still costed.
+    const outItem = await itemFor(inRun.uuid, optedOut);
+    expect(outItem.lines.find((l) => l.code === "ER_EPF")).toBeUndefined();
+    expect(outItem.employer_cost).toBe(1443);
+    expect(outItem.net).toBe(30000);
+
+    // Flip the PF component: it now rides OVER AND ABOVE CTC. Same money, different classification - and
+    // gratuity is untouched, because the choice belongs to the component, not to PF as a policy.
+    await setInCtc("Employer PF", false);
+    const aboveRun = await createRun(deps, actor, `pay-periods/${await seedPeriodRange("Feb 2026", "2026-02-01", "2026-02-28")}`);
+    await buildRunItems(deps, actor, aboveRun.uuid);
+    const aboveItem = await itemFor(aboveRun.uuid, emp);
+    expect(aboveItem.lines.find((l) => l.code === "ER_EPF")).toMatchObject({ amount: 3600, above_ctc: true });
+    expect(aboveItem.employer_cost).toBe(1443); // gratuity only - PF is outside CTC now
+    expect(aboveItem.above_ctc_cost).toBe(3600);
+    expect(aboveItem.gross).toBe(30000); // the employee's own pay is untouched by the policy
+    expect(aboveItem.net).toBe(26400);
+  });
+
+  it("allows one EPF component per side and refuses a second on the same side", async () => {
+    const actor = await seedActor(await seedEmployee());
+    const employee = await createPayComponent(deps, actor, { display_name: "Provident Fund", kind: "deduction", method: "epf", rate: 12, cap: 15000, recurring: true });
+    const employer = await createPayComponent(deps, actor, { display_name: "Employer PF", kind: "employer_contribution", method: "epf", rate: 12, cap: 15000, recurring: true });
+    // Either direction of a side flip names the component in the way, so the refusal is actionable.
+    await expect(updatePayComponent(deps, actor, employer.uuid, { kind: "deduction" }))
+      .rejects.toThrow(/one EPF component may exist per employee side - "Provident Fund" already occupies it/);
+    // A second row on either side would make payroll charge that side twice.
+    await expect(createPayComponent(deps, actor, { display_name: "Employer PF (extra)", kind: "employer_contribution", method: "epf", rate: 12, recurring: true }))
+      .rejects.toThrow(/one EPF component may exist per employer side - "Employer PF" already occupies it/);
+    // Flipping the employee row to the employer side collides with the row already there...
+    await expect(updatePayComponent(deps, actor, employee.uuid, { kind: "employer_contribution" }))
+      .rejects.toThrow(/one EPF component may exist per employer side - "Employer PF" already occupies it/);
+    // ...but is fine once that row is gone (an employer-only PF setup is legitimate).
+    await deps.db.delete(schema.payComponents).where(eq(schema.payComponents.name, "Employer PF"));
+    expect((await updatePayComponent(deps, actor, employee.uuid, { kind: "employer_contribution" })).kind).toBe("employer_contribution");
+  });
+
+  it("solves a freshly saved CTC against the live catalog, so a new split needs no re-apply", async () => {
+    const actor = await seedActor(await seedEmployee());
+    await seedComponent({ name: "House Rent Allowance", kind: "earning", method: "percent_base", rate: 40 });
+    await seedComponent({ name: "Employer PF", kind: "employer_contribution", method: "epf", rate: 12 });
+    await seedComponent({ name: "Gratuity", kind: "employer_contribution", method: "percent_base", rate: 4.81 });
+    const emp = await seedEmployee({ code: short("04"), epfEnrolled: true });
+
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 1_200_000, effective_from: "2026-01-01" });
+    // The stored basic + Special Allowance reconstruct the promised CTC: the in-CTC employer contributions are
+    // INSIDE the target, not riding on top of it. A dry-run re-apply must therefore find nothing stale - if the
+    // save used different rules from the re-apply, this is where that shows up.
+    expect(await splitStatus(deps)).toMatchObject({ stale: 0, skipped: 0 });
+
+    // Flipping the PF component to over-and-above CTC changes the target the split solves for, so the stored
+    // row IS stale until re-applied - and then reconciles again under the new side.
+    await setInCtc("Employer PF", false);
+    expect((await splitStatus(deps)).stale).toBe(1);
+    await reapplySplitCurrent(deps, actor);
+    expect(await splitStatus(deps)).toMatchObject({ stale: 0, skipped: 0 });
+  });
+
+  it("warns on a run that priced a stale split, names the employee, and clears after re-apply + rebuild", async () => {
+    const actor = await seedActor(await seedEmployee());
+    await seedComponent({ name: "Employer PF", kind: "employer_contribution", method: "epf", rate: 12 });
+    const emp = await seedEmployee({ code: short("04"), firstName: "Stale", lastName: "Split", epfEnrolled: true });
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 1_200_000, effective_from: "2026-01-01" });
+
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const staleness = async () => runStaleness(deps, await getRun(deps, run.uuid));
+    // Freshly built off a freshly solved split: nothing to warn about.
+    expect((await staleness()).split_drift).toBeUndefined();
+
+    // Move the PF component outside CTC. The stored split now solves the WRONG target, and - the point of this
+    // guard - the run's own `stale`/`changes` check cannot express that: it only knows an input was touched.
+    await setInCtc("Employer PF", false);
+    const drifted = await staleness();
+    expect(drifted.split_drift).toEqual({ stale: ["Stale Split"], skipped: [] });
+
+    // The documented fix: re-apply the splits, then rebuild. Both are needed - re-applying alone leaves the run's
+    // stored items on the old numbers.
+    await reapplySplitCurrent(deps, actor);
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await staleness()).split_drift).toBeUndefined();
+  });
+
+  it("keeps the employer ESI share in step with the employee's sticky eligibility", async () => {
+    const actor = await seedActor(await seedEmployee());
+    await seedComponent({ name: "ESI", kind: "deduction", method: "esi", rate: 0.75 });
+    await seedComponent({ name: "Employer ESI", kind: "employer_contribution", method: "esi", rate: 3.25 });
+    const sticky = await seedEmployee({ code: short("04") }); // contributed in May, now above the ceiling
+    const fresh = await seedEmployee({ code: short("04") }); // above the ceiling, never contributed
+    await seedComp(sticky, { basePay: 30000 });
+    await seedComp(fresh, { basePay: 30000 });
+
+    const may = await seedPeriodRange("May 2026", "2026-05-01", "2026-05-31");
+    const mayRun = genId();
+    await deps.db.insert(schema.payrollRuns).values({ uuid: mayRun, code: short("pr"), payPeriodId: may, state: "PUBLISHED" });
+    await deps.db.insert(schema.payrollRunItems).values({ uuid: genId(), runId: mayRun, employeeId: sticky, linesJson: JSON.stringify([{ code: "ESI", name: "ESI", kind: "deduction", amount: 150 }]), gross: 20000, totalDeductions: 150, net: 19850 });
+
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriodRange("Jun 2026", "2026-06-01", "2026-06-30")}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const items = await listRunItems(deps, run.uuid);
+    const erEsiOf = (id: string) => items.find((i) => i.employee === `employees/${id}`)!.lines.find((l) => l.code === "ER_ESI");
+    expect(erEsiOf(sticky)?.amount).toBe(975); // ceil(30000 x 3.25%) - eligible because the employee side still is
+    expect(erEsiOf(fresh)).toBeUndefined(); // not in ESI, so no employer share either
+  });
+});
+
 describe("payroll: one committed run per pay period", () => {
   it("blocks approving a second run for a period that already has an APPROVED run", async () => {
     const emp = await seedEmployee();
@@ -249,7 +392,7 @@ describe("payroll: loan recovery is capped so net never goes negative", () => {
     const actor = await seedActor(emp);
     await seedComp(emp, { basePay: 10000 }); // gross 10000, no statutory components
     // A one-installment loan whose EMI (50000) dwarfs the pay.
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 50000, installments: 1 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 50000, installments: 1 });
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
 
@@ -273,7 +416,7 @@ describe("payroll: loan recovery does not garnish a reimbursement payout", () =>
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     await seedComp(emp, { basePay: 5000 }); // small salary
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 50000, installments: 1 }); // EMI 50000
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 50000, installments: 1 }); // EMI 50000
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
     const claim = await createReimbursement(deps, actor, { employee: `employees/${emp}`, amount: 3000 });
@@ -295,7 +438,7 @@ describe("loans: manual repayment double-submit is idempotent", () => {
   it("an identical manual repayment within the window is a no-op", async () => {
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 50000, installments: 10 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 50000, installments: 10 });
     await approveLoan(deps, actor, loan.uuid); // monthly = 5000
     await disburseLoan(deps, actor, loan.uuid);
 
@@ -667,7 +810,7 @@ describe("payroll: a payable that changes mid-build is never paid", () => {
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     await seedComp(emp, { basePay: 40000 });
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 6000, installments: 6 }); // EMI 1000
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 6000, installments: 6 }); // EMI 1000
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
 
@@ -690,7 +833,7 @@ describe("loans: `repaid` is the ledger's running total (relative, never an abso
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     await seedComp(emp, { basePay: 40000 });
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 10000, installments: 10 }); // EMI 1000
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 10000, installments: 10 }); // EMI 1000
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
     const repaidOf = async () => (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!.repaid;
@@ -704,7 +847,7 @@ describe("loans: `repaid` is the ledger's running total (relative, never an abso
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     await seedComp(emp, { basePay: 40000 });
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 10000, installments: 10 }); // EMI 1000
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 10000, installments: 10 }); // EMI 1000
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
     await recordLoanRepayment(deps, actor, loan.uuid, 2500); // manual, run-less
@@ -725,7 +868,7 @@ describe("loans: `repaid` is the ledger's running total (relative, never an abso
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     await seedComp(emp, { basePay: 40000 });
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 1000, installments: 1 }); // EMI 1000 = full
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 1000, installments: 1 }); // EMI 1000 = full
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
     const loanRow = async () => (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!;
@@ -759,7 +902,7 @@ describe("FnF settlement: every open payable is settled at exit", () => {
     await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId: emp, leaveTypeId: lt, balanceDays: 10 });
     const enc = await computeAndStoreEncashment(deps, actor, { employee: `employees/${emp}`, leave_type: `leave-types/${lt}`, days: 4 });
     await approveEncashment(deps, actor, enc.uuid); // balance 10 -> 6, queued for payout
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 12000, installments: 12 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 12000, installments: 12 });
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
 
@@ -788,7 +931,7 @@ describe("FnF settlement: every open payable is settled at exit", () => {
     const lt = genId();
     await deps.db.insert(schema.leaveTypes).values({ uuid: lt, code: short("lt"), name: "Earned", encashable: true, minBalanceRetainedDays: 0 });
     await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId: emp, leaveTypeId: lt, balanceDays: 10 });
-    const loan = await createLoan(deps, actor, { employee: `employees/${emp}`, principal: 3000, installments: 3 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 3000, installments: 3 });
     await approveLoan(deps, actor, loan.uuid);
     await disburseLoan(deps, actor, loan.uuid);
 
@@ -839,5 +982,306 @@ describe("compensation: only one open row per employee", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     const open = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).filter((c) => c.effectiveTo === null);
     expect(open).toHaveLength(1); // never two "current" salaries
+  });
+});
+
+// ---- Statutory + tax bases (money-audit A1/A2/A3/A5) -----------------------------------------------------
+describe("payroll: statutory + tax bases are the wage actually paid", () => {
+  it("nets loss of pay out of gross, the taxable base, PF wages and ESI wages", async () => {
+    const emp = await seedEmployee({ epfEnrolled: true });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 12000 });
+    await seedComponent({ name: "Provident Fund", kind: "deduction", method: "epf", rate: 12, cap: 15000 });
+    await seedComponent({ name: "Employer PF", kind: "employer_contribution", method: "epf", rate: 12, cap: 15000 });
+    await seedComponent({ name: "EDLI Charges", kind: "employer_contribution", method: "edli", rate: 0.5, cap: 15000 });
+    await seedComponent({ name: "PF Admin", kind: "employer_contribution", method: "pf_admin", rate: 0.5, cap: 15000 });
+    await seedComponent({ name: "ESI", kind: "deduction", method: "esi", rate: 0.75, cap: 21000 });
+    await seedComponent({ name: "Professional Tax", kind: "deduction", method: "pt" });
+    await seedSetting("professional-tax", { slabs: [{ up_to: 5000, amount: 0 }, { up_to: null, amount: 200 }] });
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    // A manually keyed loss of pay of 3000 (a quarter of the month).
+    await buildRunItems(deps, actor, run.uuid, { [emp]: [{ code: "LOP", name: "Loss of pay (6d)", kind: "deduction", amount: 3000 }] });
+
+    const item = (await listRunItems(deps, run.uuid))[0]!;
+    const line = (code: string) => item.lines.find((l) => l.code === code);
+    // Docked pay is a NEGATIVE EARNING, so it leaves gross and the taxable base rather than sitting beside them.
+    expect(line("LOP")).toMatchObject({ kind: "earning", amount: -3000 });
+    expect(item.gross).toBe(9000);
+    expect(item.taxable_gross).toBe(9000);
+    // PF on the 9000 of basic actually paid (not 12000), and every PF-family employer line on the same wage.
+    expect(line("EPF")!.amount).toBe(1080);
+    expect(line("ER_EPF")!.amount).toBe(1080);
+    expect(line("ER_EDLI")!.amount).toBe(45);
+    expect(line("ER_PF_ADMIN")!.amount).toBe(45);
+    // ESI on the 9000 paid: ceil(9000 x 0.75%) = 68. PT still keys off the monthly wage BRACKET (12000 -> 200).
+    expect(line("ESI")!.amount).toBe(68);
+    expect(line("PT")!.amount).toBe(200);
+  });
+
+  it("charges ESI on arrears + overtime, and PF only on the basic slice of the arrears", async () => {
+    const emp = await seedEmployee({ epfEnrolled: true });
+    const actor = await seedActor(emp);
+    // A backdated revision left 4000 of arrears, of which 3000 is the rise in basic (PF wages).
+    await seedComp(emp, { basePay: 12000, arrearsAmount: 4000, arrearsBaseAmount: 3000 });
+    await seedComponent({ name: "Provident Fund", kind: "deduction", method: "epf", rate: 12, cap: 20000 });
+    await seedComponent({ name: "ESI", kind: "deduction", method: "esi", rate: 0.75, cap: 21000 });
+
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const item = (await listRunItems(deps, run.uuid))[0]!;
+    const line = (code: string) => item.lines.find((l) => l.code === code);
+    expect(line("ARREARS")!.amount).toBe(4000);
+    // ESI wages = 12000 + 4000 arrears -> ceil(16000 x 0.75%) = 120.
+    expect(line("ESI")!.amount).toBe(120);
+    // PF wages = 12000 + the 3000 basic slice = 15000 -> 1800 (the 1000 non-basic arrears carry no PF).
+    expect(line("EPF")!.amount).toBe(1800);
+  });
+});
+
+// ---- Payout precision (money-audit D1) -------------------------------------------------------------------
+describe("payroll: the net is settled to the precision the money is paid at", () => {
+  it("adds a rounding line so the payslip, the item and the bank file agree", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 12345.67 }); // INR pays in whole rupees
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const item = (await listRunItems(deps, run.uuid))[0]!;
+    expect(item.net).toBe(12346); // exactly what leaves the bank
+    expect(item.lines.find((l) => l.code === "ROUND")).toMatchObject({ kind: "earning", amount: 0.33, taxable: false });
+    expect(item.taxable_gross).toBe(12345.67); // rounding is not income
+  });
+});
+
+// ---- Who is paid (money-audit E1) ------------------------------------------------------------------------
+describe("payroll: pays everyone who has not left", () => {
+  it("includes an on_leave employee and excludes a terminated one", async () => {
+    const onLeave = await seedEmployee({ status: "on_leave", code: short("01") });
+    const left = await seedEmployee({ status: "terminated", code: short("02") });
+    const actor = await seedActor(onLeave);
+    await seedComp(onLeave, { basePay: 20000 });
+    await seedComp(left, { basePay: 20000 });
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const items = await listRunItems(deps, run.uuid);
+    expect(items.map((i) => i.employee)).toEqual([`employees/${onLeave}`]);
+  });
+});
+
+// ---- Loan installments (money-audit E2) ------------------------------------------------------------------
+describe("payroll: an EMI starts on the agreed date and is collected once a month", () => {
+  it("collects nothing before the loan's start date", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 50000 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-03-01", employee: `employees/${emp}`, principal: 12000, installments: 12 });
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+    // January period: recovery only begins in March.
+    const jan = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, jan.uuid);
+    expect((await listRunItems(deps, jan.uuid))[0]!.lines.find((l) => l.code === "LOAN")).toBeUndefined();
+
+    const mar = await createRun(deps, actor, `pay-periods/${await seedPeriodRange("Mar 2026", "2026-03-01", "2026-03-31")}`);
+    await buildRunItems(deps, actor, mar.uuid);
+    expect((await listRunItems(deps, mar.uuid))[0]!.lines.find((l) => l.code === "LOAN")!.amount).toBe(1000);
+  });
+
+  it("does not take a second installment from another run in the same month", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 50000 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 12000, installments: 12 });
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+
+    const first = await createRun(deps, actor, `pay-periods/${await seedPeriodRange("Jan 2026 (1-15)", "2026-01-01", "2026-01-15")}`);
+    await buildRunItems(deps, actor, first.uuid);
+    expect((await listRunItems(deps, first.uuid))[0]!.lines.find((l) => l.code === "LOAN")!.amount).toBe(1000);
+
+    // A second, separate period inside the SAME calendar month: the EMI is monthly, so nothing more is due.
+    const second = await createRun(deps, actor, `pay-periods/${await seedPeriodRange("Jan 2026 (16-31)", "2026-01-16", "2026-01-31")}`);
+    await buildRunItems(deps, actor, second.uuid);
+    expect((await listRunItems(deps, second.uuid))[0]!.lines.find((l) => l.code === "LOAN")).toBeUndefined();
+    // And a rebuild of the FIRST run still collects its own installment (idempotent, not double).
+    await buildRunItems(deps, actor, first.uuid);
+    expect((await listRunItems(deps, first.uuid))[0]!.lines.find((l) => l.code === "LOAN")!.amount).toBe(1000);
+    expect((await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!.repaid).toBe(1000);
+  });
+});
+
+// ---- Loan interest concession (money-audit E4) -----------------------------------------------------------
+describe("payroll: a cheap employer loan is a taxable perquisite", () => {
+  it("lifts the taxable base only - never gross, deductions or net", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 50000 });
+    await seedSetting("loan-perquisite", { enabled: true, sbi_rate_pct: 9, interest_charged_pct: 0, exempt_principal_upto: 20000 });
+    const loan = await createLoan(deps, actor, { start_date: "2026-06-01", employee: `employees/${emp}`, principal: 200000, installments: 20 });
+    await approveLoan(deps, actor, loan.uuid);
+    await disburseLoan(deps, actor, loan.uuid);
+
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const item = (await listRunItems(deps, run.uuid))[0]!;
+    expect(item.lines.find((l) => l.code === "PERQ_LOAN")).toMatchObject({ kind: "perquisite", amount: 1500 }); // 200000 x 9% / 12
+    expect(item.gross).toBe(50000);
+    expect(item.net).toBe(50000);
+    expect(item.taxable_gross).toBe(51500);
+  });
+});
+
+// ---- Full & final settlement (money-audit B1-B5) ---------------------------------------------------------
+async function seedLeaveType(name: string, encashable: boolean): Promise<string> {
+  const uuid = genId();
+  await deps.db.insert(schema.leaveTypes).values({ uuid, code: short("lt"), name, encashable });
+  return uuid;
+}
+async function seedBalance(employeeId: string, leaveTypeId: string, days: number) {
+  await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId, leaveTypeId, balanceDays: days });
+}
+
+describe("FnF: only encashable leave is cashed out (money-audit B2)", () => {
+  it("defaults to the encashable balances and debits only those", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2020-01-01"), endDate: new Date("2026-01-31") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const earned = await seedLeaveType("Earned Leave", true);
+    const sick = await seedLeaveType("Sick Leave", false);
+    await seedBalance(emp, earned, 10);
+    await seedBalance(emp, sick, 5);
+
+    const row = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    expect(row.leaveDays).toBe(10); // not 15 - sick leave is not encashable
+    const balances = await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp));
+    expect(balances.find((b) => b.leaveTypeId === earned)!.balanceDays).toBe(0);
+    expect(balances.find((b) => b.leaveTypeId === sick)!.balanceDays).toBe(5); // untouched
+  });
+});
+
+describe("FnF: exit encashment uses the configured rate (money-audit B3)", () => {
+  it("prices it off the same basis + divisor a mid-employment cashout uses", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2020-01-01"), endDate: new Date("2026-01-31") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    await seedComponent({ name: "House Rent Allowance", method: "percent_base", rate: 40 }); // gross = 42000
+    const earned = await seedLeaveType("Earned Leave", true);
+    await seedBalance(emp, earned, 10);
+    await seedSetting("leave_encashment", { rate_basis: "gross", per_day_divisor: 26 });
+    await seedSetting("gratuity", { enabled: false }); // isolate the encashment line
+
+    const row = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    const lines = JSON.parse(row.linesJson) as { name: string; amount: number }[];
+    expect(lines.find((l) => l.name.startsWith("Leave"))!.amount).toBe(16153.85); // 10 x 42000 / 26
+  });
+});
+
+describe("FnF: gratuity and the final month (money-audit B4, B5)", () => {
+  it("pays statutory gratuity once the qualifying service is served, exempt u/s 10(10)", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2019-01-01"), endDate: new Date("2026-01-31") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 26000 });
+    const row = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    const lines = JSON.parse(row.linesJson) as { name: string; amount: number; taxable?: number }[];
+    const gratuity = lines.find((l) => l.name === "Gratuity")!;
+    expect(gratuity.amount).toBe(105000); // 26000/26 x 15 x 7 completed years
+    expect(gratuity.taxable).toBe(0); // within the s.10(10) exemption
+  });
+
+  it("pays a mid-month joiner only for the days employed", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2026-01-10"), endDate: new Date("2026-01-31") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 31000 });
+    const row = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    const lines = JSON.parse(row.linesJson) as { name: string; amount: number }[];
+    // Jan 10..31 = 22 days of 31, not the whole month.
+    expect(lines.find((l) => l.name.startsWith("Salary"))!.amount).toBe(22000); // 31000 x 22/31
+  });
+});
+
+describe("FnF: the exit payout withholds like a payroll run (money-audit B1)", () => {
+  it("deducts PF, PT and income tax, and records the chargeable base + TDS for Form 16", async () => {
+    const emp = await seedEmployee({ epfEnrolled: true, startDate: new Date("2025-04-01"), endDate: new Date("2026-01-31") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 1500000 }); // a high final month, so tax is unambiguous
+    await seedComponent({ name: "Provident Fund", kind: "deduction", method: "epf", rate: 12, cap: 15000 });
+    await seedComponent({ name: "Professional Tax", kind: "deduction", method: "pt" });
+    await seedComponent({ name: "Income Tax (TDS)", kind: "deduction", method: "income_tax", regime: "new" });
+    await seedSetting("professional-tax", { slabs: [{ up_to: 25000, amount: 0 }, { up_to: null, amount: 200 }] });
+    await seedSetting("gratuity", { enabled: false });
+
+    const row = await computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" });
+    const lines = JSON.parse(row.linesJson) as { name: string; kind: string; amount: number }[];
+    const named = (n: string) => lines.find((l) => l.name === n);
+    expect(named("Provident Fund")).toMatchObject({ kind: "deduction", amount: 1800 }); // 12% of the 15000 ceiling
+    expect(named("Professional Tax")).toMatchObject({ kind: "deduction", amount: 200 });
+    const tds = named("Income tax (TDS)")!;
+    expect(tds.amount).toBeGreaterThan(0);
+    expect(row.tds).toBe(tds.amount);
+    expect(row.taxableEarnings).toBe(1500000);
+    expect(row.net).toBe(1500000 - 1800 - 200 - tds.amount);
+
+    // The same figures are what Form 16 and the year's projection read back for a leaver (no run carries them).
+    const fy = fyWindow(new Date("2026-01-31"));
+    expect(await settlementTotals(deps, fy, emp)).toEqual({ taxableGross: 1500000, tax: tds.amount });
+  });
+});
+
+// ---- Month attribution + declarations (money-audit C1, C2) -----------------------------------------------
+describe("tax: a paid run is keyed by BOTH its pay month and its earning month (money-audit C1)", () => {
+  it("keeps collection months and earned months apart when pay lags earning", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 50000 });
+    // April's salary, paid on 5 May.
+    const apr = genId();
+    await deps.db.insert(schema.payPeriods).values({
+      uuid: apr, code: short("pp"), label: "Apr 2026",
+      periodStart: new Date("2026-04-01"), periodEnd: new Date("2026-04-30"), payDate: new Date("2026-05-05"),
+    });
+    const run = await createRun(deps, actor, `pay-periods/${apr}`);
+    await buildRunItems(deps, actor, run.uuid);
+    await transition(deps, actor, run.uuid, "REVIEW");
+    await transition(deps, actor, run.uuid, "APPROVED");
+
+    const totals = (await finalizedTotals(deps, fyWindow(new Date("2026-05-05")))).get(emp)!;
+    expect([...totals.paidMonths]).toEqual(["2026-05"]); // when the tax was collected
+    expect([...totals.earnedMonths]).toEqual(["2026-04"]); // which month's salary is already priced
+  });
+});
+
+describe("tax: a VERIFIED declaration reduces withholding (money-audit C2)", () => {
+  it("cuts the monthly TDS by the allowed Chapter VI-A deduction", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2025-04-01") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 200000 });
+    await seedComponent({ name: "Income Tax (TDS)", kind: "deduction", method: "income_tax", regime: "new" });
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const before = (await listRunItems(deps, run.uuid))[0]!.tax;
+    expect(before).toBeGreaterThan(0);
+
+    const fy = fyWindow(new Date("2026-01-31")).financialYear;
+    const declare = async (section: string, amount: number, status: "VERIFIED" | "DECLARED") => {
+      await deps.db.insert(schema.taxDeclarations).values({
+        uuid: genId(), code: short("td"), employeeId: emp, financialYear: fy, section,
+        declaredAmount: amount, verifiedAmount: status === "VERIFIED" ? amount : null, status,
+      });
+      await buildRunItems(deps, actor, run.uuid);
+      return (await listRunItems(deps, run.uuid))[0]!.tax;
+    };
+
+    // 80C is disallowed under the new regime, so a verified 80C moves nothing.
+    expect(await declare("80C", 150000, "VERIFIED")).toBe(before);
+    // A merely DECLARED (unverified) 80CCD(2) must not move withholding either - verification is the gate.
+    expect(await declare("80CCD(2)", 50000, "DECLARED")).toBe(before);
+    // Verified 80CCD(2) (the employer's NPS contribution) survives the new regime and cuts the tax.
+    expect(await declare("80CCD(2)", 100000, "VERIFIED")).toBeLessThan(before);
   });
 });

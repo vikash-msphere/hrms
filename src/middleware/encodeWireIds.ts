@@ -9,6 +9,7 @@ import type { IdCodec } from "../lib/idCodec";
 
 // Collections whose item path is an internal id (key-based settings/preferences are excluded).
 export const ENCODABLE = new Set<string>([
+  "api-keys",
   "employees", "departments", "users", "holidays", "holiday-selections", "leave-types",
   "leave-requests", "leave-balances", "org-documents", "personal-documents", "announcements", "pay-components", "pay-periods",
   "payroll-runs", "payslips", "compensation", "positions", "bonuses", "assets", "settlements", "leave-encashments", "operations", "reimbursements", "reimbursement-categories",

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction } from "../src/domain/attendance";
+import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, type WorkEvent } from "../src/domain/attendance";
 
 const WORK = [1, 2, 3, 4, 5]; // Mon-Fri
 const FULL = 480; // minutes for a full day
@@ -81,5 +81,96 @@ describe("attendance LOP (loss of pay) derivation", () => {
     expect(lopAmount(0, 5, "working_days", 20)).toBe(0);
     // rounds to paise.
     expect(lopAmount(10000, 1, "working_days", 21)).toBe(476.19);
+  });
+});
+
+describe("attendance.eventCreditByDay", () => {
+  const ms = (iso: string) => Date.parse(iso);
+  const base = {
+    tz: "Asia/Kolkata",
+    workDays: [1, 2, 3, 4, 5],
+    fullDayMinutes: 480,
+    todayYmd: "2026-06-10",
+    nowMs: ms("2026-06-10T00:00:00.000Z"),
+    punchedDays: new Set<string>(),
+    onLeave: () => false,
+  };
+  // All-day events are date-anchored at UTC midnight, exactly as the events service stores them.
+  const allDay = (ymd: string, requiresClockIn = false): WorkEvent => ({
+    startMs: ms(`${ymd}T00:00:00.000Z`),
+    endMs: ms(`${ymd}T00:00:00.000Z`),
+    allDay: true,
+    requiresClockIn,
+  });
+
+  it("credits a full day for an all-day off-site, with no punch needed", () => {
+    const credit = eventCreditByDay({ ...base, events: [allDay("2026-06-01")] });
+    expect(credit.get("2026-06-01")).toBe(480);
+  });
+
+  it("credits nothing when the event requires a clock-in the employee never made", () => {
+    const credit = eventCreditByDay({ ...base, events: [allDay("2026-06-01", true)] });
+    expect(credit.size).toBe(0);
+  });
+
+  it("credits a requires-clock-in event only on the days actually punched", () => {
+    const credit = eventCreditByDay({
+      ...base,
+      events: [allDay("2026-06-01", true), allDay("2026-06-02", true)],
+      punchedDays: new Set(["2026-06-01"]),
+    });
+    expect(credit.get("2026-06-01")).toBe(480);
+    expect(credit.has("2026-06-02")).toBe(false);
+  });
+
+  it("credits a timed event its own duration only, not a whole day", () => {
+    // 10:00-13:00 IST on the 2nd = 3h. IST is UTC+5:30, so 04:30Z-07:30Z.
+    const credit = eventCreditByDay({
+      ...base,
+      events: [{ startMs: ms("2026-06-02T04:30:00.000Z"), endMs: ms("2026-06-02T07:30:00.000Z"), allDay: false, requiresClockIn: false }],
+    });
+    expect(credit.get("2026-06-02")).toBe(180);
+  });
+
+  it("withholds credit until a timed event has ended", () => {
+    const credit = eventCreditByDay({
+      ...base,
+      nowMs: ms("2026-06-02T06:00:00.000Z"), // mid-event
+      events: [{ startMs: ms("2026-06-02T04:30:00.000Z"), endMs: ms("2026-06-02T07:30:00.000Z"), allDay: false, requiresClockIn: false }],
+    });
+    expect(credit.size).toBe(0);
+  });
+
+  it("skips non-working days and on-leave days", () => {
+    expect(eventCreditByDay({ ...base, events: [allDay("2026-06-06")] }).size).toBe(0); // Saturday
+    expect(eventCreditByDay({ ...base, events: [allDay("2026-06-01")], onLeave: () => true }).size).toBe(0);
+  });
+
+  it("withholds all-day credit until the day has fully ended", () => {
+    expect(eventCreditByDay({ ...base, todayYmd: "2026-06-01", events: [allDay("2026-06-01")] }).size).toBe(0);
+  });
+
+  it("clears the LOP an off-site day would otherwise incur, while a short event still falls short", () => {
+    const lopBase = {
+      startYmd: "2026-06-01",
+      endYmd: "2026-06-01",
+      workDays: [1, 2, 3, 4, 5],
+      holidays: new Set<string>(),
+      leaveRanges: [],
+      fullDayMinutes: 480,
+      halfDayMinutes: 240,
+    };
+    // No punch, no event: a full day of loss of pay.
+    expect(lopDayUnits({ ...lopBase, workedByDay: new Map() })).toBe(1);
+    // The all-day off-site credit is merged into workedByDay by the payroll build, clearing the absence.
+    const credited = eventCreditByDay({ ...base, events: [allDay("2026-06-01")] });
+    expect(lopDayUnits({ ...lopBase, workedByDay: credited })).toBe(0);
+    // A 3h event credits 3h only, which is under the half-day minimum, so the day is still a full absence.
+    const short = eventCreditByDay({
+      ...base,
+      events: [{ startMs: ms("2026-06-01T04:30:00.000Z"), endMs: ms("2026-06-01T07:30:00.000Z"), allDay: false, requiresClockIn: false }],
+    });
+    expect(short.get("2026-06-01")).toBe(180);
+    expect(lopDayUnits({ ...lopBase, workedByDay: short })).toBe(1);
   });
 });

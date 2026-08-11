@@ -28,7 +28,13 @@ export type LetterDefaults = {
 // from every section is disabled org-wide. `order` is the legacy flat shape, still read for migration. Per-user
 // capability gating still applies on top, so an enabled action a person can't perform won't show. See
 // lib/quickActions.ts (normalizeQuickMenu / resolveQuickMenu).
-export type OrgSettings = { name: string; legal_name?: string; logo?: string; favicon?: string; logo_text?: string; name_font?: string; name_weight?: string; name_size?: string; address?: string; incorporation_date?: string; currencies?: string[]; default_currency?: string; currency_decimals?: Record<string, number>; default_department?: string | null; banks?: string[]; letter_defaults?: LetterDefaults; quick_actions?: { groups?: { id: string; label: string; items: string[] }[]; order?: string[] }; primary_color?: string; email_logo_url?: string };
+// `logo_dark` is the optional dark-theme variant of `logo`. Both are data URLs rendered in an <img>, and an
+// <img>-embedded SVG cannot see the app's `.dark` class (nor can `prefers-color-scheme` inside it, which
+// follows the OS, not the in-app theme) - so the swap happens in React, at the call site. Unset = use `logo`.
+// `wordmark`/`wordmark_dark` are the wide logo-plus-name artwork. When set, the sidebar renders it across its
+// full width INSTEAD of the square `logo` + the name text (name_font/weight/size then style nothing). The
+// collapsed icon rail still shows `logo`, since a wordmark can't fit it.
+export type OrgSettings = { name: string; legal_name?: string; logo?: string; logo_dark?: string; wordmark?: string; wordmark_dark?: string; favicon?: string; logo_text?: string; name_font?: string; name_weight?: string; name_size?: string; address?: string; incorporation_date?: string; currencies?: string[]; default_currency?: string; currency_decimals?: Record<string, number>; default_department?: string | null; banks?: string[]; letter_defaults?: LetterDefaults; quick_actions?: { groups?: { id: string; label: string; items: string[] }[]; order?: string[] }; primary_color?: string; email_logo_url?: string };
 
 // The wordmark's typeface list lives in lib/fonts.ts, shared with the typeface control on a board post; it is
 // re-exported here so the settings/sidebar call sites keep importing it from the module they always have.

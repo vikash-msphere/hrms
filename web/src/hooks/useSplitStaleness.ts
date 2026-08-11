@@ -19,7 +19,10 @@ const ZERO: SplitStatus = { stale: 0, unchanged: 0, skipped: 0 };
 //   skipped - the change pushed committed cost PAST the employee's fixed CTC, so no split fits. Re-apply can't
 //             fix these - HR must raise the CTC or trim components. Surfaced as a distinct warning.
 // Only reapply-capable callers (payroll/super) can read/act on it - anyone else gets an advisory toast.
-export function useSplitStaleness() {
+// `auto` (default true) does the status dry-run on mount, for callers that RENDER the banner. Callers that only
+// want to prompt after a change pass false: the dry-run re-solves every current compensation row, so mounting it
+// on a page that never shows the count would just spend queries (two hooks on one profile = two of them).
+export function useSplitStaleness({ auto = true }: { auto?: boolean } = {}) {
   const canReapply = usePermission("compensation.reapplySplit");
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -38,7 +41,7 @@ export function useSplitStaleness() {
     } catch { /* advisory only - never block the page */ }
   }, [canReapply, dryRun]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => { if (auto) refresh(); }, [auto, refresh]);
 
   const reapply = useCallback(async () => {
     setReapplying(true);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeRunItem, canTransition, isEditable, overtimePay, wholeMonthsBetween, ctcLines, splitCtc, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG } from "../src/domain/payroll";
+import { computeRunItem, canTransition, isEditable, overtimePay, wholeMonthsBetween, ctcLines, splitCtc, employerCostLines, pfWagesOf, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG } from "../src/domain/payroll";
 import { monthlyRecurringGross } from "../src/services/taxProjection";
 import { grantFor } from "../src/domain/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
@@ -33,32 +33,33 @@ describe("CTC breakdown (ctcLines, pure)", () => {
   const erPf = { kind: "employer_contribution" as const, method: "epf", name: "Employer PF", rate: 12, cap: 15000, recurring: true };
 
   it("adds a gratuity employer contribution on top of basic; EPF opted out", () => {
-    const { lines, ctcMonthly } = ctcLines(50000, [gratuity], false, DEFAULT_CTC_CONFIG);
+    const { lines, ctcMonthly } = ctcLines(50000, [gratuity], false);
     // 50000 basic + 4.81% gratuity = 52405
     expect(ctcMonthly).toBe(52405);
     expect(lines.map((l) => l.name)).toEqual(["Basic", "Gratuity"]);
   });
   it("adds the Special Allowance plug as a gross earning; ctcMonthly is the sum of all lines", () => {
-    const { lines, ctcMonthly } = ctcLines(50000, [gratuity], false, DEFAULT_CTC_CONFIG, 30000);
+    const { lines, ctcMonthly } = ctcLines(50000, [gratuity], false, 30000);
     expect(lines.find((l) => l.name === "Special Allowance")?.monthly).toBe(30000);
     expect(ctcMonthly).toBe(82405); // 50000 + 30000 + 2405 gratuity
     expect(lines.reduce((s, l) => s + l.monthly, 0)).toBe(ctcMonthly);
   });
   it("has no employer-contribution lines when none are configured (CTC == gross)", () => {
-    const { ctcMonthly, lines } = ctcLines(50000, [], false, DEFAULT_CTC_CONFIG);
+    const { ctcMonthly, lines } = ctcLines(50000, [], false);
     expect(ctcMonthly).toBe(50000);
     expect(lines.map((l) => l.name)).toEqual(["Basic"]);
   });
   it("gates an employer-PF (method epf) contribution on the employee's EPF enrolment", () => {
-    expect(ctcLines(50000, [erPf], false, DEFAULT_CTC_CONFIG).ctcMonthly).toBe(50000); // opted out: no PF
+    expect(ctcLines(50000, [erPf], false).ctcMonthly).toBe(50000); // opted out: no PF
     // Enrolled: 12% of basic capped at 15000 = 1800 on top.
-    const { lines, ctcMonthly } = ctcLines(50000, [erPf], true, DEFAULT_CTC_CONFIG);
+    const { lines, ctcMonthly } = ctcLines(50000, [erPf], true);
     expect(ctcMonthly).toBe(51800);
     expect(lines.find((l) => l.name === "Employer PF")?.monthly).toBe(1800);
   });
-  it("excludes employer PF from the CTC total when employer_pf_in_ctc is off (CTC + PF)", () => {
-    const cfg = { ...DEFAULT_CTC_CONFIG, employer_pf_in_ctc: false };
-    const { lines, ctcMonthly } = ctcLines(50000, [gratuity, erPf], true, cfg);
+  it("excludes a contribution marked over-and-above-CTC from the CTC total (CTC + PF)", () => {
+    // The CTC side is per component (`inCtc`), so any contribution - PF here, ESI or gratuity just as well -
+    // can be paid over and above CTC without touching the others.
+    const { lines, ctcMonthly } = ctcLines(50000, [gratuity, { ...erPf, inCtc: false }], true);
     // Gratuity stays IN CTC (50000 + 2405); PF (1800) rides over and above, marked aboveCtc, out of the total.
     expect(ctcMonthly).toBe(52405);
     const pf = lines.find((l) => l.name === "Employer PF");
@@ -66,12 +67,36 @@ describe("CTC breakdown (ctcLines, pure)", () => {
     expect(pf?.aboveCtc).toBe(true);
     expect(lines.find((l) => l.name === "Gratuity")?.aboveCtc).toBeUndefined();
   });
-  it("top-down split with PF off solves the rest of CTC and lets PF ride on top", () => {
+  // employerCostLines is what the payroll run, the payslip and ctcLines itself all price the employer's cost
+  // with, so the CTC-inclusion verdict is decided once. These pin the contract the run relies on.
+  it("employerCostLines codes each contribution, prices it, and carries the CTC verdict", () => {
+    const erEsi = { kind: "employer_contribution" as const, method: "esi", name: "Employer ESI", rate: 3.25, cap: 21000, recurring: true };
+    const inCtc = employerCostLines(50000, 60000, [gratuity, erPf, erEsi], true);
+    // Gratuity + PF only: gross 60000 is over the ESI ceiling, so no employer ESI.
+    expect(inCtc).toEqual([
+      { code: "ER_GRATUITY", name: "Gratuity", monthly: 2405, aboveCtc: false },
+      { code: "ER_EPF", name: "Employer PF", monthly: 1800, aboveCtc: false },
+    ]);
+    // Each component decides its own side: here PF rides above CTC while gratuity stays inside it, and vice
+    // versa - the flag is data on the row, not a policy about PF.
+    expect(employerCostLines(50000, 60000, [gratuity, { ...erPf, inCtc: false }], true).map((l) => [l.code, l.aboveCtc]))
+      .toEqual([["ER_GRATUITY", false], ["ER_EPF", true]]);
+    expect(employerCostLines(50000, 60000, [{ ...gratuity, inCtc: false }, erPf], true).map((l) => [l.code, l.aboveCtc]))
+      .toEqual([["ER_GRATUITY", true], ["ER_EPF", false]]);
+    // Employer ESI can sit over and above CTC too (nothing is PF-specific).
+    expect(employerCostLines(20000, 20000, [{ ...erEsi, inCtc: false }], true).map((l) => [l.code, l.aboveCtc])).toEqual([["ER_ESI", true]]);
+    // PF is opt-in per employee, exactly as on the employee side.
+    expect(employerCostLines(50000, 60000, [erPf], false)).toEqual([]);
+    // An explicit ESI verdict (payroll's sticky eligibility) overrides the plain ceiling test.
+    expect(employerCostLines(20000, 24000, [erEsi], true, true)[0]).toEqual({ code: "ER_ESI", name: "Employer ESI", monthly: 780, aboveCtc: false });
+    expect(employerCostLines(20000, 20000, [erEsi], true, false)).toEqual([]);
+  });
+  it("top-down split with an over-and-above-CTC contribution solves the rest and lets it ride on top", () => {
     const target = 100000;
-    const cfg = { ...DEFAULT_CTC_CONFIG, employer_pf_in_ctc: false };
-    const split = splitCtc(target, [erPf], true, cfg);
+    const pfAbove = { ...erPf, inCtc: false };
+    const split = splitCtc(target, [pfAbove], true, DEFAULT_CTC_CONFIG);
     // The split's CTC (PF excluded) lands on the target; PF then sits above it.
-    const { ctcMonthly } = ctcLines(split!.basePay, [erPf], true, cfg, split!.specialAllowance);
+    const { ctcMonthly } = ctcLines(split!.basePay, [pfAbove], true, split!.specialAllowance);
     expect(Math.abs(ctcMonthly - target)).toBeLessThan(1);
   });
 });
@@ -84,7 +109,7 @@ describe("top-down CTC split (splitCtc, pure)", () => {
     expect(split).not.toBeNull();
     expect(split!.basePay).toBe(50000); // 50% of the monthly CTC
     // Feeding the split back through ctcLines lands on the target (within a rupee).
-    const back = ctcLines(split!.basePay, [gratuity], false, DEFAULT_CTC_CONFIG, split!.specialAllowance).ctcMonthly;
+    const back = ctcLines(split!.basePay, [gratuity], false, split!.specialAllowance).ctcMonthly;
     expect(Math.abs(back - target)).toBeLessThanOrEqual(0.5);
   });
   it("returns null when even a zero plug already overshoots (basic_pct too high to fit)", () => {
@@ -150,5 +175,62 @@ describe("payroll run delete authz (the PUBLISHED guard is a service preconditio
   it("payroll_admin + super may delete; employee + manager may not", () => {
     for (const role of ["payroll_admin", "super_admin"]) expect(canDelete(role)).toBe(true);
     for (const role of ["employee", "manager"]) expect(canDelete(role)).toBe(false);
+  });
+});
+
+// PF wages: what EPF, EDLI and the administration charge are all priced on.
+describe("PF wages + the employer's PF side-charges (pure)", () => {
+  const hra = { kind: "earning" as const, method: "percent_base", name: "HRA", rate: 40, cap: null, recurring: true };
+  const conveyance = { kind: "earning" as const, method: "fixed", name: "Conveyance", rate: 1600, cap: null, recurring: true, pfWages: true };
+  const erPf = { kind: "employer_contribution" as const, method: "epf", name: "Employer PF", rate: 12, cap: 15000, recurring: true };
+  const edli = { kind: "employer_contribution" as const, method: "edli", name: "EDLI", rate: 0.5, cap: 15000, recurring: true };
+  const admin = { kind: "employer_contribution" as const, method: "pf_admin", name: "PF admin", rate: 0.5, cap: 15000, recurring: true };
+
+  it("defaults to basic alone", () => {
+    expect(pfWagesOf(20000, 5000, [hra, conveyance])).toBe(20000);
+  });
+  it("under basic_plus adds the Special Allowance plug + only the FLAGGED allowances (never HRA)", () => {
+    expect(pfWagesOf(20000, 5000, [hra, conveyance], "basic_plus")).toBe(26600); // 20000 + 5000 + 1600
+  });
+
+  it("prices EDLI + administration charges on PF wages, capped at the same ceiling", () => {
+    // PF wages 12000 (under the 15000 ceiling): 12% / 0.5% / 0.5% of 12000.
+    expect(employerCostLines(12000, 20000, [erPf, edli, admin], true, undefined, 12000).map((l) => [l.code, l.monthly]))
+      .toEqual([["ER_EPF", 1440], ["ER_EDLI", 60], ["ER_PF_ADMIN", 60]]);
+    // Above the ceiling everything sits on 15000.
+    expect(employerCostLines(50000, 80000, [erPf, edli, admin], true, undefined, 50000).map((l) => [l.code, l.monthly]))
+      .toEqual([["ER_EPF", 1800], ["ER_EDLI", 75], ["ER_PF_ADMIN", 75]]);
+  });
+
+  it("skips the whole PF family for an employee who is not a member", () => {
+    expect(employerCostLines(20000, 20000, [erPf, edli, admin], false)).toEqual([]);
+  });
+
+  it("counts the charges in the CTC build-up (they are real employer cost)", () => {
+    // Basic 20000 is over the 15000 ceiling, so all three sit on 15000: 1800 + 75 + 75.
+    const { ctcMonthly } = ctcLines(20000, [erPf, edli, admin], true);
+    expect(ctcMonthly).toBe(20000 + 1800 + 75 + 75);
+  });
+});
+
+// A perquisite is taxable value the employee never receives: it lifts the taxable gross and nothing else.
+describe("computeRunItem: perquisite + negative-earning loss of pay", () => {
+  it("adds perquisite value to taxable gross only", () => {
+    const t = computeRunItem([
+      { code: "BASIC", name: "Basic", kind: "earning", amount: 50000 },
+      { code: "PERQ_LOAN", name: "Loan interest concession", kind: "perquisite", amount: 1200 },
+    ]);
+    expect(t.gross).toBe(50000);
+    expect(t.taxableGross).toBe(51200);
+    expect(t.net).toBe(50000);
+  });
+  it("takes loss of pay out of gross AND the taxable base", () => {
+    const t = computeRunItem([
+      { code: "BASIC", name: "Basic", kind: "earning", amount: 50000 },
+      { code: "LOP", name: "Loss of pay (3d)", kind: "earning", amount: -5000 },
+    ]);
+    expect(t.gross).toBe(45000);
+    expect(t.taxableGross).toBe(45000);
+    expect(t.net).toBe(45000);
   });
 });

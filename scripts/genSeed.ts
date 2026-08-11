@@ -116,8 +116,11 @@ emit("INSERT INTO departments (uuid,code,name,manager_ids,created_at,updated_at)
 emit(DEPTS.map((d) => ` (${q(d.uuid)},${q(d.code)},${q(d.name)},${deptHead[d.code] ? q(JSON.stringify([deptHead[d.code]])) : "NULL"},${T0},${T0})`).join(",\n") + ";");
 
 // employees
-emit("INSERT INTO employees (uuid,code,first_name,last_name,work_email,job_title,department_id,manager_id,start_date,status,created_at,updated_at) VALUES");
-emit(employees.map((e) => ` (${q(e.uuid)},${q(e.code)},${q(e.first)},${q(e.last)},${q(e.email)},${q(e.title)},${q(e.deptUuid)},${e.managerUuid ? q(e.managerUuid) : "NULL"},${e.start},'active',${T0},${T0})`).join(",\n") + ";");
+// epf_enrolled = 1 for everyone: the compensation split below RESERVES the employer PF share inside each CTC,
+// so PF has to actually apply or every seeded split under-reconciles by that amount (and the CTC build-up on the
+// profile reads as if PF sat outside the promised CTC).
+emit("INSERT INTO employees (uuid,code,first_name,last_name,work_email,job_title,department_id,manager_id,start_date,status,epf_enrolled,created_at,updated_at) VALUES");
+emit(employees.map((e) => ` (${q(e.uuid)},${q(e.code)},${q(e.first)},${q(e.last)},${q(e.email)},${q(e.title)},${q(e.deptUuid)},${e.managerUuid ? q(e.managerUuid) : "NULL"},${e.start},'active',1,${T0},${T0})`).join(",\n") + ";");
 
 // roles + access_rules + policy + users (fixed)
 emit(`INSERT INTO roles (name,label,protected,created_at,updated_at) VALUES

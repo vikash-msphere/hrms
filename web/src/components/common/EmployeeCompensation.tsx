@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { get, create } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { formatMoney, cn, idOf } from "@/lib/utils";
+import { formatMoney, cn, idOf, round2 as r2 } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Compensation, PayComponent, PayGrade, SalaryStructure, Bonus } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,6 +14,7 @@ import { Field } from "@/components/common/Field";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 
 const BAND_LABEL: Record<NonNullable<Compensation["band_status"]>, string> = { below: "Below band", in_band: "In band", above: "Above band" };
 const BAND_VARIANT: Record<NonNullable<Compensation["band_status"]>, "secondary" | "success" | "warning"> = { below: "warning", in_band: "success", above: "warning" };
@@ -29,20 +30,29 @@ function BandBadge({ row }: { row: Compensation }) {
 }
 
 const todayYmd = () => new Date().toISOString().slice(0, 10);
-const r2 = (n: number) => Math.round(n * 100) / 100;
 // Monthly value of a recurring earning component against a given base (mirrors the server's payroll/ctc math).
 const monthlyOf = (c: PayComponent, basic: number) =>
   c.method === "fixed" ? c.rate ?? 0 : c.method === "percent_base" ? basic * ((c.rate ?? 0) / 100) : 0;
 
 // Monthly value of any component dispatched purely by method, matching the server domain/payroll componentMonthly:
-// percent_base/epf sit on basic (epf capped at its ceiling), esi on gross while within the ceiling (rounded up
-// per ESIC), fixed a flat amount. Used for the employer-contribution CTC build-up so nothing is hardcoded.
-const ctcCompMonthly = (c: PayComponent, basic: number, gross: number) =>
+// percent_base sits on basic, the PF family (epf + the employer's EDLI / administration charges) on PF wages
+// capped at the ceiling, esi on gross while within the ceiling (rounded up per ESIC), fixed a flat amount. Used
+// for the employer-contribution CTC build-up so nothing is hardcoded.
+const ctcCompMonthly = (c: PayComponent, basic: number, gross: number, pfWages = basic) =>
   c.method === "fixed" ? c.rate ?? 0
     : c.method === "percent_base" ? basic * ((c.rate ?? 0) / 100)
-    : c.method === "epf" ? Math.min(basic, c.cap ?? Infinity) * ((c.rate ?? 12) / 100)
+    : c.method === "epf" ? Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 12) / 100)
+    : c.method === "edli" || c.method === "pf_admin" ? Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 0.5) / 100)
     : c.method === "esi" ? (gross <= 0 || gross > (c.cap ?? 21000) ? 0 : Math.ceil(gross * ((c.rate ?? 0) / 100)))
     : 0;
+
+// The PF family: all three are opt-in on the employee's PF membership and priced on PF wages.
+const PF_METHODS = ["epf", "edli", "pf_admin"];
+
+// PF wages, mirroring the server pfWagesOf: basic only under the default basis, or basic + the Special Allowance
+// plug + every earning HR flagged `pf_wages` under "basic_plus" (settings/ctc pf_wage_basis).
+const pfWagesOf = (basic: number, special: number, earningComps: PayComponent[], basis: string) =>
+  basis !== "basic_plus" ? r2(basic) : r2(basic + special + earningComps.filter((c) => c.pf_wages).reduce((s, c) => s + monthlyOf(c, basic), 0));
 
 // Salary history + a salary/CTC breakdown (earnings, deductions incl. EPF, employer PF, net & CTC), and a
 // "Revise / give increment" action. Payroll/super only (gated by the caller). `epfEnrolled` comes from the
@@ -55,6 +65,9 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   const { rows: payComponents } = useCollection<PayComponent>("pay-components");
   const { rows: payGrades } = useCollection<PayGrade>("pay-grades");
   const { rows: structures } = useCollection<SalaryStructure>("salary-structures");
+  // Re-apply machinery (payroll/super only) so the stale-split warning below can be acted on from here, rather
+  // than only from the Pay components / CTC provisions panels where the change was originally made.
+  const { canReapply, reapplying, reapply: doReapply } = useSplitStaleness({ auto: false });
   const [rows, setRows] = useState<Compensation[]>([]);
   const [bonuses, setBonuses] = useState<Bonus[]>([]);
   // Projected monthly TDS from the tax endpoint (best-effort; absent grant / not configured = null) so the
@@ -68,8 +81,9 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   const [unit, setUnit] = useState<"monthly" | "annual">("monthly");
   const mult = unit === "annual" ? 12 : 1;
   // The top-down split ratio: basic = basic_pct% of monthly CTC. The employer contributions that lift gross to
-  // CTC are data (employer_contribution pay components), not config - nothing about gratuity/PF/ESI here.
-  const [ctcCfg, setCtcCfg] = useState({ basic_pct: 50, employer_pf_in_ctc: true });
+  // CTC are data (employer_contribution pay components), not config - including which side of CTC each sits on
+  // (their own `in_ctc`), so nothing about gratuity/PF/ESI is configured or hardcoded here.
+  const [ctcCfg, setCtcCfg] = useState<{ basic_pct: number; pf_wage_basis?: string }>({ basic_pct: 50, pf_wage_basis: "basic" });
   useEffect(() => {
     get<{ value?: Partial<typeof ctcCfg> }>("settings/ctc").then((s) => { if (s.value) setCtcCfg((p) => ({ ...p, ...s.value })); }).catch(() => {});
   }, []);
@@ -96,7 +110,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
 
   // Derived salary breakdown, per the standard Indian structure: the stored base pay is the contractual
   // BASIC. Gross = basic + earning components; employee EPF (on basic) and other deductions come out of gross
-  // for take-home; the employer's matching PF sits ON TOP of gross (CTC only, never on the payslip).
+  // for take-home; the employer's matching PF sits ON TOP of gross (cost to company, never withheld from pay).
   // Mirrors the server's payroll + CTC-letter math.
   // Earnings honour the employee's assigned salary structure (if any): only its components apply, each at the
   // structure's rate override when set. Shared by the breakdown and the top-down (CTC-in) split preview, so
@@ -125,10 +139,12 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
       .map((c) => ({ name: c.display_name, amount: r2(monthlyOf(c, basic)) }))
       .filter((l) => l.amount > 0);
     const epf = pcs.find((c) => c.method === "epf" && c.kind === "deduction");
-    const enrolled = !!epf && epfEnrolled;
-    // Employee EPF share = rate% of basic up to the wage ceiling (a payslip deduction). Employer provisions
-    // (matching PF, ESI, gratuity) are the CTC build-up itemised below.
-    const epfShare = enrolled && epf ? r2(Math.min(basic, epf.cap ?? Infinity) * ((epf.rate ?? 12) / 100)) : 0;
+    const enrolled = !!epf && epfEnrolled; // the employee-side PF DEDUCTION applies (needs that component)
+    // PF wages per the org's configured basis (basic, or basic + the flagged allowances).
+    const pfWages = pfWagesOf(basic, special, earningComps, ctcCfg.pf_wage_basis ?? "basic");
+    // Employee EPF share = rate% of PF wages up to the wage ceiling (a payslip deduction). Employer provisions
+    // (matching PF, EDLI/admin charges, ESI, gratuity) are the CTC build-up itemised below.
+    const epfShare = enrolled && epf ? r2(Math.min(pfWages, epf.cap ?? Infinity) * ((epf.rate ?? 12) / 100)) : 0;
     const hasTds = pcs.some((c) => c.method === "income_tax");
     const earningsTotal = earnings.reduce((s, l) => s + l.amount, 0);
     const grossEarnings = r2(basic + earningsTotal);
@@ -140,14 +156,20 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     // `aboveCtc`: employer PF sits over and above CTC when the org opts out of counting it in - shown as a
     // line but excluded from the CTC total, mirroring the server ctcLines.
     const employerContribs = pcs
-      .filter((c) => c.kind === "employer_contribution" && !(c.method === "epf" && !enrolled))
-      .map((c) => ({ name: c.display_name, amount: r2(ctcCompMonthly(c, basic, grossEarnings)), aboveCtc: c.method === "epf" && !ctcCfg.employer_pf_in_ctc }))
+      // The employer side gates on the employee's ENROLMENT only - exactly as the server's employerCostLines
+      // does - not on an employee-side deduction component existing. An org can run employer PF without one.
+      .filter((c) => c.kind === "employer_contribution" && !(PF_METHODS.includes(c.method) && !epfEnrolled))
+      .map((c) => ({ name: c.display_name, amount: r2(ctcCompMonthly(c, basic, grossEarnings, pfWages)), aboveCtc: c.in_ctc === false }))
       .filter((l) => l.amount > 0);
     const ctcMonthly = r2(grossEarnings + employerContribs.reduce((s, l) => s + (l.aboveCtc ? 0 : l.amount), 0));
     return {
       basic, earnings, otherDeductions, epf, enrolled, epfShare, hasTds, grossEarnings, totalDeductions,
       netMonthly: r2(grossEarnings - totalDeductions),
       employerContribs, ctcMonthly,
+      // The employer's PF match is a pay component like any other, so it is absent from CTC until one exists.
+      // Enrolled with no such component = say so, rather than quietly leaving the match out of the CTC.
+      missingEmployerPf: epfEnrolled && !pcs.some((c) => c.kind === "employer_contribution" && c.method === "epf"),
+      pfWages,
     };
   }, [current, payComponents, earningCompsFor, epfEnrolled, ctcCfg]);
 
@@ -160,13 +182,15 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     const basic = r2(monthlyCtc * (ctcCfg.basic_pct / 100));
     const earningComps = earningCompsFor(structurePath);
     const pcs = payComponents.filter((c) => c.recurring && !c.disabled);
-    const enrolled = pcs.some((c) => c.method === "epf" && c.kind === "deduction") && epfEnrolled;
-    const employerComps = pcs.filter((c) => c.kind === "employer_contribution" && !(c.method === "epf" && !enrolled));
+    // Employer PF applies on the employee's enrolment alone (server: employerCostLines), so the split solves the
+    // same target the server will - no dependency on an employee-side deduction component existing.
+    const employerComps = pcs.filter((c) => c.kind === "employer_contribution" && !(PF_METHODS.includes(c.method) && !epfEnrolled));
     const ctcOf = (special: number) => {
       const earn = earningComps.reduce((s, c) => s + monthlyOf(c, basic), 0) + special;
       const gross = r2(basic + earn);
+      const pfWages = pfWagesOf(basic, special, earningComps, ctcCfg.pf_wage_basis ?? "basic");
       // Off-CTC employer PF ("CTC + PF") is excluded from the target the split solves - it rides on top.
-      const employer = employerComps.reduce((s, c) => s + (c.method === "epf" && !ctcCfg.employer_pf_in_ctc ? 0 : r2(ctcCompMonthly(c, basic, gross))), 0);
+      const employer = employerComps.reduce((s, c) => s + (c.in_ctc === false ? 0 : r2(ctcCompMonthly(c, basic, gross, pfWages))), 0);
       return r2(gross + employer);
     };
     if (ctcOf(0) > monthlyCtc + 0.5) return null; // infeasible: committed cost already exceeds the target
@@ -174,6 +198,20 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     for (let i = 0; i < 48; i++) { const mid = (lo + hi) / 2; if (ctcOf(mid) < monthlyCtc) lo = mid; else hi = mid; }
     return { basic, special: r2((lo + hi) / 2), monthlyCtc: r2(monthlyCtc) };
   }, [payComponents, earningCompsFor, epfEnrolled, ctcCfg]);
+
+  // The stored split vs a FRESH solve under the current catalog. basic + Special Allowance are CACHED on the
+  // compensation row when it is saved, so anything changed afterwards - a contribution added, its CTC side
+  // flipped, the employee's EPF enrolment toggled, a rate edited - leaves those cached figures describing the
+  // OLD setup. The visible symptom is exactly this: the build-up no longer reconciles to the promised CTC (an
+  // employer contribution appears to ride on top of it). Same solver the server re-applies with, so a warning
+  // here means a re-apply really would change this row.
+  const staleSplit = useMemo(() => {
+    if (!current || !(current.annual_ctc > 0) || !payComponents.length) return null;
+    const fresh = splitPreview(current.annual_ctc, current.salary_structure);
+    if (!fresh) return null; // infeasible now - the org-wide banner reports these as "skipped"
+    const drift = Math.abs(fresh.basic - (current.base_pay ?? 0)) + Math.abs(fresh.special - (current.special_allowance ?? 0));
+    return drift > 1 ? fresh : null; // > ₹1: bisection converges to within a rupee, so ignore solver noise
+  }, [current, payComponents, splitPreview]);
 
   // Variable pay = bonuses awarded in the current financial year (Apr–Mar). Annual actuals, so they fold into
   // a "total compensation" figure on top of the annualised fixed CTC (not into the monthly numbers).
@@ -299,12 +337,38 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
               </div>
             </div>
 
+            {/* Stored-split warning: these figures were derived when the salary was saved, so a later change to the
+                component catalog (or to this employee's EPF enrolment) leaves them describing the old setup - the
+                build-up then reads as if a contribution sits on top of the promised CTC. Re-applying re-solves
+                every current row against today's catalog, holding each annual CTC fixed. */}
+            {staleSplit && (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs dark:border-amber-800 dark:bg-amber-950/40">
+                <span className="text-amber-800 dark:text-amber-200">
+                  These figures were derived when this salary was saved and no longer match the current pay-component setup, so the build-up below
+                  won't reconcile to the {money(current!.annual_ctc, cc)} CTC. Under today's setup the split is basic {money(staleSplit.basic, cc)} + Special
+                  Allowance {money(staleSplit.special, cc)} per month.{canReapply ? "" : " Ask Payroll to re-apply the split."}
+                </span>
+                {canReapply && (
+                  <AccessAction collection="compensation" verb="reapplySplit" label="re-apply the split">
+                    <Button size="sm" onClick={async () => { await doReapply(); await load(); }} disabled={reapplying}>{reapplying ? "Re-applying…" : "Re-apply split"}</Button>
+                  </AccessAction>
+                )}
+              </div>
+            )}
+
             {/* Cost-to-company build-up: reconciles gross -> CTC via the employer_contribution components (matching
                 PF, ESI while eligible, gratuity, or anything HR configures). Without this, the CTC hero and the
                 payslip gross look like they disagree; here the gap is itemised so gross + contributions = CTC. */}
-            {breakdown.employerContribs.length > 0 && (
+            {(breakdown.employerContribs.length > 0 || breakdown.missingEmployerPf) && (
               <div className="mb-6">
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cost to company build-up ({unit})</p>
+                {/* Enrolled in PF but no employer-PF component: the match is genuinely absent from CTC and payroll,
+                    so name the gap and where to close it instead of showing a CTC that quietly omits it. */}
+                {breakdown.missingEmployerPf && (
+                  <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">
+                    This employee is enrolled in EPF, but no <span className="font-medium">Employer PF</span> pay component exists - the employer's match is in neither this CTC nor payroll. Add one under Payroll - Pay components (kind: employer contribution, method: epf).
+                  </p>
+                )}
                 <div className="text-sm">
                   <Row label="Gross salary" amount={breakdown.grossEarnings} />
                   {breakdown.employerContribs.filter((l) => !l.aboveCtc).map((l) => <Row key={l.name} label={l.name} amount={l.amount} kind="earning" />)}
@@ -313,8 +377,15 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                     <span className="text-lg font-bold tabular-nums">{money(breakdown.ctcMonthly * mult, cc)}</span>
                   </div>
                   {/* Over-and-above-CTC lines (employer PF when the org excludes it from CTC): shown for the full
-                      cost-to-employer picture, but sit outside the CTC figure above. */}
+                      cost-to-employer picture, but sit outside the CTC figure above - so they get their own
+                      all-in total rather than being folded into the CTC the employee was promised. */}
                   {breakdown.employerContribs.filter((l) => l.aboveCtc).map((l) => <Row key={l.name} label={`${l.name} (over & above CTC)`} amount={l.amount} kind="earning" />)}
+                  {breakdown.employerContribs.some((l) => l.aboveCtc) && (
+                    <div className="mt-1 flex items-baseline justify-between border-t pt-2">
+                      <span className="font-medium">Total company cost</span>
+                      <span className="font-semibold tabular-nums">{money((breakdown.ctcMonthly + breakdown.employerContribs.filter((l) => l.aboveCtc).reduce((s, l) => s + l.amount, 0)) * mult, cc)}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

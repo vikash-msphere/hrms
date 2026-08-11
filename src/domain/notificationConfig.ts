@@ -45,6 +45,9 @@ export const NOTIFICATION_CATEGORIES: { key: string; label: string; defaultPrior
   { key: "shift", label: "Shifts & roster", defaultPriority: "normal" },
   { key: "recruiting", label: "Recruiting", defaultPriority: "normal" },
   { key: "compensation", label: "Compensation", defaultPriority: "high" },
+  // Access: someone asking for a grant, someone gaining one, and (with four-eyes on) a permission change
+  // waiting for a second approver. High - a change nobody sees is a change nobody reviews.
+  { key: "access", label: "Access & permissions", defaultPriority: "high" },
   { key: "system", label: "System", defaultPriority: "normal" },
 ];
 

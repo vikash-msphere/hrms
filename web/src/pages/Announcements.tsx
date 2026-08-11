@@ -144,8 +144,11 @@ export default function Announcements({ me, openId }: { me: Me; openId?: string 
 
   // Every board verb hands back the post it just changed, fully reserialized (reactions, replies, tallies,
   // reads). Folding that row in is exact and costs nothing - which is why those verbs are mapped to "invalidate
-  // nothing" in resourceStore: no board refetch per reaction, reply, vote or scroll-past.
-  const fold = (updated: Announcement) => setRows((prev) => prev.map((r) => (r.path === updated.path ? { ...r, ...updated } : r)));
+  // nothing" in resourceStore: no board refetch per reaction, reply, vote or scroll-past. The row REPLACES the
+  // old one rather than merging over it: a field that is now empty (an unpinned post's pin_time, a reopened
+  // poll's closes_time) is absent from the JSON, so merging would keep the stale value and the change would
+  // not show until a refetch.
+  const fold = (updated: Announcement) => setRows((prev) => prev.map((r) => (r.path === updated.path ? updated : r)));
 
   // Record the caller's read receipt for a post: clear the dot locally, then fire the (idempotent) server call
   // and fold its reserialized row back in (keeps the read-by count honest without refetching the board). A

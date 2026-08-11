@@ -3,6 +3,7 @@ import { resolveRequest, decide } from "../src/domain/permissions";
 import { rulesToGrant, deriveNarrowing, type CompiledRule } from "../src/domain/compileGrants";
 import { validateAccessRule } from "../src/domain/policyValidate";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { toAccessRuleResource } from "../src/http/serialize";
 
 // The "New X" buttons grant the CREATE gate: the 1-token `<collection>` write pattern, which gates the
 // collection-level POST (and list) but NOT writes on individual objects - distinct from `<collection>.**`
@@ -40,5 +41,29 @@ describe("validateAccessRule accepts scope:create and keeps it collection-level"
   });
   it("rejects a verb on a create rule", () => {
     expect(() => validateAccessRule({ ...base, scope: "create", verb: "approve" }, DEFAULT_POLICY)).toThrow();
+  });
+});
+
+// A create-gate row is stored with scope_kind "all" (it is a broad rule on the narrowing lane), so the wire
+// scope has to be read back from the PATTERN. Without that, the ACL modal's create dropdown never matched its
+// own rule (stuck on "cannot create") and the rule listed under the all-objects target instead.
+describe("create-gate rules round-trip as scope:create on the wire", () => {
+  const row = (pattern: string) => {
+    const n = deriveNarrowing(pattern);
+    const at = new Date("2026-01-01T00:00:00.000Z");
+    return { id: "r1", createdAt: at, updatedAt: at, subject: "manager", subjectKind: "role", namespace: n.namespace, pattern, scopeKind: n.scopeKind, scopeCode: n.scopeCode, matchCode: null, level: "write", effect: "allow" };
+  };
+  it("`tickets` (the create gate) serializes as scope create", () => {
+    const w = toAccessRuleResource(row("tickets"), null);
+    expect(w.scope).toBe("create");
+    expect(w.level).toBe("write");
+    expect(w.field).toBeUndefined();
+    expect(w.verb).toBeUndefined();
+  });
+  it("`tickets.**` (write on every object) still serializes as scope all", () => {
+    expect(toAccessRuleResource(row("tickets.**"), null).scope).toBe("all");
+  });
+  it("the super `**` pattern is not mistaken for a create gate", () => {
+    expect(toAccessRuleResource(row("**"), null).scope).toBe("all");
   });
 });

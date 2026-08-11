@@ -4,7 +4,7 @@
 // The server re-validates every save and every preview; this copy only drives the editor UI.
 
 export type PayslipBlockKind =
-  | "orgHeader" | "identity" | "kvGrid" | "attendance" | "earningsDeductions" | "netBox" | "note" | "rule" | "gap" | "footer";
+  | "orgHeader" | "identity" | "kvGrid" | "attendance" | "earningsDeductions" | "netBox" | "employerCost" | "note" | "rule" | "gap" | "footer";
 
 /** Typography + spacing available on every block; unset means "keep the stock design's value". */
 export type PayslipBlockStyle = {
@@ -59,6 +59,11 @@ export type PayslipBlock = {
   showWords?: boolean;
   fill?: string;
   borderWidth?: number;
+  // employerCost
+  totalLabel?: string;
+  grandTotalLabel?: string;
+  aboveCtcSuffix?: string;
+  showTotals?: boolean;
   // note
   text?: string;
   align?: "left" | "center";
@@ -113,6 +118,7 @@ export const PAYSLIP_BLOCK_META: Record<PayslipBlockKind, { title: string; desc:
   attendance: { title: "Attendance strip", desc: "Working / payable / loss-of-pay days. Hidden when the run has no attendance data." },
   earningsDeductions: { title: "Earnings & deductions", desc: "The two money columns with their totals." },
   netBox: { title: "Net pay box", desc: "Net payable, boxed, with the amount in words." },
+  employerCost: { title: "Employer contributions", desc: "The employer's own cost (PF/ESI/gratuity) and the cost-to-company total. Contributions kept outside CTC are listed after it. Hidden when the run has none." },
   note: { title: "Note", desc: "A line of your own text." },
   rule: { title: "Divider", desc: "A horizontal line." },
   gap: { title: "Spacer", desc: "Vertical whitespace." },
@@ -150,6 +156,13 @@ export const DEFAULT_PAYSLIP_TEMPLATE: PayslipTemplate = {
       amountLabel: "Amount",
     },
     { kind: "netBox", label: "Net Salary Payable (A - B)", showWords: true },
+    {
+      kind: "employerCost",
+      title: "Employer Contributions (not deducted from your pay)",
+      totalLabel: "Cost to Company (CTC)",
+      grandTotalLabel: "Total Company Cost",
+      aboveCtcSuffix: "(over & above CTC)",
+    },
     { kind: "footer", left: "This is a system-generated payslip and does not require a signature.", right: "All amounts in {{currency}}." },
   ],
 };
@@ -163,6 +176,7 @@ export function newPayslipBlock(kind: PayslipBlockKind): PayslipBlock {
     case "attendance": return { kind, title: "Attendance" };
     case "earningsDeductions": return { kind, earningsTitle: "Earnings", deductionsTitle: "Deductions", earningsTotalLabel: "Total Earnings (A)", deductionsTotalLabel: "Total Deductions (B)", amountLabel: "Amount" };
     case "netBox": return { kind, label: "Net Salary Payable (A - B)", showWords: true };
+    case "employerCost": return { kind, title: "Employer Contributions (not deducted from your pay)", totalLabel: "Cost to Company (CTC)", grandTotalLabel: "Total Company Cost", aboveCtcSuffix: "(over & above CTC)" };
     case "note": return { kind, text: "", align: "left" };
     case "rule": return { kind, weight: 0.5 };
     case "gap": return { kind, height: 8 };

@@ -10,11 +10,26 @@ import { verbsForTone, MAPPED_VERBS } from "../domain/activity";
 type AuditRow = typeof schema.auditLog.$inferSelect;
 
 // Shared free-text + tone filters over the audit rows (used by both the per-entity and the org-wide feed, so
-// search spans all history not just loaded pages). `q` LIKEs action/actor/meta; `tone` maps to the verb set.
+// search spans all history not just loaded pages). `q` LIKEs the action, the ACTOR (name + email) and the
+// touched OBJECT (its snapshotted name, its collection and its id) plus the meta blob; `tone` maps to a verb set.
+// Object names are covered because they're stored columns — searching "Asha Rao" or "leaves" finds the rows about
+// that record without any extra reads.
 function textAndToneConds(opts: { q?: string; tone?: string }): SQL[] {
   const conds: SQL[] = [];
   const q = opts.q?.trim();
-  if (q) conds.push(or(like(schema.auditLog.action, `%${q}%`), like(schema.auditLog.actorEmail, `%${q}%`), like(schema.auditLog.meta, `%${q}%`))!);
+  if (q) {
+    conds.push(
+      or(
+        like(schema.auditLog.action, `%${q}%`),
+        like(schema.auditLog.actorEmail, `%${q}%`),
+        like(schema.auditLog.actorName, `%${q}%`),
+        like(schema.auditLog.entityName, `%${q}%`),
+        like(schema.auditLog.entity, `%${q}%`),
+        like(schema.auditLog.entityId, `%${q}%`),
+        like(schema.auditLog.meta, `%${q}%`),
+      )!,
+    );
+  }
   if (opts.tone && opts.tone !== "all") {
     const verbs = verbsForTone(opts.tone);
     if (verbs === null) {

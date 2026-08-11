@@ -23,17 +23,22 @@ export const users = new Hono<AppEnv>()
   })
   .get("/:user_id", async (c) => {
     const id = c.req.param("user_id");
-    // Anyone may read their own record via `me`; reading anyone else requires admin.
-    const row = await getUser(c.get("deps"), c.get("user"), id);
-    const res = toUserResource(row);
+    const u = c.get("user");
     // The caller's own record (users/me) carries their capability set for client-side UI gating (section 7),
     // plus the per-collection grantable scope tiers from the policy manifest (drives the ACL scope chips, so
     // the UI offers the relevant scopes for each collection instead of a hardcoded "all").
-    if (id === "me") {
-      const u = c.get("user");
-      return c.json({ ...res, caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
+    const withAccess = <T extends object>(res: T) => c.json({ ...res, caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
+    // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account
+    // they WOULD get on first login, so there is no users row for `me` to read. Synthesize the identity from
+    // the simulated principal instead of 404ing the whole shell - it is the same information a real row would
+    // carry, and the simulation is read-only so nothing keyed on the (absent) account id can be written.
+    if (id === "me" && u.simulatedBy && !u.uuid) {
+      const now = c.get("deps").clock.now();
+      return withAccess(toUserResource({ uuid: "", createdAt: now, updatedAt: now, email: u.email, role: u.role, status: u.status, employeeId: u.employeeId }));
     }
-    return c.json(res);
+    // Anyone may read their own record via `me`; reading anyone else requires admin.
+    const res = toUserResource(await getUser(c.get("deps"), u, id));
+    return id === "me" ? withAccess(res) : c.json(res);
   })
   .patch("/:user_id", zValidator("json", writeSchema), async (c) => {
     const row = await updateUser(c.get("deps"), c.get("user"), c.req.param("user_id"), c.req.valid("json"), c.req.header("If-Match"));

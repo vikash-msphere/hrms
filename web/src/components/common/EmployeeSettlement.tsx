@@ -83,7 +83,14 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
               <tbody>
                 {latest.lines.map((l, i) => (
                   <tr key={i} className="border-b last:border-0">
-                    <td className="py-1.5 pr-3">{l.kind === "deduction" ? `Less: ${l.name}` : l.name}</td>
+                    <td className="py-1.5 pr-3">
+                      {l.kind === "deduction" ? `Less: ${l.name}` : l.name}
+                      {/* A partly exempt earning (gratuity u/s 10(10), exit leave encashment u/s 10(10AA)) says how
+                          much of it is chargeable, since that is what the withholding below is computed on. */}
+                      {l.kind === "earning" && l.taxable != null && l.taxable < l.amount && (
+                        <span className="ml-1 text-xs text-muted-foreground">{l.taxable > 0 ? `(${money(l.taxable)} taxable)` : "(exempt)"}</span>
+                      )}
+                    </td>
                     <td className={`py-1.5 text-right tabular-nums ${l.kind === "deduction" ? "text-destructive" : ""}`}>{l.kind === "deduction" ? `-${money(l.amount)}` : money(l.amount)}</td>
                   </tr>
                 ))}
@@ -93,6 +100,11 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
                 </tr>
               </tbody>
             </table>
+            {/* The exit payout withholds income tax like a payroll run: state the chargeable base + the tax on it,
+                because this is also what the employee's Form 16 will report for the year. */}
+            {latest.tds != null && latest.tds > 0 && (
+              <p className="mt-3 text-xs text-muted-foreground">Income tax withheld: {money(latest.tds)} on {money(latest.taxable_earnings ?? 0)} of chargeable pay (the balance of the year's liability - there is no later payroll to collect it in).</p>
+            )}
           </>
         )}
       </CardContent>

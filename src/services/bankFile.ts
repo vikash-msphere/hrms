@@ -29,8 +29,10 @@ type Employee = typeof schema.employees.$inferSelect;
 type Ctx = { emp: Employee; it: RunItem; bank: StoredBank; debit: { debit_account_number?: string; currency_code?: string }; valueDate: string; sameBank: boolean; dp: number };
 
 function cellValue(col: BankFormatColumn, c: Ctx): string | number | undefined {
-  // Payout amounts are rounded to the currency's precision (whole rupees for INR by default): the money is
-  // DISBURSED at this precision, so the file must carry the paid figure, not the paise-precision stored value.
+  // Payout amounts are stated at the currency's precision (whole rupees for INR by default). The RUN already
+  // settles each item's net to that precision with an explicit rounding line, so this is a no-op on net for a
+  // run built by this system - it stays as the belt-and-braces guard for gross/tax columns and for any item
+  // predating that line, and it keeps the file from ever carrying sub-paise noise.
   const pay = (n: number) => roundMoney(n, c.dp);
   switch (col.source) {
     case "account_name": return c.bank.account_name || `${c.emp.firstName} ${c.emp.lastName}`;

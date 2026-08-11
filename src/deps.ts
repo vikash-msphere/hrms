@@ -3,6 +3,7 @@ import * as schema from "./db/schema";
 import type { Bindings } from "./env";
 import { makeEncryptor } from "./lib/crypto";
 import { makeIdCodec, type IdCodec } from "./lib/idCodec";
+import { makeApiKeySigner, type ApiKeySigner } from "./lib/apiKeyToken";
 import { makeEmailSender, EMAIL_PROVIDERS, type EmailProvider } from "./lib/email";
 import { makeDocumentStore } from "./lib/docstore";
 import type { Clock, Encryptor, EmailSender, DocumentStore, WebhookSender, PushSender } from "./ports";
@@ -19,7 +20,7 @@ export type DB = ReturnType<typeof drizzle<typeof schema>>;
 // `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
 // the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
 // reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
-export type Deps = { db: DB; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number }; trace?: string };
+export type Deps = { db: DB; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number }; trace?: string };
 
 // Route the request's reads to the nearest D1 read replica when the runtime supports Sessions
 // (production); fall back to the plain binding where it doesn't (miniflare, the local/test runtime,
@@ -78,6 +79,8 @@ export function makeDeps(env: Bindings): Deps {
     clock: { now: () => new Date() },
     encryptor,
     idCodec: makeIdCodec(env.WIRE_ID_KEY),
+    // API-key verifier. Derives its own HMAC subkey from the field master via HKDF, so no new deploy secret.
+    apiKeySigner: makeApiKeySigner(env.FIELD_ENCRYPTION_KEY),
     email: makeEmailSender((env.EMAIL_PROVIDER as EmailProvider) || "resend", env.EMAIL_API_KEY, env.EMAIL_FROM, env.EMAIL_REGION),
     docs: makeDocumentStore(env.DOCS, encryptor), // R2 objects are encrypted app-side
     // E-sign vendor secrets, keyed by provider id (never sourced from the settings blob). For Cashfree,

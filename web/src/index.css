@@ -226,6 +226,31 @@
 }
 
 @layer components {
+  /* Access-mode row keys. The column always holds its place (no layout shift when the mode toggles), but on a
+     long table the per-row keys sit back until the row is hovered or the key is focused - fifty amber boxes
+     down the left edge drowned out the data they were supposed to annotate. Pointer-less devices have no
+     hover, so there the keys stay fully inked. */
+  @media (hover: hover) {
+    .access-row-key {
+      opacity: 0.35;
+      transition: opacity 120ms ease;
+    }
+    tr:hover .access-row-key,
+    .access-row-key:focus-visible,
+    .access-row-key:hover {
+      opacity: 1;
+    }
+  }
+
+  /* Touch: grow every manage-access key to a finger-sized target (the icon itself stays 24px, the tappable
+     box does not). Hover tooltips don't exist on touch either, so the tap has to be the reliable path in. */
+  @media (pointer: coarse) {
+    .access-key {
+      min-height: 2.25rem;
+      min-width: 2.25rem;
+    }
+  }
+
   /* Elevation utilities backed by themeable tokens (see --shadow-* above). */
   .shadow-card {
     box-shadow: var(--shadow-card);

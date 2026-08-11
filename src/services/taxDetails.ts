@@ -57,6 +57,8 @@ function toView(p: TaxProjection, decl: TaxDeclarations): Omit<Wire<"tax">, "pat
     prior_employer_tds_effective: p.priorEmployerTds,
     annual_gross: p.annualGross,
     standard_deduction: b.standardDeduction,
+    chapter_via: b.chapterVIA,
+    deductions: p.deductions.map((d) => ({ section: d.section, declared: d.declared, allowed: d.allowed })),
     taxable_income: b.taxableIncome,
     slabs: b.slabRows.map((r) => ({ from: r.from, to: r.to, rate: r.rate, amount: r.amount })),
     income_tax: b.incomeTax,

@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx, CELEBRATION_WEEK_DAYS } from "@/lib/org";
 import { useMedia } from "@/hooks/useMedia";
+import { useTheme } from "@/lib/theme";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Me } from "@/types";
 
@@ -90,15 +91,38 @@ function AnniversaryBanner({ className, years }: { className?: string; years?: n
 
 function Brand({ collapsed }: { collapsed?: boolean }) {
   const { org } = useOrg();
+  // Dark-theme logo variant, when the org uploaded one. Picked here rather than with CSS because the logo is an
+  // <img> data URL: that SVG is an isolated document, so neither our `.dark` class nor its own
+  // prefers-color-scheme rules (those follow the OS) track the in-app theme.
+  const { resolved } = useTheme();
+  const logo = (resolved === "dark" ? org.logo_dark : undefined) || org.logo;
+  // A wordmark (logo + name drawn as one wide image) replaces the square-mark-plus-text pair and spans the
+  // sidebar's width. It can't shrink into the w-16 icon rail, so the rail keeps using the square mark.
+  const wordmark = (resolved === "dark" ? org.wordmark_dark : undefined) || org.wordmark;
   // Drape a celebration banner across the logo while the incorporation anniversary is in the dashboard's
   // "this week" window - i.e. exactly when it's counted in the Celebrations StatCard.
   const anniv = orgAnniversary(org.incorporation_date);
   const celebrating = anniv != null && anniv.in_days <= CELEBRATION_WEEK_DAYS;
+  const annivTitle = celebrating ? `${anniv!.years}-year company anniversary` : undefined;
+  if (wordmark && !collapsed) {
+    return (
+      <div className="min-w-0 flex-1 px-4 py-4">
+        <div className="relative" title={annivTitle}>
+          {/* w-full + object-contain: fills the sidebar width, height capped, never distorted whatever the
+              uploaded aspect ratio is. The wordmark carries the org name, so it takes the name as alt text. */}
+          <img src={wordmark} alt={org.logo_text?.trim() || org.name} className="max-h-11 w-full object-contain object-left" />
+          {celebrating && (
+            <AnniversaryBanner years={anniv!.years} className="pointer-events-none absolute -top-[10px] -left-[5px] h-[52px] w-[46px] overflow-visible drop-shadow-md" />
+          )}
+        </div>
+      </div>
+    );
+  }
   return (
-    <div className={cn("flex items-center gap-2.5 py-4", collapsed ? "justify-center px-0" : "px-4")}>
-      <div className="relative shrink-0" title={celebrating ? `${anniv!.years}-year company anniversary` : undefined}>
-        {org.logo ? (
-          <img src={org.logo} alt="" className="h-9 w-9 rounded-lg object-cover" />
+    <div className={cn("flex items-center gap-2.5 py-4", collapsed ? "justify-center px-0" : "min-w-0 flex-1 px-4")}>
+      <div className="relative shrink-0" title={annivTitle}>
+        {logo ? (
+          <img src={logo} alt="" className="h-9 w-9 rounded-lg object-cover" />
         ) : (
           <div className="brand-gradient flex h-9 w-9 items-center justify-center rounded-lg text-white shadow-sm">
             <Building className="h-5 w-5" />
@@ -183,7 +207,7 @@ export function Sidebar({
       >
         <div className={cn("flex items-center", rail ? "justify-center pt-1" : "justify-between")}>
           <Brand collapsed={rail} />
-          <button className="px-4 text-sidebar-foreground md:hidden" onClick={onNavigate}>
+          <button className="shrink-0 px-4 text-sidebar-foreground md:hidden" onClick={onNavigate}>
             <X className="h-5 w-5" />
           </button>
         </div>

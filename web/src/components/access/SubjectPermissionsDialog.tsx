@@ -3,7 +3,8 @@ import { KeyRound } from "lucide-react";
 import { create, remove } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
-import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, groupOf, COLLECTION_GROUPS } from "./permMatrix";
+import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, groupOf, COLLECTION_GROUPS, accessTone } from "./permMatrix";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { FineRulesEditor } from "./FineRulesEditor";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -121,12 +122,15 @@ export function SubjectPermissionsDialog({
                       <div key={c} className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-accent/40">
                         <span className="text-sm font-medium">{labelOf(c)}</span>
                         {isGlobal || !canWrite ? (
-                          <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"}>{v}</Badge>
+                          <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"} className={v === "deny" || v === "none" ? undefined : accessTone(v).text}>{v}</Badge>
                         ) : (
                           <Select value={v} onValueChange={(nv) => setCell(c, nv)} disabled={busy}>
-                            <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+                            {/* line-clamp-none + flex: the default value slot is a -webkit-box, which breaks the dot+label row. */}
+                            <SelectTrigger className="h-8 w-32 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
                             <SelectContent>
-                              {CELL.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                              {/* Coloured dot + label per level (same tones as the ACL modal) - a column of grey
+                                  words is unreadable at a glance across ~60 collections. */}
+                              {CELL.map((l) => <SelectItem key={l} value={l}><CellOption value={l} /></SelectItem>)}
                             </SelectContent>
                           </Select>
                         )}
@@ -146,5 +150,17 @@ export function SubjectPermissionsDialog({
         </Tabs>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// One level option: coloured dot + coloured label. Radix clones the selected item's children into the trigger,
+// so this styles the closed control too.
+function CellOption({ value }: { value: string }) {
+  const tone = accessTone(value);
+  return (
+    <span className={cn("inline-flex items-center gap-2 whitespace-nowrap font-medium", tone.text)}>
+      <span className={cn("h-2 w-2 shrink-0 rounded-full", tone.dot)} />
+      {value}
+    </span>
   );
 }

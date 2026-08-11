@@ -25,6 +25,7 @@ export type AccessRuleInput = {
   level?: Level; // present only for an allow level rule
   verb?: string; // present only for a verb (custom-method) rule
   effect: "allow" | "deny";
+  expiresAt?: Date; // optional expiry (temporary access); absent = permanent
 };
 
 // Validate + normalize ONE access rule (role OR user) - the single uniform validator, replacing the old
@@ -34,7 +35,7 @@ export type AccessRuleInput = {
 // over-broad `**`/cross-collection rule is impossible here (collection must be a real collection, never
 // `**`), so it stays super-only via the seed. Verb fail-closed + deny-wins are ENGINE behavior, not re-done
 // here - this only shapes a valid row.
-export function validateAccessRule(body: unknown, policy: Policy): AccessRuleInput {
+export function validateAccessRule(body: unknown, policy: Policy, now: Date = new Date()): AccessRuleInput {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw invalidArgument("access rule body must be an object");
   const b = body as Record<string, unknown>;
   const subjectKind = b.subject_kind;
@@ -76,6 +77,15 @@ export function validateAccessRule(body: unknown, policy: Policy): AccessRuleInp
     if (typeof field !== "string" || !field) throw invalidArgument("field must be a non-empty string");
     if (!isFieldScopeTarget(policy, collection, field)) throw invalidArgument(`"${field}" is not an access-controlled field of "${collection}"`);
   }
+  // Optional expiry (temporary access). Must be a real instant in the FUTURE - an already-lapsed rule would
+  // be authored dead, which reads on screen as granted access that silently does nothing.
+  let expiresAt: Date | undefined;
+  if (b.expire_time !== undefined && b.expire_time !== null && b.expire_time !== "") {
+    const t = typeof b.expire_time === "number" ? b.expire_time : Date.parse(String(b.expire_time));
+    if (!Number.isFinite(t)) throw invalidArgument("expire_time must be an ISO timestamp");
+    if (t <= +now) throw invalidArgument("expire_time must be in the future");
+    expiresAt = new Date(t);
+  }
   return {
     subjectKind,
     subject,
@@ -86,6 +96,7 @@ export function validateAccessRule(body: unknown, policy: Policy): AccessRuleInp
     level: hasLevel ? (b.level as Level) : undefined,
     verb: hasVerb ? (b.verb as string) : undefined,
     effect,
+    expiresAt,
   };
 }
 

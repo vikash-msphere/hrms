@@ -63,6 +63,7 @@ export const KPI_DEFS: { key: string; label: string; category: KpiCategory; defa
   { key: "probation_ending", label: "Probation ending (30 days)", category: "attention", defaultAudience: "hr" },
   { key: "notice_serving", label: "Serving notice", category: "attention", defaultAudience: "hr" },
   // --- Coming up: leading / proactive indicators (a runway window, so you act before the deadline) ---
+  { key: "events_upcoming", label: "Events this week", category: "upcoming", defaultAudience: "everyone" },
   { key: "compliance_due", label: "Compliance due (30 days)", category: "upcoming", defaultAudience: "hr" },
   { key: "compliance_week", label: "Filings due this week", category: "upcoming", defaultAudience: "hr" },
   { key: "cards_due_week", label: "Tasks due this week", category: "upcoming" },

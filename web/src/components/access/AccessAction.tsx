@@ -43,10 +43,10 @@ export function AccessAction({
   // can manage the create gate itself. VERB buttons are deliberately NOT gated by capabilities: a
   // per-object share grants a verb on one row without any broad capability, and those buttons are already
   // driven by the row's server-computed `access.can`.
-  // "View as" is the exception to the access-mode exemption: a simulation only runs WITH access mode on, so
-  // exempting access mode would exempt every simulation too and leave create buttons the simulated user could
-  // never use on screen while the rest of the shell narrows correctly. Mid-simulation `caps` IS the simulated
-  // set (App swaps CapabilitiesContext under the shell), so gating on it answers the question honestly.
+  // "View as" is the exception to the access-mode exemption: exempting access mode would exempt every
+  // simulation too and leave create buttons the simulated user could never use on screen while the rest of
+  // the shell narrows correctly. Mid-simulation `caps` IS the simulated set (the server answers /users/me as
+  // the subject), so gating on it answers the question honestly.
   if (create && (!am.enabled || viewAs) && !hasCapability(caps, `${col}.write`)) return null;
   // The ambient object only applies to an action of the SAME collection: an action explicitly re-collectioned
   // away from the ambient scope (the export icon on a tickets detail route, a settings-blob gear on a feature

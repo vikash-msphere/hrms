@@ -1,16 +1,24 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { list, create, remove } from "@/api";
+import { Download, Upload, GitCompareArrows, KeyRound } from "lucide-react";
+import { list, create, remove, get, patch, invoke } from "@/api";
+import { ruleSentence, expiryLabel } from "@/components/access/ruleLogic";
+import { Checkbox } from "@/components/ui/checkbox";
 import { usePermission } from "@/lib/perm";
-import { roleLabel } from "@/lib/roles";
+import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleScope";
-import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules } from "@/components/access/permMatrix";
+import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, COLLECTION_GROUPS, groupOf } from "@/components/access/permMatrix";
+import { useAccessMode } from "@/components/access/AccessModeProvider";
+import { AccessAction } from "@/components/access/AccessAction";
+import { useConfirm } from "@/components/common/confirm";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { FineRulesEditor } from "@/components/access/FineRulesEditor";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import type { User } from "@/types";
@@ -23,13 +31,50 @@ type Role = { path: string; name: string; label?: string };
 // icons throughout the app; this view is intentionally the broad, org-wide level per role.
 export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement | null }) {
   const { toast } = useToast();
+  const confirm = useConfirm();
+  const am = useAccessMode();
   const canManage = usePermission("access-rules.write");
+  const [compare, setCompare] = React.useState<{ a: string; b: string } | null>(null);
+  const fileRef = React.useRef<HTMLInputElement>(null);
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const [roles, setRoles] = React.useState<Role[]>([]);
   const [users, setUsers] = React.useState<{ path: string; email: string }[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [subjectKind, setSubjectKind] = React.useState<"role" | "user">("role");
   const [view, setView] = React.useState<"matrix" | "rules">("matrix");
+
+  // Four-eyes on permission changes (settings key `access-approval`). Read here so the switch and the queue
+  // below live in the same place the changes are made.
+  const [fourEyes, setFourEyes] = React.useState<boolean | null>(null);
+  const canWriteSettings = usePermission("settings.write");
+  React.useEffect(() => {
+    get<{ value?: { enabled?: boolean } }>("settings/access-approval")
+      .then((s) => setFourEyes(s.value?.enabled === true))
+      .catch(() => setFourEyes(null)); // not readable / not configured -> hide the switch rather than guess
+  }, []);
+
+  async function setFourEyesEnabled(enabled: boolean) {
+    if (enabled && !(await confirm({ title: "Require a second approver for permission changes?", description: "From now on every access-rule change waits for a DIFFERENT access admin to approve it. A new grant does nothing until approved; a removal keeps working until approved. If you are the only access admin, nobody can approve your changes - turn this back off to unblock.", confirmLabel: "Turn on" }))) return;
+    try {
+      await patch("settings/access-approval", { value: { enabled } });
+      setFourEyes(enabled);
+      toast({ title: enabled ? "Permission changes now need a second approver" : "Permission changes apply immediately again", variant: "success" });
+    } catch (e) {
+      toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
+    }
+  }
+
+  async function decide(r: AccessRule, decision: "approve" | "reject") {
+    setBusy(true);
+    try {
+      await invoke("access-rules", decision, undefined, { rule: r.path });
+      toast({ title: decision === "approve" ? "Change approved" : "Change rejected", variant: "success" });
+      await reload();
+    } catch (e) {
+      toast({ variant: "destructive", title: `Couldn't ${decision}`, description: String((e as Error).message) });
+      setBusy(false);
+    }
+  }
 
   const reload = React.useCallback(async () => {
     setBusy(true);
@@ -51,6 +96,22 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   type Kind = "role" | "user";
   // Collections to show as matrix columns/rows: the curated base + any collection a rule already targets.
   const collections = React.useMemo(() => collectionsForRules(rules), [rules]);
+  const [matrixFilter, setMatrixFilter] = React.useState("");
+  // Matrix rows in module order ("People & org", "Leave", …, then anything outside the curated catalog),
+  // filtered by label. Same grouping the per-subject dialog uses, so both read the same shape.
+  const groupedCollections = React.useMemo(() => {
+    const q = matrixFilter.trim().toLowerCase();
+    const shown = q ? collections.filter((c) => labelOf(c).toLowerCase().includes(q) || c.includes(q)) : collections;
+    const order = [...COLLECTION_GROUPS.map((g) => g.label), "Other"];
+    const byGroup = new Map<string, string[]>();
+    for (const c of shown) {
+      const g = groupOf(c);
+      const bucket = byGroup.get(g);
+      if (bucket) bucket.push(c);
+      else byGroup.set(g, [c]);
+    }
+    return order.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)!] as const);
+  }, [collections, matrixFilter]);
 
   // A subject with a global ("*"/"**") allow rule (super_admin) is admin everywhere - shown read-only.
   const isGlobal = (kind: Kind, subject: string) =>
@@ -83,17 +144,52 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     }
   }
 
-  // A reusable level cell (used by the roles matrix and the users matrix).
+  // What the subject ALSO holds on this collection beyond the org-wide cell: the `everyone` rule the engine
+  // unions into every role, and any narrower (own/department/one-object/field/method) rules. Without these
+  // the matrix reads as the whole truth while the real answer lives in rules it doesn't show.
+  const everyoneLevel = (collection: string): string | null => {
+    const rs = rules.filter((r) => r.subject_kind === "role" && r.subject === EVERYONE_ROLE && !r.verb && ruleMatchesTarget(r, { collection }));
+    if (rs.some((r) => r.effect === "deny")) return "deny";
+    return rs.find((r) => r.effect === "allow")?.level ?? null;
+  };
+  const narrowerCount = (kind: Kind, subject: string, collection: string): number =>
+    rules.filter((r) => r.subject_kind === kind && r.subject === subject && r.collection === collection && (r.scope !== "all" || !!r.field || !!r.verb)).length;
+
+  // A reusable level cell (used by the roles matrix and the users matrix): the editable org-wide level, plus
+  // the effective-access context around it, plus a key that opens the full ACL modal for that collection -
+  // so the org-wide view is a way IN to the per-collection editor, not a dead end.
   const levelCell = (kind: Kind, subject: string, collection: string, label: string) => {
     const v = valueOf(kind, subject, collection);
-    if (isGlobal(kind, subject) || !canManage) {
-      return <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"}>{v}</Badge>;
-    }
+    const inherited = kind === "role" && subject !== EVERYONE_ROLE ? everyoneLevel(collection) : null;
+    const narrower = narrowerCount(kind, subject, collection);
+    const control =
+      isGlobal(kind, subject) || !canManage ? (
+        <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"}>{v}</Badge>
+      ) : (
+        <Select value={v} onValueChange={(nv) => setCell(kind, subject, collection, nv, label)} disabled={busy}>
+          <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
+          <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}</SelectContent>
+        </Select>
+      );
     return (
-      <Select value={v} onValueChange={(nv) => setCell(kind, subject, collection, nv, label)} disabled={busy}>
-        <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
-        <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}</SelectContent>
-      </Select>
+      <div className="flex items-center gap-1">
+        {control}
+        <button
+          type="button"
+          title={`Manage access for ${labelOf(collection)} (scopes, fields, custom methods, single objects)`}
+          onClick={() => am.open({ collection, label: labelOf(collection) })}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-amber-600 opacity-40 transition hover:bg-amber-100 hover:opacity-100 dark:hover:bg-amber-950"
+        >
+          <KeyRound className="h-3.5 w-3.5" />
+        </button>
+        {(inherited || narrower > 0) && (
+          <span className="whitespace-nowrap text-[10px] text-muted-foreground" title={[inherited ? `Everyone already grants ${inherited} here, so this subject effectively has it.` : "", narrower ? `${narrower} narrower rule(s): own/department scope, a field, a custom method or one object.` : ""].filter(Boolean).join(" ")}>
+            {inherited ? `+all:${inherited}` : ""}
+            {inherited && narrower ? " " : ""}
+            {narrower ? `+${narrower}` : ""}
+          </span>
+        )}
+      </div>
     );
   };
 
@@ -102,6 +198,79 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     { id: "user", header: "User", filter: "text", accessor: (u) => u.email, cell: (u) => <CopyEmail email={u.email} className="font-medium" /> },
     ...collections.map((c) => ({ id: c, header: labelOf(c), sortable: false, filter: "none", accessor: (u: { path: string; email: string }) => valueOf("user", u.path, c), cell: (u: { path: string; email: string }) => levelCell("user", u.path, c, u.email) } as Column<{ path: string; email: string }>)),
   ];
+
+  // Rules as JSON: the reviewable, diffable, restorable form of the whole access configuration. Export is a
+  // plain download of every rule in its create-body shape; import replays those bodies through the SAME API
+  // (and therefore the same validation, four-eyes queue and audit trail) - never a direct row write.
+  const exportBody = (r: AccessRule) => ({
+    subject_kind: r.subject_kind,
+    subject: r.subject,
+    collection: r.collection,
+    scope: r.scope,
+    ...(r.scope_ref ? { scope_ref: r.scope_ref } : {}),
+    ...(r.field ? { field: r.field } : {}),
+    ...(r.verb ? { verb: r.verb } : r.level ? { level: r.level } : {}),
+    ...(r.effect === "deny" ? { effect: "deny" } : {}),
+    ...(r.expire_time ? { expire_time: r.expire_time } : {}),
+  });
+
+  function exportRules() {
+    const payload = { exported_at: new Date().toISOString(), rules: rules.filter((r) => r.subject_kind === subjectKind).map(exportBody) };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `access-rules-${subjectKind}s-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importRules(file: File) {
+    let bodies: Record<string, unknown>[];
+    try {
+      const parsed = JSON.parse(await file.text()) as { rules?: Record<string, unknown>[] } | Record<string, unknown>[];
+      bodies = Array.isArray(parsed) ? parsed : parsed.rules ?? [];
+      if (!bodies.length) throw new Error("no rules in that file");
+    } catch (e) {
+      toast({ variant: "destructive", title: "Could not read that file", description: String((e as Error).message) });
+      return;
+    }
+    if (!(await confirm({ title: `Add ${bodies.length} access rules?`, description: "Rules that already exist are skipped. Nothing is removed - an import only ADDS access, so review the file first.", confirmLabel: "Import" }))) return;
+    setBusy(true);
+    let added = 0;
+    let skipped = 0;
+    const failed: string[] = [];
+    for (const b of bodies) {
+      try {
+        await create("access-rules", b);
+        added++;
+      } catch (e) {
+        const msg = String((e as Error).message);
+        if (msg.toLowerCase().includes("already exists")) skipped++;
+        else failed.push(msg);
+      }
+    }
+    toast({ title: `Imported ${added} rules`, description: `${skipped} already existed${failed.length ? ` · ${failed.length} rejected: ${failed[0]}` : ""}`, variant: failed.length ? "destructive" : "success" });
+    await reload();
+  }
+
+  // Copy every rule one subject holds onto another - the honest way to make "same as HR, plus payroll"
+  // instead of hand-rebuilding 40 rules and missing three.
+  async function cloneRules(from: { kind: Kind; subject: string }, to: { kind: Kind; subject: string }) {
+    const source = rules.filter((r) => r.subject_kind === from.kind && r.subject === from.subject);
+    if (!(await confirm({ title: `Copy ${source.length} rules?`, description: `Every rule ${from.kind === "role" ? roleLabel(from.subject) : from.subject} holds is added to ${to.kind === "role" ? roleLabel(to.subject) : to.subject}. Existing rules there are kept; nothing is removed.`, confirmLabel: "Copy" }))) return;
+    setBusy(true);
+    let added = 0;
+    for (const r of source) {
+      try {
+        await create("access-rules", { ...exportBody(r), subject_kind: to.kind, subject: to.subject });
+        added++;
+      } catch {
+        /* already there, or not grantable to this subject kind - skip, the summary reports the count */
+      }
+    }
+    toast({ title: `Copied ${added} rules`, variant: "success" });
+    await reload();
+  }
 
   const toggles = (
     <>
@@ -113,6 +282,32 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
         <Button size="sm" variant={subjectKind === "role" ? "default" : "ghost"} className="h-7" onClick={() => setSubjectKind("role")}>Roles</Button>
         <Button size="sm" variant={subjectKind === "user" ? "default" : "ghost"} className="h-7" onClick={() => setSubjectKind("user")}>Users</Button>
       </div>
+      {subjectKind === "role" && roles.length > 1 && (
+        <Button size="sm" variant="outline" className="h-7" onClick={() => setCompare({ a: roles[0]!.name, b: roles[1]!.name })} title="Compare two roles side by side, and copy one's rules onto another">
+          <GitCompareArrows className="h-3.5 w-3.5" /> Compare
+        </Button>
+      )}
+      <Button size="sm" variant="outline" className="h-7" onClick={exportRules} title="Download every rule as JSON for review, backup or moving between environments">
+        <Download className="h-3.5 w-3.5" /> Export
+      </Button>
+      {canManage && (
+        <>
+          <Button size="sm" variant="outline" className="h-7" onClick={() => fileRef.current?.click()} title="Add rules from a previously exported JSON file (additive; duplicates are skipped)">
+            <Upload className="h-3.5 w-3.5" /> Import
+          </Button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = ""; // let the same file be picked again after a failed import
+              if (f) void importRules(f);
+            }}
+          />
+        </>
+      )}
     </>
   );
 
@@ -123,9 +318,126 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     </p>
   );
 
+  // Two roles side by side, collection by collection, differences only by default - the question "what does
+  // manager actually have that hr_admin doesn't?" had no answer short of reading both columns of a 65-row
+  // matrix. Doubles as the copy tool: clone either direction once you can see the gap.
+  const compareDialog = compare && (
+    <Dialog open onOpenChange={(o) => !o && setCompare(null)}>
+      <DialogContent className="max-h-[85dvh] max-w-3xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <GitCompareArrows className="h-5 w-5 text-primary" /> Compare roles
+          </DialogTitle>
+          <DialogDescription>Org-wide level per collection. Rows where the two roles differ are listed first.</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-wrap items-end gap-2">
+          {(["a", "b"] as const).map((side) => (
+            <div key={side}>
+              <label className="mb-1 block text-xs font-medium">{side === "a" ? "Role A" : "Role B"}</label>
+              <Select value={compare[side]} onValueChange={(v) => setCompare({ ...compare, [side]: v })}>
+                <SelectTrigger className="h-8 w-44"><SelectValue /></SelectTrigger>
+                <SelectContent>{roles.map((r) => <SelectItem key={r.name} value={r.name}>{roleLabel(r.name)}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+          ))}
+          {canManage && (
+            <>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => cloneRules({ kind: "role", subject: compare.a }, { kind: "role", subject: compare.b })}>
+                Copy A → B
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => cloneRules({ kind: "role", subject: compare.b }, { kind: "role", subject: compare.a })}>
+                Copy B → A
+              </Button>
+            </>
+          )}
+        </div>
+        {(() => {
+          const rows = collections
+            .map((c) => ({ c, a: valueOf("role", compare.a, c), b: valueOf("role", compare.b, c) }))
+            .sort((x, y) => Number(x.a === x.b) - Number(y.a === y.b) || groupOf(x.c).localeCompare(groupOf(y.c)) || x.c.localeCompare(y.c));
+          const diffs = rows.filter((r) => r.a !== r.b).length;
+          return (
+            <>
+              <p className="text-xs text-muted-foreground">{diffs} of {rows.length} collections differ.</p>
+              <div className="overflow-x-auto rounded-lg border">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/40">
+                      <th className="px-3 py-2 text-left font-semibold">Collection</th>
+                      <th className="px-3 py-2 text-left font-semibold">{roleLabel(compare.a)}</th>
+                      <th className="px-3 py-2 text-left font-semibold">{roleLabel(compare.b)}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => (
+                      <tr key={r.c} className={r.a !== r.b ? "border-b bg-amber-50/50 last:border-0 dark:bg-amber-950/20" : "border-b last:border-0"}>
+                        <td className="px-3 py-1.5 font-medium">{labelOf(r.c)}</td>
+                        <td className="px-3 py-1.5">{r.a}</td>
+                        <td className="px-3 py-1.5">{r.b}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          );
+        })()}
+      </DialogContent>
+    </Dialog>
+  );
+
+  // Everything waiting on a second approver, across every collection - the queue the four-eyes setting
+  // creates. Without one place listing them, a pending change is only visible to whoever opens that exact
+  // key icon, which is how a "requested" grant sits unnoticed for a week.
+  const pending = rules.filter((r) => r.status === "pending" || r.status === "pending_delete");
+  const pendingCard = (pending.length > 0 || fourEyes !== null) && (
+    <Card className="mb-3">
+      <CardContent className="space-y-2 pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-semibold">Permission changes</p>
+            <p className="text-xs text-muted-foreground">
+              {fourEyes ? "Every change waits for a different access admin to approve it." : "Changes apply immediately. Turn on four-eyes approval to require a second admin."}
+            </p>
+          </div>
+          {fourEyes !== null && canWriteSettings && (
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={fourEyes} onCheckedChange={(v) => void setFourEyesEnabled(v === true)} /> Require a second approver
+            </label>
+          )}
+        </div>
+        {pending.map((r) => (
+          <div key={r.path} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50/60 px-3 py-2 text-sm dark:border-amber-800 dark:bg-amber-950/30">
+            <span className="min-w-0">
+              <Badge variant="secondary" className="mr-2 text-amber-700 dark:text-amber-400">{r.status === "pending" ? "new grant" : "removal"}</Badge>
+              {ruleSentence(r, r.subject_kind === "role" ? roleLabel(r.subject) : users.find((u) => u.path === r.subject)?.email ?? "a person")}
+              {expiryLabel(r.expire_time) ? ` · ${expiryLabel(r.expire_time)}` : ""}
+            </span>
+            {canManage && (
+              // Deciding a pending change is itself a grantable custom method, so each button carries its own
+              // verb target: an org can hand "approve permission changes" to a specific role without handing
+              // over the write that queues them.
+              <span className="flex gap-1">
+                <AccessAction verb="approve" collection="access-rules" label="Approve permission changes">
+                  <Button size="sm" variant="outline" className="h-7" disabled={busy} onClick={() => decide(r, "approve")}>Approve</Button>
+                </AccessAction>
+                <AccessAction verb="reject" collection="access-rules" label="Reject permission changes">
+                  <Button size="sm" variant="ghost" className="h-7 text-destructive" disabled={busy} onClick={() => decide(r, "reject")}>Reject</Button>
+                </AccessAction>
+              </span>
+            )}
+          </div>
+        ))}
+        {pending.length === 0 && fourEyes && <p className="text-xs text-muted-foreground">Nothing is waiting for approval.</p>}
+      </CardContent>
+    </Card>
+  );
+
   return (
     <>
       {controlsSlot ? createPortal(toggles, controlsSlot) : null}
+      {compareDialog}
+      {pendingCard}
       <Card>
       <CardContent className="pt-6">
         {view === "rules" ? (
@@ -141,9 +453,11 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
             <DataTable columns={userMatrixCols} rows={users} getRowId={(u) => u.path} tableId="user-perms-matrix" emptyTitle="No users" controlsSlot={controlsSlot} />
           </div>
         ) : (
-          // Roles x collections: a row per collection, a column per role.
+          // Roles x collections: a row per collection, a column per role, grouped by module and filterable -
+          // 65 flat rows is a wall, and the grouping already exists in the collection registry.
           <div className="space-y-3">
             {matrixNote}
+            <Input className="h-8 max-w-xs" placeholder="Filter collections…" value={matrixFilter} onChange={(e) => setMatrixFilter(e.target.value)} />
             <div className="overflow-x-auto rounded-lg border">
               <table className="w-full border-collapse text-sm">
                 <thead>
@@ -155,14 +469,27 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                   </tr>
                 </thead>
                 <tbody>
-                  {collections.map((c) => (
-                    <tr key={c} className="border-b last:border-0">
-                      <td className="sticky left-0 z-10 bg-background px-3 py-1.5 font-medium">{labelOf(c)}</td>
-                      {roles.map((role) => (
-                        <td key={role.name} className="px-3 py-1.5">{levelCell("role", role.name, c, roleLabel(role.name))}</td>
+                  {groupedCollections.map(([group, cols]) => (
+                    <React.Fragment key={group}>
+                      <tr className="border-b bg-muted/20">
+                        <td className="sticky left-0 z-10 bg-muted/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground" colSpan={1}>{group}</td>
+                        <td colSpan={roles.length} />
+                      </tr>
+                      {cols.map((c) => (
+                        <tr key={c} className="border-b last:border-0">
+                          <td className="sticky left-0 z-10 bg-background px-3 py-1.5 font-medium">{labelOf(c)}</td>
+                          {roles.map((role) => (
+                            <td key={role.name} className="px-3 py-1.5">{levelCell("role", role.name, c, roleLabel(role.name))}</td>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
+                    </React.Fragment>
                   ))}
+                  {groupedCollections.length === 0 && (
+                    <tr>
+                      <td className="px-3 py-3 text-sm text-muted-foreground" colSpan={roles.length + 1}>No collection matches "{matrixFilter}".</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

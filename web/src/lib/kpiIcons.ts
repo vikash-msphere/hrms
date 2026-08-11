@@ -20,6 +20,7 @@ import {
   Landmark,
   UserSearch,
   CalendarClock,
+  CalendarDays,
   Gift,
   ClipboardCheck,
   FileSearch,
@@ -69,6 +70,7 @@ export const KPI_ICONS: Record<string, LucideIcon> = {
   probation_ending: Hourglass,
   notice_serving: DoorOpen,
   // Coming up
+  events_upcoming: CalendarDays,
   compliance_due: ShieldCheck,
   compliance_week: CalendarClock,
   cards_due_week: CalendarRange,

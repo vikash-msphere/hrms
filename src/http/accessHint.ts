@@ -41,6 +41,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   transitions: ["update", "delete", "complete", "cancel", "reopen", "appendTask"],
   "transition-tasks": ["complete", "reopen", "upload"],
   announcements: ["update", "delete", "post", "giveKudos", "markRead", "markAllRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock", "pin", "unpin"],
+  "api-keys": ["delete", "revoke"], // no update: a credential's scope is fixed at mint time, so there is no PATCH
   holidays: ["update", "delete"],
   "leave-types": ["update", "delete"],
   "letter-templates": ["update", "delete"],
@@ -73,7 +74,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind"],
   expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["update", "delete", "enable", "disable", "test"],
-  "access-rules": ["update", "delete", "preview", "requestAccess"],
+  "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject"],
 };
 const DEFAULT_VERBS = ["update", "delete"];
 
@@ -82,6 +83,7 @@ const DEFAULT_VERBS = ["update", "delete"];
 export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "update", "delete", // standard
   "enable", "disable", "lock", "unlock", "publish", "unpublish", "restore", // shared lifecycle
+  "revoke", // kill an API key without deleting it (api-keys), so the audit trail can still resolve it
   "post", // create a generic board post (announcements)
   "giveKudos", // give a kudo (a board post about a recipient; announcements, kind="kudos")
   "markRead", // record the caller's read receipt on a board post (announcements)

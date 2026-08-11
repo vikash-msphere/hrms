@@ -178,6 +178,9 @@ export default function Dashboard({ me }: { me: Me }) {
 
   const canDecide = usePermission("leave-requests.approve");
   const canTimeline = usePermission("timeline.read");
+  // Events are private by default, so the events card is dropped entirely for callers without the grant
+  // rather than shown reading a permanent zero (an absent kpiData entry hides the card - see allBands).
+  const canEvents = usePermission("events.read");
   // Bumped whenever the caller clocks in/out, so the open-sessions read below and the team timeline both
   // refresh and reflect the change immediately.
   const [attendanceRefresh, setAttendanceRefresh] = useState(0);
@@ -353,6 +356,22 @@ export default function Dashboard({ me }: { me: Me }) {
     [holidays, today]
   );
   const isHolidayToday = useMemo(() => holidays.some((h) => h.date === today && !h.disabled), [holidays, today]);
+  // Org events whose window overlaps the next 7 days, soonest first. Computed from the rows the timeline
+  // already loaded, so this KPI costs no extra read. Instants compare on the date part, so an all-day event
+  // counts for its whole day (and a running multi-day event still counts as "this week").
+  const upcomingEvents = useMemo(() => {
+    const in7 = new Date(`${today}T00:00:00`);
+    in7.setDate(in7.getDate() + 7);
+    const in7Str = in7.toISOString().slice(0, 10);
+    const day = (v: string | undefined) => (v ?? "").slice(0, 10);
+    return events
+      .filter((e) => !e.delete_time && day(e.end_time) >= today && day(e.start_time) <= in7Str)
+      .sort((a, b) => (a.start_time ?? "").localeCompare(b.start_time ?? ""));
+  }, [events, today]);
+  const eventsToday = useMemo(
+    () => upcomingEvents.filter((e) => (e.start_time ?? "").slice(0, 10) <= today).length,
+    [upcomingEvents, today]
+  );
   const latestNews = useMemo(
     () =>
       announcements
@@ -740,6 +759,7 @@ export default function Dashboard({ me }: { me: Me }) {
     probation_ending: { label: "Probation ending", value: probationEnding, tone: probationEnding > 0 ? "warning" : "muted", hint: probationEnding === 0 ? "None in 30 days" : "Confirm or extend", target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
     notice_serving: { value: noticeServingV, tone: noticeServingV > 0 ? "warning" : "muted", hint: noticeServingV === 0 ? "None exiting" : "Working notice period", target: { collection: "notice-periods", label: "Notice periods" }, onClick: () => navigateFiltered("notice-periods", "notice-periods", { status: "serving" }) },
     // --- Coming up (leading; toned neutral-to-primary - a runway window is not a breach) ---
+    ...(canEvents ? { events_upcoming: { value: upcomingEvents.length, tone: upcomingEvents.length > 0 ? "primary" : "muted", hint: upcomingEvents[0] ? (eventsToday > 0 ? `${eventsToday} today · next: ${upcomingEvents[0].title}` : `Next: ${upcomingEvents[0].title} · ${relativeDay((upcomingEvents[0].start_time ?? "").slice(0, 10))}`) : "Nothing in the next 7 days", target: { collection: "events", label: "Events" }, onClick: () => navigate("events") } } : {}),
     compliance_due: { label: "Compliance due", value: complianceDueV, tone: complianceDueOverdueV > 0 ? "warning" : complianceDueV > 0 ? "primary" : "muted", hint: complianceDueV === 0 ? "None in 30 days" : complianceDueOverdueV > 0 ? `${complianceDueOverdueV} overdue` : "Within 30 days", target: { collection: "compliance-events", label: "Compliance events" }, onClick: () => navigate("compliance") },
     compliance_week: { value: complianceWeekV, tone: complianceWeekV > 0 ? "primary" : "muted", hint: complianceWeekV === 0 ? "Nothing due soon" : "File before the deadline", target: { collection: "compliance-events", label: "Compliance events" }, onClick: () => navigate("compliance") },
     cards_due_week: { value: cardsDueWeekV, tone: cardsDueWeekV > 0 ? "primary" : "muted", hint: cardsDueWeekV === 0 ? "Nothing due soon" : "Plan ahead", target: { collection: "cards", label: "Board cards" }, onClick: () => navigate("boards") },

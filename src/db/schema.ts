@@ -51,6 +51,37 @@ export const users = sqliteTable("users", {
   updatedAt: updated(),
 });
 
+// Machine credentials. An API key is NOT a principal of its own - it acts as its owner (a real `users` row)
+// and may only ever NARROW that user's authority, never widen it (domain/keyScope.ts). That is why there is
+// no role column here: the role comes from the owner.
+//
+// `hash` is an HMAC-SHA256 of the secret (lib/apiKeyToken.ts), never the secret and never a bare digest, so
+// a dump of this table is not a set of working credentials. `prefix` is the unhashed lookup handle: it makes
+// verification ONE indexed read instead of a scan over every key's hash.
+//
+// The owner FK cascades: deleting a user must not leave a live credential behind that still resolves.
+export const apiKeys = sqliteTable(
+  "api_keys",
+  {
+    uuid: pk(),
+    code: codeCol(),
+    name: text("name").notNull(),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references((): AnySQLiteColumn => users.uuid, { onDelete: "cascade" }),
+    prefix: text("prefix").notNull().unique(), // public lookup handle, also shown in the UI to identify a key
+    hash: text("hash").notNull(), // HMAC-SHA256(secret), base64
+    scopeJson: text("scope_json").notNull(), // domain/keyScope KeyScope - the ceiling on the owner's grant
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }), // null = never (allowed, discouraged in the UI)
+    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }), // throttled write, best-effort (see middleware/auth)
+    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }), // set by :revoke; a revoked key stays for the audit trail
+    createdBy: text("created_by").references((): AnySQLiteColumn => users.uuid),
+    createdAt: created(),
+    updatedAt: updated(),
+  },
+  (t) => ({ ownerIdx: index("api_keys_owner_idx").on(t.ownerUserId) }),
+);
+
 // Org-wide key/value config (e.g. holiday policy). One row per key, readable by all,
 // writable by config.write.
 export const settings = sqliteTable("settings", {
@@ -85,6 +116,15 @@ export const accessRules = sqliteTable("access_rules", {
   matchCode: text("match_code"), // exact object code for per-object rows (user OR exact role rules), the IN-narrowing key; NULL for scope rules
   level: text("level", { enum: ["read", "write", "admin"] }), // NULL for verb (allow) / deny rules
   effect: text("effect", { enum: ["allow", "deny"] }).notNull(),
+  // Row lifecycle, for orgs that want four-eyes on permission changes (settings key `access-approval`).
+  // A rule awaiting approval to be ADDED (`pending`) is inert; a rule awaiting approval to be REMOVED
+  // (`pending_delete`) keeps enforcing. Fail-safe in both directions - a pending change never applies itself,
+  // in either direction, until a second admin approves it (the predicate lives in lib/policyLoad `live`).
+  status: text("status", { enum: ["active", "pending", "pending_delete"] }).notNull().default("active"),
+  requestedBy: text("requested_by"), // user uuid that asked for the pending change; may not approve it (four eyes)
+  // Optional expiry for temporary access (contractors, incident break-glass). Past this instant the rule is
+  // no longer loaded by any decision path; the nightly cron deletes the row.
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({
@@ -298,8 +338,12 @@ export const events = sqliteTable("events", {
   endTime: integer("end_date", { mode: "timestamp_ms" }).notNull(),
   allDay: integer("all_day", { mode: "boolean" }).notNull().default(true),
   // When true the event's time counts toward attending employees' worked minutes (so it can make a day count
-  // as present / half day). When false the event simply marks attendees unavailable (excused) for its dates.
+  // as present / half day). When false the event does NOT excuse the day: an attendee who never clocked in is
+  // still absent (loss of pay), and one who did is paid on their clocked minutes like any other day.
   countAsWork: integer("count_as_work", { mode: "boolean" }).notNull().default(false),
+  // Only meaningful when countAsWork. When true the credit lands only for attendees who actually punched that
+  // day (a team lunch they clocked out for); when false it lands regardless (an off-site nobody badges into).
+  requiresClockIn: integer("requires_clock_in", { mode: "boolean" }).notNull().default(false),
   color: text("color"), // hex for the timeline band; null = a default accent
   description: text("description"),
   attendeeIds: text("attendee_ids"), // JSON array of employee uuids marked unavailable
@@ -962,7 +1006,8 @@ export const timeEntries = sqliteTable("time_entries", {
 // An employee's loan or salary advance, recovered over monthly installments. Employee-owned + code-scoped
 // (own/dept/all, like leave-requests). Workflow PENDING -> APPROVED -> DISBURSED -> CLOSED (+ REJECTED).
 // `monthlyAmount` is computed on approval (principal / installments); `repaid` accrues via recordRepayment;
-// outstanding = principal - repaid (derived on the wire). Payroll-deduction integration is deferred.
+// outstanding = principal - repaid (derived on the wire). A payroll run recovers one installment per calendar
+// month from the agreed `startDate` onward, capped so net never goes negative (services/loans.ts).
 export const loans = sqliteTable("loans", {
   uuid: pk(),
   code: codeCol(),
@@ -1000,7 +1045,9 @@ export const loanRepayments = sqliteTable("loan_repayments", {
 // One declared tax-saving item for a financial year (e.g. 80C: ELSS 50000). Employee-owned + code-scoped
 // (own/dept/all, like leave-requests). Workflow DECLARED -> VERIFIED/REJECTED by payroll/HR; `verifiedAmount`
 // is what they accept. A proof file attaches via the attachments service (slot "proof"), like reimbursement
-// receipts. Feeding verified amounts into the tax computation is deferred.
+// receipts. VERIFIED amounts reduce withholding: the payroll build and the Tax page feed them through
+// allowedDeductions (domain/incomeTax.ts), which keeps only the sections the regime permits, each capped - under
+// the new regime that is 80CCD(2)/80CCH alone. A merely DECLARED row never moves tax (verification is the gate).
 export const taxDeclarations = sqliteTable("tax_declarations", {
   uuid: pk(),
   code: codeCol(),
@@ -1189,6 +1236,10 @@ export const compensation = sqliteTable("compensation", {
   // Retro arrears owed by a BACKDATED revision: (new base - prior base) x whole months from effective_from to
   // the revision month. Paid as a taxable earning by the next payroll run; paidRunId pins which run (idempotent).
   arrearsAmount: real("arrears_amount").notNull().default(0),
+  // The PF-wage slice of those arrears (the rise in BASIC x the same months). PF is due on arrears of basic
+  // wages, not on the whole gross delta, so the payroll run needs the two figures apart; ESI is due on the
+  // whole arrears amount and uses `arrearsAmount`.
+  arrearsBaseAmount: real("arrears_base_amount").notNull().default(0),
   arrearsPaidRunId: text("arrears_paid_run_id").references((): AnySQLiteColumn => payrollRuns.uuid),
   arrearsPaidAt: integer("arrears_paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
@@ -1423,6 +1474,12 @@ export const settlements = sqliteTable("settlements", {
   totalEarnings: real("total_earnings").notNull(),
   totalDeductions: real("total_deductions").notNull(),
   net: real("net").notNull(),
+  // The FnF is salary income and the year's largest single payment, so it withholds like a payroll run does:
+  // `taxableEarnings` is the slice of the earnings that is chargeable (exempt gratuity / leave-encashment
+  // portions excluded) and `tds` the income tax withheld on it. Both are stored because Form 16 is assembled
+  // from actuals - a leaver is in no payroll run, so without these the certificate would omit the payment.
+  taxableEarnings: real("taxable_earnings").notNull().default(0),
+  tds: real("tds").notNull().default(0),
   // Exactly which payables this FnF consumed: {reimbursements,bonuses,encashments,overtime,arrears,loans[],
   // leaveDebits[]} by id. The FnF is the leaver's terminal payout, so it takes those rows OUT of the payroll
   // queues (they would otherwise never be paid - a terminated employee is in no run). Recording the ids is
@@ -1494,14 +1551,27 @@ export const payComponents = sqliteTable("pay_components", {
   code: codeCol(),
   name: text("name").notNull(),
   // earning = paid, in gross; deduction = withheld from gross (employee side); employer_contribution = the
-  // employer's on-top cost (PF/ESI/gratuity), never on the payslip, only in CTC. What is provided (gratuity
+  // employer's on-top cost (PF/ESI/gratuity): part of neither gross nor deductions, reported as cost to
+  // company (CTC views, the run's own lines and the payslip's employer block). What is provided (gratuity
   // etc.), at what rate/cap/method, is ALL data: add/remove a row, no code changes.
   kind: text("kind", { enum: ["earning", "deduction", "employer_contribution"] }).notNull(),
-  method: text("method", { enum: ["fixed", "percent_base", "rate_qty", "income_tax", "epf", "esi", "pt"] }).notNull().default("fixed"),
+  // "edli" and "pf_admin" are the employer's two statutory PF side-charges (EDLI 0.5%, administration 0.5%),
+  // priced on the SAME PF wages as method "epf" (basic-or-configured composition, capped at the wage ceiling).
+  // They exist as their own methods rather than a percent_base row because percent_base ignores the PF ceiling.
+  method: text("method", { enum: ["fixed", "percent_base", "rate_qty", "income_tax", "epf", "esi", "pt", "edli", "pf_admin"] }).notNull().default("fixed"),
   rate: real("rate"),
-  cap: real("cap"), // for method "epf": wage ceiling on the base (e.g. 15000); null = apply to full base
+  cap: real("cap"), // for methods "epf"/"edli"/"pf_admin": wage ceiling on PF wages (e.g. 15000); null = uncapped
   regime: text("regime"), // for method "income_tax": which tax regime block to use (e.g. "new")
   recurring: integer("recurring", { mode: "boolean" }).notNull().default(true),
+  // EARNING rows only, and only when settings/pf sets wage_basis "basic_plus": does this allowance count as PF
+  // wages? (The SC's Vivekananda Vidyamandir line: universally-paid allowances are "basic wages"; HRA, overtime
+  // and bonus are statutorily excluded.) Ignored under the default "basic" basis, where PF wages are basic only.
+  pfWages: integer("pf_wages", { mode: "boolean" }).notNull().default(false),
+  // employer_contribution rows only: does this contribution count INSIDE the CTC figure (default, the common
+  // Indian convention) or is it paid OVER AND ABOVE CTC ("CTC + PF")? Either way the company pays it and the
+  // payroll run costs it; this only decides which side of the CTC number it lands on. Ignored (always true)
+  // for earnings and employee deductions, which are inside CTC by construction.
+  inCtc: integer("in_ctc", { mode: "boolean" }).notNull().default(true),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),

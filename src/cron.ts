@@ -13,6 +13,7 @@ import { generateComplianceOccurrences } from "./services/complianceRules";
 import { awardReferralBonuses } from "./services/referrals";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
+import { purgeExpiredAccessRules } from "./services/accessRules";
 import { getSettingValue } from "./services/settings";
 import { renderEmail, loadEmailBrand } from "./lib/emailLayout";
 import { notify, managerIdOf } from "./services/notifications";
@@ -109,7 +110,10 @@ async function dispatchCron(cron: string, deps: Deps): Promise<Record<string, nu
     // Recurring 1:1s roll forward once their date passes, and tomorrow's 1:1s get a day-before nudge.
     const checkInsRolled = await bestEffort("rollRecurringCheckIns", rollRecurringCheckIns(deps));
     const checkInReminders = await bestEffort("remindUpcomingCheckIns", remindUpcomingCheckIns(deps));
-    return { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, recurringExpenses, budgetAlerts, esignReconciled, checkInsRolled, checkInReminders };
+    // Sweep lapsed temporary access rules. They already stopped deciding at their expiry instant (policyLoad
+    // filters on it), so this is table hygiene, not the enforcement mechanism.
+    const accessRulesExpired = await bestEffort("purgeExpiredAccessRules", purgeExpiredAccessRules(deps));
+    return { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, recurringExpenses, budgetAlerts, esignReconciled, checkInsRolled, checkInReminders, accessRulesExpired };
   }
   return {};
 }

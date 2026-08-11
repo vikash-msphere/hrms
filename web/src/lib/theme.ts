@@ -104,6 +104,9 @@ export function useTheme() {
     applyResolved(r, true);
     setThemeState(next);
     setResolved(r);
+    // Other useTheme() consumers (e.g. the sidebar logo, which swaps light/dark artwork) hold their own state,
+    // so announce the change the same way syncThemeFromServer does.
+    window.dispatchEvent(new Event("themechange"));
     persistToServer(next);
   }, []);
 

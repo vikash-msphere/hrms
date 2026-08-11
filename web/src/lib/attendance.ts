@@ -80,6 +80,36 @@ export type DaySummary = {
   earlyByMin: number;
 };
 
+// The shift window a single day is judged against. `grace` is that day's effective lateness allowance -
+// widened by a grace exception, or Infinity when the exception waives lateness entirely.
+type ShiftWindow = { tz: string; startMin: number; endMin: number; grace: number };
+
+// One day's punches -> its summary. Late / left-early are judged against that day's own shift window.
+function summarizeDay(day: string, ss: AttendanceSession[], shift: ShiftWindow): DaySummary {
+  const sorted = [...ss].sort((a, b) => +new Date(a.clock_in) - +new Date(b.clock_in));
+  const arrival = sorted[0]?.clock_in;
+  const closed = sorted.filter((s) => s.clock_out);
+  const open = sorted.some((s) => !s.clock_out);
+  const departure = closed.length ? closed[closed.length - 1]!.clock_out : undefined;
+  const workedMinutes = closed.reduce((sum, s) => sum + Math.max(0, Math.round((+new Date(s.clock_out!) - +new Date(s.clock_in)) / 60000)), 0);
+  const arrMin = arrival ? localMinutes(arrival, shift.tz) : 0;
+  const depMin = departure ? localMinutes(departure, shift.tz) : 0;
+  const late = !!arrival && arrMin > shift.startMin + shift.grace;
+  const leftEarly = !!departure && depMin < shift.endMin - shift.grace;
+  return {
+    day,
+    sessions: sorted,
+    arrival,
+    departure,
+    workedMinutes,
+    open,
+    late,
+    leftEarly,
+    lateByMin: late ? arrMin - shift.startMin : 0,
+    earlyByMin: leftEarly ? shift.endMin - depMin : 0,
+  };
+}
+
 // Group a flat session list into per-day summaries with derived late/early flags. Sorted newest day first.
 export function summarizeByDay(sessions: AttendanceSession[], sched: AttendanceSchedule): DaySummary[] {
   const byDay = new Map<string, AttendanceSession[]>();
@@ -95,28 +125,7 @@ export function summarizeByDay(sessions: AttendanceSession[], sched: AttendanceS
     // On an exception day widen grace: add extra minutes, or waive lateness/early departure entirely.
     const ex = exceptions.get(day);
     const grace = ex ? (ex.extra_grace_minutes == null ? Infinity : sched.grace_minutes + ex.extra_grace_minutes) : sched.grace_minutes;
-    const sorted = [...ss].sort((a, b) => +new Date(a.clock_in) - +new Date(b.clock_in));
-    const arrival = sorted[0]?.clock_in;
-    const closed = sorted.filter((s) => s.clock_out);
-    const open = sorted.some((s) => !s.clock_out);
-    const departure = closed.length ? closed[closed.length - 1]!.clock_out : undefined;
-    const workedMinutes = closed.reduce((sum, s) => sum + Math.max(0, Math.round((+new Date(s.clock_out!) - +new Date(s.clock_in)) / 60000)), 0);
-    const arrMin = arrival ? localMinutes(arrival, sched.timezone) : 0;
-    const depMin = departure ? localMinutes(departure, sched.timezone) : 0;
-    const late = !!arrival && arrMin > startMin + grace;
-    const leftEarly = !!departure && depMin < endMin - grace;
-    out.push({
-      day,
-      sessions: sorted,
-      arrival,
-      departure,
-      workedMinutes,
-      open,
-      late,
-      leftEarly,
-      lateByMin: late ? arrMin - startMin : 0,
-      earlyByMin: leftEarly ? endMin - depMin : 0,
-    });
+    out.push(summarizeDay(day, ss, { tz: sched.timezone, startMin, endMin, grace }));
   }
   return out.sort((a, b) => b.day.localeCompare(a.day));
 }
@@ -133,8 +142,24 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
   return out;
 }
 
-export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "on_event" | "holiday" | "absent";
+// No "on_event": a count_as_work=false event does not excuse the day, so an attendee who never punched is
+// plain "absent" (and docked). count_as_work events show up as credited minutes, not as a status of their own.
+export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "holiday" | "absent";
 export type AttendanceRow = { day: string; summary?: DaySummary; status: DayStatus };
+
+// Status of a day that has punches and/or event work credit. `total` is clocked + event-credited minutes;
+// `s` is absent on an event-only day. Minutes decide first (a day too short to count can't be "late"), then
+// punctuality - which only applies when there are real punches and the schedule isn't flexible.
+function dayStatus(s: DaySummary | undefined, total: number, sched: AttendanceSchedule): DayStatus {
+  if (s?.open) return "open";
+  if (total < sched.half_day_minutes) return "insufficient"; // too little (clocked + event) to earn even a half day
+  if (total < sched.full_day_minutes) return "half_day";
+  if (sched.flexible_hours || !s) return "present"; // event-only or flexible: a full day's worth of minutes = present
+  if (s.late && s.leftEarly) return "late_early";
+  if (s.late) return "late";
+  if (s.leftEarly) return "left_early";
+  return "present";
+}
 
 // Merge punches with the schedule + holidays + approved leave into a per-day grid. Working days with no punch
 // (and not on leave / not a holiday) before today are flagged ABSENT. Weekends without punches are omitted.
@@ -146,14 +171,12 @@ export function buildAttendanceRows(opts: {
   summaries: DaySummary[];
   holidays: Set<string>;
   leaveRanges: { start: string; end: string }[];
-  eventRanges?: { start: string; end: string }[]; // excused events (count_as_work=false): unavailable, no credit
   workMinutesByDay?: Map<string, number>; // count_as_work events: minutes credited toward the day's worked total
   joinedYmd?: string; // employee start date; days before it aren't their attendance, so they're omitted (no absent)
 }): AttendanceRow[] {
-  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, eventRanges = [], workMinutesByDay = new Map(), joinedYmd } = opts;
+  const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), joinedYmd } = opts;
   const byDay = new Map(summaries.map((s) => [s.day, s]));
   const onLeave = (day: string) => leaveRanges.some((r) => r.start <= day && day <= r.end);
-  const onEvent = (day: string) => eventRanges.some((r) => r.start <= day && day <= r.end);
   const rows: AttendanceRow[] = [];
   for (const day of enumerateDays(fromYmd, toYmd)) {
     if (joinedYmd && day < joinedYmd) continue; // before the employee joined -> not their attendance
@@ -162,21 +185,7 @@ export function buildAttendanceRows(opts: {
     if (s || credit > 0) {
       // Event credit adds to clocked minutes for the day's total; late/early flags come from real punches only.
       const total = (s?.workedMinutes ?? 0) + credit;
-      const status: DayStatus = s?.open
-        ? "open"
-        : total < sched.half_day_minutes
-          ? "insufficient" // too little (clocked + event) to earn even a half day
-          : total < sched.full_day_minutes
-            ? "half_day"
-            : sched.flexible_hours || !s // event-only or flexible: a full day's worth of minutes = present
-              ? "present"
-              : s.late && s.leftEarly
-                ? "late_early"
-                : s.late
-                  ? "late"
-                  : s.leftEarly
-                    ? "left_early"
-                    : "present";
+      const status = dayStatus(s, total, sched);
       const summary: DaySummary = s
         ? { ...s, workedMinutes: total }
         : { day, sessions: [], workedMinutes: total, open: false, late: false, leftEarly: false, lateByMin: 0, earlyByMin: 0 };
@@ -187,8 +196,6 @@ export function buildAttendanceRows(opts: {
       rows.push({ day, status: "holiday" });
     } else if (onLeave(day)) {
       rows.push({ day, status: "on_leave" });
-    } else if (onEvent(day)) {
-      rows.push({ day, status: "on_event" });
     } else if (day < todayYmd) {
       rows.push({ day, status: "absent" }); // a past working day with no punch and no leave/holiday
     }
