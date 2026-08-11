@@ -38,6 +38,10 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   const svc: CrudService<I> = { ...crudService(spec), ...spec.overrides };
   const { param, collection, serialize } = spec;
   const itemId = (c: Context<AppEnv>) => c.req.param(param)!;
+  // An item response carries the per-object-merged grant (a share can lift a caller above their role), so the
+  // SPA's affordances on a single record are share-accurate. Lists pass the role grant - one grant, many rows.
+  const item = (c: Context<AppEnv>, row: { code?: string | null } | undefined) =>
+    c.json(withAccess(serialize(row) as object, c.get("user"), collection, row?.code, c.get("objectGrant")));
 
   return new Hono<AppEnv>()
     .get("/", async (c) => {
@@ -46,18 +50,11 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
       const { items, nextPageToken } = await svc.list(c.get("deps"), user, maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
       return c.json({ results: items.map((r) => withAccess(serialize(r) as object, user, collection, r.code)), next_page_token: nextPageToken });
     })
-    .get(`/:${param}`, async (c) => {
-      const row = await svc.get(c.get("deps"), c.get("user"), itemId(c));
-      return c.json(serialize(row));
-    })
-    .post("/", zValidator("json", spec.writeSchema), async (c) => {
-      const row = await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, c.req.query("id"));
-      return c.json(serialize(row));
-    })
-    .patch(`/:${param}`, zValidator("json", spec.writeSchema), async (c) => {
-      const row = await svc.update(c.get("deps"), c.get("user"), itemId(c), c.req.valid("json") as I, c.req.header("If-Match"));
-      return c.json(serialize(row));
-    })
+    .get(`/:${param}`, async (c) => item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c))))
+    .post("/", zValidator("json", spec.writeSchema), async (c) =>
+      item(c, await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, c.req.query("id"))))
+    .patch(`/:${param}`, zValidator("json", spec.writeSchema), async (c) =>
+      item(c, await svc.update(c.get("deps"), c.get("user"), itemId(c), c.req.valid("json") as I, c.req.header("If-Match"))))
     .delete(`/:${param}`, async (c) => {
       const id = itemId(c);
       const ifMatch = c.req.header("If-Match");
@@ -77,7 +74,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
       });
       if (lc) return lc;
       const { id, verb } = customMethod(c);
-      if (verb === "restore") return c.json(serialize(await svc.restore(c.get("deps"), c.get("user"), id)));
+      if (verb === "restore") return item(c, await svc.restore(c.get("deps"), c.get("user"), id));
       const own = spec.verbs?.[verb];
       if (own) return own(c, id, svc);
       return c.notFound();

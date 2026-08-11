@@ -40,14 +40,23 @@ export type CrudSpec<I> = {
   notFound: string;
   /** Wire input -> insert columns. Throws `invalidArgument` for a missing/unparseable required field. */
   insert: (input: I, deps: Deps, actor: AppUser) => Record<string, unknown> | Promise<Record<string, unknown>>;
-  /** Wire patch -> the `set` object: ONLY keys the caller actually sent (see `has`), so a diff stays honest. */
-  patch: (input: I, row: any) => Record<string, unknown>;
+  /**
+   * Wire patch -> the `set` object: ONLY keys the caller actually sent (see `has`), so a diff stays honest.
+   * Async when a field has to be resolved against another table (a reference the write must validate).
+   */
+  patch: (input: I, row: any, deps: Deps) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Presentation order within a page. Default: oldest-first by (createTime, uuid), the cursor's own order. */
   sort?: (a: any, b: any) => number;
   /** Per-caller decoration of the returned rows (e.g. a holiday's own selection). Runs on the page, not the table. */
   decorate?: (deps: Deps, actor: AppUser, rows: any[]) => Promise<any[]>;
-  /** Code allocation, when the resource is not a flat one (owned/dept-scoped tables). */
-  allocCode?: (deps: Deps, table: Table) => Promise<string>;
+  /** Side effects the write owes the rest of the system (notify, re-accrue, emit an event). Run after the audit row. */
+  afterCreate?: (deps: Deps, actor: AppUser, row: any, input: I) => Promise<void>;
+  afterUpdate?: (deps: Deps, actor: AppUser, row: any, before: any, patch: I) => Promise<void>;
+  /**
+   * Code allocation, when the resource is not a flat one (owned/dept-scoped tables). Receives the resolved
+   * insert values, since an owned code is allocated under the row's owner.
+   */
+  allocCode?: (deps: Deps, table: Table, values: Record<string, unknown>) => Promise<string>;
 };
 
 export type CrudService<I> = {
@@ -67,7 +76,8 @@ const byCreated = (a: Row, b: Row) => +new Date(a.createdAt) - +new Date(b.creat
 
 export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
   const { table, collection, auditName } = spec;
-  const alloc = spec.allocCode ?? allocFlatCode;
+  // allocFlatCode's third parameter is a width, not the values bag - bind it explicitly.
+  const alloc = spec.allocCode ?? ((deps: Deps, t: Table) => allocFlatCode(deps, t));
 
   const required = async (deps: Deps, id: string): Promise<Row> => {
     const row = (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1))[0] as Row | undefined;
@@ -100,19 +110,24 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
       const values = await spec.insert(input, deps, actor);
       const row = ((await deps.db
         .insert(table)
-        .values({ code: await alloc(deps, table), ...(id ? { uuid: id } : {}), ...values })
+        .values({ code: await alloc(deps, table, values), ...(id ? { uuid: id } : {}), ...values })
         .returning()) as Row[])[0]!;
       await audit(deps, actor, `${auditName}.create`, collection, row.uuid, undefined, row);
+      if (spec.afterCreate) await spec.afterCreate(deps, actor, row, input);
       return row;
     },
 
     async update(deps, actor, id, patch, ifMatch) {
       const row = await required(deps, id);
+      // A row in the trash is not editable: restore it first. (A GET still resolves it, so `?show_deleted`
+      // views and audit links keep working.)
+      if (row.deleteTime) throw notFound(spec.notFound);
       assertNotLocked(row);
       if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-      const set: Record<string, unknown> = { updatedAt: new Date(), ...spec.patch(patch, row) };
+      const set: Record<string, unknown> = { updatedAt: new Date(), ...(await spec.patch(patch, row, deps)) };
       const updated = ((await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning()) as Row[])[0]!;
       await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set), updated);
+      if (spec.afterUpdate) await spec.afterUpdate(deps, actor, updated, row, patch);
       return updated;
     },
 
