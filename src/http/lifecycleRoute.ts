@@ -23,15 +23,23 @@ export async function lifecycleVerb(c: Context<AppEnv>, opts: Opts): Promise<Res
   const user = c.get("user");
   const { table, singular, collection, serialize } = opts;
   const done = (row: unknown) => c.json(serialize(row));
+  // A member is only offered where the table can hold the state (pay_grades, for one, has no locked/disabled
+  // column). Returning null makes the unsupported verb a clean 404 at the caller's `c.notFound()` instead of a
+  // 500 from an UPDATE against a column that does not exist.
+  const has = (column: string) => !!(table as Record<string, unknown>)[column];
   switch (verb) {
     case "enable":
-      return done(await setDisabled(deps, user, table, singular, collection, id, false));
+      if (has("disabled")) return done(await setDisabled(deps, user, table, singular, collection, id, false));
+      break;
     case "disable":
-      return done(await setDisabled(deps, user, table, singular, collection, id, true));
+      if (has("disabled")) return done(await setDisabled(deps, user, table, singular, collection, id, true));
+      break;
     case "lock":
-      return done(await setLocked(deps, user, table, singular, collection, id, true));
+      if (has("locked")) return done(await setLocked(deps, user, table, singular, collection, id, true));
+      break;
     case "unlock":
-      return done(await setLocked(deps, user, table, singular, collection, id, false));
+      if (has("locked")) return done(await setLocked(deps, user, table, singular, collection, id, false));
+      break;
     case "publish":
       if (opts.publish) return done(await setPublished(deps, user, table, singular, collection, id, true, opts.publishTime));
       break;
