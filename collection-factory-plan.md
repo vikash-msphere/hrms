@@ -54,6 +54,27 @@ Everything else needed already exists: `list` (scoped lists via `applyScope` + `
 **Hard rule:** a collection that would require a fourth addition stays hand-written *and* gets an explicit
 allow-list entry in the drift test with a one-line reason. No silent exceptions.
 
+## Progress
+
+Steps 1 and 2 are done; 17 of 86 collections are on the factory. Every commit below is green
+(typecheck + full suite, pre-existing tests unmodified).
+
+| commit | step |
+| --- | --- |
+| `d95464e` | factory + holidays, pay-grades, expense-categories |
+| `3608482` | reimbursement-categories, vendors, projects, shifts, leave-types, pay-periods |
+| `2b6b1a4` | salary-structures, background-checks, compliance-events (route-level `list` hook) |
+| `8887e2c` | step 1: create/update schema split, verb entries, optional insert/patch |
+| `2b523a2` | benefit-plans, compliance-rules |
+| `d3b7d24` | letter-templates, expense-budgets, pay-components (step 2 complete) |
+
+Two spec refinements the conversions earned after the plan was written:
+- `decorate` now also runs on create/update/restore responses, so a write answers with the same resource shape
+  a read would (expense-budgets derives spend on every row).
+- A verb entry is `{schema?, run}` or `{raw}`; `run` returns the row and the factory serializes + hints it.
+
+Next: step 3 (read-only / partial collections), which exercises optional `insert`/`patch` in anger.
+
 ## Sequence
 
 Each batch: convert, `npm run typecheck`, `npm run test`, commit. Pre-existing tests must pass **unchanged** —
