@@ -48,7 +48,11 @@ export type CollectionRouteSpec<I> = CrudSpec<I> & {
   createSchema?: ZodTypeAny;
   /** PATCH-only body schema. */
   updateSchema?: ZodTypeAny;
-  serialize: (row: any) => unknown;
+  /**
+   * Row -> wire resource. Receives the caller when the resource itself depends on who is looking: an event-log
+   * payload is redacted below super, an employee's signature marker is owner-only. Most serializers ignore it.
+   */
+  serialize: (row: any, user?: AppUser) => unknown;
   /** `singular` for the lifecycle verbs' audit actions, when it differs from `auditName`. */
   lifecycleName?: string;
   publish?: boolean; // resource supports :publish/:unpublish
@@ -74,7 +78,11 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   // An item response carries the per-object-merged grant (a share can lift a caller above their role), so the
   // SPA's affordances on a single record are share-accurate. Lists pass the role grant - one grant, many rows.
   const item = (c: Context<AppEnv>, row: { code?: string | null } | undefined) =>
-    c.json(withAccess(serialize(row) as object, c.get("user"), collection, row?.code, c.get("objectGrant")));
+    c.json(withAccess(serialize(row, c.get("user")) as object, c.get("user"), collection, row?.code, c.get("objectGrant")));
+  // Soft delete is a property of the TABLE: an append-only collection (event-log, cron-runs) has no
+  // `delete_time` column, so it gets no DELETE and no `:restore` rather than a route that writes a column
+  // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleRoute.ts).
+  const softDeletable = !!(spec.table as Record<string, unknown>).deleteTime;
 
   const app = new Hono<AppEnv>();
 
@@ -84,7 +92,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     const { items, nextPageToken } = spec.list
       ? await spec.list(c)
       : await svc.list(c.get("deps"), user, maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
-    return c.json({ results: items.map((r) => withAccess(serialize(r) as object, user, collection, r.code)), next_page_token: nextPageToken });
+    return c.json({ results: items.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code)), next_page_token: nextPageToken });
   });
 
   app.get(`/:${param}`, async (c) => item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c))));
@@ -101,14 +109,16 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
       item(c, await svc.update(c.get("deps"), c.get("user"), itemId(c), c.req.valid("json") as I, c.req.header("If-Match"))));
   }
 
-  app.delete(`/:${param}`, async (c) => {
-    const id = itemId(c);
-    const ifMatch = c.req.header("If-Match");
-    // ?force is the hard purge (admin); the plain call is the soft delete `:restore` can undo.
-    if (c.req.query("force") === "true") await svc.purge(c.get("deps"), c.get("user"), id, ifMatch);
-    else await svc.remove(c.get("deps"), c.get("user"), id, ifMatch);
-    return c.body(null, 204);
-  });
+  if (softDeletable) {
+    app.delete(`/:${param}`, async (c) => {
+      const id = itemId(c);
+      const ifMatch = c.req.header("If-Match");
+      // ?force is the hard purge (admin); the plain call is the soft delete `:restore` can undo.
+      if (c.req.query("force") === "true") await svc.purge(c.get("deps"), c.get("user"), id, ifMatch);
+      else await svc.remove(c.get("deps"), c.get("user"), id, ifMatch);
+      return c.body(null, 204);
+    });
+  }
 
   app.post(`/:${param}`, async (c) => {
     const lc = await lifecycleVerb(c, {
@@ -121,7 +131,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     });
     if (lc) return lc;
     const { id, verb } = customMethod(c);
-    if (verb === "restore") return item(c, await svc.restore(c.get("deps"), c.get("user"), id));
+    if (verb === "restore" && softDeletable) return item(c, await svc.restore(c.get("deps"), c.get("user"), id));
     const own = spec.verbs?.[verb];
     if (!own) return c.notFound();
     if (own.raw) return own.raw(c, id);

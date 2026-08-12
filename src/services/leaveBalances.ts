@@ -4,8 +4,8 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { notFound } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { crudService, type CrudSpec } from "./crud";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
@@ -17,9 +17,14 @@ export async function listLeaveBalances(deps: Deps, scope: ListScope, maxPageSiz
   return keysetPage(deps, schema.leaveBalances, "leave-balances", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getLeaveBalance(deps: Deps, _actor: AppUser, id: string) {
-  // Item access (own / dept / all) is enforced by the middleware on leave-balances/<code>.
-  const row = (await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("leave balance not found");
-  return row;
-}
+// Balances are produced by the accrual cron, never written through the API, and never deleted - so the spec
+// carries no insert/patch and the table no delete_time. The factory mounts exactly list + get from that.
+// Item access (own / dept / all) is enforced by the middleware on leave-balances/<code>.
+export const leaveBalanceSpec: CrudSpec<never> = {
+  table: schema.leaveBalances,
+  collection: "leave-balances",
+  auditName: "leave_balance",
+  notFound: "leave balance not found",
+};
+
+export const { get: getLeaveBalance } = crudService(leaveBalanceSpec);

@@ -305,6 +305,22 @@ describe("spec dimensions", () => {
     expect((await call(`/${id}:nosuchverb`, { method: "POST" })).status).toBe(404);
   });
 
+  it("mounts no delete or restore for an append-only table (no delete_time column)", async () => {
+    // event_log is history: there is no column to mark a row deleted, so the routes that would write one are
+    // simply absent rather than 500ing on a missing column.
+    const call = mount({
+      table: schema.eventLog,
+      collection: "event-log",
+      auditName: "event",
+      notFound: "event not found",
+      param: "event",
+      list: async () => ({ items: [], nextPageToken: undefined }),
+    } as any);
+    expect((await call(COLLECTION)).status, "reads still work").toBe(200);
+    expect((await call(`/${genId()}`, { method: "DELETE" })).status).toBe(404);
+    expect((await call(`/${genId()}:restore`, { method: "POST" })).status).toBe(404);
+  });
+
   it("mounts no write route for a collection that has no insert or patch", async () => {
     const { insert: _i, patch: _p, ...readOnly } = holidaySpec;
     await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-ro", name: "History", date: new Date("2099-12-25") });
