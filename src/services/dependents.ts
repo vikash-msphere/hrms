@@ -1,15 +1,14 @@
+// Dependents: who an employee can enrol in a benefit plan. Employee-owned (the code is allocated under the
+// owner), so a caller sees their own by scope; HR sees the department or all.
 import { eq, and } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { crudService, has, type CrudSpec } from "./crud";
 
 type Relationship = typeof schema.dependents.$inferSelect.relationship;
 export type DependentInput = {
@@ -36,52 +35,42 @@ export async function listDependents(deps: Deps, scope: ListScope, maxPageSize: 
   return { items: slice, nextPageToken };
 }
 
-export async function getDependent(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.dependents).where(eq(schema.dependents.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("dependent not found");
-  return row;
-}
+export const dependentSpec: CrudSpec<DependentInput> = {
+  table: schema.dependents,
+  collection: "dependents",
+  auditName: "dependent",
+  notFound: "dependent not found",
+  // Owned code: allocated under the owning employee, which `insert` has just resolved.
+  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.dependents.employeeId, values.employeeId as string),
+  insert: (input, _deps, actor) => {
+    if (!input.name?.trim()) throw invalidArgument("name is required");
+    const employeeId = idFromPath(input.employee) ?? actor.employeeId;
+    if (!employeeId) throw invalidArgument("employee is required");
+    if (input.date_of_birth && Number.isNaN(dayMs(input.date_of_birth))) throw invalidArgument("date_of_birth is invalid");
+    return {
+      employeeId,
+      name: input.name.trim(),
+      relationship: input.relationship ?? "other",
+      dateOfBirth: input.date_of_birth ? new Date(dayMs(input.date_of_birth)) : null,
+    };
+  },
+  patch: (patch) => {
+    const set: Record<string, unknown> = {};
+    if (has(patch, "name")) { if (!patch.name?.trim()) throw invalidArgument("name is required"); set.name = patch.name.trim(); }
+    if (has(patch, "relationship")) set.relationship = patch.relationship;
+    if (has(patch, "date_of_birth")) {
+      if (patch.date_of_birth && Number.isNaN(dayMs(patch.date_of_birth))) throw invalidArgument("date_of_birth is invalid");
+      set.dateOfBirth = patch.date_of_birth ? new Date(dayMs(patch.date_of_birth)) : null;
+    }
+    return set;
+  },
+};
 
-export async function createDependent(deps: Deps, actor: AppUser, input: DependentInput, id?: string) {
-  if (!input.name?.trim()) throw invalidArgument("name is required");
-  const employeeId = idFromPath(input.employee) ?? actor.employeeId;
-  if (!employeeId) throw invalidArgument("employee is required");
-  if (input.date_of_birth && Number.isNaN(dayMs(input.date_of_birth))) throw invalidArgument("date_of_birth is invalid");
-  const row = (await deps.db.insert(schema.dependents).values({
-    code: await allocOwnedCode(deps, schema.dependents, schema.dependents.employeeId, employeeId),
-    ...(id ? { uuid: id } : {}),
-    employeeId,
-    name: input.name.trim(),
-    relationship: input.relationship ?? "other",
-    dateOfBirth: input.date_of_birth ? new Date(dayMs(input.date_of_birth)) : null,
-  }).returning())[0]!;
-  await audit(deps, actor, "dependent.create", "dependents", row.uuid, undefined, row);
-  return row;
-}
-
-export async function updateDependent(deps: Deps, actor: AppUser, id: string, patch: DependentInput, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.dependents).where(eq(schema.dependents.uuid, id)).limit(1))[0];
-  if (!row || row.deleteTime) throw notFound("dependent not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
-  const has = (k: keyof DependentInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  if (has("name")) { if (!patch.name?.trim()) throw invalidArgument("name is required"); set.name = patch.name.trim(); }
-  if (has("relationship")) set.relationship = patch.relationship;
-  if (has("date_of_birth")) {
-    if (patch.date_of_birth && Number.isNaN(dayMs(patch.date_of_birth))) throw invalidArgument("date_of_birth is invalid");
-    set.dateOfBirth = patch.date_of_birth ? new Date(dayMs(patch.date_of_birth)) : null;
-  }
-  const updated = (await deps.db.update(schema.dependents).set(set).where(eq(schema.dependents.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "dependent.update", "dependents", id, diffMeta(row, updated, set), updated);
-  return updated;
-}
-
-export async function deleteDependent(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.dependents, "dependent", "dependents", id, ifMatch);
-}
-export async function restoreDependent(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.dependents, "dependent", "dependents", id);
-}
-export async function purgeDependent(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.dependents, "dependent", "dependents", id, ifMatch);
-}
+export const {
+  get: getDependent,
+  create: createDependent,
+  update: updateDependent,
+  remove: deleteDependent,
+  restore: restoreDependent,
+  purge: purgeDependent,
+} = crudService(dependentSpec);

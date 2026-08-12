@@ -1,15 +1,12 @@
-import { eq } from "drizzle-orm";
-import { allocFlatCode } from "./codeAlloc";
+// Company events (holidays' timed sibling): all-day or timed, optionally counting as work for attendees.
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
-import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { invalidArgument } from "../lib/errors";
+import { visibleByDelete } from "./softDelete";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
+import { encodeCursor, decodeCursor } from "../http/pagination";
+import { crudService, has, type CrudSpec } from "./crud";
 
 export type EventInput = {
   title?: string;
@@ -37,6 +34,7 @@ function parseTime(s: string | undefined, allDay: boolean): number {
   return Date.parse(s.length <= 10 ? `${s}T00:00:00.000Z` : s);
 }
 
+// Scope-filtered in SQL (an event can be shared to a department), then paged like any other collection.
 export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const all = visibleByDelete(await deps.db.select().from(schema.events).where(applyScope(scope, schema.events.code, schema.events.code)), showDeleted).sort(
     (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
@@ -51,25 +49,20 @@ export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPa
   return { items: slice, nextPageToken };
 }
 
-export async function getEvent(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.events).where(eq(schema.events.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("event not found");
-  return row;
-}
-
-export async function createEvent(deps: Deps, actor: AppUser, input: EventInput, id?: string) {
-  const title = (input.title ?? "").trim();
-  if (!title) throw invalidArgument("title is required");
-  const allDay = input.all_day !== false; // default to all-day
-  const start = parseTime(input.start_time, allDay);
-  const end = parseTime(input.end_time, allDay);
-  if (Number.isNaN(start) || Number.isNaN(end)) throw invalidArgument("start_time and end_time are required");
-  if (end < start) throw invalidArgument("end_time must be on or after start_time");
-  const row = (await deps.db
-    .insert(schema.events)
-    .values({
-      code: await allocFlatCode(deps, schema.events),
-      ...(id ? { id } : {}),
+export const eventSpec: CrudSpec<EventInput> = {
+  table: schema.events,
+  collection: "events",
+  auditName: "event",
+  notFound: "event not found",
+  insert: (input) => {
+    const title = (input.title ?? "").trim();
+    if (!title) throw invalidArgument("title is required");
+    const allDay = input.all_day !== false; // default to all-day
+    const start = parseTime(input.start_time, allDay);
+    const end = parseTime(input.end_time, allDay);
+    if (Number.isNaN(start) || Number.isNaN(end)) throw invalidArgument("start_time and end_time are required");
+    if (end < start) throw invalidArgument("end_time must be on or after start_time");
+    return {
       title,
       startTime: new Date(start),
       endTime: new Date(end),
@@ -79,52 +72,41 @@ export async function createEvent(deps: Deps, actor: AppUser, input: EventInput,
       color: input.color ?? null,
       description: input.description ?? null,
       attendeeIds: attendeesJson(input.attendees),
-    })
-    .returning())[0]!;
-  await audit(deps, actor, "event.create", "events", row.uuid, undefined, row);
-  return row;
-}
+    };
+  },
+  patch: (patch, row) => {
+    const set: Record<string, unknown> = {};
+    if (has(patch, "title")) {
+      const title = (patch.title ?? "").trim();
+      if (!title) throw invalidArgument("title cannot be empty");
+      set.title = title;
+    }
+    if (has(patch, "color")) set.color = patch.color ?? null;
+    if (has(patch, "description")) set.description = patch.description ?? null;
+    if (has(patch, "count_as_work")) set.countAsWork = !!patch.count_as_work;
+    if (has(patch, "requires_clock_in")) set.requiresClockIn = !!patch.requires_clock_in;
+    if (has(patch, "attendees")) set.attendeeIds = attendeesJson(patch.attendees);
+    // all_day may change alongside the times; resolve the effective flag then re-parse any supplied bound.
+    const allDay = has(patch, "all_day") ? patch.all_day !== false : row.allDay;
+    if (has(patch, "all_day")) set.allDay = allDay;
+    if (has(patch, "start_time") || has(patch, "end_time") || has(patch, "all_day")) {
+      const start = has(patch, "start_time") ? parseTime(patch.start_time, allDay) : +new Date(row.startTime);
+      const end = has(patch, "end_time") ? parseTime(patch.end_time, allDay) : +new Date(row.endTime);
+      if (Number.isNaN(start) || Number.isNaN(end)) throw invalidArgument("start_time and end_time must be valid");
+      if (end < start) throw invalidArgument("end_time must be on or after start_time");
+      set.startTime = new Date(start);
+      set.endTime = new Date(end);
+    }
+    return set;
+  },
+};
 
-export async function updateEvent(deps: Deps, actor: AppUser, id: string, patch: EventInput, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.events).where(eq(schema.events.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("event not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const has = (k: keyof EventInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
-  if (has("title")) {
-    const title = (patch.title ?? "").trim();
-    if (!title) throw invalidArgument("title cannot be empty");
-    set.title = title;
-  }
-  if (has("color")) set.color = patch.color ?? null;
-  if (has("description")) set.description = patch.description ?? null;
-  if (has("count_as_work")) set.countAsWork = !!patch.count_as_work;
-  if (has("requires_clock_in")) set.requiresClockIn = !!patch.requires_clock_in;
-  if (has("attendees")) set.attendeeIds = attendeesJson(patch.attendees);
-  // all_day may change alongside the times; resolve the effective flag then re-parse any supplied bound.
-  const allDay = has("all_day") ? patch.all_day !== false : row.allDay;
-  if (has("all_day")) set.allDay = allDay;
-  if (has("start_time") || has("end_time") || has("all_day")) {
-    const start = has("start_time") ? parseTime(patch.start_time, allDay) : +new Date(row.startTime);
-    const end = has("end_time") ? parseTime(patch.end_time, allDay) : +new Date(row.endTime);
-    if (Number.isNaN(start) || Number.isNaN(end)) throw invalidArgument("start_time and end_time must be valid");
-    if (end < start) throw invalidArgument("end_time must be on or after start_time");
-    set.startTime = new Date(start);
-    set.endTime = new Date(end);
-  }
-  const updated = (await deps.db.update(schema.events).set(set).where(eq(schema.events.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "event.update", "events", id, diffMeta(row, updated, set), updated);
-  return updated;
-}
-
-export async function deleteEvent(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.events, "event", "events", id, ifMatch);
-}
-
-export async function restoreEvent(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.events, "event", "events", id);
-}
-
-export async function purgeEvent(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.events, "event", "events", id, ifMatch);
-}
+export const {
+  list: listEventsUnscoped,
+  get: getEvent,
+  create: createEvent,
+  update: updateEvent,
+  remove: deleteEvent,
+  restore: restoreEvent,
+  purge: purgeEvent,
+} = crudService(eventSpec);
