@@ -1,14 +1,10 @@
-import { eq } from "drizzle-orm";
-import { allocFlatCode } from "./codeAlloc";
+// Pay components: the catalog of earnings, deductions and employer contributions payroll prices. Statutory
+// methods (epf/esi/pt/income_tax/edli/pf_admin) are engine-computed and uniqueness-constrained per side; the
+// validators below own those rules, and both the create and the patch check the EFFECTIVE post-write state.
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
-import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
-import { assertNotLocked } from "./lifecycle";
+import { invalidArgument } from "../lib/errors";
+import { crudService, has, type CrudSpec } from "./crud";
 
 export type PayComponentInput = {
   display_name?: string;
@@ -100,45 +96,26 @@ async function validatePt(deps: Deps, effective: { method?: string; kind?: strin
   if (dup) throw invalidArgument(`only one Professional Tax component may exist - ${dupHint(dup)}`);
 }
 
-export async function listPayComponents(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.payComponents), showDeleted).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
-}
-
-export async function getPayComponent(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.payComponents).where(eq(schema.payComponents.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("pay component not found");
-  return row;
-}
-
-export async function createPayComponent(deps: Deps, actor: AppUser, input: PayComponentInput, id?: string) {
-  if (!input.display_name) throw invalidArgument("display_name is required");
-  if (!input.kind) throw invalidArgument("kind is required");
-  const method = input.method ?? "fixed";
-  await validateIncomeTax(deps, { method, kind: input.kind, regime: input.regime });
-  await validateEpf(deps, { method, kind: input.kind });
-  await validateEsi(deps, { method, kind: input.kind });
-  await validatePfCharges(deps, { method, kind: input.kind });
-  await validatePt(deps, { method, kind: input.kind });
-  validateComponentAmounts(
-    method,
-    method === "income_tax" || method === "pt" ? null : input.rate ?? null,
-    CAPPED_METHODS(method) ? input.cap ?? null : null,
-  );
-  const row = (await deps.db
-    .insert(schema.payComponents)
-    .values({
-      ...(id ? { id } : {}),
-      code: await allocFlatCode(deps, schema.payComponents),
+export const payComponentSpec: CrudSpec<PayComponentInput> = {
+  table: schema.payComponents,
+  collection: "pay-components",
+  auditName: "pay_component",
+  notFound: "pay component not found",
+  insert: async (input, deps) => {
+    if (!input.display_name) throw invalidArgument("display_name is required");
+    if (!input.kind) throw invalidArgument("kind is required");
+    const method = input.method ?? "fixed";
+    await validateIncomeTax(deps, { method, kind: input.kind, regime: input.regime });
+    await validateEpf(deps, { method, kind: input.kind });
+    await validateEsi(deps, { method, kind: input.kind });
+    await validatePfCharges(deps, { method, kind: input.kind });
+    await validatePt(deps, { method, kind: input.kind });
+    validateComponentAmounts(
+      method,
+      method === "income_tax" || method === "pt" ? null : input.rate ?? null,
+      CAPPED_METHODS(method) ? input.cap ?? null : null,
+    );
+    return {
       name: input.display_name,
       kind: input.kind,
       method,
@@ -153,67 +130,55 @@ export async function createPayComponent(deps: Deps, actor: AppUser, input: PayC
       // Counting an allowance as PF wages is only meaningful for an EARNING (see pfWagesOf); pinned false
       // elsewhere so no row carries a flag its kind ignores.
       pfWages: input.kind === "earning" ? input.pf_wages ?? false : false,
-    })
-    .returning())[0]!;
-  await audit(deps, actor, "pay_component.create", "pay-components", row.uuid, undefined, row);
-  return row;
-}
+    };
+  },
+  patch: async (patch, row, deps) => {
+    const set: Record<string, unknown> = {};
+    if (has(patch, "display_name")) set.name = patch.display_name;
+    if (has(patch, "kind")) set.kind = patch.kind;
+    if (has(patch, "method")) set.method = patch.method;
+    if (has(patch, "rate")) set.rate = patch.rate ?? null;
+    if (has(patch, "cap")) set.cap = patch.cap ?? null;
+    if (has(patch, "regime")) set.regime = patch.regime ?? null;
+    if (has(patch, "recurring")) set.recurring = patch.recurring;
+    // Validate the effective post-write state for TDS (method/kind/regime) and EPF (method/kind).
+    const eff = {
+      method: (has(patch, "method") ? patch.method : row.method) ?? row.method,
+      kind: (has(patch, "kind") ? patch.kind : row.kind) ?? row.kind,
+      regime: has(patch, "regime") ? patch.regime ?? null : row.regime,
+    };
+    await validateIncomeTax(deps, eff, row.uuid);
+    await validateEpf(deps, eff, row.uuid);
+    await validateEsi(deps, eff, row.uuid);
+    await validatePfCharges(deps, eff, row.uuid);
+    await validatePt(deps, eff, row.uuid);
+    const effRate = has(patch, "rate") ? patch.rate ?? null : row.rate;
+    const effCap = has(patch, "cap") ? patch.cap ?? null : row.cap;
+    validateComponentAmounts(
+      eff.method,
+      eff.method === "income_tax" || eff.method === "pt" ? null : effRate,
+      CAPPED_METHODS(eff.method) ? effCap : null,
+    );
+    if (eff.method === "income_tax") { set.rate = null; set.regime = eff.regime; } // TDS: engine-computed, regime-driven
+    if (eff.method === "pt") set.rate = null; // Professional Tax is slab-computed (settings), never a rate
+    if (!CAPPED_METHODS(eff.method)) set.cap = null; // cap = PF wage ceiling / ESI eligibility ceiling
+    // CTC side: settable only while the component IS an employer contribution. Flipping a contribution to an
+    // earning/deduction resets it to "inside CTC", so a row can never carry an outside-CTC flag its kind ignores.
+    if (eff.kind === "employer_contribution") { if (has(patch, "in_ctc")) set.inCtc = patch.in_ctc ?? true; }
+    else if (has(patch, "in_ctc") || (has(patch, "kind") && row.kind === "employer_contribution")) set.inCtc = true;
+    // PF-wage flag: settable only while the component IS an earning; flipping the kind clears it.
+    if (eff.kind === "earning") { if (has(patch, "pf_wages")) set.pfWages = patch.pf_wages ?? false; }
+    else if (has(patch, "pf_wages") || (has(patch, "kind") && row.kind === "earning")) set.pfWages = false;
+    return set;
+  },
+};
 
-export async function updatePayComponent(deps: Deps, actor: AppUser, id: string, patch: PayComponentInput, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.payComponents).where(eq(schema.payComponents.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("pay component not found");
-  assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
-  const has = (k: keyof PayComponentInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  if (has("display_name")) set.name = patch.display_name;
-  if (has("kind")) set.kind = patch.kind;
-  if (has("method")) set.method = patch.method;
-  if (has("rate")) set.rate = patch.rate ?? null;
-  if (has("cap")) set.cap = patch.cap ?? null;
-  if (has("regime")) set.regime = patch.regime ?? null;
-  if (has("recurring")) set.recurring = patch.recurring;
-  // Validate the effective post-write state for TDS (method/kind/regime) and EPF (method/kind).
-  const eff = {
-    method: (has("method") ? patch.method : row.method) ?? row.method,
-    kind: (has("kind") ? patch.kind : row.kind) ?? row.kind,
-    regime: has("regime") ? patch.regime ?? null : row.regime,
-  };
-  await validateIncomeTax(deps, eff, id);
-  await validateEpf(deps, eff, id);
-  await validateEsi(deps, eff, id);
-  await validatePfCharges(deps, eff, id);
-  await validatePt(deps, eff, id);
-  const effRate = has("rate") ? patch.rate ?? null : row.rate;
-  const effCap = has("cap") ? patch.cap ?? null : row.cap;
-  validateComponentAmounts(
-    eff.method,
-    eff.method === "income_tax" || eff.method === "pt" ? null : effRate,
-    CAPPED_METHODS(eff.method) ? effCap : null,
-  );
-  if (eff.method === "income_tax") { set.rate = null; set.regime = eff.regime; } // TDS: engine-computed, regime-driven
-  if (eff.method === "pt") set.rate = null; // Professional Tax is slab-computed (settings), never a rate
-  if (!CAPPED_METHODS(eff.method)) set.cap = null; // cap = PF wage ceiling / ESI eligibility ceiling
-  // CTC side: settable only while the component IS an employer contribution. Flipping a contribution to an
-  // earning/deduction resets it to "inside CTC", so a row can never carry an outside-CTC flag its kind ignores.
-  if (eff.kind === "employer_contribution") { if (has("in_ctc")) set.inCtc = patch.in_ctc ?? true; }
-  else if (has("in_ctc") || (has("kind") && row.kind === "employer_contribution")) set.inCtc = true;
-  // PF-wage flag: settable only while the component IS an earning; flipping the kind clears it.
-  if (eff.kind === "earning") { if (has("pf_wages")) set.pfWages = patch.pf_wages ?? false; }
-  else if (has("pf_wages") || (has("kind") && row.kind === "earning")) set.pfWages = false;
-  const updated = (await deps.db.update(schema.payComponents).set(set).where(eq(schema.payComponents.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "pay_component.update", "pay-components", id, diffMeta(row, updated, set), updated);
-  return updated;
-}
-
-export async function deletePayComponent(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.payComponents, "pay_component", "pay-components", id, ifMatch);
-}
-
-export async function restorePayComponent(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.payComponents, "pay_component", "pay-components", id);
-}
-
-export async function purgePayComponent(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.payComponents, "pay_component", "pay-components", id, ifMatch);
-}
+export const {
+  list: listPayComponents,
+  get: getPayComponent,
+  create: createPayComponent,
+  update: updatePayComponent,
+  remove: deletePayComponent,
+  restore: restorePayComponent,
+  purge: purgePayComponent,
+} = crudService(payComponentSpec);

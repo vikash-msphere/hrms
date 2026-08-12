@@ -121,7 +121,9 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
         .returning()) as Row[])[0]!;
       await audit(deps, actor, `${auditName}.create`, collection, row.uuid, undefined, row);
       if (spec.afterCreate) await spec.afterCreate(deps, actor, row, input);
-      return row;
+      // Decorated on the way out like a read: a write answers with the same resource shape a GET would, so a
+      // derived field (an expense budget's spend, a holiday's own selection) is never missing from a POST.
+      return (await decorate(deps, actor, [row]))[0];
     },
 
     async update(deps, actor, id, patch, ifMatch) {
@@ -136,11 +138,11 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
       const updated = ((await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning()) as Row[])[0]!;
       await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set), updated);
       if (spec.afterUpdate) await spec.afterUpdate(deps, actor, updated, row, patch);
-      return updated;
+      return (await decorate(deps, actor, [updated]))[0];
     },
 
     remove: (deps, actor, id, ifMatch) => softDeleteRow(deps, actor, table, auditName, collection, id, ifMatch),
-    restore: (deps, actor, id) => restoreRow(deps, actor, table, auditName, collection, id),
+    restore: async (deps, actor, id) => (await decorate(deps, actor, [await restoreRow(deps, actor, table, auditName, collection, id)]))[0],
     purge: (deps, actor, id, ifMatch) => purgeRow(deps, actor, table, auditName, collection, id, ifMatch),
   };
 }
