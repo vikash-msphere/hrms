@@ -12,7 +12,7 @@ import { allocFlatCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
-import { notFound, aborted } from "../lib/errors";
+import { notFound, aborted, unimplemented } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
@@ -38,13 +38,19 @@ export type CrudSpec<I> = {
   auditName: string;
   /** 404 detail for get/update, phrased for a human (`pay grade not found`). */
   notFound: string;
-  /** Wire input -> insert columns. Throws `invalidArgument` for a missing/unparseable required field. */
-  insert: (input: I, deps: Deps, actor: AppUser) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /**
+   * Wire input -> insert columns. Throws `invalidArgument` for a missing/unparseable required field.
+   * OMIT for a collection that is not created through its own endpoint (an acknowledgement is written by
+   * org-documents :acknowledge; a leave balance is accrued) - the factory then mounts no POST at all, so the
+   * absence of a create is expressed once, here, instead of as a missing route somebody has to notice.
+   */
+  insert?: (input: I, deps: Deps, actor: AppUser) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /**
    * Wire patch -> the `set` object: ONLY keys the caller actually sent (see `has`), so a diff stays honest.
    * Async when a field has to be resolved against another table (a reference the write must validate).
+   * OMIT for a read-only collection (an event-log row is history; a cron run is a record of what happened).
    */
-  patch: (input: I, row: any, deps: Deps) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  patch?: (input: I, row: any, deps: Deps) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Presentation order within a page. Default: oldest-first by (createTime, uuid), the cursor's own order. */
   sort?: (a: any, b: any) => number;
   /** Per-caller decoration of the returned rows (e.g. a holiday's own selection). Runs on the page, not the table. */
@@ -107,6 +113,7 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
     },
 
     async create(deps, actor, input, id) {
+      if (!spec.insert) throw unimplemented(`${collection} are not created directly`);
       const values = await spec.insert(input, deps, actor);
       const row = ((await deps.db
         .insert(table)
@@ -118,6 +125,7 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
     },
 
     async update(deps, actor, id, patch, ifMatch) {
+      if (!spec.patch) throw unimplemented(`${collection} cannot be edited`);
       const row = await required(deps, id);
       // A row in the trash is not editable: restore it first. (A GET still resolves it, so `?show_deleted`
       // views and audit links keep working.)

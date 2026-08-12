@@ -5,13 +5,17 @@ import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { eq, like } from "drizzle-orm";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
+import { Hono } from "hono";
+import { z } from "zod";
 import * as schema from "../src/db/schema";
-import type { AppUser, Bindings } from "../src/env";
+import type { AppEnv, AppUser, Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
-import { etagOf } from "../src/http/serialize";
-import { createHoliday } from "../src/services/holidays";
+import { etagOf, toHolidayResource } from "../src/http/serialize";
+import { createHoliday, holidaySpec } from "../src/services/holidays";
+import { collectionRoutes, type CollectionRouteSpec } from "../src/http/collectionRoute";
+import { grantFor } from "../src/domain/grants";
 
 // The generic collection surface (http/collectionRoute.ts + services/crud.ts), end to end through the real
 // app. Every plain-CRUD collection converted to the factory inherits exactly these behaviors, so this suite is
@@ -218,5 +222,99 @@ describe("a collection's own rules ride on the same surface", () => {
   it("keeps its own audit action stem", async () => {
     await send("/v1/pay-grades", "POST", { display_name: "Lead", level: 5 });
     expect(await actions("pay_grade")).toEqual(["pay_grade.create"]);
+  });
+});
+
+// The three spec dimensions that let EVERY collection sit on this one lane. Exercised against a factory app
+// mounted directly over the holidays table: no middleware, so what is under test is the factory itself rather
+// than the request pipeline the suites above already cover end to end.
+describe("spec dimensions", () => {
+  const principal = () =>
+    ({ uuid: "u", email: DEV_EMAIL, role: "super_admin", status: "active", employeeId: null, employeeCode: null, name: null, grant: grantFor("super_admin") }) as unknown as AppUser;
+
+  const mount = (spec: Omit<CollectionRouteSpec<any>, "serialize">) => {
+    const harness = new Hono<AppEnv>();
+    harness.use("*", async (c, next) => {
+      c.set("deps", deps);
+      c.set("user", principal());
+      await next();
+    });
+    harness.route("/t", collectionRoutes({ ...spec, serialize: toHolidayResource } as CollectionRouteSpec<any>));
+    // COLLECTION is the mount path itself (`/t`, no trailing slash - that is what a real request sends and
+    // what Hono's sub-app matches); an item path is `/t/<id>` or `/t/<id>:<verb>`.
+    return (path: string, init: RequestInit = {}) => harness.request(`/t${path}`, init);
+  };
+  const COLLECTION = "";
+  const post = (call: ReturnType<typeof mount>, path: string, body?: unknown, method: "POST" | "PATCH" = "POST") =>
+    call(path, { method, body: JSON.stringify(body ?? {}), headers: { "Content-Type": "application/json" } });
+
+  it("takes separate create and update schemas, so create can demand what patch forbids", async () => {
+    const call = mount({
+      ...holidaySpec,
+      param: "id",
+      // A holiday must be born with a date; a patch of one may not move it.
+      createSchema: z.object({ display_name: z.string().min(1), date: z.string() }).strict(),
+      updateSchema: z.object({ display_name: z.string().min(1).optional() }).strict(),
+    });
+    expect((await post(call, COLLECTION, { display_name: "No date" })).status).toBe(400);
+    expect((await post(call, COLLECTION, { display_name: "Onam", date: "2099-09-01" })).status).toBe(200);
+    const id = (await deps.db.select().from(schema.holidays))[0]!.uuid;
+    expect((await post(call, `/${id}`, { date: "2099-09-02" }, "PATCH")).status).toBe(400);
+    expect((await post(call, `/${id}`, { display_name: "Onam Day" }, "PATCH")).status).toBe(200);
+  });
+
+  it("runs a custom method from a verb entry: parse body, call the service, serialize with the hint", async () => {
+    let sawBody: unknown = "never called";
+    const call = mount({
+      ...holidaySpec,
+      param: "id",
+      writeSchema: z.object({ display_name: z.string().optional(), date: z.string().optional() }).strict(),
+      verbs: {
+        // With a schema: the parsed body reaches `run`.
+        setKind: {
+          schema: z.object({ kind: z.enum(["fixed", "optional"]) }).strict(),
+          run: async (d, _user, id, body) => {
+            sawBody = body;
+            return (await d.db.update(schema.holidays).set({ kind: body.kind }).where(eq(schema.holidays.uuid, id)).returning())[0];
+          },
+        },
+        // Without a schema: a verb that carries no body at all.
+        touch: { run: async (d, _user, id, body) => { sawBody = body; return (await d.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]; } },
+        // Raw: owns its whole Response (the shape binary downloads need).
+        card: { raw: async (c, id) => c.body(`holiday ${id}`, 200, { "Content-Type": "text/plain" }) },
+      },
+    });
+    await post(call, COLLECTION, { display_name: "Pongal", date: "2099-01-15" });
+    const id = (await deps.db.select().from(schema.holidays))[0]!.uuid;
+
+    const res = await call(`/${id}:setKind`, { method: "POST", body: JSON.stringify({ kind: "optional" }), headers: { "Content-Type": "application/json" } });
+    expect(res.status).toBe(200);
+    expect(sawBody).toEqual({ kind: "optional" });
+    const body1 = (await res.json()) as Record<string, any>;
+    expect(body1.kind, "the verb's row is serialized like any other item response").toBe("optional");
+    expect(body1.access.can, "and carries the item access hint").toContain("update");
+
+    sawBody = "never called";
+    expect((await call(`/${id}:touch`, { method: "POST" })).status).toBe(200);
+    expect(sawBody, "no schema means no body is parsed or passed").toBeUndefined();
+
+    const raw = await call(`/${id}:card`, { method: "POST" });
+    expect(raw.headers.get("Content-Type")).toContain("text/plain");
+    expect(await raw.text()).toBe(`holiday ${id}`);
+
+    expect((await call(`/${id}:nosuchverb`, { method: "POST" })).status).toBe(404);
+  });
+
+  it("mounts no write route for a collection that has no insert or patch", async () => {
+    const { insert: _i, patch: _p, ...readOnly } = holidaySpec;
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-ro", name: "History", date: new Date("2099-12-25") });
+    const call = mount({ ...readOnly, param: "id", writeSchema: z.object({}).strict() });
+    const id = (await deps.db.select().from(schema.holidays))[0]!.uuid;
+    // Reads and the delete/restore pair stay: it is the WRITE endpoints that do not exist.
+    expect((await call(COLLECTION)).status).toBe(200);
+    expect((await call(`/${id}`)).status).toBe(200);
+    expect((await post(call, COLLECTION, { display_name: "Nope", date: "2099-01-01" })).status).toBe(404);
+    expect((await post(call, `/${id}`, { display_name: "Nope" }, "PATCH")).status).toBe(404);
+    expect((await call(`/${id}`, { method: "DELETE" })).status).toBe(204);
   });
 });
