@@ -36,7 +36,7 @@ const PENDING = new Set([
   // lifecycle verb would answer :enable/:disable first and write the WRONG column, leaving a rule that reads
   // disabled but still fires. Collapsing the duplicate columns is a schema change, not a spec knob - do that
   // first, then convert.
-  "accessRules", "automations", "documentRoutes", "payrollRuns", "roles", "users",
+  "accessRules", "automations", "documentRoutes", "roles", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",
 ]);
