@@ -27,8 +27,8 @@ the factory decides no permission.
 
 ## Current state
 
-**70 of 106 route files are on the factory; 9 collections remain, 6 of them recorded with a reason.** 1219 tests
-across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+**74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
+reason - none is simply unstarted work.** 1219 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
@@ -42,8 +42,9 @@ Optional: `insert`, `patch` (omit either to mount no POST / no PATCH), `writeSch
 `updateSchema`, `sort`, `decorate`, `afterCreate`, `afterUpdate`, `allocCode`, `lifecycleName`, `publish`,
 `publishTime`, `softDelete: false`, `overrides`, `list`, `verbs`.
 
-That is the same 15 knobs the conversion started with. Nothing was added: 43 collections went on the lane
-without one, and the two that could not be expressed are recorded as blocked rather than as a 16th knob.
+That is the same 15 knobs the conversion started with. Nothing was added: every collection converted went on
+the lane with them, and the five that could not be expressed are recorded as blocked rather than as a 16th
+knob.
 
 Behaviours worth knowing before converting anything:
 
@@ -69,27 +70,25 @@ drift test, each with a one-line reason, and the test asserts **no collection-le
 one grows either, it has become a collection and the test pulls it into the lane.
 
 **2. The spec surface is frozen.** No new optional fields. A collection that appears to need a 16th knob goes
-into `PENDING` with its reason instead, to be reviewed as a batch. Step 5's variation was custom methods, which
-`verbs` already covers, so this rarely binds - it bound twice, and both are recorded below.
+into `PENDING` with its reason instead, to be reviewed on its own merits. Custom methods, the biggest source of
+variation, are already covered by `verbs`, so this rarely binds - it bound five times out of eighty, and all
+five are in the table below.
 
 **3. Convert biggest-first, in batches of 3-6.** Verb-heavy files pay the most: they are the files people edit.
 
 ## Remaining work
 
-Nine files, six with a recorded reason. All of them are in `PENDING` in the drift test, which carries the same
-reasons inline.
+Five files, each blocked on something that is not a spec knob. All are in `PENDING` in the drift test, which
+carries the same reasons inline. Three want a schema or an identity change first; two want a factory change
+that has to be decided on its own merits, not slipped in to finish a conversion.
 
 | file | why it is still hand-rolled |
 | --- | --- |
 | `automations` | **Blocked on the schema.** The table carries BOTH `enabled` (the rule's own switch, which :enable/:disable write through `setAutomationEnabled`) and the generic lifecycle `disabled`/`locked` columns. On the factory the shared lifecycle verb answers :enable/:disable first and would write the wrong column, leaving a rule that reads disabled but still fires. Collapse the duplicate columns first - that is a schema change, not a spec knob. |
 | `roles` | **Blocked on identity.** The item id is the role NAME (the FK target every grant and user row points at), not the uuid every generic method keys on. Converting means overriding all of get/update/delete, which buys the list shape and nothing else. |
+| `accessRules` | **Blocked on identity.** Rows are keyed by an `id` column and have neither the `uuid` every generic method keys on nor the `code` the access hint decides against; the service also serializes inside list/get. |
 | `users` | **Blocked on the response.** `GET /v1/users/me` answers with a caller-identity envelope (capabilities + grantable scope tiers) and synthesizes a row for a simulated principal who has never signed in. The factory serializes a row; this endpoint answers about the caller. |
-| `accessRules` | Not yet attempted. |
-| `documentRoutes` | Not yet attempted (org + personal documents share one file, with byte-serving verbs). |
-| `payrollRuns` | Not yet attempted (5 verbs, several answering with files rather than the resource). |
-| `announcements` | Step 6: the board. ~17 verbs, publish/pin lifecycle, viewer-dependent serialization. |
-| `cards` | Step 6: kanban cards. ~11 verbs. |
-| `employees` | Step 6: scoped list with `?q`, viewer-dependent `serialize(row, user)`, `{raw}` verbs for photo / signature / identity-doc bytes, and ten singleton sub-resource routes chained onto the app the factory returns. |
+| `announcements` | **Blocked on ordering.** A board post carries `read_by`/`read_count` only for its author or someone who may edit it, and that second half is read off `access.can` - the hint the factory computes AFTER serializing, from the per-object grant only it holds. `serialize(row, user)` runs before that and sees the caller's broad grant, so it cannot make the same call. Expressing it needs a post-serialize hook - the 16th knob, so it goes here instead. |
 
 ## Per-collection recipe
 
@@ -166,6 +165,7 @@ Defects the copied code was hiding, now fixed:
   never enable. The hint is now derived from the mounted surface, in one place.
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
+- `operations` answered 400 for an unknown verb where every other collection answers 404.
 
 Defects the conversion itself introduced, all found and fixed:
 
