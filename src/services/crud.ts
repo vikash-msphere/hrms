@@ -16,6 +16,8 @@ import { notFound, aborted, alreadyExists, unimplemented } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { keysetPage } from "./keysetPage";
+import { applyScope } from "./listScope";
+import type { ListScope } from "../domain/access";
 import { assertNotLocked } from "./lockGuard";
 
 // Drizzle tables are heavily generic; treated structurally here, as in services/softDelete.ts.
@@ -70,7 +72,12 @@ export type CrudSpec<I> = {
 };
 
 export type CrudService<I> = {
-  list: (deps: Deps, actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted?: boolean) => Promise<{ items: any[]; nextPageToken?: string }>;
+  /**
+   * `scope` is the row filter the authz middleware decided for this request (`c.get("scope")`), bound to
+   * columns here and nowhere else. It is required, not optional: an absent scope is a request the middleware
+   * did not scope, and `applyScope` answers no rows for it rather than the whole table.
+   */
+  list: (deps: Deps, actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted?: boolean) => Promise<{ items: any[]; nextPageToken?: string }>;
   get: (deps: Deps, actor: AppUser, id: string) => Promise<any>;
   create: (deps: Deps, actor: AppUser, input: I, id?: string) => Promise<any>;
   update: (deps: Deps, actor: AppUser, id: string, patch: I, ifMatch?: string) => Promise<any>;
@@ -99,10 +106,15 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
     // `delete_time` column (an append-only collection), and the page token carries the WIRE token for the row
     // rather than its internal uuid - both handed over by keysetPage, which is what the 25 hand-written scoped
     // lists already use. `sort` then presents within the page (see CrudSpec.sort).
-    async list(deps, actor, maxPageSize, pageToken, showDeleted = false) {
-      const conds: SQL[] = [];
+    //
+    // The caller's scope is bound the same way every hand-written list binds it: applyScope maps the breadth
+    // the middleware DECIDED onto this table's columns and decides nothing itself. A generic-list table is a
+    // flat catalog with a `code` and no owner column, so a scoped-to-`own` caller correctly gets nothing -
+    // fail closed, rather than the whole table a missing scope check used to hand back.
+    async list(deps, actor, scope, maxPageSize, pageToken, showDeleted = false) {
+      const conds = [applyScope(scope, table.code, undefined)];
       if (!showDeleted && table.deleteTime) conds.push(isNull(table.deleteTime));
-      const { items, nextPageToken } = await keysetPage<Row>(deps, table, collection, and(...conds), {
+      const { items, nextPageToken } = await keysetPage<Row>(deps, table, collection, and(...conds.filter(Boolean) as SQL[]), {
         max: maxPageSize,
         pageToken,
       });

@@ -6,6 +6,7 @@ const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query:
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
+import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { clampPageSize } from "../src/http/pagination";
@@ -35,6 +36,9 @@ beforeEach(async () => {
 });
 
 const actor = { uuid: "u", email: "a@b.c", role: "super_admin", status: "active", employeeId: null, employeeCode: null, name: null } as unknown as AppUser;
+// The row filter the authz middleware hands a list request. Org-wide here, which is what every seeded role
+// resolves to on the holiday catalog - the cap is what these tests are about, not the scope.
+const ALL: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true };
 
 async function seedHolidays(n: number) {
   const rows = Array.from({ length: n }, (_, i) => ({ uuid: genId(), code: `h-${i}`, date: new Date("2026-03-04"), name: `Holiday ${i}` }));
@@ -51,14 +55,14 @@ describe("list pagination cap", () => {
 
   it("returns a cursor when the collection is larger than one page, so the client can tell it was truncated", async () => {
     await seedHolidays(150);
-    const page = await listHolidays(deps, actor, clampPageSize(500));
+    const page = await listHolidays(deps, actor, ALL, clampPageSize(500));
     expect(page.items.length).toBe(100); // NOT 150, however much the caller asked for
     expect(page.nextPageToken, "a truncated page MUST carry a cursor or the UI cannot know it is partial").toBeTruthy();
   });
 
   it("returns no cursor when the whole collection fits, so a complete page is not labelled partial", async () => {
     await seedHolidays(12);
-    const page = await listHolidays(deps, actor, clampPageSize(200));
+    const page = await listHolidays(deps, actor, ALL, clampPageSize(200));
     expect(page.items.length).toBe(12);
     expect(page.nextPageToken).toBeUndefined();
   });

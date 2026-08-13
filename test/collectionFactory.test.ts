@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import * as schema from "../src/db/schema";
 import type { AppEnv, AppUser, Bindings } from "../src/env";
+import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
@@ -270,11 +271,17 @@ describe("spec dimensions", () => {
   const principal = () =>
     ({ uuid: "u", email: DEV_EMAIL, role: "super_admin", status: "active", employeeId: null, employeeCode: null, name: null, grant: grantFor("super_admin") }) as unknown as AppUser;
 
-  const mount = (spec: Omit<CollectionRouteSpec<any>, "serialize">) => {
+  // The row filter the authz middleware puts on every list request. The harness stands in for that middleware,
+  // so it supplies one: the generic list binds `c.get("scope")` and answers NOTHING when it is absent.
+  const ALL: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true };
+
+  // `null` stands for a request the middleware never scoped - the case the generic list must fail closed on.
+  const mount = (spec: Omit<CollectionRouteSpec<any>, "serialize">, scope: ListScope | null = ALL) => {
     const harness = new Hono<AppEnv>();
     harness.use("*", async (c, next) => {
       c.set("deps", deps);
       c.set("user", principal());
+      c.set("scope", scope as ListScope);
       await next();
     });
     harness.route("/t", collectionRoutes({ serialize: toHolidayResource, ...spec } as CollectionRouteSpec<any>));
@@ -366,6 +373,20 @@ describe("spec dimensions", () => {
     await post(writable, COLLECTION, { display_name: "Ugadi", date: "2099-03-22" });
     const holidays = (await (await writable(COLLECTION)).json()) as Record<string, any>;
     expect(holidays.results[0].access.can).toEqual(expect.arrayContaining(["update", "delete", "restore", "disable", "lock"]));
+  });
+
+  it("binds the caller's list scope, and answers nothing when the request was never scoped", async () => {
+    await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-scope", name: "Onam", date: new Date("2099-09-01") });
+    const spec = { ...holidaySpec, param: "id" };
+    const rows = async (call: ReturnType<typeof mount>) => ((await (await call(COLLECTION)).json()) as Record<string, any>).results;
+
+    expect((await rows(mount(spec))).length, "org-wide breadth: the whole catalog").toBe(1);
+    // A holiday catalog is flat: a `code` and no owner column. A caller scoped to their own records therefore
+    // has nothing to match, and gets nothing - not the whole table, which is what an unbound scope returned.
+    expect(await rows(mount(spec, { breadth: "own", deptCode: null, ownerId: "emp-1", seeRestricted: true }))).toEqual([]);
+    // Same answer for a dept-scoped caller whose codes cannot match, and for a request with no scope at all.
+    expect(await rows(mount(spec, { breadth: "dept", deptCode: "04", ownerId: null, seeRestricted: true }))).toEqual([]);
+    expect(await rows(mount(spec, null))).toEqual([]);
   });
 
   it("mounts no delete or restore for an append-only table (no delete_time column)", async () => {

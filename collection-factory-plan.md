@@ -28,15 +28,15 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1221 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1223 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
 
-The lane itself is not finished. The generic path still carries defects the copied code had (a list that ignores
-the caller's scope) and still has one copy-pasted block of its own in the 59 route-level list hooks. Track A
-under "Remaining work" clears them; each is one fix now instead of forty.
+The lane itself is not finished: it still has one copy-pasted block of its own in the 59 route-level list hooks,
+and derived data is computed twice in the 13 collections that declare both `list` and `decorate`. Track A under
+"Remaining work" clears them; each is one fix now instead of forty.
 
 ### The spec, as it stands
 
@@ -69,6 +69,14 @@ Behaviours worth knowing before converting anything:
   table without the column. The page token carries the row's WIRE token, never its internal uuid.
 - `sort` therefore orders WITHIN a page, not across the table. A catalog expected to exceed the 100-row
   truncation cap should be ordered client-side rather than re-reading the whole table to sort it.
+- The generic list binds the caller's scope through `applyScope`, exactly as a hand-written scoped list does,
+  and decides nothing itself. A generic-list table is a flat catalog (a `code`, no owner column), so a caller
+  narrowed to `dept` or `own` gets NO rows - fail closed. `collectionLaneDrift.test.ts` asserts every seeded
+  role reads all 15 of them org-wide, so narrowing one in `domain/grants.ts` fails there rather than emptying a
+  dropdown in the SPA.
+- `scope.seeRestricted` (state visibility) is still bound by hand in the services that have it. Only
+  `announcements` carries a `STATE_VISIBILITY` rule and it is hand-rolled, so the generic list has nothing to
+  honor yet; when a factory collection gets a state rule, the generic list must bind it.
 
 ## Decided policy
 
@@ -91,27 +99,13 @@ Two tracks. **A** hardens the lane itself: the generic path still carries defect
 because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
 hand-rolled, three of which only become convertible after a step in A.
 
-Order matters: A2 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
+Order matters: A3 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
 under all 74 converted collections, which is cheapest while the conversion is fresh.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track A - fix the lane
-
-**A2. Bind the list scope in the generic list.** `crud.ts` never reads `c.get("scope")`, so those 15
-collections return every row whatever the caller's breadth. Safe today only by accident: every grant on these
-catalogs is unscoped (`holidays.**`, `leave-types.**`, ...), so `actorScope` answers `all` for everyone who can
-read them. Nothing enforces that, and a single scoped grant would silently list the whole table.
-
-Bind `applyScope(scope, table.code, owner)` into the generic list's where clause. All 15 tables have `code` and none has an
-owner column, so `applyScope` needs to accept a missing owner and answer `1 = 0` for breadth `own` - fail
-closed, the same rule it already applies to a missing scope. Add a test asserting each generic-list collection
-resolves `all` for every seeded role, so the fix cannot silently empty a catalog the SPA needs.
-
-Related gap to record, not fix: `scope.seeRestricted` (state visibility) is bound by hand in the services that
-have it. Only `announcements` carries a `STATE_VISIBILITY` rule today, and it is hand-rolled, so the generic
-list has nothing to honor yet. When a factory collection gets a state rule, the generic list must bind it.
 
 **A3. Hand the resolved paging to `list(c)`.** 59 of the 74 converted files open their list hook with the same
 three lines (`clampPageSize(Number(c.req.query("max_page_size")) || undefined)`, `page_token`, `show_deleted`) -
@@ -182,11 +176,11 @@ collection-level `POST /`, no DELETE).
 
 ### What each step has to prove
 
-The standing gates are under "Verification" below and all of them apply. On top of that: A2 and A4 change
-behavior under all 74 converted collections at once, so each runs the three delta audits in "Audits to run per
-batch" as well - a lane-wide change is exactly where a green suite is least convincing. Extend
-`test/collectionFactory.test.ts` per step: an empty result for a scoped caller (A2), one derived field on both
-list and get (A4), a collection verb that shadows a lifecycle verb (A5), and a serializer that reads `can` (A7).
+The standing gates are under "Verification" below and all of them apply. On top of that: A4 changes behavior
+under all 74 converted collections at once, so it runs the three delta audits in "Audits to run per batch" as
+well - a lane-wide change is exactly where a green suite is least convincing. Extend
+`test/collectionFactory.test.ts` per step: one derived field on both list and get (A4), a collection verb that
+shadows a lifecycle verb (A5), and a serializer that reads `can` (A7).
 
 ## Per-collection recipe
 
@@ -264,6 +258,9 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- The generic list never read `c.get("scope")`, so the 15 collections on it returned every row whatever the
+  caller's breadth. Safe only by accident: every grant on those catalogs is unscoped, so `actorScope` answered
+  `all` for every reader. A single narrowed grant would have listed the whole table.
 - A custom `sort` silently broke paging. `pay-grades`, `projects` and `shifts` presented the table in their own
   order while the cursor compared `createdAt` against that order, so page 2 skipped rows outright - paging
   `pay-grades` by 2 over levels 5, 1, 3 (created in that order) answered [1, 3] and then nothing, losing the row

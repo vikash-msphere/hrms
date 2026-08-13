@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
+import { GRANTS } from "../src/domain/grants";
+import { actorCan, actorScope } from "../src/domain/access";
 
 // ONE way to define a collection. Every route file that exposes the AEP standard methods (a collection-level
 // `GET /` plus an item-level `GET /:id`) must be built by http/collectionRoute.ts, so the paging cursor, the
@@ -99,6 +101,35 @@ describe("every collection is built by the factory", () => {
       }
     }
     expect(stranded, "a bespoke purge nothing calls - wire it as overrides.purge, or delete it if the generic purge is enough").toEqual([]);
+  });
+
+  // The generic list binds the caller's scope (services/crud.ts), and these tables are FLAT catalogs: a `code`
+  // and no owner column. So a grant that narrowed one of them to `dept` or `own` would no longer return the
+  // whole table - it would return nothing, and the SPA would render an empty dropdown where a leave type or a
+  // pay component belongs. Every seeded role that may read one of these must therefore read it org-wide. This
+  // is a claim about the GRANT policy (domain/grants.ts), which is where such a change would be made.
+  it("keeps every generic-list catalog readable org-wide, so binding the scope cannot empty it", () => {
+    // Wire names of the collections with no route-level `list` hook. The count is pinned below, so a 16th
+    // joining the generic path fails here rather than silently escaping the check.
+    const GENERIC_LIST = [
+      "benefit-plans", "compliance-rules", "expense-budgets", "expense-categories", "holidays", "leave-types",
+      "letter-templates", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
+      "salary-structures", "shifts", "vendors",
+    ];
+    const genericListFiles = entries.filter((e) => usesFactory(e.src) && !/^\s*list:/m.test(e.src)).map((e) => e.name);
+    expect(genericListFiles.length, `these list through crud.ts: ${genericListFiles.join(", ")} - keep GENERIC_LIST in step`).toBe(GENERIC_LIST.length);
+
+    // An employee code so `dept` is derivable: without one actorScope cannot answer dept and would fall to own.
+    const narrowed: string[] = [];
+    for (const [role, grant] of Object.entries(GRANTS)) {
+      const actor = { grant, employeeCode: "04-0001" };
+      for (const collection of GENERIC_LIST) {
+        if (!actorCan(actor, `${collection}.read`)) continue; // cannot read it at all - the middleware 403s first
+        const scope = actorScope(actor, collection);
+        if (scope !== "all") narrowed.push(`${role} reads ${collection} as ${scope}`);
+      }
+    }
+    expect(narrowed, "a flat catalog has no owner column, so a narrowed read grant lists NOTHING - give the collection a route-level scoped list before narrowing it").toEqual([]);
   });
 
   // The exemption is only honest while the claim holds: a key/value surface has no create and no delete, because

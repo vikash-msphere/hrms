@@ -120,7 +120,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     const user = c.get("user");
     const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = spec.list
       ? await spec.list(c)
-      : await svc.list(c.get("deps"), user, maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+      : await svc.list(c.get("deps"), user, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
     return c.json({
