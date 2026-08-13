@@ -5,11 +5,9 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { has, type CrudSpec } from "./crud";
 import { notify } from "./notifications";
 
 export type ShiftAssignmentInput = {
@@ -38,53 +36,33 @@ export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPage
   return { items: slice, nextPageToken };
 }
 
-export async function getShiftAssignment(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.shiftAssignments).where(eq(schema.shiftAssignments.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("shift assignment not found");
-  return row;
-}
-
-export async function createShiftAssignment(deps: Deps, actor: AppUser, input: ShiftAssignmentInput, id?: string) {
-  const employeeId = idFromPath(input.employee) ?? actor.employeeId;
-  if (!employeeId) throw invalidArgument("employee is required");
-  const shiftId = idFromPath(input.shift);
-  if (!shiftId) throw invalidArgument("shift is required");
-  const ms = dayMs(input.date);
-  if (Number.isNaN(ms)) throw invalidArgument("date is required");
-  const row = (await deps.db.insert(schema.shiftAssignments).values({
-    code: await allocOwnedCode(deps, schema.shiftAssignments, schema.shiftAssignments.employeeId, employeeId),
-    ...(id ? { uuid: id } : {}),
-    employeeId,
-    shiftId,
-    date: new Date(ms),
-    note: input.note?.trim() || null,
-  }).returning())[0]!;
-  await audit(deps, actor, "shift-assignment.create", "shift-assignments", row.uuid, undefined, row);
-  if (employeeId !== actor.employeeId)
-    await notify(deps, { recipient: employeeId, type: "shift.assigned", title: "Shift assigned", body: `You've been rostered for ${input.date}.`, link: "schedule", subject: `shift-assignments/${row.uuid}`, actorId: actor.employeeId });
-  return row;
-}
-
-export async function updateShiftAssignment(deps: Deps, actor: AppUser, id: string, patch: ShiftAssignmentInput, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.shiftAssignments).where(eq(schema.shiftAssignments.uuid, id)).limit(1))[0];
-  if (!row || row.deleteTime) throw notFound("shift assignment not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
-  const has = (k: keyof ShiftAssignmentInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  if (has("shift")) { const s = idFromPath(patch.shift); if (!s) throw invalidArgument("shift is required"); set.shiftId = s; }
-  if (has("date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }
-  if (has("note")) set.note = patch.note?.trim() || null;
-  const updated = (await deps.db.update(schema.shiftAssignments).set(set).where(eq(schema.shiftAssignments.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "shift-assignment.update", "shift-assignments", id, diffMeta(row, updated, set), updated);
-  return updated;
-}
-
-export async function deleteShiftAssignment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.shiftAssignments, "shift-assignment", "shift-assignments", id, ifMatch);
-}
-export async function restoreShiftAssignment(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.shiftAssignments, "shift-assignment", "shift-assignments", id);
-}
-export async function purgeShiftAssignment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.shiftAssignments, "shift-assignment", "shift-assignments", id, ifMatch);
-}
+// One employee rostered onto one shift on one day. Owned by that employee (the code embeds the owner, so
+// own/dept/all scoping works); the write only decides which shift, which day and the note.
+export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput> = {
+  table: schema.shiftAssignments,
+  collection: "shift-assignments",
+  auditName: "shift-assignment",
+  notFound: "shift assignment not found",
+  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.shiftAssignments.employeeId, values.employeeId as string),
+  insert: (input, _deps, actor) => {
+    const employeeId = idFromPath(input.employee) ?? actor.employeeId;
+    if (!employeeId) throw invalidArgument("employee is required");
+    const shiftId = idFromPath(input.shift);
+    if (!shiftId) throw invalidArgument("shift is required");
+    const ms = dayMs(input.date);
+    if (Number.isNaN(ms)) throw invalidArgument("date is required");
+    return { employeeId, shiftId, date: new Date(ms), note: input.note?.trim() || null };
+  },
+  patch: (patch) => {
+    const set: Record<string, unknown> = {};
+    if (has(patch, "shift")) { const s = idFromPath(patch.shift); if (!s) throw invalidArgument("shift is required"); set.shiftId = s; }
+    if (has(patch, "date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }
+    if (has(patch, "note")) set.note = patch.note?.trim() || null;
+    return set;
+  },
+  // Being rostered by someone else is news; rostering yourself is not.
+  afterCreate: async (deps, actor, row, input) => {
+    if (row.employeeId === actor.employeeId) return;
+    await notify(deps, { recipient: row.employeeId, type: "shift.assigned", title: "Shift assigned", body: `You've been rostered for ${input.date}.`, link: "schedule", subject: `shift-assignments/${row.uuid}`, actorId: actor.employeeId });
+  },
+};

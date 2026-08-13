@@ -30,8 +30,6 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 // Remaining conversion work, by plan step (collection-factory-plan.md). Delete a name when its file lands on
 // the factory; never add one without a reason.
 const PENDING = new Set([
-  // step 4 - scope-filtered / employee-owned collections
-  "departments", "shiftAssignments",
   // step 5 - collections whose custom methods are the bulk of the file
   "accessRules", "apiKeys", "applications", "automations", "bankFormats", "boards", "candidates",
   "documentRoutes", "expenses", "goals", "interviewFeedback", "interviews", "leaveRequests", "loans", "offers",

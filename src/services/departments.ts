@@ -10,8 +10,9 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { moveDepartment } from "./codeCascade";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { visibleByDelete } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
+import { crudService, type CrudSpec } from "./crud";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 
@@ -40,21 +41,23 @@ export async function listDepartments(deps: Deps, scope: ListScope | undefined, 
   return { items: slice, nextPageToken };
 }
 
-export async function getDepartment(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.departments).where(eq(schema.departments.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("department not found");
-  return row;
-}
+// A department is a node in the hierarchy, so its code IS its position in the tree: the create allocates one
+// under the chosen parent, and re-parenting (below) has to move the whole subtree with it.
+export const departmentSpec: CrudSpec<DepartmentInput> = {
+  table: schema.departments,
+  collection: "departments",
+  auditName: "department",
+  notFound: "department not found",
+  allocCode: (deps, _table, values) => allocUnderDept(deps, (values.parentId as string | undefined) ?? null, CODE_WIDTH.dept),
+  insert: (input) => {
+    if (!input.display_name) throw invalidArgument("display_name is required");
+    return { name: input.display_name, parentId: idFromPath(input.parent), managerIds: managerIdsJson(input.managers) };
+  },
+};
 
-export async function createDepartment(deps: Deps, actor: AppUser, input: DepartmentInput, id?: string) {
-  if (!input.display_name) throw invalidArgument("display_name is required");
-  const row = (await deps.db
-    .insert(schema.departments)
-    .values({ code: await allocUnderDept(deps, idFromPath(input.parent) ?? null, CODE_WIDTH.dept), ...(id ? { id } : {}), name: input.display_name, parentId: idFromPath(input.parent), managerIds: managerIdsJson(input.managers) })
-    .returning())[0]!;
-  await audit(deps, actor, "department.create", "departments", row.uuid, undefined, row);
-  return row;
-}
+// Creating a department is the generic create over the spec above. Named here because the hierarchy tests (and
+// anything that has to seed a tree) create departments without going through HTTP.
+export const { create: createDepartment } = crudService(departmentSpec);
 
 export async function updateDepartment(deps: Deps, actor: AppUser, id: string, patch: DepartmentInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.departments).where(eq(schema.departments.uuid, id)).limit(1))[0];
@@ -76,14 +79,3 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
   return updated;
 }
 
-export async function deleteDepartment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.departments, "department", "departments", id, ifMatch);
-}
-
-export async function restoreDepartment(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.departments, "department", "departments", id);
-}
-
-export async function purgeDepartment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.departments, "department", "departments", id, ifMatch);
-}
