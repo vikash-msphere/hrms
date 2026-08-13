@@ -13,7 +13,6 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { moveEmployee } from "./codeCascade";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
-import { restoreRow, purgeRow } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
 import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from "../domain/employeeNumber";
@@ -176,22 +175,8 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   return updated;
 }
 
-export async function deleteEmployee(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
-  if (!row || row.deleteTime) throw notFound("employee not found");
-  assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  await deps.db.update(schema.employees).set({ deleteTime: new Date(), updatedAt: new Date() }).where(eq(schema.employees.uuid, id));
-  await audit(deps, actor, "employee.delete", "employees", id);
-}
 
-export async function restoreEmployee(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.employees, "employee", "employees", id);
-}
 
-export async function purgeEmployee(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.employees, "employee", "employees", id, ifMatch);
-}
 
 /** Public "about me" one-liner shown on profile heroes and the directory. Plain text on the base
  *  record (not PII, no encryption) so display rides every employee read for free. Access (owner /

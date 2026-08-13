@@ -1,11 +1,11 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
+import type { Context } from "hono";
 import type { AppEnv } from "../env";
-import { customMethod } from "../http/customMethod";
-import { lifecycleVerb } from "../http/lifecycleRoute";
 import * as schema from "../db/schema";
-import { listEmployees, getEmployee, createEmployee, updateEmployee, deleteEmployee, restoreEmployee, purgeEmployee, setBio } from "../services/employees";
+import { collectionRoutes } from "../http/collectionRoute";
+import { listEmployees, getEmployee, createEmployee, updateEmployee, setBio } from "../services/employees";
 import { enrollDefaultBenefits } from "../services/benefitEnrollments";
 import { getBankDetails, setBankDetails } from "../services/bankDetails";
 import { getIdentityDetails, setIdentityDetails } from "../services/identityDetails";
@@ -17,7 +17,6 @@ import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, get
 import { putAttachment, downloadAttachment, deleteAttachment } from "../services/attachments";
 import { identityDocSlot } from "../services/identityDetails";
 import { toEmployeeResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { redactIdentity, redactFlat, deniedFieldKeys } from "../http/fieldAccess";
 import { invalidArgument, forbidden } from "../lib/errors";
 import { clampPageSize } from "../http/pagination";
@@ -61,46 +60,93 @@ const empResource = (viewerEmployeeId: string | null | undefined, row: any) => {
   return r;
 };
 
-export const employees = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// The employee record. Its serializer is viewer-dependent (the signature marker is owner-only) and its item
+// read carries the profile-completeness flags, so both go through the spec rather than a hand-written handler.
+// Every write is the service's own: a create allocates the code under the department and provisions the user,
+// an update can re-parent the employee (re-coding every row they own), and delete/purge cascade.
+type EmployeeWrite = z.infer<typeof writeSchema>;
+
+const records = collectionRoutes<EmployeeWrite>({
+  table: schema.employees,
+  collection: COL,
+  auditName: "employee",
+  notFound: "employee not found",
+  param: "employee_id",
+  writeSchema,
+  serialize: (row, user) => {
+    const res = empResource(user?.employeeId, row);
+    if (row._profileCompleteness) res.profile_completeness = row._profileCompleteness;
+    return res;
+  },
+  // Owner-private (like `signature`) with one exception: HR (employees.write) also gets the flags as a
+  // record-quality signal. The `signature` flag stays owner-only - even its existence is private (see
+  // empResource) - so it is stripped for any other viewer. Runs on the item read, not on a page.
+  decorate: async (deps, actor, rows) =>
+    Promise.all(rows.map(async (row) => {
+      if (actor.employeeId !== row.uuid && !actorCan(actor, "employees.write")) return row;
+      const flags = await computeProfileCompleteness(deps, row);
+      if (actor.employeeId !== row.uuid) delete flags.signature;
+      return { ...row, _profileCompleteness: flags };
+    })),
+  overrides: {
+    get: (deps, actor, id) => getEmployee(deps, actor, id),
+    create: (deps, actor, input, id) => createEmployee(deps, actor, input, id),
+    update: (deps, actor, id, patch, ifMatch) => updateEmployee(deps, actor, id, patch, ifMatch),
+  },
+  list: (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listEmployees(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true", c.req.query("q"));
-    const user = c.get("user");
-    return c.json({ results: items.map((r) => withAccess(empResource(user.employeeId, r), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:employee_id", async (c) => {
-    const row = await getEmployee(c.get("deps"), c.get("user"), c.req.param("employee_id"));
-    const user = c.get("user");
-    const res = empResource(user.employeeId, row);
-    // Owner-private (like `signature`) with one exception: HR (employees.write) also gets the flags as a
-    // record-quality signal. The `signature` flag stays owner-only - even its existence is private (see
-    // empResource) - so it's stripped for any other viewer.
-    if (user.employeeId === row.uuid || actorCan(user, "employees.write")) {
-      const flags = await computeProfileCompleteness(c.get("deps"), row);
-      if (user.employeeId !== row.uuid) delete flags.signature;
-      res.profile_completeness = flags;
-    }
-    return c.json(withAccess(res, user, COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const row = await createEmployee(c.get("deps"), c.get("user"), c.req.valid("json"), c.req.query("id"));
-    return c.json(withAccess(empResource(c.get("user").employeeId, row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  // JSON Merge Patch; optional If-Match.
-  .patch("/:employee_id", zValidator("json", writeSchema), async (c) => {
-    const row = await updateEmployee(c.get("deps"), c.get("user"), c.req.param("employee_id"), c.req.valid("json"), c.req.header("If-Match"));
-    return c.json(withAccess(empResource(c.get("user").employeeId, row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .delete("/:employee_id", async (c) => {
-    const id = c.req.param("employee_id")!;
-    const ifMatch = c.req.header("If-Match");
-    if (c.req.query("force") === "true") {
-      await purgeEmployee(c.get("deps"), c.get("user"), id, ifMatch);
-    } else {
-      await deleteEmployee(c.get("deps"), c.get("user"), id, ifMatch);
-    }
-    return c.body(null, 204);
-  })
+    return listEmployees(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true", c.req.query("q"));
+  },
+  verbs: {
+    // Profile photo: media + clear (no standard equivalent for a binary upload/download).
+    getPhoto: { raw: async (c, id) => c.body(await getPhoto(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },
+    uploadPhoto: { run: async (deps, user, id, _b, c) => uploadPhoto(deps, user, id, await c.req.arrayBuffer()) },
+    clearPhoto: { run: (deps, user, id) => clearPhoto(deps, user, id) },
+    // Signature image (the employee's e-signature): owner-private (the service enforces owner-only).
+    getSignature: { raw: async (c, id) => c.body(await getSignature(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },
+    uploadSignature: { run: async (deps, user, id, _b, c) => uploadSignature(deps, user, id, await c.req.arrayBuffer(), c.req.query("content_type") || undefined) },
+    clearSignature: { run: (deps, user, id) => clearSignature(deps, user, id) },
+    // Identity-field supporting documents (slot identity:<field>). The verb is gated by the middleware
+    // (employees.me.* / employees.** allow); here we additionally enforce the per-field READ grant, so a
+    // restricted field's document is never reachable even by a caller who can touch identity generally. All
+    // three answer with bytes or a receipt rather than the employee, so they own their responses.
+    uploadIdentityDoc: { raw: (c, id) => identityDoc(c, id, "upload") },
+    downloadIdentityDoc: { raw: (c, id) => identityDoc(c, id, "download") },
+    clearIdentityDoc: { raw: (c, id) => identityDoc(c, id, "clear") },
+    // Auto-enrol the employee in default benefit plans (idempotent). Used by the new-hire automation, and
+    // callable by HR directly. Answers with a count, not the employee.
+    enrollDefaultBenefits: { raw: async (c, id) => c.json(await enrollDefaultBenefits(c.get("deps"), c.get("user"), id)) },
+  },
+});
+
+// The three identity-document verbs differ only in what they do once the per-field grant is checked.
+async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "download" | "clear") {
+  const deps = c.get("deps");
+  const user = c.get("user");
+  const field = c.req.query("field");
+  if (!field) throw invalidArgument("field is required");
+  const code = c.get("itemCode");
+  if (code && deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }).has(field)) {
+    throw forbidden("you do not have permission to perform this action");
+  }
+  const slot = identityDocSlot(field);
+  if (action === "download") {
+    const { bytes, row } = await downloadAttachment(deps, COL, id, slot);
+    return c.body(bytes, 200, { "Content-Type": row.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+  }
+  if (action === "upload") {
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    await putAttachment(deps, user, { collection: COL, objectId: id, slot, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
+  } else {
+    await deleteAttachment(deps, user, COL, id, slot);
+  }
+  return c.json({ ok: true });
+}
+
+// The singleton sub-resources hang off an employee (they are not collections): each is one row's worth of
+// fields, gated by the same path grant and redacted per field. Registered before the collection lane so their
+// two-segment paths win.
+export const employees = new Hono<AppEnv>()
   // Singleton sub-resources (bank account, identity, personal info). Access (owner/HR/super_admin)
   // is enforced inside each service. JSON merge-patch on the PATCH.
   .get("/:employee_id/bank-account", async (c) => {
@@ -164,48 +210,4 @@ export const employees = new Hono<AppEnv>()
     const body = (await c.req.json().catch(() => ({}))) as { muted?: unknown; digest?: unknown };
     return c.json({ path: `employees/${id}/notification-prefs`, ...(await setNotificationPrefs(c.get("deps"), c.get("user"), id, body ?? {})) });
   })
-  .post("/:employee_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    const deps = c.get("deps");
-    const user = c.get("user");
-    // Profile photo: media + clear (no standard equivalent for binary upload/download).
-    if (verb === "getPhoto") return c.body(await getPhoto(deps, user, id), 200, { "Content-Type": "application/octet-stream" });
-    if (verb === "uploadPhoto") return c.json(empResource(user.employeeId, await uploadPhoto(deps, user, id, await c.req.arrayBuffer())));
-    if (verb === "clearPhoto") return c.json(empResource(user.employeeId, await clearPhoto(deps, user, id)));
-    // Signature image (the employee's e-signature): owner-private (the service enforces owner-only).
-    if (verb === "getSignature") return c.body(await getSignature(deps, user, id), 200, { "Content-Type": "application/octet-stream" });
-    if (verb === "uploadSignature") return c.json(empResource(user.employeeId, await uploadSignature(deps, user, id, await c.req.arrayBuffer(), c.req.query("content_type") || undefined)));
-    if (verb === "clearSignature") return c.json(empResource(user.employeeId, await clearSignature(deps, user, id)));
-    // Identity-field supporting documents (slot identity:<field>). The verb is gated by the middleware
-    // (employees.me.* / employees.** allow); here we additionally enforce the per-field READ grant, so a
-    // restricted field's document is never reachable even by a caller who can touch identity generally.
-    if (verb === "uploadIdentityDoc" || verb === "downloadIdentityDoc" || verb === "clearIdentityDoc") {
-      const field = c.req.query("field");
-      if (!field) throw invalidArgument("field is required");
-      const code = c.get("itemCode");
-      if (code && deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }).has(field)) {
-        throw forbidden("you do not have permission to perform this action");
-      }
-      const slot = identityDocSlot(field);
-      if (verb === "downloadIdentityDoc") {
-        const { bytes, row } = await downloadAttachment(deps, COL, id, slot);
-        return c.body(bytes, 200, { "Content-Type": row.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
-      }
-      if (verb === "uploadIdentityDoc") {
-        const bytes = new Uint8Array(await c.req.arrayBuffer());
-        await putAttachment(deps, user, { collection: COL, objectId: id, slot, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
-      } else {
-        await deleteAttachment(deps, user, COL, id, slot);
-      }
-      return c.json({ ok: true });
-    }
-    // Auto-enrol the employee in default benefit plans (idempotent). Used by the new-hire automation, and
-    // callable by HR directly. Gated by the employees write grant (middleware).
-    if (verb === "enrollDefaultBenefits") return c.json(await enrollDefaultBenefits(deps, user, id));
-    // All other employee custom methods (lifecycle, restore) require employee.write.
-    const lc = await lifecycleVerb(c, { table: schema.employees, singular: "employee", collection: "employees", serialize: (row) => empResource(user.employeeId, row) });
-    if (lc) return lc;
-    if (verb !== "restore") return c.notFound();
-    const row = await restoreEmployee(deps, user, id);
-    return c.json(empResource(user.employeeId, row));
-  });
+  .route("/", records);
