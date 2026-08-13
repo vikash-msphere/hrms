@@ -34,7 +34,7 @@ export async function listSessions(deps: Deps, scope: ListScope, maxPageSize: nu
   return { items: slice, nextPageToken };
 }
 
-export async function openSessionFor(deps: Deps, employeeId: string) {
+async function openSessionFor(deps: Deps, employeeId: string) {
   return (await deps.db
     .select()
     .from(schema.attendanceSessions)
@@ -68,8 +68,3 @@ export async function clockOut(deps: Deps, actor: AppUser) {
   return row!;
 }
 
-export async function getSession(deps: Deps, id: string) {
-  const row = (await deps.db.select().from(schema.attendanceSessions).where(eq(schema.attendanceSessions.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("attendance session not found");
-  return row;
-}

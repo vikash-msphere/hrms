@@ -47,7 +47,9 @@ export async function listRegularizations(deps: Deps, scope: ListScope, maxPageS
   return keysetPage<typeof schema.attendanceRegularizations.$inferSelect>(deps, schema.attendanceRegularizations, "attendance-regularizations", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getRegularization(deps: Deps, _actor: AppUser, id: string) {
+// The read side of the collection is the factory's generic get (same select, same 404); this stays internal
+// because every decision needs the stored row (and its requested pairs) first.
+async function getRegularization(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.attendanceRegularizations).where(eq(schema.attendanceRegularizations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("regularization request not found");
   return row;
