@@ -38,7 +38,7 @@ const PENDING = new Set([
   // first, then convert.
   "accessRules", "automations", "roles", "users",
   // step 6 - the heavy three, converted last
-  "announcements", "cards", "employees",
+  "announcements", "employees",
 ]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
