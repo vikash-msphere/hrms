@@ -27,7 +27,7 @@ the factory decides no permission.
 
 ## Current state
 
-**34 of 86 collections on the factory.** 1212 tests green; every commit typechecks, passes the full suite with
+**34 of 86 collections on the factory.** 1213 tests across 105 files green; every commit typechecks, passes the full suite with
 pre-existing tests unmodified, and is independently shippable.
 
 | commit | what |
@@ -40,6 +40,8 @@ pre-existing tests unmodified, and is independently shippable.
 | `7b7c6ff` | read-only + append-only: document-acknowledgements, leave-balances, event-log, cron-runs, automation-runs, workflow-instances |
 | `a936df9` … `0d0ab95` | events, dependents, positions, approval-delegations, holiday-selections, transition-tasks, compensation, assets, notifications |
 | `a4e4484` | the lane drift test with its shrinking PENDING ledger |
+| `862e715` | pruned ~120 dead re-exports; `?id=` collision is 409, not 500 |
+| `e50746d` | the access hint is derived from the mounted surface, not a default |
 
 ### The spec, as it now stands
 
@@ -57,6 +59,12 @@ Behaviours worth knowing before converting anything:
 - `decorate` runs on write responses too, so a POST answers with the shape a GET would.
 - `serialize(row, user)` for viewer-dependent resources; `list` may return `extra` for an aggregate beside the
   page.
+- The `access.can` hint is computed from the surface the factory actually mounted - update/delete/restore only
+  when mounted, enable/disable and lock/unlock only when the table has those columns, publish only when
+  declared, plus the spec's own verb names. `ACCESS_VERBS` in `src/http/accessHint.ts` stays the vocabulary for
+  hand-written routes and the ACL modal, and is NOT consulted for a factory collection. A converted collection
+  therefore needs no `ACCESS_VERBS` entry, and cannot advertise an action its route does not have.
+- A caller-supplied `?id=` that is already taken answers 409 ALREADY_EXISTS.
 - `assertNotLocked` lives in `src/services/lockGuard.ts` (a leaf). Importing it from `services/lifecycle.ts`
   inside `crud.ts` created a cycle through notifications that left `crudService` undefined at module-init.
 
@@ -148,15 +156,37 @@ Expect these three to be roughly LOC-neutral. They are converted so no collectio
    `afterCreate` / `afterUpdate`. Anything else genuinely bespoke → `overrides`.
 6. `grep -rn "<serviceFn>" src test` before renaming or dropping an export - `test/listTruncation.test.ts`
    imports `listHolidays` directly, and cron imports several services.
-7. `npm run typecheck && npm run test`. Pre-existing tests must pass **unchanged** - that is the equivalence
+7. **Export only what something imports.** Do NOT re-export the generic CRUD functions "in case": that pattern
+   left ~120 dead exports and a second way to call the same behaviour sitting next to the factory (`862e715`
+   removed them). The route builds its service from the spec; a service export is for an outside caller only.
+8. `npm run typecheck && npm run test`. Pre-existing tests must pass **unchanged** - that is the equivalence
    proof. Commit the batch.
+
+### Two audits to run per batch (each has already caught a real defect)
+
+**Did anything gain a destructive route it did not have?** For each converted file, compare the pre-factory
+baseline against what the factory now mounts:
+
+```sh
+for f in $(grep -ln collectionRoutes src/routes/*.ts); do
+  git show b12d009:$f | grep -c '\.delete(' ;   # 0 here + no `softDelete: false` in the new file = ADDED a delete
+done
+```
+
+**Are there dead exports?** For each converted service, every name in its `export const { ... } =
+crudService(spec)` block must have a reference outside its own file:
+
+```sh
+grep -rn "\b<exportedName>\b" src test web/src | grep -v "^src/services/<file>.ts:"
+```
 
 ## Verification
 
-- Per batch: `npm run typecheck`, `npm run test` (105 files / 1212 tests today), pre-existing tests unmodified.
-- `test/collectionFactory.test.ts` (21 tests) pins the shared surface: paging cursor, If-Match, lock guard,
+- Per batch: `npm run typecheck`, `npm run test` (105 files / 1213 tests today), pre-existing tests unmodified.
+- `test/collectionFactory.test.ts` (22 tests) pins the shared surface: paging cursor, If-Match, lock guard,
   delete/`?show_deleted`/restore/`?force`, unknown-verb 404, unsupported lifecycle verb 404, audit stems, the
-  create/update schema split, verb entries (schema / no schema / raw), append-only tables, read-only specs.
+  create/update schema split, verb entries (schema / no schema / raw), append-only tables, read-only specs, the
+  `?id=` conflict, and that the hint lists only mounted actions.
 - `test/collectionLaneDrift.test.ts` gates the lane itself.
 - Existing contract gates stay: `openapiRoutesDrift`, `customMethodsDrift`, `serializerContractDrift`,
   `accessHint`, `parity` (route × role), `bola` (item-level isolation), plus `npm run api:lint` (spectral) in the
@@ -166,9 +196,15 @@ Expect these three to be roughly LOC-neutral. They are converted so no collectio
 
 ## Known consequences, accepted
 
-- Uniform semantics replace per-collection accidents: `?id=` honored via `uuid`, `assertNotLocked` on every
-  update, PATCH of a soft-deleted row 404s, item responses always carry the per-object access hint, delete-side
-  audit stems normalize to the create/update stem, GET of a soft-deleted row resolves rather than 404ing.
+- Uniform semantics replace per-collection accidents: `?id=` honored via `uuid` (409 on collision),
+  `assertNotLocked` on every update, PATCH of a soft-deleted row 404s, item responses always carry the
+  per-object access hint, delete-side audit stems normalize to the create/update stem, GET of a soft-deleted row
+  resolves rather than 404ing.
+- Three defects the conversion itself introduced, all found and fixed: ~120 dead re-exports, a 500 on a
+  colliding `?id=`, and read-only collections advertising update/delete in their access hint. The last one also
+  corrected a pre-existing falsehood on positions, compensation and notifications. The lesson is in the recipe:
+  a conversion adds behaviour as easily as it removes it, so audit the delta rather than trusting the green
+  suite - the tests passed through all three.
 - `compliance-rules` lost the `{generated: N}` meta on its create audit row; the count stays derivable from
   `compliance_events.rule_id`.
 - Indirection: a route file no longer shows the mechanics. `collectionRoute.ts` + `crud.ts` (~300 lines) is the
