@@ -34,8 +34,8 @@ const PENDING = new Set([
   "accessRules", "apiKeys", "applications", "automations", "bankFormats", "boards", "candidates",
   "documentRoutes", "goals", "interviewFeedback", "interviews", "leaveRequests", "offers",
   "operations", "overtimeRequests", "payrollRuns", "referrals", "reimbursements", "remoteWorkRequests",
-  "requisitions", "reviewCycles", "reviewFeedback", "reviews", "roles", "sprints", "suggestions",
-  "taxDeclarations", "ticketChecklists", "timeEntries", "transitions", "users",
+  "requisitions", "reviewFeedback", "roles", "sprints", "suggestions",
+  "taxDeclarations", "ticketChecklists", "timeEntries", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",
 ]);

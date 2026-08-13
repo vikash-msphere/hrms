@@ -10,7 +10,6 @@ import { audit, diffMeta } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { getSettingValue } from "./settings";
 import { DEFAULT_TRANSITION_TEMPLATES, type TaskAssignee } from "../domain/transitions";
 import { notify } from "./notifications";
@@ -34,7 +33,7 @@ export async function listTransitions(deps: Deps, scope: ListScope, maxPageSize:
   return keysetPage(deps, schema.transitions, "transitions", and(...conds.filter(Boolean)), { dir: "desc", max: maxPageSize, pageToken });
 }
 
-export async function getTransition(deps: Deps, _actor: AppUser, id: string) {
+async function getTransition(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.transitions).where(eq(schema.transitions.uuid, id)).limit(1))[0];
   if (!row) throw notFound("transition not found");
   return row;
@@ -181,13 +180,3 @@ export async function appendTransitionTask(deps: Deps, actor: AppUser, transitio
   return row;
 }
 
-export async function deleteTransition(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.transitions, "transition", "transitions", id, ifMatch);
-}
-export async function restoreTransition(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.transitions, "transition", "transitions", id);
-}
-export async function purgeTransition(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await deps.db.delete(schema.transitionTasks).where(eq(schema.transitionTasks.transitionId, id));
-  await purgeRow(deps, actor, schema.transitions, "transition", "transitions", id, ifMatch);
-}

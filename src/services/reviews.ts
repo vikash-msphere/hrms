@@ -30,11 +30,6 @@ export async function listReviews(deps: Deps, scope: ListScope, maxPageSize: num
   return keysetPage(deps, schema.reviews, "reviews", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getReview(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.reviews).where(eq(schema.reviews.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("review not found");
-  return row;
-}
 
 async function loadInState(deps: Deps, id: string, required: State): Promise<typeof schema.reviews.$inferSelect> {
   const row = (await deps.db.select().from(schema.reviews).where(eq(schema.reviews.uuid, id)).limit(1))[0];

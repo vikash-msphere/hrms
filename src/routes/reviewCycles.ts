@@ -1,19 +1,14 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv, AppUser } from "../env";
+import * as schema from "../db/schema";
+import type { Deps } from "../deps";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
-  listReviewCycles, getReviewCycle, createReviewCycle, updateReviewCycle,
-  launchReviewCycle, addRevieweesToCycle, setReviewCycleState,
-  deleteReviewCycle, restoreReviewCycle, purgeReviewCycle, reviewCountsFor,
+  listReviewCycles, createReviewCycle, updateReviewCycle,
+  launchReviewCycle, addRevieweesToCycle, setReviewCycleState, reviewCountsFor,
+  type ReviewCycleInput,
 } from "../services/reviewCycles";
 import { toReviewCycleResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
-import type { Grant } from "../domain/permissions";
-
-const COL = "review-cycles";
 
 const writeSchema = z.object({
   name: z.string().min(1).optional(),
@@ -24,58 +19,40 @@ const writeSchema = z.object({
 }).strict();
 const employeesSchema = z.object({ employees: z.array(z.string()).min(1) }).strict();
 
-async function serialize(deps: any, user: AppUser, row: any, grant?: Grant) {
-  const counts = await reviewCountsFor(deps, [row.uuid]);
-  row._reviewCount = counts.get(row.uuid) ?? 0;
-  return withAccess(toReviewCycleResource(row), user, COL, row?.code, grant);
-}
+// A cycle always reports how many reviews it holds: one count query per page, one per single row.
+const withCounts = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => {
+  const counts = await reviewCountsFor(deps, rows.map((r) => r.uuid));
+  return rows.map((r) => Object.assign(r, { _reviewCount: counts.get(r.uuid) ?? 0 }));
+};
+const oneWithCounts = async (deps: Deps, row: any) => (await withCounts(deps, [row]))[0];
 
-export const reviewCycles = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// Review cycles. Create and update stay the service's own (the dates drive every review the cycle will hold);
+// :launch mints the reviews, :enroll adds late joiners, :close/:reopen move the state. Delete/restore are the
+// shared soft-delete lane.
+export const reviewCycles = collectionRoutes<ReviewCycleInput>({
+  table: schema.reviewCycles,
+  collection: "review-cycles",
+  auditName: "review-cycle",
+  notFound: "review cycle not found",
+  param: "cycle_id",
+  writeSchema,
+  serialize: toReviewCycleResource,
+  decorate: (deps, _actor, rows) => withCounts(deps, rows),
+  overrides: {
+    create: (deps, actor, input, id) => createReviewCycle(deps, actor, input, id),
+    update: (deps, actor, id, patch, ifMatch) => updateReviewCycle(deps, actor, id, patch, ifMatch),
+  },
+  list: async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listReviewCycles(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
-    const user = c.get("user");
-    const counts = await reviewCountsFor(c.get("deps"), items.map((r) => r.uuid));
-    const results = items.map((r) => {
-      (r as any)._reviewCount = counts.get(r.uuid) ?? 0;
-      return withAccess(toReviewCycleResource(r), user, COL, r.code);
-    });
-    return c.json({ results, next_page_token: nextPageToken });
-  })
-  .get("/:cycle_id", async (c) => {
-    const row = await getReviewCycle(c.get("deps"), c.get("user"), c.req.param("cycle_id")!);
-    return c.json(await serialize(c.get("deps"), c.get("user"), row, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const row = await createReviewCycle(c.get("deps"), c.get("user"), c.req.valid("json"), c.req.query("id"));
-    return c.json(await serialize(c.get("deps"), c.get("user"), row, c.get("objectGrant")));
-  })
-  .patch("/:cycle_id", zValidator("json", writeSchema), async (c) => {
-    const row = await updateReviewCycle(c.get("deps"), c.get("user"), c.req.param("cycle_id")!, c.req.valid("json"), c.req.header("If-Match"));
-    return c.json(await serialize(c.get("deps"), c.get("user"), row, c.get("objectGrant")));
-  })
-  .delete("/:cycle_id", async (c) => {
-    const id = c.req.param("cycle_id")!;
-    const ifMatch = c.req.header("If-Match");
-    if (c.req.query("force") === "true") await purgeReviewCycle(c.get("deps"), c.get("user"), id, ifMatch);
-    else await deleteReviewCycle(c.get("deps"), c.get("user"), id, ifMatch);
-    return c.body(null, 204);
-  })
-  .post("/:cycle_id", async (c) => {
-    const { id, verb } = customMethod(c);
     const deps = c.get("deps");
-    const user = c.get("user");
-    const out = (row: any) => serialize(deps, user, row, c.get("objectGrant")).then((r) => c.json(r));
-    if (verb === "launch") {
-      const { employees } = employeesSchema.parse(await c.req.json().catch(() => ({})));
-      return out(await launchReviewCycle(deps, user, id, employees));
-    }
-    if (verb === "enroll") {
-      const { employees } = employeesSchema.parse(await c.req.json().catch(() => ({})));
-      return out(await addRevieweesToCycle(deps, user, id, employees));
-    }
-    if (verb === "close") return out(await setReviewCycleState(deps, user, id, "CLOSED"));
-    if (verb === "reopen") return out(await setReviewCycleState(deps, user, id, "ACTIVE"));
-    if (verb === "restore") return out(await restoreReviewCycle(deps, user, id));
-    return c.notFound();
-  });
+    // This list scopes by the caller (a cycle is visible to whoever holds a review in it), not by a code filter.
+    const { items, nextPageToken } = await listReviewCycles(deps, c.get("user"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+    return { items: await withCounts(deps, items), nextPageToken };
+  },
+  verbs: {
+    launch: { schema: employeesSchema, run: async (deps, user, id, body) => oneWithCounts(deps, await launchReviewCycle(deps, user, id, body.employees)) },
+    enroll: { schema: employeesSchema, run: async (deps, user, id, body) => oneWithCounts(deps, await addRevieweesToCycle(deps, user, id, body.employees)) },
+    close: { run: async (deps, user, id) => oneWithCounts(deps, await setReviewCycleState(deps, user, id, "CLOSED")) },
+    reopen: { run: async (deps, user, id) => oneWithCounts(deps, await setReviewCycleState(deps, user, id, "ACTIVE")) },
+  },
+});
