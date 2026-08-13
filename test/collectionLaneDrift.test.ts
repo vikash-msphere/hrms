@@ -31,10 +31,9 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 // the factory; never add one without a reason.
 const PENDING = new Set([
   // step 5 - collections whose custom methods are the bulk of the file
-  "accessRules", "apiKeys", "applications", "automations", "bankFormats", "boards", "candidates",
-  "documentRoutes", "interviewFeedback", "interviews", "offers",
-  "operations", "payrollRuns", "referrals",
-  "requisitions", "reviewFeedback", "roles", "sprints", "suggestions",
+  "accessRules", "apiKeys", "automations", "bankFormats", "boards",
+  "documentRoutes", "operations", "payrollRuns", "referrals",
+  "reviewFeedback", "roles", "sprints", "suggestions",
   "ticketChecklists", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",

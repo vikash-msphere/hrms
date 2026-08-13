@@ -13,7 +13,6 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { idFromPath } from "./documentsCommon";
 import { getSettingValue } from "./settings";
 import {
@@ -67,7 +66,7 @@ export async function applicantCountsByRequisition(deps: Deps): Promise<Map<stri
   return new Map(rows.map((r) => [r.requisitionId, Number(r.n)]));
 }
 
-export async function getRequisition(deps: Deps, id: string) {
+async function getRequisition(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, id)).limit(1))[0];
   if (!row) throw notFound("requisition not found");
   return row;
@@ -127,9 +126,6 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
   return updated;
 }
 
-export const deleteRequisition = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, schema.jobRequisitions, "requisition", "job-requisitions", id, ifMatch);
-export const restoreRequisition = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, schema.jobRequisitions, "requisition", "job-requisitions", id);
-export const purgeRequisition = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => purgeRow(deps, actor, schema.jobRequisitions, "requisition", "job-requisitions", id, ifMatch);
 
 // ---- Candidates ----------------------------------------------------------------------------------------------
 
@@ -195,9 +191,6 @@ export async function updateCandidate(deps: Deps, actor: AppUser, id: string, pa
   return updated;
 }
 
-export const deleteCandidate = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, schema.candidates, "candidate", "candidates", id, ifMatch);
-export const restoreCandidate = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, schema.candidates, "candidate", "candidates", id);
-export const purgeCandidate = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => purgeRow(deps, actor, schema.candidates, "candidate", "candidates", id, ifMatch);
 
 // ---- Applications --------------------------------------------------------------------------------------------
 
@@ -222,7 +215,7 @@ export async function listApplications(deps: Deps, scope: ListScope | undefined,
   return keysetPage(deps, schema.applications, "applications", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getApplication(deps: Deps, id: string) {
+async function getApplication(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.applications).where(eq(schema.applications.uuid, id)).limit(1))[0];
   if (!row) throw notFound("application not found");
   return row;
@@ -313,9 +306,6 @@ export async function rejectApplication(deps: Deps, actor: AppUser, id: string, 
   return updated!;
 }
 
-export const deleteApplication = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, schema.applications, "application", "applications", id, ifMatch);
-export const restoreApplication = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, schema.applications, "application", "applications", id);
-export const purgeApplication = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => purgeRow(deps, actor, schema.applications, "application", "applications", id, ifMatch);
 
 // ---- Interviews ----------------------------------------------------------------------------------------------
 
@@ -344,7 +334,7 @@ export async function listInterviews(deps: Deps, scope: ListScope | undefined, m
   return keysetPage(deps, schema.interviews, "interviews", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getInterview(deps: Deps, id: string) {
+async function getInterview(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.interviews).where(eq(schema.interviews.uuid, id)).limit(1))[0];
   if (!row) throw notFound("interview not found");
   return row;
@@ -425,9 +415,6 @@ async function setInterviewStatus(deps: Deps, actor: AppUser, id: string, status
 export const completeInterview = (deps: Deps, actor: AppUser, id: string) => setInterviewStatus(deps, actor, id, "done");
 export const cancelInterview = (deps: Deps, actor: AppUser, id: string) => setInterviewStatus(deps, actor, id, "cancelled");
 
-export const deleteInterview = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, schema.interviews, "interview", "interviews", id, ifMatch);
-export const restoreInterview = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, schema.interviews, "interview", "interviews", id);
-export const purgeInterview = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => purgeRow(deps, actor, schema.interviews, "interview", "interviews", id, ifMatch);
 
 // ---- Interview feedback (scorecards) -------------------------------------------------------------------------
 
@@ -448,7 +435,7 @@ export async function listInterviewFeedback(deps: Deps, scope: ListScope, maxPag
   return keysetPage(deps, schema.interviewFeedback, "interview-feedback", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getInterviewFeedback(deps: Deps, id: string) {
+async function getInterviewFeedback(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.interviewFeedback).where(eq(schema.interviewFeedback.uuid, id)).limit(1))[0];
   if (!row) throw notFound("scorecard not found");
   return row;
@@ -491,9 +478,6 @@ export async function updateInterviewFeedback(deps: Deps, actor: AppUser, id: st
   return updated;
 }
 
-export const deleteInterviewFeedback = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, schema.interviewFeedback, "scorecard", "interview-feedback", id, ifMatch);
-export const restoreInterviewFeedback = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, schema.interviewFeedback, "scorecard", "interview-feedback", id);
-export const purgeInterviewFeedback = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => purgeRow(deps, actor, schema.interviewFeedback, "scorecard", "interview-feedback", id, ifMatch);
 
 // ---- Offers --------------------------------------------------------------------------------------------------
 
@@ -518,7 +502,7 @@ export async function listOffers(deps: Deps, scope: ListScope | undefined, maxPa
   return keysetPage(deps, schema.offers, "offers", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getOffer(deps: Deps, id: string) {
+async function getOffer(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.offers).where(eq(schema.offers.uuid, id)).limit(1))[0];
   if (!row) throw notFound("offer not found");
   return row;
@@ -676,6 +660,3 @@ export async function acceptOffer(deps: Deps, actor: AppUser, id: string) {
   return updated!;
 }
 
-export const deleteOffer = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, schema.offers, "offer", "offers", id, ifMatch);
-export const restoreOffer = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, schema.offers, "offer", "offers", id);
-export const purgeOffer = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => purgeRow(deps, actor, schema.offers, "offer", "offers", id, ifMatch);
