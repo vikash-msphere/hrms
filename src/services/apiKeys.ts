@@ -47,7 +47,7 @@ export async function listApiKeys(deps: Deps, _actor: AppUser, maxPageSize: numb
   return { items, nextPageToken };
 }
 
-export async function getApiKey(deps: Deps, _actor: AppUser, id: string) {
+async function getApiKey(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.apiKeys).where(eq(schema.apiKeys.uuid, id)).limit(1))[0];
   if (!row) throw notFound("api key not found");
   return row;

@@ -1,11 +1,8 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { customMethod } from "../http/customMethod";
-import { listApiKeys, getApiKey, createApiKey, revokeApiKey, deleteApiKey } from "../services/apiKeys";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
+import { listApiKeys, createApiKey, revokeApiKey, deleteApiKey, type ApiKeyInput } from "../services/apiKeys";
 import { toApiKeyResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
 
 const scopeSchema = z
@@ -25,29 +22,30 @@ const writeSchema = z
   })
   .strict();
 
-export const apiKeys = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// Machine credentials. No PATCH: a credential's scope is fixed at mint time. The DELETE is a real removal (the
+// table has no delete_time), so there is no `:restore` and no `?force` - and :revoke is the softer move that
+// kills the key while keeping the row, so the audit trail can still resolve it.
+export const apiKeys = collectionRoutes<ApiKeyInput>({
+  table: schema.apiKeys,
+  collection: "api-keys",
+  auditName: "api_key",
+  notFound: "api key not found",
+  param: "api_key_id",
+  createSchema: writeSchema,
+  serialize: toApiKeyResource,
+  overrides: {
+    // The ONLY response that ever carries the plaintext token. Nothing stores it, so there is no second chance.
+    create: async (deps, actor, input, id) => {
+      const { row, token } = await createApiKey(deps, actor, input, id);
+      return { ...row, secret: token };
+    },
+    remove: (deps, actor, id, ifMatch) => deleteApiKey(deps, actor, id, ifMatch),
+  },
+  list: (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listApiKeys(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"));
-    const user = c.get("user");
-    return c.json({ results: items.map((r) => withAccess(toApiKeyResource(r), user, "api-keys", r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:api_key_id", async (c) => {
-    const row = await getApiKey(c.get("deps"), c.get("user"), c.req.param("api_key_id")!);
-    return c.json(toApiKeyResource(row));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const { row, token } = await createApiKey(c.get("deps"), c.get("user"), c.req.valid("json"), c.req.query("id"));
-    // The ONLY response that ever carries the plaintext. Nothing stores it, so there is no second chance.
-    return c.json(toApiKeyResource({ ...row, secret: token }));
-  })
-  .delete("/:api_key_id", async (c) => {
-    await deleteApiKey(c.get("deps"), c.get("user"), c.req.param("api_key_id")!, c.req.header("If-Match"));
-    return c.body(null, 204);
-  })
-  .post("/:api_key_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    if (verb !== "revoke") return c.notFound();
-    const row = await revokeApiKey(c.get("deps"), c.get("user"), id);
-    return c.json(toApiKeyResource(row));
-  });
+    return listApiKeys(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"));
+  },
+  verbs: {
+    revoke: { run: (deps, user, id) => revokeApiKey(deps, user, id) },
+  },
+});
