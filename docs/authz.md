@@ -368,7 +368,10 @@ A `WHERE` runs in the data layer, but the **decision** it encodes is made in the
   `dept`; else `own`.
 - `shares` / `denies` are the caller's per-object exception codes for the collection (section 10), loaded by
   the middleware for list requests.
-- The middleware sets `ctx.scope`. A list service calls `applyScope(scope, table.code, table.owner)`
+- The middleware sets `ctx.scope`. A scoped collection reads it in its spec's `list(c)` hook (the one part of
+  the standard lane a collection supplies itself, because only it can see the caller's scope and its own
+  filters; `collectionRoute.ts` still owns the response shape and the access hints). That hook calls the
+  service, and the list service calls `applyScope(scope, table.code, table.owner)`
   (`listScope.ts`), which only **binds** the decision to columns: `(breadth-predicate OR code in a shared
   subtree) AND code NOT in a denied subtree`, where the breadth predicate is `all` -> no filter, `dept` ->
   `code LIKE '<deptCode>-%'` (boundary-anchored), `own` -> `owner = <ownerId>`. Each share/deny on code `C`
@@ -559,6 +562,7 @@ sibling doc, having no row, stays denied.
 | `src/domain/access.ts` | `actorScope`, `scopeFor`, `ListScope`, `stateReadAllowed` |
 | `src/lib/policyLoad.ts` | load broad role grant + broad user grant + manifest (cached); `loadObjectRulesForRequest` / `loadObjectExceptionCodes` (per-object user + exact-role reads) |
 | `src/http/accessHint.ts` | `computeCan` / `withAccess` - the per-object `access.can` UX hint (gates nothing) |
+| `src/http/collectionRoute.ts` + `src/services/crud.ts` | the ONE standard-method surface every collection is built from; shapes requests, decides no permission |
 | `src/lib/cache.ts` | in-isolate TTL cache (`cached` / `clearCache`); correctness-independent |
 | `src/lib/authzResolve.ts` | path -> coded path, `uuid <-> code` resolvers + cache, collection->table map |
 | `src/middleware/auth.ts` | resolve caller + employeeCode; load grant + manifest from the store |

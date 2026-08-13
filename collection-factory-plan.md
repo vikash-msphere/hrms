@@ -3,23 +3,23 @@
 ## Context
 
 Every collection used to hand-roll the AEP standard methods: list with cursor paging, get, create, patch with
-`If-Match`, delete with `?force`, plus the shared lifecycle verbs and `:restore`. 86 route files, the same ~60
-lines copied into each. That duplication is not a tidiness problem, it is a defect generator - converting the
-first 34 collections surfaced six defects of one class, each present because the code was copied rather than
+`If-Match`, delete with `?force`, plus the shared lifecycle verbs and `:restore`. The same ~60 lines were copied
+into each route file. The duplication is not a tidiness problem, it is a defect generator - converting the
+collections surfaced defect after defect of one class, present only because the code was copied rather than
 shared:
 
-- `?id=` (AEP user-specified id) was spread as a non-existent `id` column in at least five collections and
+- `?id=` (the AEP user-specified id) spread as a non-existent `id` column in at least six collections and was
   silently dropped.
-- `POST /v1/pay-grades/{id}:lock` returned 500: the shared lifecycle verbs were mounted over a table with no
-  `locked` column.
-- `assertNotLocked` was present in some updates and absent in others for no reason.
-- PATCH of a soft-deleted row 404'd in two collections and succeeded in the rest.
+- `POST /v1/pay-grades/{id}:lock` returned 500: shared lifecycle verbs mounted over a table with no `locked`
+  column.
+- `assertNotLocked` present in some updates, absent in others, for no reason.
+- A PATCH of a soft-deleted row 404'd in two collections and succeeded in the rest.
 - `pay-grades` had no tests at all; `expense-categories` had none of its own.
 - Auto-mounting DELETE on `positions` / `compensation` would have handed HR a way to delete role and salary
   history (caught during conversion, before it shipped).
 
-The end state: exactly one way to define a collection. `src/http/collectionRoute.ts` + `src/services/crud.ts`
-generate the standard lane from a spec; per-collection domain logic stays in that collection's service.
+The end state is exactly one way to define a collection. `src/http/collectionRoute.ts` + `src/services/crud.ts`
+generate the standard lane from a spec; per-collection domain logic stays in the collection's service.
 `test/collectionLaneDrift.test.ts` enforces it, so the rule survives without anyone remembering it.
 
 Authorization is untouched throughout: `src/middleware/authz.ts` remains the single source of access control and
@@ -27,154 +27,115 @@ the factory decides no permission.
 
 ## Current state
 
-**34 of 86 collections on the factory.** 1213 tests across 105 files green; every commit typechecks, passes the full suite with
-pre-existing tests unmodified, and is independently shippable.
+**70 of 106 route files are on the factory; 9 collections remain, 6 of them recorded with a reason.** 1219 tests
+across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+and each is independently shippable.
 
-| commit | what |
-| --- | --- |
-| `d95464e` | the factory + holidays, pay-grades, expense-categories |
-| `3608482` | reimbursement-categories, vendors, projects, shifts, leave-types, pay-periods |
-| `2b6b1a4` | salary-structures, background-checks, compliance-events (route-level `list` hook) |
-| `8887e2c` | create/update schema split, verb entries, optional insert/patch |
-| `2b523a2` `d3b7d24` | benefit-plans, compliance-rules, letter-templates, expense-budgets, pay-components |
-| `7b7c6ff` | read-only + append-only: document-acknowledgements, leave-balances, event-log, cron-runs, automation-runs, workflow-instances |
-| `a936df9` … `0d0ab95` | events, dependents, positions, approval-delegations, holiday-selections, transition-tasks, compensation, assets, notifications |
-| `a4e4484` | the lane drift test with its shrinking PENDING ledger |
-| `862e715` | pruned ~120 dead re-exports; `?id=` collision is 409, not 500 |
-| `e50746d` | the access hint is derived from the mounted surface, not a default |
+The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
+the five key/value config surfaces the drift test names.
 
-### The spec, as it now stands
+### The spec, as it stands
 
 Required: `table`, `collection`, `auditName`, `notFound`, `param`, `serialize`.
+
 Optional: `insert`, `patch` (omit either to mount no POST / no PATCH), `writeSchema` or `createSchema` +
 `updateSchema`, `sort`, `decorate`, `afterCreate`, `afterUpdate`, `allocCode`, `lifecycleName`, `publish`,
 `publishTime`, `softDelete: false`, `overrides`, `list`, `verbs`.
 
+That is the same 15 knobs the conversion started with. Nothing was added: 43 collections went on the lane
+without one, and the two that could not be expressed are recorded as blocked rather than as a 16th knob.
+
 Behaviours worth knowing before converting anything:
 
-- The delete lane is described, never assumed. No `delete_time` column → no DELETE and no `:restore`.
+- The delete lane is described, never assumed. No `delete_time` column means no DELETE and no `:restore`.
   `softDelete: false` opts a history collection out even when the column exists. `overrides.remove` gives a
   permanent delete with no restore and no `?force`.
 - POST/PATCH mount when EITHER the generic mapper or an override supplies the method.
 - `decorate` runs on write responses too, so a POST answers with the shape a GET would.
-- `serialize(row, user)` for viewer-dependent resources; `list` may return `extra` for an aggregate beside the
-  page.
-- The `access.can` hint is computed from the surface the factory actually mounted - update/delete/restore only
-  when mounted, enable/disable and lock/unlock only when the table has those columns, publish only when
-  declared, plus the spec's own verb names. `ACCESS_VERBS` in `src/http/accessHint.ts` stays the vocabulary for
-  hand-written routes and the ACL modal, and is NOT consulted for a factory collection. A converted collection
-  therefore needs no `ACCESS_VERBS` entry, and cannot advertise an action its route does not have.
-- A caller-supplied `?id=` that is already taken answers 409 ALREADY_EXISTS.
-- `assertNotLocked` lives in `src/services/lockGuard.ts` (a leaf). Importing it from `services/lifecycle.ts`
-  inside `crud.ts` created a cycle through notifications that left `crudService` undefined at module-init.
+- `serialize(row, user)` is for viewer-dependent resources (an employee's signature marker, a review's withheld
+  manager assessment).
+- The access hint is derived from what the route actually mounted, not from `ACCESS_VERBS`. A factory-built
+  collection never consults that table.
+- A caller-supplied `?id=` that is already taken is a 409 ALREADY_EXISTS, not a 500.
+- The lock guard lives in `src/services/lockGuard.ts` (a leaf). Importing it from `services/lifecycle.ts` inside
+  `crud.ts` created a cycle through notifications and left `crudService` undefined at module-init.
 
 ## Decided policy
 
-**1. Key/value config surfaces are not collections, and the test checks that.** `policy`, `preferences`,
-`settings` and `payrollDebit` have a collection's route shape but a key as their item id and an upsert as their
-PATCH; `payrollDebit` is not even backed by its own table (it is a `settings` key). They stay hand-written in a
-named `NOT_COLLECTIONS` category in the drift test, each with a one-line reason, and the test asserts they have
-**no POST and no DELETE** - if one grows a create or a delete it has become a collection and the test pulls it
-into the lane.
+**1. Key/value config surfaces are not collections, and a test checks that.** `policy`, `preferences`,
+`settings`, `payrollDebit` and `bankFormats` borrow the route shape but the item id is a key the caller names,
+so PATCH upserts and there is nothing to create or delete. They sit in a named `NOT_COLLECTIONS` category in the
+drift test, each with a one-line reason, and the test asserts **no collection-level `POST /` and no DELETE** - if
+one grows either, it has become a collection and the test pulls it into the lane.
 
-**2. The spec surface is frozen.** No new optional fields from here. A collection that appears to need a 16th
-knob goes into `PENDING` with the reason instead, to be reviewed as a batch. Step 5's variation is custom
-methods, which `verbs` already covers, so this should rarely bind.
+**2. The spec surface is frozen.** No new optional fields. A collection that appears to need a 16th knob goes
+into `PENDING` with its reason instead, to be reviewed as a batch. Step 5's variation was custom methods, which
+`verbs` already covers, so this rarely binds - it bound twice, and both are recorded below.
 
-**3. Convert biggest-first, in batches of 3-6, one batch per session.** Verb entries pay most in the files with
-the most hand-written verb blocks, and those are the files people edit. Long sessions caused the only two
-mistakes so far (writing a service from a stale read; inventing a tighter zod schema than the original), so
-batch size is a quality control, not a preference.
+**3. Convert biggest-first, in batches of 3-6.** Verb-heavy files pay the most: they are the files people edit.
 
 ## Remaining work
 
-### Batch 0 - the exempt category (small, do first)
+Nine files, six with a recorded reason. All of them are in `PENDING` in the drift test, which carries the same
+reasons inline.
 
-Edit `test/collectionLaneDrift.test.ts`: split the list into `PENDING` (conversion budget) and
-`NOT_COLLECTIONS` (`policy`, `preferences`, `settings`, `payrollDebit`, each with its reason). Add the
-assertion that a `NOT_COLLECTIONS` file registers neither `.post("/"` nor `.delete(`. Verify the new assertion
-fails when violated (add a POST to one temporarily), then revert and commit.
-
-### Step 4 remainder - 11 files
-
-Each keeps its scope-filtered list behind the route-level `list` hook; owned codes via `allocCode`; write side
-effects via `afterCreate` / `afterUpdate`.
-
-| batch | collections | route/service lines | notes |
-| --- | --- | --- | --- |
-| 4a | settlements, payslips, bonuses | 37/425, 31/46, 61/195 | money-adjacent; settlements' service is large and stays bespoke behind overrides |
-| 4b | leaveEncashments, benefitEnrollments, noticePeriods | 52/344, 51/132, 61/142 | all scoped + owned + effects |
-| 4c | attendance, attendanceRegularizations, checkIns | 39/75, 49/123, 57/105 | 2-3 verbs each (clockIn/clockOut, approve/reject/cancel) |
-| 4d | departments, shiftAssignments | 53/89, 50/90 | departments allocates dept codes and re-parents subtrees - read `src/services/departments.ts` fully before touching it |
-
-### Step 5 - 34 files, the verb-heavy population
-
-Each hand-written verb block (parse body → call service → serialize → access hint) becomes one `verbs` entry.
-Use `{raw}` only for a verb that does not answer with a resource.
-
-| batch | collections | verbs each |
-| --- | --- | --- |
-| 5a | tickets, expenses, loans | 8, 7, 5 |
-| 5b | transitions, reviews, reviewCycles | 5, 7, 5 |
-| 5c | reimbursements, taxDeclarations, leaveRequests | 6, 5, 3 |
-| 5d | goals, timeEntries, overtimeRequests, remoteWorkRequests | 2, 4, 3, 3 |
-| 5e | offers, interviews, interviewFeedback, candidates, applications, requisitions | 6, 3, 1, 3, 3, 1 - the ATS group; their logic lives in `src/services/ats.ts`, not per-collection files |
-| 5f | referrals, suggestions, sprints, boards, automations | 4, 4, 3, 3, 3 |
-| 5g | documentRoutes, payrollRuns, bankFormats | 5, 5, 1 - byte streams: `{raw}` verbs |
-| 5h | apiKeys, accessRules, users, roles, operations, ticketChecklists, reviewFeedback | 0-2 each; cheap cleanup tail |
-
-### Step 6 - the heavy three, converted last
-
-- **cards** (127/423): distinct create/update schemas, 9 verb entries, scoped list with `?board`,
-  `overrides.get` for `getCardWithComments`.
-- **announcements** (216/502): 6 verbs, owned code, publish/unpublish (`publish: true`).
-- **employees** (211/207): `list` hook (scope + `?q`), `decorate` for the viewer-dependent signature strip and
-  `profile_completeness`, `serialize(row, user)`, `{raw}` verbs for photo / signature / identity-doc bytes, and
-  its ten singleton sub-resource routes (`/bank-account`, `/identity`, `/personal-info`, `/tax`,
-  `/notification-prefs`, `/bio`) chained onto the Hono app the factory returns.
-
-Expect these three to be roughly LOC-neutral. They are converted so no collection sits outside the lane.
-
-### Step 7 - close it out
-
-- `PENDING` is empty; the drift test's `toBeGreaterThanOrEqual` floor becomes the real count.
-- `docs/authz.md` collection-authoring section and the add-collection checklist describe ONE path: write a spec,
-  mount it, done.
-- This file records the final state and the knob inventory.
+| file | why it is still hand-rolled |
+| --- | --- |
+| `automations` | **Blocked on the schema.** The table carries BOTH `enabled` (the rule's own switch, which :enable/:disable write through `setAutomationEnabled`) and the generic lifecycle `disabled`/`locked` columns. On the factory the shared lifecycle verb answers :enable/:disable first and would write the wrong column, leaving a rule that reads disabled but still fires. Collapse the duplicate columns first - that is a schema change, not a spec knob. |
+| `roles` | **Blocked on identity.** The item id is the role NAME (the FK target every grant and user row points at), not the uuid every generic method keys on. Converting means overriding all of get/update/delete, which buys the list shape and nothing else. |
+| `users` | **Blocked on the response.** `GET /v1/users/me` answers with a caller-identity envelope (capabilities + grantable scope tiers) and synthesizes a row for a simulated principal who has never signed in. The factory serializes a row; this endpoint answers about the caller. |
+| `accessRules` | Not yet attempted. |
+| `documentRoutes` | Not yet attempted (org + personal documents share one file, with byte-serving verbs). |
+| `payrollRuns` | Not yet attempted (5 verbs, several answering with files rather than the resource). |
+| `announcements` | Step 6: the board. ~17 verbs, publish/pin lifecycle, viewer-dependent serialization. |
+| `cards` | Step 6: kanban cards. ~11 verbs. |
+| `employees` | Step 6: scoped list with `?q`, viewer-dependent `serialize(row, user)`, `{raw}` verbs for photo / signature / identity-doc bytes, and ten singleton sub-resource routes chained onto the app the factory returns. |
 
 ## Per-collection recipe
 
-1. `git show HEAD:src/routes/<name>.ts` and `git show HEAD:src/services/<name>.ts` - **not** the Read tool,
-   which went stale mid-session three times and led to services written from memory.
-2. Check the table for `delete_time` / `locked` / `disabled`, and check whether the current route exposes a
-   DELETE. Column present + route absent → `softDelete: false`. Hard `db.delete` in the service →
-   `overrides.remove` + `softDelete: false`.
-3. Move field mapping into `insert` / `patch` verbatim, including validation and its exact error strings.
-4. Keep audit stems byte-identical (`auditName`, plus `lifecycleName` where the lifecycle verbs used a different
-   singular). `test/apiKeys.test.ts` asserts on `holiday.%`; the activity feed renders these.
-5. Scoped list → route-level `list(c)`. Owned code → `allocCode(deps, table, values)`. Side effects →
-   `afterCreate` / `afterUpdate`. Anything else genuinely bespoke → `overrides`.
-6. `grep -rn "<serviceFn>" src test` before renaming or dropping an export - `test/listTruncation.test.ts`
-   imports `listHolidays` directly, and cron imports several services.
-7. **Export only what something imports.** Do NOT re-export the generic CRUD functions "in case": that pattern
-   left ~120 dead exports and a second way to call the same behaviour sitting next to the factory (`862e715`
-   removed them). The route builds its service from the spec; a service export is for an outside caller only.
+1. `git show HEAD:src/routes/<name>.ts` and `git show HEAD:src/services/<name>.ts` - **not** the Read tool, which
+   went stale mid-session three times and led to services written from memory.
+2. Check the table for `delete_time` / `locked` / `disabled`, and check whether the current route exposes DELETE.
+   Column present + route absent means `softDelete: false`. A hard `db.delete` in the service means
+   `overrides.remove` plus `softDelete: false`. Read the table definition itself - a `sed` range over schema.ts
+   runs past the end of a table that closes with `}, (t) => ({...}));` and reports the next table's columns.
+3. Move the field mapping into `insert` / `patch` verbatim, including validation and exact error strings. Do not
+   invent a tighter zod schema than the original had: a verb whose body was taken as sent stays that way.
+4. Keep audit stems byte-identical where you can (`auditName`, plus `lifecycleName` when the lifecycle verbs used
+   a different singular). Where a service used one stem for create/update and another for delete/restore/purge,
+   they unify on the create/update stem - check nothing reads the old one first. `test/apiKeys.test.ts` asserts
+   on `holiday.%`; the activity feed renders these.
+5. Scoped list becomes a route-level `list(c)`. An owned code becomes `allocCode(deps, table, values)`. Side
+   effects become `afterCreate` / `afterUpdate`. Derived data attached to every answer becomes `decorate` - and
+   because a route-level `list` bypasses `decorate`, attach it in the list hook too, in one query for the page.
+6. **A bespoke purge means the row has children.** Before deleting a `purge<X>` helper, read it: a board's cards,
+   a cycle's reviews, a transition's tasks and a suggestion's votes are all torn down by hand before the row.
+   Wire it as `overrides.purge` or the parent goes and the children are orphaned.
+7. Do NOT re-export what the lane now serves. If the generic method is byte-equivalent, delete the wrapper; if
+   the function is still called inside its own service, drop the `export` instead of the function.
 8. `npm run typecheck && npm run test`. Pre-existing tests must pass **unchanged** - that is the equivalence
    proof. Commit the batch.
 
-### Two audits to run per batch (each has already caught a real defect)
+### Audits to run per batch (each has caught a real defect)
 
-**Did anything gain a destructive route it did not have?** For each converted file, compare the pre-factory
+**Did anything gain a destructive route it did not have?** For every converted file, compare the pre-factory
 baseline against what the factory now mounts:
 
 ```sh
 for f in $(grep -ln collectionRoutes src/routes/*.ts); do
-  git show b12d009:$f | grep -c '\.delete(' ;   # 0 here + no `softDelete: false` in the new file = ADDED a delete
+  git show b12d009:$f | grep -c '\.delete(' ;  # 0 here + no `softDelete: false` in the new file = ADDED delete
 done
 ```
 
-**Are there dead exports?** For each converted service, every name in its `export const { ... } =
-crudService(spec)` block must have a reference outside its own file:
+**Did the list lose a filter?** The query parameters a route reads are its whole filter surface, and dropping one
+is silent - the list just returns everything:
+
+```sh
+git show b12d009:src/routes/<name>.ts | grep -oE 'query\("[a-z_]+"\)' | sort -u   # minus force/id, which the factory owns
+grep -oE 'query\("[a-z_]+"\)' src/routes/<name>.ts | sort -u
+```
+
+**Are there dead exports?** For every converted service, each name must be used outside its own file:
 
 ```sh
 grep -rn "\b<exportedName>\b" src test web/src | grep -v "^src/services/<file>.ts:"
@@ -182,33 +143,48 @@ grep -rn "\b<exportedName>\b" src test web/src | grep -v "^src/services/<file>.t
 
 ## Verification
 
-- Per batch: `npm run typecheck`, `npm run test` (105 files / 1213 tests today), pre-existing tests unmodified.
+- Per batch: `npm run typecheck`, `npm run test` (105 files / 1219 tests today), pre-existing tests unmodified.
 - `test/collectionFactory.test.ts` (22 tests) pins the shared surface: paging cursor, If-Match, lock guard,
-  delete/`?show_deleted`/restore/`?force`, unknown-verb 404, unsupported lifecycle verb 404, audit stems, the
-  create/update schema split, verb entries (schema / no schema / raw), append-only tables, read-only specs, the
+  delete/`?show_deleted`/restore/`?force`, unknown-verb 404, unsupported lifecycle verb 404, audit stems,
+  create/update schema split, verb entries (schema / no schema / raw), append-only tables, read-only specs,
   `?id=` conflict, and that the hint lists only mounted actions.
-- `test/collectionLaneDrift.test.ts` gates the lane itself.
+- `test/collectionLaneDrift.test.ts` gates the lane itself: the PENDING budget, the NOT_COLLECTIONS exemption and
+  its no-create/no-delete property, and that every bespoke purge has a caller.
 - Existing contract gates stay: `openapiRoutesDrift`, `customMethodsDrift`, `serializerContractDrift`,
   `accessHint`, `parity` (route × role), `bola` (item-level isolation), plus `npm run api:lint` (spectral) in the
   pre-commit `verify` hook.
-- Per batch, diff audit action stems and 404 wording against `git show HEAD~1` for the converted collections.
-- No screenshot/boot verification (project convention): reason plus `tsc` plus the suite.
 
-## Known consequences, accepted
+## What the conversion found, and what it cost
 
-- Uniform semantics replace per-collection accidents: `?id=` honored via `uuid` (409 on collision),
-  `assertNotLocked` on every update, PATCH of a soft-deleted row 404s, item responses always carry the
-  per-object access hint, delete-side audit stems normalize to the create/update stem, GET of a soft-deleted row
-  resolves rather than 404ing.
-- Three defects the conversion itself introduced, all found and fixed: ~120 dead re-exports, a 500 on a
-  colliding `?id=`, and read-only collections advertising update/delete in their access hint. The last one also
-  corrected a pre-existing falsehood on positions, compensation and notifications. The lesson is in the recipe:
-  a conversion adds behaviour as easily as it removes it, so audit the delta rather than trusting the green
-  suite - the tests passed through all three.
-- `compliance-rules` lost the `{generated: N}` meta on its create audit row; the count stays derivable from
+Defects the copied code was hiding, now fixed:
+
+- `?id=` written to a non-existent column (departments among them), so a caller-supplied id was dropped without
+  a word. The generic create writes `uuid` and answers 409 when the id is taken.
+- Access hints that advertised actions the route did not have: read-only collections offering update+delete,
+  `leave-requests` offering a phantom update+delete pair, `settlements` the same. And the reverse - the tickets
+  list's bulk Resolve/Close read verb names out of `access.can` that the hint never supplied, so they could
+  never enable. The hint is now derived from the mounted surface, in one place.
+- `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
+  but not through the API.
+
+Defects the conversion itself introduced, all found and fixed:
+
+- ~120 dead re-exports, a 500 on a colliding `?id=`, and read-only collections advertising update/delete.
+- **Two child-aware purges dropped** (transitions' tasks, review-cycles' feedback + reviews). `?force=true` would
+  have deleted the parent and orphaned the children, and the full suite stayed green through it - no test
+  covers `?force` on those collections. The lane test now fails on a bespoke purge that nothing calls, and the
+  recipe says to read a purge before deleting it.
+- A dropped `?status` filter on tax-declarations, caught by the query-parameter audit that is now in the recipe.
+
+The lesson repeats: a conversion adds behaviour easily and removes it just as easily, so audit the delta rather
+than trusting a green suite.
+
+Known cost:
+
+- `compliance-rules` lost `{generated: N}` meta on its create audit row; the count stays derivable from
   `compliance_events.rule_id`.
-- Indirection: a route file no longer shows the mechanics. `collectionRoute.ts` + `crud.ts` (~300 lines) is the
-  one file to learn.
-- Override-heavy collections are LOC-neutral or slightly worse (`holiday-selections` 33 → 39 lines, `assets`
-  51 → 45). They convert for one lane and one test, not for line count. The "−70 lines each" arithmetic from
-  the first three collections does not apply to what remains.
+- Indirection: a route file no longer shows the mechanics. `collectionRoute.ts` + `crud.ts` (~340 lines) are one
+  file to learn.
+- Override-heavy collections are LOC-neutral or slightly worse (`holiday-selections` 33 -> 39 lines, `assets`
+  51 -> 45). The win is one lane and one test, not line count. The "-70 lines each" arithmetic from the first
+  three collections does not generalize.
