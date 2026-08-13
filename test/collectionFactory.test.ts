@@ -375,6 +375,32 @@ describe("spec dimensions", () => {
     expect(holidays.results[0].access.can).toEqual(expect.arrayContaining(["update", "delete", "restore", "disable", "lock"]));
   });
 
+  it("answers a collection's own verb before the shared lifecycle verb of the same name", async () => {
+    const { id } = await newHoliday();
+    let ran = "";
+    // `holidays` has a `disabled` column, so the shared lane would answer :disable by writing it. A collection
+    // that means something else by the same verb used to be silently shadowed.
+    const call = mount({
+      ...holidaySpec,
+      param: "id",
+      verbs: {
+        disable: {
+          run: async (deps, _user, rowId) => {
+            ran = "own";
+            return (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, rowId)))[0];
+          },
+        },
+      },
+    });
+    expect((await post(call, `${COLLECTION}/${id}:disable`)).status).toBe(200);
+    expect(ran, "the collection's own verb wins").toBe("own");
+    const row = (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!;
+    expect(row.disabled, "the generic column write must not also have happened").toBeFalsy();
+    // A lifecycle verb the collection does NOT claim still comes from the shared lane.
+    expect((await post(call, `${COLLECTION}/${id}:lock`)).status).toBe(200);
+    expect((await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!.locked).toBeTruthy();
+  });
+
   it("applies decorate on every path it owns, so a derived field is identical on list, get and write", async () => {
     // Counts how often the derived field is computed: it must be ONE call per response, not one per row.
     let calls = 0;

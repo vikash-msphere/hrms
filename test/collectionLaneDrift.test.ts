@@ -103,6 +103,26 @@ describe("every collection is built by the factory", () => {
     expect(stranded, "a bespoke purge nothing calls - wire it as overrides.purge, or delete it if the generic purge is enough").toEqual([]);
   });
 
+  // A collection's own verb is answered BEFORE the shared lifecycle lane (http/collectionRoute.ts), so an
+  // overlap is resolved rather than silent. It is still worth seeing: a collection that claims `:disable` owns
+  // the whole meaning of that verb, including whether the row's `disabled` column is written at all. This lists
+  // every overlap so one arrives as a visible change here rather than as a surprise in the route file.
+  it("names every collection verb that shadows a shared lifecycle verb", () => {
+    const SHARED = ["enable", "disable", "lock", "unlock", "publish", "unpublish", "restore"];
+    // Verbs a collection claims for itself, read off the top level of its `verbs: { ... }` block.
+    const shadowed: string[] = [];
+    for (const { name, src } of entries) {
+      if (!usesFactory(src)) continue;
+      const block = src.match(/\n  verbs: \{\n([\s\S]*?)\n  \},?\n/);
+      if (!block) continue;
+      for (const m of block[1]!.matchAll(/^    (\w+): \{/gm)) if (SHARED.includes(m[1]!)) shadowed.push(`${name}:${m[1]}`);
+    }
+    // `payroll-runs:publish` is a long-running publish that answers 202 + an Operation to poll, not the run, so
+    // it can never be the shared lane's column write. `automations` will claim :enable/:disable when it converts
+    // (its own switch is a different column than the lifecycle one) - add it here in that commit.
+    expect(shadowed.sort()).toEqual(["payrollRuns:publish"]);
+  });
+
   // The generic list binds the caller's scope (services/crud.ts), and these tables are FLAT catalogs: a `code`
   // and no owner column. So a grant that narrowed one of them to `dept` or `own` would no longer return the
   // whole table - it would return nothing, and the SPA would render an empty dropdown where a leave type or a

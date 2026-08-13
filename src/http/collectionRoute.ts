@@ -186,7 +186,20 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     });
   }
 
+  // The collection's OWN verb is answered first. The shared lifecycle lane and `:restore` are the fallback, so
+  // a collection that means something specific by `:enable` gets to say so instead of being silently answered by
+  // the generic column write - which is a whole class of shadowing, not one instance (see `automations`, whose
+  // `:enable` writes a different column than the lifecycle verb would).
   app.post(`/:${param}`, async (c) => {
+    const { id, verb } = customMethod(c);
+    const own = spec.verbs?.[verb];
+    if (own) {
+      if (own.raw) return own.raw(c, id);
+      // A verb body is optional on the wire (`:unblock` carries none), so a missing/!JSON body parses as {}.
+      const body = own.schema ? own.schema.parse(await c.req.json().catch(() => ({}))) : undefined;
+      return item(c, (await own.run(c.get("deps"), c.get("user"), id, body, c)) as { code?: string | null });
+    }
+    if (verb === "restore" && softDeletable) return item(c, await svc.restore(c.get("deps"), c.get("user"), id));
     const lc = await lifecycleVerb(c, {
       table: spec.table,
       singular: spec.lifecycleName ?? spec.auditName,
@@ -195,15 +208,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
       publish: spec.publish,
       publishTime: spec.publishTime,
     });
-    if (lc) return lc;
-    const { id, verb } = customMethod(c);
-    if (verb === "restore" && softDeletable) return item(c, await svc.restore(c.get("deps"), c.get("user"), id));
-    const own = spec.verbs?.[verb];
-    if (!own) return c.notFound();
-    if (own.raw) return own.raw(c, id);
-    // A verb body is optional on the wire (`:unblock` carries none), so a missing/!JSON body parses as {}.
-    const body = own.schema ? own.schema.parse(await c.req.json().catch(() => ({}))) : undefined;
-    return item(c, (await own.run(c.get("deps"), c.get("user"), id, body, c)) as { code?: string | null });
+    return lc ?? c.notFound();
   });
 
   return app;

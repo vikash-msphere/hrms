@@ -28,15 +28,14 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1227 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1229 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
 
-The lane itself is not finished: a collection's own verb is still shadowed by the shared lifecycle verb of the
-same name, the spec is not typed against its table, and the access hint is computed after serializing. Track A
-under "Remaining work" clears them; each is one fix now instead of forty.
+The lane itself is not finished: the spec is not typed against its table, and the access hint is computed after
+serializing. Track A under "Remaining work" clears them; each is one fix now instead of forty.
 
 ### The spec, as it stands
 
@@ -69,6 +68,9 @@ Behaviours worth knowing before converting anything:
   manager assessment).
 - The access hint is derived from what the route actually mounted, not from `ACCESS_VERBS`. A factory-built
   collection never consults that table.
+- A collection's OWN verb is answered first; `:restore` and the shared lifecycle lane are the fallback. So a
+  collection that means something specific by `:enable` says so in `verbs` instead of being answered by the
+  generic column write, and `collectionLaneDrift.test.ts` names every such overlap so one is visible.
 - A caller-supplied `?id=` that is already taken is a 409 ALREADY_EXISTS, not a 500.
 - The lock guard lives in `src/services/lockGuard.ts` (a leaf). Importing it from `services/lifecycle.ts` inside
   `crud.ts` created a cycle through notifications and left `crudService` undefined at module-init.
@@ -111,19 +113,13 @@ Two tracks. **A** hardens the lane itself: the generic path still carries defect
 because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
 hand-rolled, three of which only become convertible after a step in A.
 
-Order matters: A5 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
+Order matters: A6 and A7 first, because B1 depends on A7, and because every A step changes the lane
 under all 74 converted collections, which is cheapest while the conversion is fresh.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track A - fix the lane
-
-**A5. Let a collection's own verb beat the shared lifecycle verb.** `collectionRoute.ts` runs `lifecycleVerb`
-before `spec.verbs`, so a collection that defines its own `:enable` is silently shadowed by the generic one.
-Check `spec.verbs` first. This is what actually blocks `automations` (see B2), and it removes a whole class of
-silent shadowing rather than one instance. Add the collision list to the drift test so an overlap is visible
-rather than merely resolved.
 
 **A6. Type the spec against its table.** `type Table = any` and `insert` returns `Record<string, unknown>`, so
 a mistyped column name compiles and then either drops silently or fails at D1. Parametrize `CrudSpec` on the
@@ -250,6 +246,11 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- Still open, recorded here rather than fixed: a shared lifecycle verb's response does not go through the
+  factory's item path (`http/lifecycleRoute.ts` serializes and answers itself), so `:disable` / `:lock` /
+  `:publish` answer WITHOUT `access.can` and without the collection's derived fields, unlike every other item
+  response. Routing it through `item()` means making the lifecycle helper return the row instead of a Response,
+  which changes the response shape of ~40 collections at once - its own change, not a rider on another step.
 - **A regression the conversion introduced and this pass fixed:** `profile_completeness` disappeared from
   `GET /v1/employees/{id}`. The employees spec expressed it as `decorate`, but `overrides.get` replaces the
   service method that applied decorate, and create/update are overridden too - so the flags were computed on
