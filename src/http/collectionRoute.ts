@@ -85,7 +85,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   // An item response carries the per-object-merged grant (a share can lift a caller above their role), so the
   // SPA's affordances on a single record are share-accurate. Lists pass the role grant - one grant, many rows.
   const item = (c: Context<AppEnv>, row: { code?: string | null } | undefined) =>
-    c.json(withAccess(serialize(row, c.get("user")) as object, c.get("user"), collection, row?.code, c.get("objectGrant")));
+    c.json(withAccess(serialize(row, c.get("user")) as object, c.get("user"), collection, row?.code, c.get("objectGrant"), hintVerbs));
   // Soft delete is a property of the TABLE: an append-only collection (event-log, cron-runs) has no
   // `delete_time` column, so it gets no DELETE and no `:restore` rather than a route that writes a column
   // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleRoute.ts). `softDelete: false`
@@ -99,6 +99,19 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   // row would keep re-routing approvals) while having no restore and no `?force`: that is `overrides.remove`
   // plus `softDelete: false`.
   const canDelete = softDeletable || !!spec.overrides?.remove;
+  // The access hint must describe THIS collection's actual surface, not a default. Forward and inverse
+  // lifecycle members are both listed so the UI gets a hint whichever state a row is in (they share one grant
+  // pattern, so it only costs an in-memory decide()).
+  const table = spec.table as Record<string, unknown>;
+  const hintVerbs: string[] = [
+    ...(canUpdate ? ["update"] : []),
+    ...(canDelete ? ["delete"] : []),
+    ...(softDeletable ? ["restore"] : []),
+    ...(table.disabled ? ["enable", "disable"] : []),
+    ...(table.locked ? ["lock", "unlock"] : []),
+    ...(spec.publish ? ["publish", "unpublish"] : []),
+    ...Object.keys(spec.verbs ?? {}),
+  ];
 
   const app = new Hono<AppEnv>();
 
@@ -111,7 +124,7 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
     return c.json({
-      results: items.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code)),
+      results: items.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code, user.grant, hintVerbs)),
       next_page_token: nextPageToken,
       ...(extra ?? {}),
     });

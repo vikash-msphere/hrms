@@ -12,7 +12,7 @@ import type { AppEnv, AppUser, Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
-import { etagOf, toHolidayResource } from "../src/http/serialize";
+import { etagOf, toHolidayResource, toEventLogResource } from "../src/http/serialize";
 import { holidaySpec } from "../src/services/holidays";
 import { collectionRoutes, type CollectionRouteSpec } from "../src/http/collectionRoute";
 import { grantFor } from "../src/domain/grants";
@@ -42,7 +42,7 @@ beforeAll(async () => {
 });
 
 const DEV_EMAIL = "dev@example.com"; // the dev-auth bypass (vitest.config.ts) is the ambient credential
-const CLEAR = [schema.auditLog, schema.holidays, schema.payGrades, schema.accessRules, schema.users, schema.roles];
+const CLEAR = [schema.auditLog, schema.holidays, schema.payGrades, schema.eventLog, schema.accessRules, schema.users, schema.roles];
 beforeEach(async () => {
   for (const t of CLEAR) await deps.db.delete(t);
   await deps.db.insert(schema.roles).values([{ name: "super_admin", label: "Super" }]).onConflictDoNothing();
@@ -251,7 +251,7 @@ describe("spec dimensions", () => {
       c.set("user", principal());
       await next();
     });
-    harness.route("/t", collectionRoutes({ ...spec, serialize: toHolidayResource } as CollectionRouteSpec<any>));
+    harness.route("/t", collectionRoutes({ serialize: toHolidayResource, ...spec } as CollectionRouteSpec<any>));
     // COLLECTION is the mount path itself (`/t`, no trailing slash - that is what a real request sends and
     // what Hono's sub-app matches); an item path is `/t/<id>` or `/t/<id>:<verb>`.
     return (path: string, init: RequestInit = {}) => harness.request(`/t${path}`, init);
@@ -315,6 +315,31 @@ describe("spec dimensions", () => {
     expect(await raw.text()).toBe(`holiday ${id}`);
 
     expect((await call(`/${id}:nosuchverb`, { method: "POST" })).status).toBe(404);
+  });
+
+  it("hints only the actions it actually mounted, so the SPA never offers a button that 404s", async () => {
+    // Read-only: no insert, no patch, and event_log has no delete_time. Before the hint was derived from the
+    // mounted surface, a collection with no ACCESS_VERBS entry inherited the update+delete default and claimed
+    // both on rows that have neither route.
+    await deps.db.insert(schema.eventLog).values({ uuid: genId(), code: "ev-1", type: "test.event", occurredAt: new Date() });
+    const readOnly = mount({
+      table: schema.eventLog,
+      collection: "event-log",
+      auditName: "event",
+      notFound: "event not found",
+      param: "event",
+      serialize: (row: any) => toEventLogResource(row, false),
+      list: async () => ({ items: await deps.db.select().from(schema.eventLog), nextPageToken: undefined }),
+    } as any);
+    const page = (await (await readOnly(COLLECTION)).json()) as Record<string, any>;
+    expect(page.results.length).toBe(1);
+    expect(page.results[0].access.can, "an append-only row can be neither edited nor deleted").toEqual([]);
+
+    // A writable collection with lifecycle columns still hints the full set it really has.
+    const writable = mount({ ...holidaySpec, param: "id", writeSchema: z.object({ display_name: z.string().optional(), date: z.string().optional() }).strict() });
+    await post(writable, COLLECTION, { display_name: "Ugadi", date: "2099-03-22" });
+    const holidays = (await (await writable(COLLECTION)).json()) as Record<string, any>;
+    expect(holidays.results[0].access.can).toEqual(expect.arrayContaining(["update", "delete", "restore", "disable", "lock"]));
   });
 
   it("mounts no delete or restore for an append-only table (no delete_time column)", async () => {

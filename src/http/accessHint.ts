@@ -125,9 +125,12 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
 
 // The verbs this caller may perform on the object with internal `code`, decided by the engine over `grant`
 // (the broad role grant, or - on item paths - the per-object-merged grant). Pure, in-memory, zero DB.
-export function computeCan(grant: Grant, self: Self, collection: string, code: string): string[] {
+export function computeCan(grant: Grant, self: Self, collection: string, code: string, candidates?: readonly string[]): string[] {
   const resource = `${collection}.${code}`;
-  const verbs = ACCESS_VERBS[collection] ?? DEFAULT_VERBS;
+  // A factory-built collection passes the methods it ACTUALLY mounted (http/collectionRoute.ts), so the hint
+  // can never advertise an action the route does not have - an append-only collection like event-log used to
+  // inherit the update+delete default and offer the SPA two buttons that would 404.
+  const verbs = candidates ?? ACCESS_VERBS[collection] ?? DEFAULT_VERBS;
   const can: string[] = [];
   for (const v of verbs) {
     const level = STANDARD_LEVEL[v];
@@ -156,10 +159,11 @@ export function withAccess<T extends object>(
   collection: string,
   code: string | null | undefined,
   grant: Grant = user.grant,
+  candidates?: readonly string[],
 ): T & { access: { can: string[]; why?: ScopeKind } } {
   // A row with no code can't be decided against -> fail safe (hint nothing; the server still enforces).
   const self = { employeeCode: user.employeeCode };
-  const can = code ? computeCan(grant, self, collection, code) : [];
+  const can = code ? computeCan(grant, self, collection, code, candidates) : [];
   const why = code ? computeWhy(grant, self, collection, code) : null;
   return { ...res, access: why ? { can, why } : { can } };
 }
