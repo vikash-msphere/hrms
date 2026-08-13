@@ -221,6 +221,32 @@ describe("a collection's own rules ride on the same surface", () => {
     expect(page.results.map((r: { level: number }) => r.level)).toEqual([1, 3]);
   });
 
+  it("pages every row exactly once across a boundary, even under a custom sort", async () => {
+    // The cursor seeks in the DB's (createdAt, uuid) order while `sort` presents within the page. When the two
+    // disagree - here creation order 5, 1, 3 against pay-grades' by-level presentation - a cursor compared
+    // against the PRESENTED order skips whole rows: paging by 2 used to answer levels [1,3] then nothing at
+    // all, losing the row created first. Distinct createdAt values so the boundary is exact.
+    const t = 1_700_000_000_000;
+    await deps.db.insert(schema.payGrades).values(
+      [5, 1, 3].map((level, i) => ({ uuid: genId(), code: `pg-${level}`, name: `L${level}`, level, createdAt: new Date(t + i * 1000), updatedAt: new Date(t + i * 1000) })),
+    );
+    const first = await body(await call("/v1/pay-grades?max_page_size=2"));
+    expect(first.results.map((r: { level: number }) => r.level), "the two oldest rows, presented by level").toEqual([1, 5]);
+    expect(first.next_page_token).toBeTruthy();
+    const second = await body(await call(`/v1/pay-grades?max_page_size=2&page_token=${encodeURIComponent(first.next_page_token)}`));
+    expect(second.results.map((r: { level: number }) => r.level)).toEqual([3]);
+    expect(second.next_page_token, "the last page is not labelled partial").toBeUndefined();
+  });
+
+  it("keeps the internal row id out of the page token", async () => {
+    await send("/v1/pay-grades", "POST", { display_name: "Senior", level: 3 });
+    await send("/v1/pay-grades", "POST", { display_name: "Junior", level: 1 });
+    const first = await body(await call("/v1/pay-grades?max_page_size=1"));
+    const cursor = Buffer.from(first.next_page_token as string, "base64url").toString();
+    const uuids = (await deps.db.select().from(schema.payGrades)).map((r) => r.uuid);
+    expect(uuids.some((u) => cursor.includes(u)), "the cursor carries the wire token, never the internal uuid").toBe(false);
+  });
+
   it("validates across fields on create, and across the patch merged over the stored row", async () => {
     expect((await send("/v1/pay-grades", "POST", { display_name: "Bad", band_min: 900, band_mid: 100 })).status).toBe(400);
     const created = await send("/v1/pay-grades", "POST", { display_name: "Mid", band_min: 100, band_mid: 500, band_max: 900 });

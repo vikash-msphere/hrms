@@ -28,11 +28,15 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1219 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1221 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
+
+The lane itself is not finished. The generic path still carries defects the copied code had (a list that ignores
+the caller's scope) and still has one copy-pasted block of its own in the 59 route-level list hooks. Track A
+under "Remaining work" clears them; each is one fix now instead of forty.
 
 ### The spec, as it stands
 
@@ -60,6 +64,11 @@ Behaviours worth knowing before converting anything:
 - A caller-supplied `?id=` that is already taken is a 409 ALREADY_EXISTS, not a 500.
 - The lock guard lives in `src/services/lockGuard.ts` (a leaf). Importing it from `services/lifecycle.ts` inside
   `crud.ts` created a cycle through notifications and left `crudService` undefined at module-init.
+- The generic list pages in SQL through `services/keysetPage.ts`: one page per request, ordered and seeked on
+  (createdAt, uuid), with `isNull(delete_time)` unless `?show_deleted` and no soft-delete predicate at all for a
+  table without the column. The page token carries the row's WIRE token, never its internal uuid.
+- `sort` therefore orders WITHIN a page, not across the table. A catalog expected to exceed the 100-row
+  truncation cap should be ordered client-side rather than re-reading the whole table to sort it.
 
 ## Decided policy
 
@@ -78,17 +87,106 @@ five are in the table below.
 
 ## Remaining work
 
-Five files, each blocked on something that is not a spec knob. All are in `PENDING` in the drift test, which
-carries the same reasons inline. Three want a schema or an identity change first; two want a factory change
-that has to be decided on its own merits, not slipped in to finish a conversion.
+Two tracks. **A** hardens the lane itself: the generic path still carries defects the copied code had, and
+because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
+hand-rolled, three of which only become convertible after a step in A.
 
-| file | why it is still hand-rolled |
-| --- | --- |
-| `automations` | **Blocked on the schema.** The table carries BOTH `enabled` (the rule's own switch, which :enable/:disable write through `setAutomationEnabled`) and the generic lifecycle `disabled`/`locked` columns. On the factory the shared lifecycle verb answers :enable/:disable first and would write the wrong column, leaving a rule that reads disabled but still fires. Collapse the duplicate columns first - that is a schema change, not a spec knob. |
-| `roles` | **Blocked on identity.** The item id is the role NAME (the FK target every grant and user row points at), not the uuid every generic method keys on. Converting means overriding all of get/update/delete, which buys the list shape and nothing else. |
-| `accessRules` | **Blocked on identity.** Rows are keyed by an `id` column and have neither the `uuid` every generic method keys on nor the `code` the access hint decides against; the service also serializes inside list/get. |
-| `users` | **Blocked on the response.** `GET /v1/users/me` answers with a caller-identity envelope (capabilities + grantable scope tiers) and synthesizes a row for a simulated principal who has never signed in. The factory serializes a row; this endpoint answers about the caller. |
-| `announcements` | **Blocked on ordering.** A board post carries `read_by`/`read_count` only for its author or someone who may edit it, and that second half is read off `access.can` - the hint the factory computes AFTER serializing, from the per-object grant only it holds. `serialize(row, user)` runs before that and sees the caller's broad grant, so it cannot make the same call. Expressing it needs a post-serialize hook - the 16th knob, so it goes here instead. |
+Order matters: A2 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
+under all 74 converted collections, which is cheapest while the conversion is fresh.
+
+Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
+shippable.
+
+### Track A - fix the lane
+
+**A2. Bind the list scope in the generic list.** `crud.ts` never reads `c.get("scope")`, so those 15
+collections return every row whatever the caller's breadth. Safe today only by accident: every grant on these
+catalogs is unscoped (`holidays.**`, `leave-types.**`, ...), so `actorScope` answers `all` for everyone who can
+read them. Nothing enforces that, and a single scoped grant would silently list the whole table.
+
+Bind `applyScope(scope, table.code, owner)` into the generic list's where clause. All 15 tables have `code` and none has an
+owner column, so `applyScope` needs to accept a missing owner and answer `1 = 0` for breadth `own` - fail
+closed, the same rule it already applies to a missing scope. Add a test asserting each generic-list collection
+resolves `all` for every seeded role, so the fix cannot silently empty a catalog the SPA needs.
+
+Related gap to record, not fix: `scope.seeRestricted` (state visibility) is bound by hand in the services that
+have it. Only `announcements` carries a `STATE_VISIBILITY` rule today, and it is hand-rolled, so the generic
+list has nothing to honor yet. When a factory collection gets a state rule, the generic list must bind it.
+
+**A3. Hand the resolved paging to `list(c)`.** 59 of the 74 converted files open their list hook with the same
+three lines (`clampPageSize(Number(c.req.query("max_page_size")) || undefined)`, `page_token`, `show_deleted`) -
+124 `clampPageSize` call sites across routes. The factory already computes all three for the generic path.
+Change the hook to `list(c, page)` where `page = {maxPageSize, pageToken, showDeleted}` and strip the
+duplicated lines. This is the last copy-pasted block in the lane, and copy-paste in exactly this position is
+what produced the defect class the conversion set out to kill. It is a signature change, not a 16th knob, so
+the frozen-spec policy stands.
+
+**A4. One implementation of derived data per collection.** 13 collections declare BOTH `list` and `decorate`
+(candidates, boards, employees, expenses, payroll-runs, reimbursements, review-cycles, reviews, referrals,
+requisitions, suggestions, transitions, tax-declarations). A route-level `list` bypasses `decorate`, so each of
+those computes the same derived field twice, in two shapes - and the two can drift. `tax-declarations` is the
+clean example: `decorate` resolves `hasProof` per row (N queries), its list hook resolves the same field with
+one `attachedObjectIds` query.
+
+Fix: rewrite each `decorate` in the batched, page-level form it was always handed (it receives the whole page,
+not a row), delete the attachment from the list hook, and have the factory apply `decorate` to whatever `list`
+returns. Then derived data has one implementation, on one code path, at one query per page. Do not do this
+before A3, and audit per collection - decorate is not always the same field the list hook attaches.
+
+**A5. Let a collection's own verb beat the shared lifecycle verb.** `collectionRoute.ts` runs `lifecycleVerb`
+before `spec.verbs`, so a collection that defines its own `:enable` is silently shadowed by the generic one.
+Check `spec.verbs` first. This is what actually blocks `automations` (see B2), and it removes a whole class of
+silent shadowing rather than one instance. Add the collision list to the drift test so an overlap is visible
+rather than merely resolved.
+
+**A6. Type the spec against its table.** `type Table = any` and `insert` returns `Record<string, unknown>`, so
+a mistyped column name compiles and then either drops silently or fails at D1. Parametrize `CrudSpec` on the
+table and type `insert` / `patch` returns as `Partial<T["$inferInsert"]>`. Mechanical, and it puts a compiler
+under the one thing every spec has to get right.
+
+**A7. Compute the access hint before serializing.** `item()` serializes, then computes the hint. A resource
+whose SHAPE depends on what the caller may do therefore cannot be expressed. `computeCan` is pure and already
+has everything it needs at that point, so compute `can` first and pass it to `serialize(row, user, can)`.
+Unblocks B1 and is a signature change, not a new field.
+
+### Track B - the five hand-rolled collections
+
+**B1. `announcements`** (needs A7). A post carries `read_by` / `read_count` only for its author or someone who
+may edit it, and the second half is read off `access.can`. With the hint computed first, this is an ordinary
+`serialize(row, user, can)`. Converting also brings the biggest remaining verb set onto the lane.
+
+**B2. `automations`** (needs A5, plus a schema change). The table carries both `enabled` (the rule's own
+switch, written by `setAutomationEnabled`) and the generic lifecycle `disabled` / `locked`. A5 stops the shared
+verb from answering `:enable` first, which is enough to convert safely, but the duplicate state is still wrong:
+collapse `enabled` and `disabled` into one column in the same squashed migration, and keep exactly one meaning
+of "this rule does not fire".
+
+**B3. `roles` and `accessRules`** (identity). `roles` keys on the role NAME, the FK target every grant and user
+row points at; `accessRules` keys on an `id` column and has neither `uuid` nor `code`, and serializes inside
+list/get. Both need an identity decision before a conversion, not a conversion that overrides every method:
+either give the tables the standard `uuid` + `code` pair and keep the name/id as the display key, or accept
+that these two are configuration surfaces and move them to `NOT_COLLECTIONS` with that reason. Decide first,
+then act - a five-override conversion buys the list shape and nothing else.
+
+**B4. `users`.** `GET /v1/users/me` answers with a caller-identity envelope (capabilities plus grantable scope
+tiers) and synthesizes a row for a simulated principal who has never signed in. That endpoint is not a
+collection item and never will be. Split it out as its own route, then convert what is left (list / get /
+update over real user rows) on the lane. If the residue turns out to be only `me`, the file moves to
+`NOT_COLLECTIONS` instead.
+
+### Not in scope
+
+The 36 remaining non-factory route files are sub-resource routes and action surfaces, not collections. The five
+`NOT_COLLECTIONS` key/value surfaces stay where they are, with the drift test holding them to the claim (no
+collection-level `POST /`, no DELETE).
+
+### What each step has to prove
+
+The standing gates are under "Verification" below and all of them apply. On top of that: A2 and A4 change
+behavior under all 74 converted collections at once, so each runs the three delta audits in "Audits to run per
+batch" as well - a lane-wide change is exactly where a green suite is least convincing. Extend
+`test/collectionFactory.test.ts` per step: an empty result for a scoped caller (A2), one derived field on both
+list and get (A4), a collection verb that shadows a lifecycle verb (A5), and a serializer that reads `can` (A7).
 
 ## Per-collection recipe
 
@@ -166,6 +264,11 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- A custom `sort` silently broke paging. `pay-grades`, `projects` and `shifts` presented the table in their own
+  order while the cursor compared `createdAt` against that order, so page 2 skipped rows outright - paging
+  `pay-grades` by 2 over levels 5, 1, 3 (created in that order) answered [1, 3] and then nothing, losing the row
+  created first. Pre-existing, copied three times on dev, and invisible because these catalogs fit one page.
+  The DB now orders the page and `sort` presents within it.
 
 Defects the conversion itself introduced, all found and fixed:
 

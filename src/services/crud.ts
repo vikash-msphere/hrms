@@ -7,15 +7,15 @@
 //
 // This makes NO access decision: the middleware is still the single source of authorization, exactly as when
 // each service was written by hand. `assertNotLocked` is a workflow precondition, not access control.
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, type SQL } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { notFound, aborted, alreadyExists, unimplemented } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { keysetPage } from "./keysetPage";
 import { assertNotLocked } from "./lockGuard";
 
 // Drizzle tables are heavily generic; treated structurally here, as in services/softDelete.ts.
@@ -51,7 +51,11 @@ export type CrudSpec<I> = {
    * OMIT for a read-only collection (an event-log row is history; a cron run is a record of what happened).
    */
   patch?: (input: I, row: any, deps: Deps) => Record<string, unknown> | Promise<Record<string, unknown>>;
-  /** Presentation order within a page. Default: oldest-first by (createTime, uuid), the cursor's own order. */
+  /**
+   * Presentation order WITHIN a page. The DB always pages in the cursor's own (createdAt, uuid) order - that is
+   * what makes a page boundary stable - and this reorders the rows of one page before they are serialized.
+   * A catalog that is expected to exceed a page should be ordered client-side instead.
+   */
   sort?: (a: any, b: any) => number;
   /** Per-caller decoration of the returned rows (e.g. a holiday's own selection). Runs on the page, not the table. */
   decorate?: (deps: Deps, actor: AppUser, rows: any[]) => Promise<any[]>;
@@ -78,8 +82,6 @@ export type CrudService<I> = {
 /** Did the caller actually send this key? A PATCH of `{x: undefined}` clears x; an absent x leaves it alone. */
 export const has = <T extends object>(patch: T, key: keyof T) => Object.prototype.hasOwnProperty.call(patch, key);
 
-const byCreated = (a: Row, b: Row) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid);
-
 export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
   const { table, collection, auditName } = spec;
   // allocFlatCode's third parameter is a width, not the values bag - bind it explicitly.
@@ -93,19 +95,19 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
   const decorate = async (deps: Deps, actor: AppUser, rows: any[]) => (spec.decorate ? spec.decorate(deps, actor, rows) : rows);
 
   return {
+    // One page, ordered and seeked in SQL. The soft-delete filter is skipped entirely for a table with no
+    // `delete_time` column (an append-only collection), and the page token carries the WIRE token for the row
+    // rather than its internal uuid - both handed over by keysetPage, which is what the 25 hand-written scoped
+    // lists already use. `sort` then presents within the page (see CrudSpec.sort).
     async list(deps, actor, maxPageSize, pageToken, showDeleted = false) {
-      const all = visibleByDelete((await deps.db.select().from(table)) as Row[], showDeleted).sort(spec.sort ?? byCreated);
-      // The cursor is keyed on (createTime, uuid) whatever `sort` presents, so a page boundary stays stable
-      // while rows are inserted. Paging is in-memory over the whole table: bounded by clampPageSize upstream
-      // and by the 100-row cap the truncation contract pins (test/listTruncation.test.ts).
-      const cur = decodeCursor(pageToken);
-      const start = cur
-        ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-        : 0;
-      const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-      const last = slice[slice.length - 1];
-      const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-      return { items: await decorate(deps, actor, slice), nextPageToken };
+      const conds: SQL[] = [];
+      if (!showDeleted && table.deleteTime) conds.push(isNull(table.deleteTime));
+      const { items, nextPageToken } = await keysetPage<Row>(deps, table, collection, and(...conds), {
+        max: maxPageSize,
+        pageToken,
+      });
+      const page = spec.sort ? [...items].sort(spec.sort) : items;
+      return { items: await decorate(deps, actor, page), nextPageToken };
     },
 
     async get(deps, actor, id) {
