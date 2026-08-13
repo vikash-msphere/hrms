@@ -31,7 +31,7 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 
 // Remaining conversion work, by plan step (collection-factory-plan.md). Delete a name when its file lands on
 // the factory; never add one without a reason.
-const PENDING = new Set(["accessRules", "roles", "users"]);
+const PENDING = new Set(["accessRules", "roles"]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
 const NOT_COLLECTIONS = new Map([

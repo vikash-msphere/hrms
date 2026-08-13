@@ -1,46 +1,59 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
+import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { capabilitiesOf } from "../domain/permissions";
-import { listUsers, getUser, updateUser } from "../services/users";
+import { collectionRoutes } from "../http/collectionRoute";
+import { getUser, listUsers, updateUser, type UserInput } from "../services/users";
 import { toUserResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
-const writeSchema = z
+const updateSchema = z
   .object({
-    role: z.enum(["employee", "manager", "hr_admin", "payroll_admin", "super_admin"]).optional(),
+    // Roles are DATA (the roles table), so this is any string: `updateUser` validates it against the table and
+    // refuses the reserved `everyone` subject. A hardcoded enum here would have made a role added through the
+    // roles catalog unassignable, which is the opposite of what that catalog is for.
+    role: z.string().min(1).optional(),
     status: z.enum(["active", "disabled"]).optional(),
     employee: z.string().nullable().optional(),
   })
   .strict();
 
+// Sign-in accounts. There is no create and no delete: an account is provisioned when an employee is created
+// and disabled rather than removed, so the lane mounts list, get and patch only.
+const accounts = collectionRoutes<UserInput, typeof schema.users>({
+  table: schema.users,
+  collection: "users",
+  auditName: "user",
+  notFound: "user not found",
+  param: "user_id",
+  updateSchema,
+  serialize: toUserResource,
+  overrides: {
+    // The role is validated against the roles table, and an admin can neither strip their own role nor disable
+    // their own account (the lockout guard).
+    update: (deps, actor, id, patch, ifMatch) => updateUser(deps, actor, id, patch, ifMatch),
+  },
+  // Scoped by the account's employee link, which the generic list cannot bind (it knows a table's `code`, not
+  // which column owns the row). Without it everyone who may read their own account could list every account.
+  list: (c, page) => listUsers(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken),
+});
+
+// `users/me` is NOT a collection item: it answers about the CALLER. It carries the capability set the SPA gates
+// its UI on plus the per-collection grantable scope tiers, and it has to answer for a simulated principal who
+// has no row at all. Registered ahead of the lane so it wins over the item path.
 export const users = new Hono<AppEnv>()
-  .get("/", async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listUsers(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"));
-    return c.json({ results: items.map(toUserResource), next_page_token: nextPageToken });
-  })
-  .get("/:user_id", async (c) => {
-    const id = c.req.param("user_id");
+  .get("/me", async (c) => {
     const u = c.get("user");
-    // The caller's own record (users/me) carries their capability set for client-side UI gating (section 7),
-    // plus the per-collection grantable scope tiers from the policy manifest (drives the ACL scope chips, so
-    // the UI offers the relevant scopes for each collection instead of a hardcoded "all").
-    const withAccess = <T extends object>(res: T) => c.json({ ...res, caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
-    // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account
-    // they WOULD get on first login, so there is no users row for `me` to read. Synthesize the identity from
-    // the simulated principal instead of 404ing the whole shell - it is the same information a real row would
-    // carry, and the simulation is read-only so nothing keyed on the (absent) account id can be written.
-    if (id === "me" && u.simulatedBy && !u.uuid) {
+    const withCallerAccess = <T extends object>(res: T) =>
+      c.json({ ...res, caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
+    // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account they
+    // WOULD get on first login, so there is no users row to read. Synthesize the identity from the simulated
+    // principal instead of 404ing the whole shell - it is the same information a real row would carry, and the
+    // simulation is read-only, so nothing keyed on the (absent) account id can be written.
+    if (u.simulatedBy && !u.uuid) {
       const now = c.get("deps").clock.now();
-      return withAccess(toUserResource({ uuid: "", createdAt: now, updatedAt: now, email: u.email, role: u.role, status: u.status, employeeId: u.employeeId }));
+      return withCallerAccess(toUserResource({ uuid: "", createdAt: now, updatedAt: now, email: u.email, role: u.role, status: u.status, employeeId: u.employeeId }));
     }
-    // Anyone may read their own record via `me`; reading anyone else requires admin.
-    const res = toUserResource(await getUser(c.get("deps"), u, id));
-    return id === "me" ? withAccess(res) : c.json(res);
+    return withCallerAccess(toUserResource(await getUser(c.get("deps"), u, "me")));
   })
-  .patch("/:user_id", zValidator("json", writeSchema), async (c) => {
-    const row = await updateUser(c.get("deps"), c.get("user"), c.req.param("user_id"), c.req.valid("json"), c.req.header("If-Match"));
-    return c.json(toUserResource(row));
-  });
+  .route("/", accounts);

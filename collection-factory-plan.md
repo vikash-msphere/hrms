@@ -27,8 +27,8 @@ the factory decides no permission.
 
 ## Current state
 
-**76 of 106 route files are on the factory. Three collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1235 tests across 107 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+**77 of 106 route files are on the factory. Two collections remain, and every one of them carries a recorded
+reason - none is simply unstarted work.** 1238 tests across 108 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
@@ -124,8 +124,8 @@ five are in the table below.
 
 ## Remaining work
 
-Track A is done: the lane itself is hardened. What remains is **B**, converting the three collections that are
-still hand-rolled.
+Track A is done, and so is every convertible collection. What remains is one decision, not one conversion:
+`roles` and `accessRules` (B3) both key on something other than the standard `uuid` + `code` pair.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
@@ -139,11 +139,7 @@ either give the tables the standard `uuid` + `code` pair and keep the name/id as
 that these two are configuration surfaces and move them to `NOT_COLLECTIONS` with that reason. Decide first,
 then act - a five-override conversion buys the list shape and nothing else.
 
-**B4. `users`.** `GET /v1/users/me` answers with a caller-identity envelope (capabilities plus grantable scope
-tiers) and synthesizes a row for a simulated principal who has never signed in. That endpoint is not a
-collection item and never will be. Split it out as its own route, then convert what is left (list / get /
-update over real user rows) on the lane. If the residue turns out to be only `me`, the file moves to
-`NOT_COLLECTIONS` instead.
+**B3. `roles` and `accessRules`** are BLOCKED on an identity decision, stated below, not on a conversion.
 
 ### Not in scope
 
@@ -235,6 +231,14 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- **`GET /v1/users` leaked every account.** Its list bound no scope at all, and everyone holds `users.me.**` -
+  which resolves to breadth `own`, i.e. they may reach the list - so any employee could read a page carrying
+  every colleague's email and role. The list is now scoped on the account's employee link, so an admin
+  (`users.**`) sees all accounts and everyone else sees their own. Found by the drift guard added in A2: `users`
+  joined the generic-list set, and the guard failed because four seeded roles read it as `own`.
+- The users PATCH schema hardcoded five role names while `updateUser` validated the role against the roles
+  TABLE, so a role added through the roles catalog could never be assigned. The schema now takes any string and
+  lets the table decide - which is what "roles are data" means. `openapi.yaml` already typed it as a plain string.
 - `automations` carried TWO columns meaning "this rule does not fire": its own `enabled` and the shared
   lifecycle `disabled`. The engine had to check both, and a lifecycle `:disable` would have written the one the
   engine ignored. Collapsed onto `disabled` (the shared column every collection uses); the wire field is still

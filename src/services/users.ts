@@ -2,10 +2,12 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
+import type { ListScope } from "../domain/access";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { notFound, aborted, invalidArgument, oneOf } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { EVERYONE_ROLE } from "../domain/grants";
 
@@ -14,18 +16,14 @@ export type UserInput = { role?: string; status?: string; employee?: string | nu
 const STATUSES = ["active", "disabled"] as const;
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
-export async function listUsers(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string) {
-  const all = (await deps.db.select().from(schema.users)).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+// Accounts the caller may see. Scoped like any other list: an admin holds `users.**` (org-wide), while everyone
+// else holds only `users.me.**`, which resolves to breadth `own` - so their page is their own account and not,
+// as it used to be, every email and role in the company. The owner column is the account's employee link.
+export async function listUsers(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
+  return keysetPage(deps, schema.users, "users", applyScope(scope, schema.users.code, schema.users.employeeId), {
+    max: maxPageSize,
+    pageToken,
+  });
 }
 
 // `me` resolves to the caller; any other id is gated to admins at the route.
