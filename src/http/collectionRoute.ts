@@ -71,7 +71,7 @@ export type CollectionRouteSpec<I> = CrudSpec<I> & {
    * row filter the middleware computed) and often its own `?employee` / `?from` / `?to` filters - things a
    * service-level signature cannot see. The factory still owns the response shape and the access hints.
    */
-  list?: (c: Context<AppEnv>) => Promise<{ items: any[]; nextPageToken?: string }>;
+  list?: (c: Context<AppEnv>) => Promise<{ items: any[]; nextPageToken?: string; extra?: Record<string, unknown> }>;
   /** This collection's own custom methods, by verb. Reached after the lifecycle verbs and `:restore`. */
   verbs?: Record<string, VerbEntry>;
 };
@@ -105,10 +105,16 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   app.get("/", async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
     const user = c.get("user");
-    const { items, nextPageToken } = spec.list
+    const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = spec.list
       ? await spec.list(c)
       : await svc.list(c.get("deps"), user, maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
-    return c.json({ results: items.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code)), next_page_token: nextPageToken });
+    // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
+    // bell can say "3 snoozed" without a second request.
+    return c.json({
+      results: items.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code)),
+      next_page_token: nextPageToken,
+      ...(extra ?? {}),
+    });
   });
 
   app.get(`/:${param}`, async (c) => item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c))));

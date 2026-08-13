@@ -1,17 +1,16 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
+import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
+import { collectionRoutes } from "../http/collectionRoute";
 import { listNotifications, getNotification, patchNotification, markAllRead } from "../services/notifications";
 import { toNotificationResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-
-const COL = "notifications";
 
 // Recipient-driven state on a notification (rows are emitted server-side; content is not editable). `read`
 // toggles the read flag; `snooze_until_time` (ISO, or null to clear) hides it until a later time; `dismissed`
-// archives it out of the feed. All write-level, me-scoped by the middleware.
+// archives it out of the feed. All write-level, me-scoped by the middleware. There is no create (the server
+// emits these) and no delete (the table has no delete_time - dismissing is the archive).
 const patchSchema = z
   .object({
     read: z.boolean().optional(),
@@ -20,38 +19,39 @@ const patchSchema = z
   })
   .strict();
 
-export const notifications = new Hono<AppEnv>()
-  .get("/", async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const user = c.get("user");
-    const res = await listNotifications(c.get("deps"), c.get("scope"), maxPageSize, {
+type NotificationPatch = z.infer<typeof patchSchema>;
+
+export const notifications = collectionRoutes<NotificationPatch>({
+  table: schema.notifications,
+  collection: "notifications",
+  auditName: "notification",
+  notFound: "notification not found",
+  param: "notification_id",
+  updateSchema: patchSchema,
+  serialize: toNotificationResource,
+  overrides: {
+    get: getNotification,
+    // The wire shape is not the service shape: snooze_until_time is an ISO string (or null to clear) and the
+    // service takes a Date. `"snooze_until_time" in b` distinguishes "clear it" from "leave it alone".
+    update: (deps, actor, id, b, ifMatch) =>
+      patchNotification(
+        deps,
+        actor,
+        id,
+        { read: b.read, dismissed: b.dismissed, ...("snooze_until_time" in b ? { snoozeUntil: b.snooze_until_time ? new Date(b.snooze_until_time) : null } : {}) },
+        ifMatch,
+      ),
+  },
+  list: async (c) => {
+    const res = await listNotifications(c.get("deps"), c.get("scope"), clampPageSize(Number(c.req.query("max_page_size")) || undefined), {
       pageToken: c.req.query("page_token"),
       unread: c.req.query("unread") === "true",
       snoozed: c.req.query("snoozed") === "true",
     });
-    const { items, nextPageToken } = res;
     const snoozedCount = "snoozedCount" in res ? res.snoozedCount : undefined;
-    return c.json({
-      results: items.map((r) => withAccess(toNotificationResource(r), user, COL, r.code)),
-      next_page_token: nextPageToken,
-      ...(snoozedCount !== undefined ? { snoozed_count: snoozedCount } : {}),
-    });
-  })
-  .get("/:notification_id", async (c) => {
-    const row = await getNotification(c.get("deps"), c.get("user"), c.req.param("notification_id"));
-    return c.json(withAccess(toNotificationResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .patch("/:notification_id", zValidator("json", patchSchema), async (c) => {
-    const b = c.req.valid("json");
-    const row = await patchNotification(
-      c.get("deps"),
-      c.get("user"),
-      c.req.param("notification_id"),
-      { read: b.read, dismissed: b.dismissed, ...("snooze_until_time" in b ? { snoozeUntil: b.snooze_until_time ? new Date(b.snooze_until_time) : null } : {}) },
-      c.req.header("If-Match"),
-    );
-    return c.json(withAccess(toNotificationResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  });
+    return { items: res.items, nextPageToken: res.nextPageToken, ...(snoozedCount !== undefined ? { extra: { snoozed_count: snoozedCount } } : {}) };
+  },
+});
 
 // Collection-level custom method `notifications:markAllRead` (mounted at the full path in index.ts, before the
 // collection mount - Hono won't bind a `:verb` not preceded by an id). The authz middleware resolves it to the
