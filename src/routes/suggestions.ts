@@ -33,15 +33,13 @@ export const suggestions = collectionRoutes<SuggestionInput>({
     // A hard purge has to take the suggestion's votes with it - they are rows in another table.
     purge: (deps, actor, id, ifMatch) => purgeSuggestion(deps, actor, id, ifMatch),
   },
-  list: (c, page) => {
-    return listSuggestions(c.get("deps"), c.get("scope"), page.maxPageSize, {
+  list: (c, page) =>
+    listSuggestions(c.get("deps"), c.get("scope"), page.maxPageSize, {
       pageToken: page.pageToken,
       status: c.req.query("status"),
       category: c.req.query("category"),
       showDeleted: page.showDeleted,
-      actor: c.get("user"),
-    });
-  },
+    }),
   verbs: {
     respond: {
       run: async (deps, user, id, _body, c) => {

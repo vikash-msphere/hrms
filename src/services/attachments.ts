@@ -1,7 +1,7 @@
 // Generic encrypted file attachments, reached THROUGH a parent resource's routes (so access inherits the
 // parent's gating - this is NOT a directly-addressable collection). One file per (collection, object_id,
 // slot); uploading the same slot overwrites. Bytes are encrypted in R2 by the docstore wrapper.
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -36,11 +36,20 @@ export async function getAttachmentsFor(deps: Deps, collection: string, objectId
 }
 
 // Object ids in `collection` that have a file in `slot` - one query, for list serialization (has_receipt).
-export async function attachedObjectIds(deps: Deps, collection: string, slot = ""): Promise<Set<string>> {
+export async function attachedObjectIds(deps: Deps, collection: string, slot = "", objectIds?: string[]): Promise<Set<string>> {
+  // Bounded to the rows being answered when the caller knows them (a page, or one item), so the flag costs one
+  // query over one page rather than a scan of every attachment the collection has ever had.
+  if (objectIds && objectIds.length === 0) return new Set();
   const rows = await deps.db
     .select({ objectId: schema.attachments.objectId })
     .from(schema.attachments)
-    .where(and(eq(schema.attachments.collection, collection), eq(schema.attachments.slot, slot)));
+    .where(
+      and(
+        eq(schema.attachments.collection, collection),
+        eq(schema.attachments.slot, slot),
+        ...(objectIds ? [inArray(schema.attachments.objectId, objectIds)] : []),
+      ),
+    );
   return new Set(rows.map((r) => r.objectId));
 }
 

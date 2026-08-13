@@ -14,7 +14,6 @@ const withFeedback = async <T extends { uuid: string }>(deps: Deps, rows: T[]) =
   const fb = await feedbackForReviews(deps, rows.map((r) => r.uuid));
   return rows.map((r) => Object.assign(r, { _fb: fb.get(r.uuid) ?? [] }));
 };
-const oneWithFeedback = async (deps: Deps, row: any) => (await withFeedback(deps, [row]))[0];
 
 const selfSchema = z.object({
   self_comment: z.string().nullable().optional(),
@@ -51,19 +50,15 @@ export const reviews = collectionRoutes({
     else row._feedback = undefined; // employee, not yet shared: omit
     return toReviewResource(row);
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listReviews(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("cycle"), c.req.query("state"));
-    return { items: await withFeedback(deps, items), nextPageToken };
-  },
+  list: (c, page) => listReviews(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("cycle"), c.req.query("state")),
   decorate: (deps, _actor, rows) => withFeedback(deps, rows),
   verbs: {
-    submitSelf: { schema: selfSchema, run: async (deps, user, id, body) => oneWithFeedback(deps, await submitSelf(deps, user, id, body.self_comment, body.self_ratings)) },
-    submitManager: { schema: managerSchema, run: async (deps, user, id, body) => oneWithFeedback(deps, await submitManager(deps, user, id, body)) },
-    nominate: { schema: nominateSchema, run: async (deps, user, id, body) => oneWithFeedback(deps, await nominateFeedback(deps, user, id, body.employees)) },
-    acknowledge: { schema: acknowledgeSchema, run: async (deps, user, id, body) => oneWithFeedback(deps, await acknowledgeReview(deps, user, id, body.comment)) },
-    skipStage: { run: async (deps, user, id) => oneWithFeedback(deps, await skipReviewStage(deps, user, id)) },
-    nudge: { run: async (deps, user, id) => oneWithFeedback(deps, await nudgeReview(deps, user, id)) },
+    submitSelf: { schema: selfSchema, run: (deps, user, id, body) => submitSelf(deps, user, id, body.self_comment, body.self_ratings) },
+    submitManager: { schema: managerSchema, run: (deps, user, id, body) => submitManager(deps, user, id, body) },
+    nominate: { schema: nominateSchema, run: (deps, user, id, body) => nominateFeedback(deps, user, id, body.employees) },
+    acknowledge: { schema: acknowledgeSchema, run: (deps, user, id, body) => acknowledgeReview(deps, user, id, body.comment) },
+    skipStage: { run: (deps, user, id) => skipReviewStage(deps, user, id) },
+    nudge: { run: (deps, user, id) => nudgeReview(deps, user, id) },
     pdf: {
       raw: async (c, id) => {
         const { bytes, fileName } = await renderReviewPdf(c.get("deps"), c.get("user"), id);

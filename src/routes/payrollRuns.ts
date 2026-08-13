@@ -3,7 +3,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listRuns, listRunItems, createRun, buildRunItems, transition, publishRun, deleteRun, runStaleness, previewRunItemPayslip } from "../services/payroll";
+import { listRuns, listRunItems, getRun, withStaleness, createRun, buildRunItems, transition, publishRun, deleteRun, previewRunItemPayslip } from "../services/payroll";
 import { idFromPath } from "../services/documentsCommon";
 import { buildBankFile } from "../services/bankFile";
 import { buildStatutoryReport, buildPfEcr } from "../services/statutoryReport";
@@ -24,11 +24,12 @@ const runs = collectionRoutes<{ pay_period: string }>({
   notFound: "payroll run not found",
   param: "payroll_run_id",
   createSchema,
-  // The detail view carries staleness so the run page can prompt a rebuild when inputs changed since the
-  // build. `decorate` attaches it to a single-row read; a page does not carry it (it is a per-run query).
-  decorate: async (deps, _actor, rows) => Promise.all(rows.map(async (r) => ({ ...r, _staleness: await runStaleness(deps, r) }))),
   serialize: (row) => ({ ...toPayrollRunResource(row), ...(row._staleness ?? {}) }),
   overrides: {
+    // The detail read carries staleness so the run page can prompt a rebuild when inputs changed since the
+    // build; a page does not (see withStaleness). `getRun` also resolves the submitter/approver names the list
+    // already carried.
+    get: async (deps, _actor, id) => withStaleness(deps, await getRun(deps, id)),
     create: (deps, actor, input) => createRun(deps, actor, input.pay_period),
     remove: (deps, actor, id, ifMatch) => deleteRun(deps, actor, id, ifMatch),
   },
@@ -38,11 +39,11 @@ const runs = collectionRoutes<{ pay_period: string }>({
       run: async (deps, user, id, _body, c) => {
         const parsed = buildSchema.safeParse(await c.req.json().catch(() => ({})));
         if (!parsed.success) throw invalidArgument("invalid build body");
-        return buildRunItems(deps, user, id, (parsed.data.one_offs ?? {}) as any, c.req.header("If-Match"));
+        return withStaleness(deps, await buildRunItems(deps, user, id, (parsed.data.one_offs ?? {}) as any, c.req.header("If-Match")));
       },
     },
-    submit: { run: (deps, user, id, _body, c) => transition(deps, user, id, "REVIEW" as RunState, c.req.header("If-Match")) },
-    approve: { run: (deps, user, id, _body, c) => transition(deps, user, id, "APPROVED" as RunState, c.req.header("If-Match")) },
+    submit: { run: async (deps, user, id, _body, c) => withStaleness(deps, await transition(deps, user, id, "REVIEW" as RunState, c.req.header("If-Match"))) },
+    approve: { run: async (deps, user, id, _body, c) => withStaleness(deps, await transition(deps, user, id, "APPROVED" as RunState, c.req.header("If-Match"))) },
     // Long-running: answers 202 + an Operation to poll, not the run.
     publish: {
       raw: async (c, id) => c.json(toOperationResource(await publishRun(c.get("deps"), c.get("user"), id, c.req.header("If-Match"))) as object, 202),

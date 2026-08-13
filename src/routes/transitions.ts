@@ -30,7 +30,6 @@ const withTasks = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => {
   const tasks = await tasksForTransitions(deps, rows.map((r) => r.uuid));
   return rows.map((r) => Object.assign(r, { _tasks: tasks.get(r.uuid) ?? [] }));
 };
-const oneWithTasks = async (deps: Deps, row: any) => (await withTasks(deps, [row]))[0];
 
 // Onboarding / offboarding runs. Create and update stay the service's own (a create instantiates the chosen
 // template's tasks; an update can move the anchor date and every task's due date with it), and the three
@@ -50,15 +49,12 @@ export const transitions = collectionRoutes<TransitionInput>({
     // A hard purge has to take the transition's tasks with it - they carry the FK.
     purge: (deps, actor, id, ifMatch) => purgeTransition(deps, actor, id, ifMatch),
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listTransitions(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("kind"), c.req.query("state"), page.showDeleted);
-    return { items: await withTasks(deps, items), nextPageToken };
-  },
+  list: (c, page) =>
+    listTransitions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("kind"), c.req.query("state"), page.showDeleted),
   verbs: {
-    complete: { run: async (deps, user, id) => oneWithTasks(deps, await setTransitionState(deps, user, id, "COMPLETED")) },
-    cancel: { run: async (deps, user, id) => oneWithTasks(deps, await setTransitionState(deps, user, id, "CANCELLED")) },
-    reopen: { run: async (deps, user, id) => oneWithTasks(deps, await setTransitionState(deps, user, id, "ACTIVE")) },
-    appendTask: { schema: appendTaskSchema, run: async (deps, user, id, body) => oneWithTasks(deps, await appendTransitionTask(deps, user, id, body)) },
+    complete: { run: (deps, user, id) => setTransitionState(deps, user, id, "COMPLETED") },
+    cancel: { run: (deps, user, id) => setTransitionState(deps, user, id, "CANCELLED") },
+    reopen: { run: (deps, user, id) => setTransitionState(deps, user, id, "ACTIVE") },
+    appendTask: { schema: appendTaskSchema, run: (deps, user, id, body) => appendTransitionTask(deps, user, id, body) },
   },
 });

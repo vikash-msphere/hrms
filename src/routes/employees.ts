@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
-import type { AppEnv } from "../env";
+import type { AppEnv, AppUser } from "../env";
 import * as schema from "../db/schema";
+import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listEmployees, getEmployee, createEmployee, updateEmployee, setBio } from "../services/employees";
 import { enrollDefaultBenefits } from "../services/benefitEnrollments";
@@ -65,6 +66,17 @@ const empResource = (viewerEmployeeId: string | null | undefined, row: any) => {
 // an update can re-parent the employee (re-coding every row they own), and delete/purge cascade.
 type EmployeeWrite = z.infer<typeof writeSchema>;
 
+// The record-quality flags for ONE employee. Owner-private (like `signature`) with one exception: HR
+// (employees.write) also gets them as a record-quality signal, minus `signature` - even its existence is
+// private (see empResource). This rides the item read only: it decrypts three stored blobs per row and no list
+// renders it, so it belongs to the `get` rather than to `decorate`, which the factory applies to a page too.
+const withCompleteness = async (deps: Deps, actor: AppUser, row: any) => {
+  if (actor.employeeId !== row.uuid && !actorCan(actor, "employees.write")) return row;
+  const flags = await computeProfileCompleteness(deps, row);
+  if (actor.employeeId !== row.uuid) delete flags.signature;
+  return { ...row, _profileCompleteness: flags };
+};
+
 const records = collectionRoutes<EmployeeWrite>({
   table: schema.employees,
   collection: COL,
@@ -77,18 +89,8 @@ const records = collectionRoutes<EmployeeWrite>({
     if (row._profileCompleteness) res.profile_completeness = row._profileCompleteness;
     return res;
   },
-  // Owner-private (like `signature`) with one exception: HR (employees.write) also gets the flags as a
-  // record-quality signal. The `signature` flag stays owner-only - even its existence is private (see
-  // empResource) - so it is stripped for any other viewer. Runs on the item read, not on a page.
-  decorate: async (deps, actor, rows) =>
-    Promise.all(rows.map(async (row) => {
-      if (actor.employeeId !== row.uuid && !actorCan(actor, "employees.write")) return row;
-      const flags = await computeProfileCompleteness(deps, row);
-      if (actor.employeeId !== row.uuid) delete flags.signature;
-      return { ...row, _profileCompleteness: flags };
-    })),
   overrides: {
-    get: (deps, actor, id) => getEmployee(deps, actor, id),
+    get: async (deps, actor, id) => withCompleteness(deps, actor, await getEmployee(deps, actor, id)),
     create: (deps, actor, input, id) => createEmployee(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateEmployee(deps, actor, id, patch, ifMatch),
   },

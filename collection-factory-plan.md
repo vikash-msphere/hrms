@@ -28,16 +28,15 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1224 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1227 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
 
-The lane itself is not finished: derived data is still computed twice in the 13 collections that declare both
-`list` and `decorate`, a collection's own verb is still shadowed by the shared lifecycle verb of the same name,
-the spec is not typed against its table, and the access hint is computed after serializing. Track A under
-"Remaining work" clears them; each is one fix now instead of forty.
+The lane itself is not finished: a collection's own verb is still shadowed by the shared lifecycle verb of the
+same name, the spec is not typed against its table, and the access hint is computed after serializing. Track A
+under "Remaining work" clears them; each is one fix now instead of forty.
 
 ### The spec, as it stands
 
@@ -57,7 +56,15 @@ Behaviours worth knowing before converting anything:
   `softDelete: false` opts a history collection out even when the column exists. `overrides.remove` gives a
   permanent delete with no restore and no `?force`.
 - POST/PATCH mount when EITHER the generic mapper or an override supplies the method.
-- `decorate` runs on write responses too, so a POST answers with the shape a GET would.
+- `decorate` is applied by the FACTORY, on the one path every answer passes through: the list (route-level or
+  generic), get, create, patch, restore and every non-raw verb. Nothing can bypass it - an `overrides` entry
+  replaces a service method, not the decoration - so a POST answers with the shape a GET would and a route-level
+  `list` carries the same derived field the item read does, computed by the same code.
+- `decorate` receives the whole PAGE, so it costs one query per response. Derived data that must NOT ride a page
+  therefore cannot be a `decorate`: it goes in the collection's own item path instead. Two do this, each for a
+  stated reason - an employee's profile-completeness flags decrypt three blobs per row (`overrides.get`), and a
+  payroll run's staleness costs a query per input table (`withStaleness`, called by `get` and the three verbs
+  that answer with a run).
 - `serialize(row, user)` is for viewer-dependent resources (an employee's signature marker, a review's withheld
   manager assessment).
 - The access hint is derived from what the route actually mounted, not from `ACCESS_VERBS`. A factory-built
@@ -104,25 +111,13 @@ Two tracks. **A** hardens the lane itself: the generic path still carries defect
 because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
 hand-rolled, three of which only become convertible after a step in A.
 
-Order matters: A4 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
+Order matters: A5 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
 under all 74 converted collections, which is cheapest while the conversion is fresh.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track A - fix the lane
-
-**A4. One implementation of derived data per collection.** 13 collections declare BOTH `list` and `decorate`
-(candidates, boards, employees, expenses, payroll-runs, reimbursements, review-cycles, reviews, referrals,
-requisitions, suggestions, transitions, tax-declarations). A route-level `list` bypasses `decorate`, so each of
-those computes the same derived field twice, in two shapes - and the two can drift. `tax-declarations` is the
-clean example: `decorate` resolves `hasProof` per row (N queries), its list hook resolves the same field with
-one `attachedObjectIds` query.
-
-Fix: rewrite each `decorate` in the batched, page-level form it was always handed (it receives the whole page,
-not a row), delete the attachment from the list hook, and have the factory apply `decorate` to whatever `list`
-returns. Then derived data has one implementation, on one code path, at one query per page. Do not do this
-before A3, and audit per collection - decorate is not always the same field the list hook attaches.
 
 **A5. Let a collection's own verb beat the shared lifecycle verb.** `collectionRoute.ts` runs `lifecycleVerb`
 before `spec.verbs`, so a collection that defines its own `:enable` is silently shadowed by the generic one.
@@ -255,6 +250,16 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- **A regression the conversion introduced and this pass fixed:** `profile_completeness` disappeared from
+  `GET /v1/employees/{id}`. The employees spec expressed it as `decorate`, but `overrides.get` replaces the
+  service method that applied decorate, and create/update are overridden too - so the flags were computed on
+  `:restore` and nowhere else, and the Profile page's record-quality card had nothing to render. No test covered
+  the field. `test/employeeCompleteness.test.ts` now pins both halves: on the item read, off a page.
+- Derived data was implemented twice in 13 collections, because a route-level `list` bypassed `decorate`. The two
+  shapes had already diverged in cost: `tax-declarations`, `candidates`, `expenses`, `referrals` and
+  `reimbursements` resolved their attachment flag per row in `decorate` (N queries) and once per page in the list
+  hook. There is now one batched implementation each, and `attachedObjectIds` takes the ids it is answering for,
+  so the item read costs one row rather than a scan of the collection's whole attachment history.
 - The generic list never read `c.get("scope")`, so the 15 collections on it returned every row whatever the
   caller's breadth. Safe only by accident: every grant on those catalogs is unscoped, so `actorScope` answered
   `all` for every reader. A single narrowed grant would have listed the whole table.

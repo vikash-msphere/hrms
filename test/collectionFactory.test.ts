@@ -375,6 +375,34 @@ describe("spec dimensions", () => {
     expect(holidays.results[0].access.can).toEqual(expect.arrayContaining(["update", "delete", "restore", "disable", "lock"]));
   });
 
+  it("applies decorate on every path it owns, so a derived field is identical on list, get and write", async () => {
+    // Counts how often the derived field is computed: it must be ONE call per response, not one per row.
+    let calls = 0;
+    const call = mount({
+      ...holidaySpec,
+      param: "id",
+      writeSchema: z.object({ display_name: z.string(), date: z.string() }).strict(),
+      decorate: async (_d: unknown, _a: unknown, rows: any[]) => {
+        calls++;
+        return rows.map((r) => ({ ...r, _derived: `d:${r.name}` }));
+      },
+      // A route-level list used to bypass decorate entirely, and an `overrides.get` replaced the very method
+      // that applied it - the two ways derived data went missing while a `decorate` sat in the spec.
+      list: async () => ({ items: await deps.db.select().from(schema.holidays) }),
+      overrides: { get: async (_d: unknown, _a: unknown, id: string) => (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0] },
+      serialize: (row: any) => ({ name: row.name, derived: row._derived ?? null }),
+    } as unknown as Omit<CollectionRouteSpec<any>, "serialize">);
+
+    const created = await body(await post(call, COLLECTION, { display_name: "Onam", date: "2099-09-01" }));
+    expect(created.derived, "a write answers with the shape a read would").toBe("d:Onam");
+    const listed = await body(await call(COLLECTION));
+    expect(listed.results.map((r: { derived: string }) => r.derived)).toEqual(["d:Onam"]);
+    const id = (await deps.db.select().from(schema.holidays))[0]!.uuid;
+    const got = await body(await call(`${COLLECTION}/${id}`));
+    expect(got.derived, "an overrides.get must not be able to skip it").toBe("d:Onam");
+    expect(calls, "once per response - decorate is handed the page, not a row").toBe(3);
+  });
+
   it("hands a route-level list the paging it already resolved, rather than each hook re-deriving it", async () => {
     let saw: unknown;
     const call = mount({ ...holidaySpec, param: "id", list: async (_c, page) => { saw = page; return { items: [] }; } });

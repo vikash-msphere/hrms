@@ -58,6 +58,14 @@ async function withNames<T extends { submittedBy: string | null; approvedBy: str
   }));
 }
 
+// A run's staleness rides the ITEM paths only - the detail read and the verbs that answer with a run - because
+// it costs a query per input table (see runStaleness). A page of runs deliberately does not carry it, which is
+// why this is a helper the item paths call rather than the spec's `decorate`, which the factory also applies to
+// a list.
+export async function withStaleness<T extends { uuid: string; state: string; itemsBuiltAt: Date | null }>(deps: Deps, run: T) {
+  return { ...run, _staleness: await runStaleness(deps, run) };
+}
+
 export async function getRun(deps: Deps, id: string) {
   const r = (await deps.db.select().from(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, id)).limit(1))[0];
   if (!r) throw notFound("payroll run not found");

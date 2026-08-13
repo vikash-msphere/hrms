@@ -6,7 +6,7 @@ import {
   submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense,
   type ExpenseInput,
 } from "../services/expenses";
-import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
 import { toExpenseResource } from "../http/serialize";
 
 const COL = "expenses";
@@ -48,18 +48,18 @@ export const expenses = collectionRoutes<ExpenseInput>({
   serialize: toExpenseResource,
   // Whether the invoice/receipt is attached lives in the attachments table, so every single-row answer (get,
   // create, update, and the verbs) resolves it here - one lookup, in one place.
-  decorate: async (deps, _actor, rows) =>
-    Promise.all(rows.map(async (r) => ({ ...r, hasInvoice: !!(await getAttachment(deps, COL, r.uuid, INVOICE)) }))),
+  // One query for the whole page (bounded to it), not one per row - and the factory applies it to the
+  // list, the item read and every write response alike, so the flag has a single implementation.
+  decorate: async (deps, _actor, rows) => {
+    const attached = await attachedObjectIds(deps, COL, INVOICE, rows.map((r) => r.uuid));
+    return rows.map((r) => ({ ...r, hasInvoice: attached.has(r.uuid) }));
+  },
   overrides: {
     create: (deps, actor, input) => createExpense(deps, actor, input),
     update: (deps, actor, id, patch) => updateExpense(deps, actor, id, patch),
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listExpenses(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("department"), c.req.query("q"));
-    const withInvoice = await attachedObjectIds(deps, COL, INVOICE); // one query for the page's invoice flags
-    return { items: items.map((r) => ({ ...r, hasInvoice: withInvoice.has(r.uuid) })), nextPageToken };
-  },
+  list: (c, page) =>
+    listExpenses(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("department"), c.req.query("q")),
   verbs: {
     submit: { run: (deps, user, id) => submitExpense(deps, user, id) },
     approve: { run: (deps, user, id) => approveExpense(deps, user, id) },

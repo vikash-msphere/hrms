@@ -55,7 +55,7 @@ export async function decorate(deps: Deps, actor: AppUser | undefined, rows: any
   return rows.map((r) => ({ ...r, upCount: up.get(r.uuid) ?? 0, downCount: down.get(r.uuid) ?? 0, myVote: mine.get(r.uuid) ?? 0, own: !!actor?.employeeId && r.submitterId === actor.employeeId }));
 }
 
-export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize: number, opts: { pageToken?: string; status?: string; category?: string; showDeleted?: boolean; actor?: AppUser } = {}) {
+export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize: number, opts: { pageToken?: string; status?: string; category?: string; showDeleted?: boolean } = {}) {
   const conds = [applyScope(scope, schema.suggestions.code, schema.suggestions.submitterId)];
   if (opts.status) conds.push(eq(schema.suggestions.status, opts.status as Status));
   if (opts.category) conds.push(eq(schema.suggestions.category, opts.category));
@@ -63,13 +63,7 @@ export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize:
   const { items, nextPageToken } = await keysetPage<typeof schema.suggestions.$inferSelect>(
     deps, schema.suggestions, "suggestions", and(...(conds.filter(Boolean) as any)), { dir: "desc", max: maxPageSize, pageToken: opts.pageToken },
   );
-  return { items: await decorate(deps, opts.actor, items), nextPageToken };
-}
-
-export async function getSuggestion(deps: Deps, actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).limit(1))[0];
-  if (!row || row.deleteTime) throw notFound("suggestion not found");
-  return (await decorate(deps, actor, [row]))[0];
+  return { items, nextPageToken };
 }
 
 export async function createSuggestion(deps: Deps, actor: AppUser, input: SuggestionInput) {
@@ -95,7 +89,7 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
     subject: `suggestions/${row.uuid}`,
     actorId: input.anonymous ? undefined : submitterId,
   });
-  return (await decorate(deps, actor, [row]))[0];
+  return row;
 }
 
 export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, patch: SuggestionInput, ifMatch?: string) {
@@ -110,7 +104,7 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   if (has("anonymous")) set.anonymous = !!patch.anonymous;
   const updated = (await deps.db.update(schema.suggestions).set(set).where(eq(schema.suggestions.uuid, id)).returning())[0]!;
   await audit(deps, actor, "suggestion.update", "suggestions", id, diffMeta(row, updated, set), updated);
-  return (await decorate(deps, actor, [updated]))[0];
+  return updated;
 }
 
 // HR triage: set status + an optional public response. Separate from the owner's plain edit.
@@ -127,7 +121,7 @@ export async function respondSuggestion(deps: Deps, actor: AppUser, id: string, 
   await audit(deps, actor, "suggestion.respond", "suggestions", id, { status: set.status });
   // The submitter owns the suggestion (anonymity hides them from peers, not from themselves), so they get the response.
   await notify(deps, { recipient: row.submitterId, type: "suggestion.responded", title: "Your suggestion got a response", body: updated.response || `Status: ${updated.status}`, link: "suggestions", subject: `suggestions/${id}`, actorId: actor.employeeId });
-  return (await decorate(deps, actor, [updated]))[0];
+  return updated;
 }
 
 // Cast the caller's vote in a direction (+1 up, -1 down). Same direction as the existing vote clears it;
@@ -144,7 +138,7 @@ export async function voteSuggestion(deps: Deps, actor: AppUser, id: string, dir
   } else {
     await deps.db.insert(schema.suggestionVotes).values({ suggestionId: id, employeeId: actor.employeeId, value: dir });
   }
-  return (await decorate(deps, actor, [row]))[0];
+  return row;
 }
 
 export async function purgeSuggestion(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {

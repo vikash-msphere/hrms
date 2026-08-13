@@ -2,7 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listReferrals, getReferral, createReferral, updateReferral, awardReferralBonusNow, type ReferralInput } from "../services/referrals";
-import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
 import { toReferralResource } from "../http/serialize";
 
 const COL = "referrals";
@@ -32,18 +32,17 @@ export const referrals = collectionRoutes<ReferralInput>({
   param: "referral_id",
   writeSchema,
   serialize: toReferralResource,
-  decorate: async (deps, _actor, rows) =>
-    Promise.all(rows.map(async (r) => ({ ...r, hasResume: !!(await getAttachment(deps, COL, r.uuid, RESUME)) }))),
+  // One query for the whole page (bounded to it), not one per row - and the factory applies it to the
+  // list, the item read and every write response alike, so the flag has a single implementation.
+  decorate: async (deps, _actor, rows) => {
+    const attached = await attachedObjectIds(deps, COL, RESUME, rows.map((r) => r.uuid));
+    return rows.map((r) => ({ ...r, hasResume: attached.has(r.uuid) }));
+  },
   overrides: {
     create: (deps, actor, input, id) => createReferral(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateReferral(deps, actor, id, patch, ifMatch),
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listReferrals(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted);
-    const withResume = await attachedObjectIds(deps, COL, RESUME); // one query for the page's resume flags
-    return { items: items.map((r) => ({ ...r, hasResume: withResume.has(r.uuid) })), nextPageToken };
-  },
+  list: (c, page) => listReferrals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted),
   verbs: {
     award: { run: (deps, user, id) => awardReferralBonusNow(deps, user, id) },
     upload: {

@@ -6,7 +6,7 @@ import {
   approveReimbursement, rejectReimbursement, cancelReimbursement, payReimbursement,
   type ReimbursementInput,
 } from "../services/reimbursements";
-import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
 import { toReimbursementResource } from "../http/serialize";
 
 const COL = "reimbursements";
@@ -33,17 +33,16 @@ export const reimbursements = collectionRoutes<ReimbursementInput>({
   createSchema,
   serialize: toReimbursementResource,
   // Whether the receipt is attached lives in the attachments table, so every single-row answer resolves it here.
-  decorate: async (deps, _actor, rows) =>
-    Promise.all(rows.map(async (r) => ({ ...r, hasReceipt: !!(await getAttachment(deps, COL, r.uuid, RECEIPT)) }))),
+  // One query for the whole page (bounded to it), not one per row - and the factory applies it to the
+  // list, the item read and every write response alike, so the flag has a single implementation.
+  decorate: async (deps, _actor, rows) => {
+    const attached = await attachedObjectIds(deps, COL, RECEIPT, rows.map((r) => r.uuid));
+    return rows.map((r) => ({ ...r, hasReceipt: attached.has(r.uuid) }));
+  },
   overrides: {
     create: (deps, actor, input) => createReimbursement(deps, actor, input),
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listReimbursements(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q"));
-    const withReceipt = await attachedObjectIds(deps, COL, RECEIPT); // one query for the page's receipt flags
-    return { items: items.map((r) => ({ ...r, hasReceipt: withReceipt.has(r.uuid) })), nextPageToken };
-  },
+  list: (c, page) => listReimbursements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
   verbs: {
     approve: { run: (deps, user, id) => approveReimbursement(deps, user, id) },
     reject: { run: (deps, user, id) => rejectReimbursement(deps, user, id) },

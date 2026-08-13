@@ -39,9 +39,5 @@ export const requisitions = collectionRoutes<RequisitionInput>({
     create: (deps, actor, input, id) => createRequisition(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateRequisition(deps, actor, id, patch, ifMatch),
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listRequisitions(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted);
-    return { items: await withCounts(deps, items), nextPageToken };
-  },
+  list: (c, page) => listRequisitions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted),
 });

@@ -6,7 +6,7 @@ import {
   verifyTaxDeclaration, rejectTaxDeclaration,
   type TaxDeclarationInput,
 } from "../services/taxDeclarations";
-import { putAttachment, downloadAttachment, getAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
 import { toTaxDeclarationResource } from "../http/serialize";
 
 const COL = "tax-declarations";
@@ -33,18 +33,18 @@ export const taxDeclarations = collectionRoutes<TaxDeclarationInput>({
   writeSchema,
   serialize: toTaxDeclarationResource,
   // Whether the proof document is attached lives in the attachments table.
-  decorate: async (deps, _actor, rows) =>
-    Promise.all(rows.map(async (r) => ({ ...r, hasProof: !!(await getAttachment(deps, COL, r.uuid, PROOF)) }))),
+  // One query for the whole page (bounded to it), not one per row - and the factory applies it to the
+  // list, the item read and every write response alike, so the flag has a single implementation.
+  decorate: async (deps, _actor, rows) => {
+    const attached = await attachedObjectIds(deps, COL, PROOF, rows.map((r) => r.uuid));
+    return rows.map((r) => ({ ...r, hasProof: attached.has(r.uuid) }));
+  },
   overrides: {
     create: (deps, actor, input, id) => createTaxDeclaration(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateTaxDeclaration(deps, actor, id, patch, ifMatch),
   },
-  list: async (c, page) => {
-    const deps = c.get("deps");
-    const { items, nextPageToken } = await listTaxDeclarations(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), page.showDeleted);
-    const withProof = await attachedObjectIds(deps, COL, PROOF);
-    return { items: items.map((r) => ({ ...r, hasProof: withProof.has(r.uuid) })), nextPageToken };
-  },
+  list: (c, page) =>
+    listTaxDeclarations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), page.showDeleted),
   verbs: {
     verify: { schema: verifySchema, run: (deps, user, id, body) => verifyTaxDeclaration(deps, user, id, body.verified_amount) },
     reject: { run: (deps, user, id) => rejectTaxDeclaration(deps, user, id) },

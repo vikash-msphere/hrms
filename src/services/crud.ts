@@ -59,7 +59,12 @@ export type CrudSpec<I> = {
    * A catalog that is expected to exceed a page should be ordered client-side instead.
    */
   sort?: (a: any, b: any) => number;
-  /** Per-caller decoration of the returned rows (e.g. a holiday's own selection). Runs on the page, not the table. */
+  /**
+   * Per-caller decoration of the returned rows (a holiday's own selection, a board's card count). Receives the
+   * whole PAGE, so it costs one query per response rather than one per row. APPLIED BY THE FACTORY
+   * (http/collectionRoute.ts), not here: an `overrides` entry replaces a method in this service wholesale, and
+   * derived data must survive that.
+   */
   decorate?: (deps: Deps, actor: AppUser, rows: any[]) => Promise<any[]>;
   /** Side effects the write owes the rest of the system (notify, re-accrue, emit an event). Run after the audit row. */
   afterCreate?: (deps: Deps, actor: AppUser, row: any, input: I) => Promise<void>;
@@ -99,7 +104,6 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
     if (!row) throw notFound(spec.notFound);
     return row;
   };
-  const decorate = async (deps: Deps, actor: AppUser, rows: any[]) => (spec.decorate ? spec.decorate(deps, actor, rows) : rows);
 
   return {
     // One page, ordered and seeked in SQL. The soft-delete filter is skipped entirely for a table with no
@@ -118,13 +122,10 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
         max: maxPageSize,
         pageToken,
       });
-      const page = spec.sort ? [...items].sort(spec.sort) : items;
-      return { items: await decorate(deps, actor, page), nextPageToken };
+      return { items: spec.sort ? [...items].sort(spec.sort) : items, nextPageToken };
     },
 
-    async get(deps, actor, id) {
-      return (await decorate(deps, actor, [await required(deps, id)]))[0];
-    },
+    get: (deps, _actor, id) => required(deps, id),
 
     async create(deps, actor, input, id) {
       if (!spec.insert) throw unimplemented(`${collection} are not created directly`);
@@ -144,9 +145,9 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
       }
       await audit(deps, actor, `${auditName}.create`, collection, row.uuid, undefined, row);
       if (spec.afterCreate) await spec.afterCreate(deps, actor, row, input);
-      // Decorated on the way out like a read: a write answers with the same resource shape a GET would, so a
-      // derived field (an expense budget's spend, a holiday's own selection) is never missing from a POST.
-      return (await decorate(deps, actor, [row]))[0];
+      // The factory decorates the response like a read, so a write answers with the same resource shape a GET
+      // would - a derived field (an expense budget's spend, a holiday's own selection) is never missing.
+      return row;
     },
 
     async update(deps, actor, id, patch, ifMatch) {
@@ -161,11 +162,11 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
       const updated = ((await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning()) as Row[])[0]!;
       await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set), updated);
       if (spec.afterUpdate) await spec.afterUpdate(deps, actor, updated, row, patch);
-      return (await decorate(deps, actor, [updated]))[0];
+      return updated;
     },
 
     remove: (deps, actor, id, ifMatch) => softDeleteRow(deps, actor, table, auditName, collection, id, ifMatch),
-    restore: async (deps, actor, id) => (await decorate(deps, actor, [await restoreRow(deps, actor, table, auditName, collection, id)]))[0],
+    restore: (deps, actor, id) => restoreRow(deps, actor, table, auditName, collection, id),
     purge: (deps, actor, id, ifMatch) => purgeRow(deps, actor, table, auditName, collection, id, ifMatch),
   };
 }

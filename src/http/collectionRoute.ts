@@ -97,10 +97,19 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   const createSchema = spec.createSchema ?? spec.writeSchema;
   const updateSchema = spec.updateSchema ?? spec.writeSchema;
   const itemId = (c: Context<AppEnv>) => c.req.param(param)!;
+  // Derived data is attached HERE, on the one path every answer passes through, so no method can bypass it. It
+  // used to be applied inside crudService, which an `overrides` entry replaced wholesale - that is how
+  // employees' profile flags went missing from its item read - and a route-level `list` skipped it entirely, so
+  // 13 collections computed the same field a second time in their list hook, in a second shape.
+  const decorate = async (c: Context<AppEnv>, rows: any[]) =>
+    spec.decorate && rows.length ? spec.decorate(c.get("deps"), c.get("user"), rows) : rows;
   // An item response carries the per-object-merged grant (a share can lift a caller above their role), so the
   // SPA's affordances on a single record are share-accurate. Lists pass the role grant - one grant, many rows.
-  const item = (c: Context<AppEnv>, row: { code?: string | null } | undefined) =>
-    c.json(withAccess(serialize(row, c.get("user")) as object, c.get("user"), collection, row?.code, c.get("objectGrant"), hintVerbs));
+  const item = async (c: Context<AppEnv>, row: { code?: string | null } | undefined) => {
+    const [decorated] = await decorate(c, row ? [row] : []);
+    const res = serialize(decorated ?? row, c.get("user")) as object;
+    return c.json(withAccess(res, c.get("user"), collection, row?.code, c.get("objectGrant"), hintVerbs));
+  };
   // Soft delete is a property of the TABLE: an append-only collection (event-log, cron-runs) has no
   // `delete_time` column, so it gets no DELETE and no `:restore` rather than a route that writes a column
   // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleRoute.ts). `softDelete: false`
@@ -141,10 +150,11 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = spec.list
       ? await spec.list(c, page)
       : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted);
+    const rows = await decorate(c, items);
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
     return c.json({
-      results: items.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code, user.grant, hintVerbs)),
+      results: rows.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code, user.grant, hintVerbs)),
       next_page_token: nextPageToken,
       ...(extra ?? {}),
     });

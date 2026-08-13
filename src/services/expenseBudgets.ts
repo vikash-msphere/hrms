@@ -11,6 +11,7 @@ import { round2 } from "../domain/money";
 import { periodBounds, budgetUtilization, type PeriodType } from "../domain/expenses";
 import { invalidArgument } from "../lib/errors";
 import { visibleByDelete } from "./softDelete";
+import type { AppUser } from "../env";
 import { crudService, has, type CrudSpec } from "./crud";
 
 export type ExpenseBudgetInput = {
@@ -100,9 +101,11 @@ export const expenseBudgetSpec: CrudSpec<ExpenseBudgetInput> = {
   },
 };
 
-export const {
-  create: createExpenseBudget,
-} = crudService(expenseBudgetSpec);
+// The service-level create, for callers that are not an HTTP request (the recurring-budget cron). It attaches
+// the derived spend itself: on the HTTP path the factory applies `decorate`, and this answers the same shape.
+const budgetSvc = crudService(expenseBudgetSpec);
+export const createExpenseBudget = async (deps: Deps, actor: AppUser, input: ExpenseBudgetInput, id?: string) =>
+  budgetWithSpend(deps, await budgetSvc.create(deps, actor, input, id));
 
 // ---- Budget alerts (daily cron) -------------------------------------------------------------------------
 // For each active budget whose spend crosses a configured threshold higher than the highest already alerted
