@@ -28,14 +28,15 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1230 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1231 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
 
-The lane itself is not finished: the access hint is still computed after serializing. Track A under "Remaining
-work" clears that; it is one fix now instead of forty.
+The lane is now hardened as well as shared: it pages in SQL, binds the caller's scope, hands the resolved paging
+to a route-level list, applies derived data on every path it owns, lets a collection's own verb beat the shared
+one, is typed against its table, and computes the access hint before serializing.
 
 ### The spec, as it stands
 
@@ -64,8 +65,10 @@ Behaviours worth knowing before converting anything:
   stated reason - an employee's profile-completeness flags decrypt three blobs per row (`overrides.get`), and a
   payroll run's staleness costs a query per input table (`withStaleness`, called by `get` and the three verbs
   that answer with a run).
-- `serialize(row, user)` is for viewer-dependent resources (an employee's signature marker, a review's withheld
-  manager assessment).
+- `serialize(row, user, can)` is for viewer-dependent resources (an employee's signature marker, a review's
+  withheld manager assessment) and, through `can`, for a resource whose shape depends on what the caller may DO.
+  The access hint is computed BEFORE serializing, on both the item path and the list, so `can` is the same verb
+  list the response ships as `access.can`.
 - The access hint is derived from what the route actually mounted, not from `ACCESS_VERBS`. A factory-built
   collection never consults that table.
 - A collection's OWN verb is answered first; `:restore` and the shared lifecycle lane are the fallback. So a
@@ -115,22 +118,11 @@ five are in the table below.
 
 ## Remaining work
 
-Two tracks. **A** hardens the lane itself: the generic path still carries defects the copied code had, and
-because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
-hand-rolled, three of which only become convertible after a step in A.
-
-Order matters: A7 first, because B1 depends on A7, and because every A step changes the lane
-under all 74 converted collections, which is cheapest while the conversion is fresh.
+Track A is done: the lane itself is hardened. What remains is **B**, converting the five collections that are
+still hand-rolled.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
-
-### Track A - fix the lane
-
-**A7. Compute the access hint before serializing.** `item()` serializes, then computes the hint. A resource
-whose SHAPE depends on what the caller may do therefore cannot be expressed. `computeCan` is pure and already
-has everything it needs at that point, so compute `can` first and pass it to `serialize(row, user, can)`.
-Unblocks B1 and is a signature change, not a new field.
 
 ### Track B - the five hand-rolled collections
 

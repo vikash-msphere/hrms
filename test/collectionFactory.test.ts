@@ -375,6 +375,23 @@ describe("spec dimensions", () => {
     expect(holidays.results[0].access.can).toEqual(expect.arrayContaining(["update", "delete", "restore", "disable", "lock"]));
   });
 
+  it("computes the access hint before serializing, so a resource can shape itself around it", async () => {
+    // The point of the order: a field that only someone who may EDIT the row gets to see. Before this, the hint
+    // was computed from the per-object grant after serialize had already run, so a serializer could not ask.
+    const spec = {
+      ...holidaySpec,
+      param: "id",
+      serialize: (row: any, _user: unknown, can?: string[]) => ({
+        ...(toHolidayResource(row) as object),
+        ...(can?.includes("update") ? { editors_only: row.name } : {}),
+      }),
+    } as unknown as Omit<CollectionRouteSpec<any>, "serialize">;
+    const { id } = await newHoliday();
+    const editor = await body(await mount(spec)(`${COLLECTION}/${id}`));
+    expect(editor.editors_only, "super may update, so the field is there").toBe("Diwali");
+    expect(editor.access.can, "and the same verb list is what the hint ships").toContain("update");
+  });
+
   it("answers a collection's own verb before the shared lifecycle verb of the same name", async () => {
     const { id } = await newHoliday();
     let ran = "";

@@ -17,7 +17,7 @@ import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import { customMethod } from "./customMethod";
 import { lifecycleVerb } from "./lifecycleRoute";
-import { withAccess } from "./accessHint";
+import { accessHint, withAccess } from "./accessHint";
 import { clampPageSize } from "./pagination";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
 
@@ -64,9 +64,11 @@ export type CollectionRouteSpec<I, T extends CrudTable = CrudTable> = CrudSpec<I
   updateSchema?: ZodTypeAny;
   /**
    * Row -> wire resource. Receives the caller when the resource itself depends on who is looking: an event-log
-   * payload is redacted below super, an employee's signature marker is owner-only. Most serializers ignore it.
+   * payload is redacted below super, an employee's signature marker is owner-only. `can` is this caller's
+   * allowed verbs on this row - the access hint, computed BEFORE serializing - for a resource whose shape
+   * depends on what the caller may DO rather than only on who they are. Most serializers ignore both.
    */
-  serialize: (row: any, user?: AppUser) => unknown;
+  serialize: (row: any, user?: AppUser, can?: string[]) => unknown;
   /** `singular` for the lifecycle verbs' audit actions, when it differs from `auditName`. */
   lifecycleName?: string;
   /**
@@ -107,8 +109,12 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   // SPA's affordances on a single record are share-accurate. Lists pass the role grant - one grant, many rows.
   const item = async (c: Context<AppEnv>, row: { code?: string | null } | undefined) => {
     const [decorated] = await decorate(c, row ? [row] : []);
-    const res = serialize(decorated ?? row, c.get("user")) as object;
-    return c.json(withAccess(res, c.get("user"), collection, row?.code, c.get("objectGrant"), hintVerbs));
+    const user = c.get("user");
+    const grant = c.get("objectGrant");
+    // Hint first, then serialize: a resource may shape itself around what the caller may do.
+    const hint = accessHint(user, collection, row?.code, grant, hintVerbs);
+    const res = serialize(decorated ?? row, user, hint.can) as object;
+    return c.json(withAccess(res, user, collection, row?.code, grant, hintVerbs, hint));
   };
   // Soft delete is a property of the TABLE: an append-only collection (event-log, cron-runs) has no
   // `delete_time` column, so it gets no DELETE and no `:restore` rather than a route that writes a column
@@ -154,7 +160,10 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
     return c.json({
-      results: rows.map((r) => withAccess(serialize(r, user) as object, user, collection, r.code, user.grant, hintVerbs)),
+      results: rows.map((r) => {
+        const hint = accessHint(user, collection, r.code, user.grant, hintVerbs);
+        return withAccess(serialize(r, user, hint.can) as object, user, collection, r.code, user.grant, hintVerbs, hint);
+      }),
       next_page_token: nextPageToken,
       ...(extra ?? {}),
     });

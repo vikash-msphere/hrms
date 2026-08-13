@@ -149,10 +149,29 @@ export function computeWhy(grant: Grant, self: Self, collection: string, code: s
   return pat ? deriveNarrowing(pat).scopeKind : null;
 }
 
-// Attach `access.can` to an already-serialized resource. `code` is the object's internal code (the row's
-// `code` column - NOT the wire id, since `me`/`my-dept`/prefix scope tokens match against codes). On item
-// paths pass the per-object-merged grant (c.get("objectGrant")) for share-accurate hints; lists pass the
-// role grant (user.grant).
+export type AccessHint = { can: string[]; why?: ScopeKind };
+
+// The hint for one object, computed BEFORE it is serialized. That order matters for a resource whose SHAPE
+// depends on what the caller may do - a board post carries its read receipts only for someone who may edit it -
+// because only the caller of this holds the per-object grant the answer depends on. `code` is the object's
+// internal code (the row's `code` column - NOT the wire id, since `me`/`my-dept`/prefix scope tokens match
+// against codes). On item paths pass the per-object-merged grant (c.get("objectGrant")) for share-accurate
+// hints; lists pass the role grant (user.grant).
+export function accessHint(
+  user: AppUser,
+  collection: string,
+  code: string | null | undefined,
+  grant: Grant = user.grant,
+  candidates?: readonly string[],
+): AccessHint {
+  // A row with no code can't be decided against -> fail safe (hint nothing; the server still enforces).
+  const self = { employeeCode: user.employeeCode };
+  const can = code ? computeCan(grant, self, collection, code, candidates) : [];
+  const why = code ? computeWhy(grant, self, collection, code) : null;
+  return why ? { can, why } : { can };
+}
+
+/** Attach an already-computed hint (or compute it now) to a serialized resource. */
 export function withAccess<T extends object>(
   res: T,
   user: AppUser,
@@ -160,10 +179,7 @@ export function withAccess<T extends object>(
   code: string | null | undefined,
   grant: Grant = user.grant,
   candidates?: readonly string[],
-): T & { access: { can: string[]; why?: ScopeKind } } {
-  // A row with no code can't be decided against -> fail safe (hint nothing; the server still enforces).
-  const self = { employeeCode: user.employeeCode };
-  const can = code ? computeCan(grant, self, collection, code, candidates) : [];
-  const why = code ? computeWhy(grant, self, collection, code) : null;
-  return { ...res, access: why ? { can, why } : { can } };
+  hint?: AccessHint,
+): T & { access: AccessHint } {
+  return { ...res, access: hint ?? accessHint(user, collection, code, grant, candidates) };
 }
