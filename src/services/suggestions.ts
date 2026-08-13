@@ -11,7 +11,7 @@ import { notify, notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { purgeRow } from "./softDelete";
 
 // Suggestion box: employee ideas, optionally anonymous, peer-upvoted, HR-responded. NO access control here
 // (middleware gates by path + grants; private by default, open box = grant read/write to `everyone`). Owned by
@@ -39,7 +39,8 @@ export type SuggestionInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
 // Attach up/down counts + the caller's own vote direction, in one read for the whole page (like reactions).
-async function decorate(deps: Deps, actor: AppUser | undefined, rows: any[]): Promise<any[]> {
+// Exported as the collection spec's `decorate`, so a single row read answers with the same counts a page does.
+export async function decorate(deps: Deps, actor: AppUser | undefined, rows: any[]): Promise<any[]> {
   if (rows.length === 0) return rows;
   const ids = rows.map((r) => r.uuid);
   const votes = await deps.db.select().from(schema.suggestionVotes).where(inArray(schema.suggestionVotes.suggestionId, ids));
@@ -146,10 +147,6 @@ export async function voteSuggestion(deps: Deps, actor: AppUser, id: string, dir
   return (await decorate(deps, actor, [row]))[0];
 }
 
-export const deleteSuggestion = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) =>
-  softDeleteRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id, ifMatch);
-export const restoreSuggestion = (deps: Deps, actor: AppUser, id: string) =>
-  restoreRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id);
 export async function purgeSuggestion(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   await deps.db.delete(schema.suggestionVotes).where(eq(schema.suggestionVotes.suggestionId, id));
   await purgeRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id, ifMatch);

@@ -50,7 +50,7 @@ export async function listBoards(deps: Deps, _actor: AppUser, maxPageSize: numbe
   return { items: slice, nextPageToken };
 }
 
-export async function getBoard(deps: Deps, _actor: AppUser, id: string) {
+async function getBoard(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, id)).limit(1))[0];
   if (!row) throw notFound("board not found");
   return row;
@@ -163,12 +163,6 @@ export async function boardMetrics(deps: Deps, actor: AppUser, id: string, days 
   );
 }
 
-export async function deleteBoard(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.boards, "board", "boards", id, ifMatch);
-}
-export async function restoreBoard(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.boards, "board", "boards", id);
-}
 export async function purgeBoard(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   // Tear down children bottom-up (FKs): movements, then cards, then the board.
   await deps.db.delete(schema.cardMovements).where(eq(schema.cardMovements.boardId, id));

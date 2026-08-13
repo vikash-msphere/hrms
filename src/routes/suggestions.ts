@@ -1,18 +1,10 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { customMethod } from "../http/customMethod";
-import {
-  listSuggestions, getSuggestion, createSuggestion, updateSuggestion,
-  respondSuggestion, voteSuggestion, deleteSuggestion, restoreSuggestion, purgeSuggestion,
-} from "../services/suggestions";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
+import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
 import { toSuggestionResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
 import { invalidArgument } from "../lib/errors";
-
-const COL = "suggestions";
 
 const writeSchema = z
   .object({
@@ -24,49 +16,43 @@ const writeSchema = z
   .strict();
 const respondSchema = z.object({ status: z.string().max(64).optional(), response: z.string().max(10_000).nullable().optional() }).strict();
 
-export const suggestions = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// The suggestion box. The create carries anonymity (the submitter is stored but hidden from readers), HR
+// triages with :respond, and everyone else moves the count with :upvote / :downvote.
+export const suggestions = collectionRoutes<SuggestionInput>({
+  table: schema.suggestions,
+  collection: "suggestions",
+  auditName: "suggestion",
+  notFound: "suggestion not found",
+  param: "suggestion_id",
+  writeSchema,
+  serialize: toSuggestionResource,
+  // Up/down counts and the caller's own vote come from the votes table, one read per page or row.
+  decorate: (deps, actor, rows) => decorate(deps, actor, rows),
+  overrides: {
+    create: (deps, actor, input) => createSuggestion(deps, actor, input),
+    update: (deps, actor, id, patch, ifMatch) => updateSuggestion(deps, actor, id, patch, ifMatch),
+    // A hard purge has to take the suggestion's votes with it - they are rows in another table.
+    purge: (deps, actor, id, ifMatch) => purgeSuggestion(deps, actor, id, ifMatch),
+  },
+  list: (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const user = c.get("user");
-    const { items, nextPageToken } = await listSuggestions(c.get("deps"), c.get("scope"), maxPageSize, {
+    return listSuggestions(c.get("deps"), c.get("scope"), maxPageSize, {
       pageToken: c.req.query("page_token"),
       status: c.req.query("status"),
       category: c.req.query("category"),
       showDeleted: c.req.query("show_deleted") === "true",
-      actor: user,
+      actor: c.get("user"),
     });
-    return c.json({ results: items.map((r) => withAccess(toSuggestionResource(r), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:suggestion_id", async (c) => {
-    const row = await getSuggestion(c.get("deps"), c.get("user"), c.req.param("suggestion_id"));
-    return c.json(withAccess(toSuggestionResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const row = await createSuggestion(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toSuggestionResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .patch("/:suggestion_id", zValidator("json", writeSchema), async (c) => {
-    const row = await updateSuggestion(c.get("deps"), c.get("user"), c.req.param("suggestion_id"), c.req.valid("json"), c.req.header("If-Match"));
-    return c.json(withAccess(toSuggestionResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .delete("/:suggestion_id", async (c) => {
-    const id = c.req.param("suggestion_id");
-    const ifMatch = c.req.header("If-Match");
-    if (c.req.query("force") === "true") await purgeSuggestion(c.get("deps"), c.get("user"), id, ifMatch);
-    else await deleteSuggestion(c.get("deps"), c.get("user"), id, ifMatch);
-    return c.body(null, 204);
-  })
-  .post("/:suggestion_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    const user = c.get("user");
-    const hint = (row: { code: string | null } | undefined) => withAccess(toSuggestionResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "respond") {
-      const parsed = respondSchema.safeParse(await c.req.json().catch(() => ({})));
-      if (!parsed.success) throw invalidArgument("body must be { status?, response? }");
-      return c.json(hint(await respondSuggestion(c.get("deps"), user, id, parsed.data)));
-    }
-    if (verb === "upvote") return c.json(hint(await voteSuggestion(c.get("deps"), user, id, 1)));
-    if (verb === "downvote") return c.json(hint(await voteSuggestion(c.get("deps"), user, id, -1)));
-    if (verb === "restore") return c.json(toSuggestionResource(await restoreSuggestion(c.get("deps"), user, id)));
-    return c.notFound();
-  });
+  },
+  verbs: {
+    respond: {
+      run: async (deps, user, id, _body, c) => {
+        const parsed = respondSchema.safeParse(await c.req.json().catch(() => ({})));
+        if (!parsed.success) throw invalidArgument("body must be { status?, response? }");
+        return respondSuggestion(deps, user, id, parsed.data);
+      },
+    },
+    upvote: { run: (deps, user, id) => voteSuggestion(deps, user, id, 1) },
+    downvote: { run: (deps, user, id) => voteSuggestion(deps, user, id, -1) },
+  },
+});

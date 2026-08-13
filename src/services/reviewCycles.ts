@@ -7,7 +7,7 @@ import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow } from "./softDelete";
+import { visibleByDelete, softDeleteRow, purgeRow } from "./softDelete";
 import { notify } from "./notifications";
 
 export type ReviewCycleInput = {
@@ -136,4 +136,12 @@ export async function setReviewCycleState(deps: Deps, actor: AppUser, id: string
 
 export async function deleteReviewCycle(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   await softDeleteRow(deps, actor, schema.reviewCycles, "review-cycle", "review-cycles", id, ifMatch);
+}
+
+export async function purgeReviewCycle(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+  // Tear down children bottom-up (FKs): feedback on the cycle's reviews, then the reviews, then the cycle.
+  const reviewIds = (await deps.db.select({ uuid: schema.reviews.uuid }).from(schema.reviews).where(eq(schema.reviews.cycleId, id))).map((r) => r.uuid);
+  if (reviewIds.length) await deps.db.delete(schema.reviewFeedback).where(inArray(schema.reviewFeedback.reviewId, reviewIds));
+  await deps.db.delete(schema.reviews).where(eq(schema.reviews.cycleId, id));
+  await purgeRow(deps, actor, schema.reviewCycles, "review-cycle", "review-cycles", id, ifMatch);
 }

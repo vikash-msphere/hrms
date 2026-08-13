@@ -31,10 +31,12 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 // the factory; never add one without a reason.
 const PENDING = new Set([
   // step 5 - collections whose custom methods are the bulk of the file
-  "accessRules", "apiKeys", "automations", "bankFormats", "boards",
-  "documentRoutes", "operations", "payrollRuns", "referrals",
-  "reviewFeedback", "roles", "sprints", "suggestions",
-  "ticketChecklists", "users",
+  // automations: its table carries BOTH `enabled` (the rule's own switch, which :enable/:disable write through
+  // setAutomationEnabled) and the generic lifecycle `disabled`/`locked` columns. On the factory the shared
+  // lifecycle verb would answer :enable/:disable first and write the WRONG column, leaving a rule that reads
+  // disabled but still fires. Collapsing the duplicate columns is a schema change, not a spec knob - do that
+  // first, then convert.
+  "accessRules", "apiKeys", "automations", "bankFormats", "documentRoutes", "operations", "payrollRuns", "reviewFeedback", "roles", "ticketChecklists", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",
 ]);
@@ -75,6 +77,23 @@ describe("every collection is built by the factory", () => {
     // A converted file must not also hand-register the standard methods - that would mean two lanes in one file.
     const mixed = converted.filter((e) => isHandRolledCollection(e.src)).map((e) => e.name);
     expect(mixed, "a factory-built collection must not also register GET / and GET /:id by hand").toEqual([]);
+  });
+
+  // A bespoke purge exists for one reason: the row has children the generic purge knows nothing about (a
+  // board's cards, a cycle's reviews, a transition's tasks, a suggestion's votes). Converting a collection and
+  // forgetting to wire it as `overrides.purge` leaves `?force=true` deleting the parent and orphaning the
+  // children - which no test noticed, twice, during this conversion. If one is defined, something must call it.
+  it("wires every bespoke purge into a caller", () => {
+    const all = import.meta.glob("../src/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    const services = Object.entries(all).filter(([p]) => p.includes("/services/") && !p.endsWith("/softDelete.ts"));
+    const stranded: string[] = [];
+    for (const [path, src] of services) {
+      for (const m of src.matchAll(/export (?:async function|const) (purge[A-Z]\w*)/g)) {
+        const used = Object.entries(all).some(([p, s]) => p !== path && new RegExp(`\\b${m[1]}\\b`).test(s));
+        if (!used) stranded.push(`${basename(path)}.${m[1]}`);
+      }
+    }
+    expect(stranded, "a bespoke purge nothing calls - wire it as overrides.purge, or delete it if the generic purge is enough").toEqual([]);
   });
 
   // The exemption is only honest while the claim holds: a key/value surface has no create and no delete, because

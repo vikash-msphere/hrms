@@ -7,6 +7,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
+import { purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -180,3 +181,7 @@ export async function appendTransitionTask(deps: Deps, actor: AppUser, transitio
   return row;
 }
 
+export async function purgeTransition(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+  await deps.db.delete(schema.transitionTasks).where(eq(schema.transitionTasks.transitionId, id));
+  await purgeRow(deps, actor, schema.transitions, "transition", "transitions", id, ifMatch);
+}

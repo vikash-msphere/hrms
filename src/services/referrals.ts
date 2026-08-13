@@ -103,15 +103,6 @@ export async function updateReferral(deps: Deps, actor: AppUser, id: string, pat
   return updated;
 }
 
-export async function deleteReferral(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  return softDeleteRow(deps, actor, schema.referrals, "referral", "referrals", id, ifMatch);
-}
-export async function restoreReferral(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.referrals, "referral", "referrals", id);
-}
-export async function purgeReferral(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  return purgeRow(deps, actor, schema.referrals, "referral", "referrals", id, ifMatch);
-}
 
 // ---- Bonus award ---------------------------------------------------------------------------------------------
 

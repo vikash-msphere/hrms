@@ -35,7 +35,7 @@ export async function listSprints(deps: Deps, _actor: AppUser, maxPageSize: numb
   return { items: slice, nextPageToken };
 }
 
-export async function getSprint(deps: Deps, _actor: AppUser, id: string) {
+async function getSprint(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.sprints).where(eq(schema.sprints.uuid, id)).limit(1))[0];
   if (!row) throw notFound("sprint not found");
   return row;
@@ -114,12 +114,6 @@ export async function completeSprint(deps: Deps, actor: AppUser, id: string) {
   return updated;
 }
 
-export async function deleteSprint(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.sprints, "sprint", "sprints", id, ifMatch);
-}
-export async function restoreSprint(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.sprints, "sprint", "sprints", id);
-}
 export async function purgeSprint(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   // Detach cards from the sprint before removing it (FK), then purge.
   await deps.db.update(schema.cards).set({ sprintId: null }).where(eq(schema.cards.sprintId, id));

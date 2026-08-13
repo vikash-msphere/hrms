@@ -4,7 +4,7 @@ import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
   listTransitions, createTransition, updateTransition,
-  setTransitionState, appendTransitionTask, tasksForTransitions,
+  setTransitionState, appendTransitionTask, tasksForTransitions, purgeTransition,
   type TransitionInput,
 } from "../services/transitions";
 import { toTransitionResource } from "../http/serialize";
@@ -48,6 +48,8 @@ export const transitions = collectionRoutes<TransitionInput>({
   overrides: {
     create: (deps, actor, input, id) => createTransition(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateTransition(deps, actor, id, patch, ifMatch),
+    // A hard purge has to take the transition's tasks with it - they carry the FK.
+    purge: (deps, actor, id, ifMatch) => purgeTransition(deps, actor, id, ifMatch),
   },
   list: async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);

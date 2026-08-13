@@ -4,7 +4,7 @@ import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
   listReviewCycles, createReviewCycle, updateReviewCycle,
-  launchReviewCycle, addRevieweesToCycle, setReviewCycleState, reviewCountsFor,
+  launchReviewCycle, addRevieweesToCycle, setReviewCycleState, reviewCountsFor, purgeReviewCycle,
   type ReviewCycleInput,
 } from "../services/reviewCycles";
 import { toReviewCycleResource } from "../http/serialize";
@@ -41,6 +41,8 @@ export const reviewCycles = collectionRoutes<ReviewCycleInput>({
   overrides: {
     create: (deps, actor, input, id) => createReviewCycle(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateReviewCycle(deps, actor, id, patch, ifMatch),
+    // A hard purge tears the cycle's children down bottom-up: 360 feedback, then the reviews, then the cycle.
+    purge: (deps, actor, id, ifMatch) => purgeReviewCycle(deps, actor, id, ifMatch),
   },
   list: async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
