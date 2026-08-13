@@ -49,7 +49,7 @@ async function seedScheduledRule(opts: { schedule: Schedule; condition?: Conditi
   await deps.db.insert(schema.automations).values({
     uuid: genId(), code: `aut-${genId().slice(0, 4)}`, name: "sched", description: "",
     triggerType: SCHEDULE_TRIGGER, conditionJson: opts.condition ? JSON.stringify(opts.condition) : null,
-    actionsJson: JSON.stringify(opts.actions), scheduleJson: JSON.stringify(opts.schedule), enabled: opts.enabled ?? true,
+    actionsJson: JSON.stringify(opts.actions), scheduleJson: JSON.stringify(opts.schedule), disabled: opts.enabled === false,
   });
   invalidateAutomationCache();
 }

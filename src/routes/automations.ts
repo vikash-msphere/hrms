@@ -1,17 +1,12 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { customMethod } from "../http/customMethod";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
-  listAutomations, getAutomation, createAutomation, updateAutomation, deleteAutomation,
-  setAutomationEnabled, testAutomation,
+  listAutomations, createAutomation, updateAutomation, deleteAutomation, setAutomationEnabled, testAutomation,
+  type AutomationInput,
 } from "../services/automations";
 import { toAutomationResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
-import { clampPageSize } from "../http/pagination";
 
-const COL = "automations";
 // condition/actions are validated in depth by the pure domain validator (services/automations); the schema
 // only enforces the transport shape (JSON objects), keeping the rule grammar in ONE place.
 const writeSchema = z.object({
@@ -23,39 +18,39 @@ const writeSchema = z.object({
   enabled: z.boolean().optional(),
 }).strict();
 
-export const automations = new Hono<AppEnv>()
-  .get("/", async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listAutomations(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"));
-    const user = c.get("user");
-    return c.json({ results: items.map((r) => withAccess(toAutomationResource(r), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:automation_id", async (c) => {
-    const row = await getAutomation(c.get("deps"), c.get("user"), c.req.param("automation_id")!);
-    return c.json(toAutomationResource(row));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const row = await createAutomation(c.get("deps"), c.get("user"), c.req.valid("json"), c.req.query("id"));
-    return c.json(toAutomationResource(row));
-  })
-  .patch("/:automation_id", zValidator("json", writeSchema), async (c) => {
-    const row = await updateAutomation(c.get("deps"), c.get("user"), c.req.param("automation_id")!, c.req.valid("json"), c.req.header("If-Match"));
-    return c.json(toAutomationResource(row));
-  })
-  .delete("/:automation_id", async (c) => {
-    await deleteAutomation(c.get("deps"), c.get("user"), c.req.param("automation_id")!, c.req.header("If-Match"));
-    return c.body(null, 204);
-  })
-  .post("/:automation_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    if (verb === "enable" || verb === "disable") {
-      const row = await setAutomationEnabled(c.get("deps"), c.get("user"), id, verb === "enable");
-      return c.json(toAutomationResource(row));
-    }
-    if (verb === "test") {
-      const body = await c.req.json().catch(() => ({}));
-      const res = await testAutomation(c.get("deps"), c.get("user"), id, { employeeId: body.employee_id, payload: body.payload });
-      return c.json(res);
-    }
-    return c.notFound();
-  });
+// Data-driven automation rules. Every write is the service's own: a rule is validated as a whole (a partial
+// patch is merged and re-validated), the actions a caller may author are gated, and each write drops the
+// engine's rule cache. Deleting one is a real removal - the table carries no delete_time - so there is no
+// `:restore` and no `?force`.
+export const automations = collectionRoutes<AutomationInput, typeof schema.automations>({
+  table: schema.automations,
+  collection: "automations",
+  auditName: "automation",
+  notFound: "automation not found",
+  param: "automation_id",
+  writeSchema,
+  serialize: toAutomationResource,
+  overrides: {
+    create: (deps, actor, input, id) => createAutomation(deps, actor, input, id),
+    update: (deps, actor, id, patch, ifMatch) => updateAutomation(deps, actor, id, patch, ifMatch),
+    // A hard delete: a rule that no longer exists must not sit in the trash still firing.
+    remove: (deps, actor, id, ifMatch) => deleteAutomation(deps, actor, id, ifMatch),
+  },
+  // Rules are admin-only, so this list is the caller's own rather than a code-scoped one.
+  list: (c, page) => listAutomations(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken),
+  verbs: {
+    // The collection's OWN :enable / :disable, answered before the shared lifecycle lane. They write the same
+    // `disabled` column and record the same audit stem; what they add is dropping the engine's rule cache, so a
+    // rule switched off stops firing now rather than when the cache expires.
+    enable: { run: (deps, user, id) => setAutomationEnabled(deps, user, id, true) },
+    disable: { run: (deps, user, id) => setAutomationEnabled(deps, user, id, false) },
+    // Dry run: report which actions WOULD fire for a sample event, executing none of them. Answers a report,
+    // not the rule, so it owns its response.
+    test: {
+      raw: async (c, id) => {
+        const body = (await c.req.json().catch(() => ({}))) as { employee_id?: string; payload?: Record<string, unknown> };
+        return c.json(await testAutomation(c.get("deps"), c.get("user"), id, { employeeId: body.employee_id, payload: body.payload }) as object);
+      },
+    },
+  },
+});

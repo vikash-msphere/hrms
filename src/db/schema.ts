@@ -1157,7 +1157,10 @@ export const automations = sqliteTable("automations", {
   // Idempotency guard for scheduled rules: the last date (YYYY-MM-DD) this rule fired on, so a re-run of the
   // daily tick (or a manual trigger) the same day can't double-fire. Claimed with a guarded update.
   lastScheduledOn: text("last_scheduled_on"),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  // Whether the rule fires, as the SHARED lifecycle column every collection uses (:enable / :disable). There
+  // used to be a second `enabled` column meaning the same thing, which left two answers to "does this rule
+  // fire" and a lifecycle verb that wrote the wrong one. The wire field is still `enabled` (see
+  // toAutomationResource) - one column, one meaning, unchanged API.
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
   lockedBy: text("locked_by"),

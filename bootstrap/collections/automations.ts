@@ -964,10 +964,10 @@ export const AUTOMATIONS: AutomationSeed[] = [
 
 export function automations(ctx: Ctx): string {
   return rows(
-    "INSERT INTO automations (uuid,code,name,description,trigger_type,condition_json,actions_json,schedule_json,enabled,disabled,locked,created_at,updated_at) VALUES",
+    "INSERT INTO automations (uuid,code,name,description,trigger_type,condition_json,actions_json,schedule_json,disabled,locked,created_at,updated_at) VALUES",
     AUTOMATIONS.map((a, i) =>
       ` (${q(ctx.nid())},${q(code2(i + 1))},${q(a.name)},${q(a.description)},${q(a.trigger)},` +
-        `${a.condition ? j(a.condition) : "NULL"},${j(a.actions)},${a.schedule ? j(a.schedule) : "NULL"},${b(a.enabled ?? true)},0,0,${T0},${T0})`,
+        `${a.condition ? j(a.condition) : "NULL"},${j(a.actions)},${a.schedule ? j(a.schedule) : "NULL"},${b(a.enabled === false)},0,${T0},${T0})`,
     ),
   );
 }

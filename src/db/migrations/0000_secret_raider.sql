@@ -303,7 +303,6 @@ CREATE TABLE `automations` (
 	`actions_json` text NOT NULL,
 	`schedule_json` text,
 	`last_scheduled_on` text,
-	`enabled` integer DEFAULT true NOT NULL,
 	`disabled` integer DEFAULT false NOT NULL,
 	`locked` integer DEFAULT false NOT NULL,
 	`locked_by` text,

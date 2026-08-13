@@ -52,7 +52,7 @@ async function loadEnabled(deps: Deps): Promise<AutomationRow[]> {
   const rows = await deps.db
     .select()
     .from(schema.automations)
-    .where(and(eq(schema.automations.enabled, true), eq(schema.automations.disabled, false)));
+    .where(eq(schema.automations.disabled, false));
   cache = { at: now, rows };
   return rows;
 }
@@ -67,7 +67,7 @@ function parseAutomation(row: AutomationRow): Automation {
     triggerType: row.triggerType,
     condition: row.conditionJson ? JSON.parse(row.conditionJson) : null,
     actions: JSON.parse(row.actionsJson) as Action[],
-    enabled: row.enabled,
+    enabled: !row.disabled,
     schedule: row.scheduleJson ? (JSON.parse(row.scheduleJson) as Schedule) : null,
   };
 }

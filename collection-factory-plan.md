@@ -27,7 +27,7 @@ the factory decides no permission.
 
 ## Current state
 
-**75 of 106 route files are on the factory. Four collections remain, and every one of them carries a recorded
+**76 of 106 route files are on the factory. Three collections remain, and every one of them carries a recorded
 reason - none is simply unstarted work.** 1235 tests across 107 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
@@ -124,20 +124,13 @@ five are in the table below.
 
 ## Remaining work
 
-Track A is done: the lane itself is hardened. What remains is **B**, converting the four collections that are
+Track A is done: the lane itself is hardened. What remains is **B**, converting the three collections that are
 still hand-rolled.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track B - the hand-rolled collections
-
-**B2. `automations`** (plus a schema change). The table carries both `enabled` (the rule's own
-switch, written by `setAutomationEnabled`) and the generic lifecycle `disabled` / `locked`. A5 stops the shared
-verb from answering `:enable` first (a collection's own verb now wins), which is enough to convert safely, but
-the duplicate state is still wrong:
-collapse `enabled` and `disabled` into one column in the same squashed migration, and keep exactly one meaning
-of "this rule does not fire".
 
 **B3. `roles` and `accessRules`** (identity). `roles` keys on the role NAME, the FK target every grant and user
 row points at; `accessRules` keys on an `id` column and has neither `uuid` nor `code`, and serializes inside
@@ -242,6 +235,18 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- `automations` carried TWO columns meaning "this rule does not fire": its own `enabled` and the shared
+  lifecycle `disabled`. The engine had to check both, and a lifecycle `:disable` would have written the one the
+  engine ignored. Collapsed onto `disabled` (the shared column every collection uses); the wire field is still
+  `enabled`, so no API changed. The collection keeps its OWN `:enable` / `:disable`, which write the same column
+  and record the same audit stem but also drop the engine's rule cache - without that, a rule switched off keeps
+  firing until the cache expires. That is what A5 exists for.
+- Converting `automations` also mounted `:lock` / `:unlock`, which its table's `locked` column had always
+  earned and the hand-written route never offered. Added to `openapi.yaml` in the same commit, because the local
+  dev proxy 404s an unspecified path.
+- `automations` item and write responses carried NO `access` hint at all - the hand-written handlers called
+  `toAutomationResource` directly and only the list wrapped it. On the lane they carry it like every other
+  collection.
 - `announcements` had the board's visibility rule written twice, in JS, over a whole-table read: the list and
   `:markAllRead` each filtered `scope.seeRestricted || (published && !disabled)` in their own loop. It is now one
   SQL predicate (`visibleWhere`) that both bind, and the caller's breadth is bound with it - the list had never

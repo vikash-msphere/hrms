@@ -61,7 +61,7 @@ async function seedRule(name: string, enabled = true) {
   await deps.db.insert(schema.automations).values({
     uuid: genId(), code: `aut-${genId().slice(0, 4)}`, name: a.name, description: a.description,
     triggerType: a.trigger, conditionJson: a.condition ? JSON.stringify(a.condition) : null,
-    actionsJson: JSON.stringify(a.actions), enabled,
+    actionsJson: JSON.stringify(a.actions), disabled: !enabled,
   });
   invalidateAutomationCache(); // the engine caches the enabled set for 5s; drop it so the new rule is seen now
 }

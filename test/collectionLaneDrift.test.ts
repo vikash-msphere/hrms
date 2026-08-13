@@ -31,14 +31,7 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 
 // Remaining conversion work, by plan step (collection-factory-plan.md). Delete a name when its file lands on
 // the factory; never add one without a reason.
-const PENDING = new Set([
-  // step 5 - collections whose custom methods are the bulk of the file
-  // automations: its table carries BOTH `enabled` (the rule's own switch, which :enable/:disable write through
-  // setAutomationEnabled) and the generic lifecycle `disabled`/`locked` columns. On the factory the shared
-  // lifecycle verb would answer :enable/:disable first and write the WRONG column, leaving a rule that reads
-  // disabled but still fires. Collapsing the duplicate columns is a schema change, not a spec knob - do that
-  // first, then convert.
-  "accessRules", "automations", "roles", "users", ]);
+const PENDING = new Set(["accessRules", "roles", "users"]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
 const NOT_COLLECTIONS = new Map([
@@ -122,9 +115,10 @@ describe("every collection is built by the factory", () => {
       for (const m of block[1]!.matchAll(/^    (\w+): \{/gm)) if (SHARED.includes(m[1]!)) shadowed.push(`${name}:${m[1]}`);
     }
     // `payroll-runs:publish` is a long-running publish that answers 202 + an Operation to poll, not the run, so
-    // it can never be the shared lane's column write. `automations` will claim :enable/:disable when it converts
-    // (its own switch is a different column than the lifecycle one) - add it here in that commit.
-    expect(shadowed.sort()).toEqual(["payrollRuns:publish"]);
+    // it can never be the shared lane's column write. `automations:enable/disable` write the SAME `disabled`
+    // column the shared verb would, with the same audit stem - they exist to drop the engine's rule cache, which
+    // the shared verb knows nothing about.
+    expect(shadowed.sort()).toEqual(["automations:disable", "automations:enable", "payrollRuns:publish"]);
   });
 
   // The generic list binds the caller's scope (services/crud.ts), and these tables are FLAT catalogs: a `code`

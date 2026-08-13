@@ -1518,7 +1518,6 @@ export function toAutomationResource(r: {
   actionsJson: string;
   scheduleJson?: string | null;
   lastScheduledOn?: string | null;
-  enabled: boolean | null;
   disabled: boolean | null;
   locked: boolean | null;
   lockedBy: string | null;
@@ -1534,7 +1533,7 @@ export function toAutomationResource(r: {
     actions: JSON.parse(r.actionsJson),
     schedule: r.scheduleJson ? JSON.parse(r.scheduleJson) : null,
     ...(r.lastScheduledOn ? { last_scheduled_on: r.lastScheduledOn } : {}),
-    enabled: !!r.enabled,
+    enabled: !r.disabled,
   };
 }
 

@@ -76,7 +76,9 @@ export async function listAutomations(deps: Deps, _actor: AppUser, maxPageSize: 
   return { items: slice, nextPageToken };
 }
 
-export async function getAutomation(deps: Deps, _actor: AppUser, id: string) {
+// Not exported: the factory's generic get answers the item read (services/crud.ts); this is the internal
+// fetch :test shares.
+async function getAutomation(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.automations).where(eq(schema.automations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("automation not found");
   return row;
@@ -97,7 +99,7 @@ export async function createAutomation(deps: Deps, actor: AppUser, input: Automa
       conditionJson: a.condition ? JSON.stringify(a.condition) : null,
       actionsJson: JSON.stringify(a.actions),
       scheduleJson: isScheduled(a) && a.schedule ? JSON.stringify(a.schedule) : null,
-      enabled: input.enabled ?? true,
+      disabled: input.enabled === false,
       createdBy: actor.uuid === "system" ? null : actor.uuid,
     })
     .returning())[0]!;
@@ -131,7 +133,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
   if (has("trigger_type")) set.triggerType = merged.triggerType;
   if (has("condition")) set.conditionJson = merged.condition ? JSON.stringify(merged.condition) : null;
   if (has("actions")) set.actionsJson = JSON.stringify(merged.actions);
-  if (has("enabled")) set.enabled = patch.enabled;
+  if (has("enabled")) set.disabled = !patch.enabled;
   // Trigger or schedule changed: keep scheduleJson consistent with the merged rule (clear it if the rule is
   // no longer scheduled). Also clear the idempotency stamp so a re-timed rule fires on its next due date.
   if (has("schedule") || has("trigger_type")) {
@@ -154,11 +156,14 @@ export async function deleteAutomation(deps: Deps, actor: AppUser, id: string, i
   invalidateAutomationCache();
 }
 
-// The :enable / :disable verbs toggle the `enabled` flag (distinct from the generic lifecycle disable/lock).
+// The :enable / :disable verbs, kept as the collection's OWN (the factory answers a collection's verb before the
+// shared lifecycle lane). They write the same `disabled` column the shared verb would and record the same audit
+// stem - what they add is `invalidateAutomationCache()`, without which a rule the operator just switched off
+// keeps firing until the engine's cache expires.
 export async function setAutomationEnabled(deps: Deps, actor: AppUser, id: string, enabled: boolean) {
   const row = (await deps.db.select().from(schema.automations).where(eq(schema.automations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("automation not found");
-  const updated = (await deps.db.update(schema.automations).set({ enabled, updatedAt: new Date() }).where(eq(schema.automations.uuid, id)).returning())[0]!;
+  const updated = (await deps.db.update(schema.automations).set({ disabled: !enabled, updatedAt: new Date() }).where(eq(schema.automations.uuid, id)).returning())[0]!;
   await audit(deps, actor, `automation.${enabled ? "enable" : "disable"}`, "automations", id);
   invalidateAutomationCache();
   return updated;

@@ -3617,6 +3617,24 @@ paths:
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/automation' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/automations/{automation_id}:lock:
+    post:
+      description: "Custom method lock for automation."
+      operationId: ":LockAutomation"
+      parameters: [ { in: path, name: automation_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/automation' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/automations/{automation_id}:unlock:
+    post:
+      description: "Custom method unlock for automation."
+      operationId: ":UnlockAutomation"
+      parameters: [ { in: path, name: automation_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/automation' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/automations/{automation_id}:test:
     post:
       description: "Custom method test: dry-run the rule's condition against a synthetic event. No action executes, nothing is written."

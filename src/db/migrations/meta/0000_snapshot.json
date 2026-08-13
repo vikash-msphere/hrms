@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6185513d-269b-4e52-b643-17d970924175",
+  "id": "9d5169ba-52e7-401f-abb0-32dfaa832a39",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -2189,14 +2189,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": true
         },
         "disabled": {
           "name": "disabled",
