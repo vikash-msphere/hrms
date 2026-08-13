@@ -1,41 +1,74 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { customMethod } from "../http/customMethod";
-import { lifecycleVerb } from "../http/lifecycleRoute";
+import type { AppEnv, AppUser } from "../env";
+import type { Deps } from "../deps";
 import * as schema from "../db/schema";
-import { listAnnouncements, getAnnouncement, createAnnouncement, updateAnnouncement, deleteAnnouncement, restoreAnnouncement, purgeAnnouncement, markAnnouncementRead, readsFor, toggleReaction, reactionsFor, addReply, repliesFor, castVote, pollDataFor, setPinned, markAllAnnouncementsRead } from "../services/announcements";
+import { collectionRoutes } from "../http/collectionRoute";
+import {
+  listAnnouncements, createAnnouncement, updateAnnouncement, markAnnouncementRead, readsFor, toggleReaction,
+  reactionsFor, addReply, repliesFor, castVote, pollDataFor, setPinned, markAllAnnouncementsRead, readersVisibleTo,
+  type AnnouncementInput,
+} from "../services/announcements";
 import { toAnnouncementResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
-import { clampPageSize } from "../http/pagination";
-import type { AppUser } from "../env";
-import type { Grant } from "../domain/permissions";
+import { accessHint, withAccess } from "../http/accessHint";
 import { WRAP_MODES } from "../domain/illustration";
 
 const COL = "announcements";
 
-// Serialize a board row with its read info. `_read` (the caller's own receipt) drives the dashboard "unread"
-// widget. The "Read by" list is exposed ONLY to the post's author or to an editor - decided here NOT by an
-// access call but by the access affordance the middleware already produced (access.can includes write-level
-// "update"), so reader identities never reach other viewers. read_by uses `employees/<id>` strings, which the
-// outbound wire-id codec encodes like any other ref.
-function serializeWithReads(user: AppUser, row: any, readers: string[], reactions: { emoji: string; count: number; reacted: boolean }[], replies: any[], poll: import("../services/announcements").PollData | undefined, grant?: Grant) {
-  const isAuthor = !!row.authorEmployeeId && row.authorEmployeeId === user.employeeId;
-  // The author isn't a reader: drop them from the receipt list, and count them as having read their own post
-  // so it never shows up as unread to them.
-  const others = readers.filter((id) => id !== row.authorEmployeeId);
-  row._read = isAuthor || (!!user.employeeId && others.includes(user.employeeId));
-  row._reactions = reactions;
-  row._replies = replies;
-  row._poll = poll;
-  const res = withAccess(toAnnouncementResource(row), user, COL, row?.code, grant);
-  if (res.access.can.includes("update") || isAuthor) {
-    (res as any).read_by = others.map((id) => `employees/${id}`);
-    (res as any).read_count = others.length;
+// Everything a board card carries beyond its own row: the caller's read receipt, the reaction groups, the reply
+// thread and the poll tallies - one query each per PAGE, not per card. `_readers` is the receipt list minus the
+// author, since an author is not a reader of their own post; `serialize` hands it out only to those who may see
+// it. The factory applies this to the list, the item read and every write response alike.
+const decorateAnnouncements = async (deps: Deps, actor: AppUser, rows: any[]) => {
+  const ids = rows.map((r) => r.uuid);
+  const me = actor.employeeId ?? null;
+  const [readMap, reactMap, replyMap, pollMap] = await Promise.all([
+    readsFor(deps, ids),
+    reactionsFor(deps, ids, me),
+    repliesFor(deps, ids, me),
+    pollDataFor(deps, ids, me),
+  ]);
+  return rows.map((row) => {
+    const readers = (readMap.get(row.uuid) ?? []).filter((id) => id !== row.authorEmployeeId);
+    const isAuthor = !!row.authorEmployeeId && row.authorEmployeeId === me;
+    return Object.assign(row, {
+      _readers: readers,
+      // An author has read their own post, so it never shows up as unread to them. `_read` drives the
+      // dashboard's unread widget.
+      _read: isAuthor || (!!me && readers.includes(me)),
+      _reactions: reactMap.get(row.uuid) ?? [],
+      _replies: replyMap.get(row.uuid) ?? [],
+      _poll: pollMap.get(row.uuid),
+    });
+  });
+};
+
+// The "Read by" list is exposed ONLY to the post's author or to someone who may edit it. That second half is a
+// question about what the CALLER MAY DO, so it is answered from `can` - the access hint the factory computes
+// BEFORE serializing - not by a second access decision here. Reader identities never reach any other viewer.
+// read_by uses `employees/<id>` refs, which the outbound wire-id codec encodes like any other ref.
+const serializeAnnouncement = (row: any, user?: AppUser, can?: string[]) => {
+  const res = toAnnouncementResource(row) as Record<string, unknown>;
+  const readers = row._readers as string[] | undefined;
+  if (readers && readersVisibleTo(row, user?.employeeId, can)) {
+    res.read_by = readers.map((id) => `employees/${id}`);
+    res.read_count = readers.length;
   }
   return res;
-}
+};
+
+// One freshly written row, answered the way the factory answers one: decorate, hint, serialize, attach. The
+// collection-level custom methods below are their own routes (they are gated by their own verbs, not by the
+// collection's write level), so they compose the same three steps rather than repeating the shape.
+const respondOne = async (c: Context<AppEnv>, row: { uuid: string; code: string | null }) => {
+  const user = c.get("user");
+  const [decorated] = await decorateAnnouncements(c.get("deps"), user, [row]);
+  const grant = c.get("objectGrant");
+  const hint = accessHint(user, COL, row.code, grant);
+  return c.json(withAccess(serializeAnnouncement(decorated, user, hint.can) as object, user, COL, row.code, grant, undefined, hint));
+};
+
 // Where the sticker sits on the card, as fractions of the card's width - see normalizeIllustrationLayout, which
 // clamps them. Absent/null means the default inline placement; all four are required together, since a partial
 // placement has no reading.
@@ -94,10 +127,7 @@ export const announcementPost = new Hono<AppEnv>().post("/", zValidator("json", 
   const { title, body, options, multiple, closes_time, illustration, illustration_layout, title_align, body_valign } = c.req.valid("json");
   // Options present -> a poll; otherwise a generic post. Either way the kind/author are forced server-side.
   const kind = options && options.length ? "poll" : "post";
-  const row = await createAnnouncement(c.get("deps"), c.get("user"), { title, body, kind, options, multiple, closes_time, illustration, illustration_layout, title_align, body_valign });
-  const user = c.get("user");
-  const pollMap = await pollDataFor(c.get("deps"), [row.uuid], user.employeeId ?? null);
-  return c.json(serializeWithReads(user, row, [], [], [], pollMap.get(row.uuid), c.get("objectGrant")));
+  return respondOne(c, await createAnnouncement(c.get("deps"), c.get("user"), { title, body, kind, options, multiple, closes_time, illustration, illustration_layout, title_align, body_valign }));
 });
 
 // Collection-level custom method `announcements:markAllRead` (mounted at the full path in index.ts, like
@@ -134,83 +164,44 @@ const giveKudosSchema = z.object({
 // gate, separate from posting/announcing. Forces kind="kudos" + author=caller (the giver).
 export const announcementGiveKudos = new Hono<AppEnv>().post("/", zValidator("json", giveKudosSchema), async (c) => {
   const { recipient, recipient_department, message, value, category, level, illustration, illustration_layout, recipient_layout, body_valign } = c.req.valid("json");
-  const user = c.get("user");
-  const row = await createAnnouncement(c.get("deps"), user, { kind: "kudos", recipient, recipient_department, message, value, category, level, illustration, illustration_layout, recipient_layout, body_valign });
-  return c.json(serializeWithReads(user, row, [], [], [], undefined, c.get("objectGrant")));
+  return respondOne(c, await createAnnouncement(c.get("deps"), c.get("user"), { kind: "kudos", recipient, recipient_department, message, value, category, level, illustration, illustration_layout, recipient_layout, body_valign }));
 });
 
-export const announcements = new Hono<AppEnv>()
-  .get("/", async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listAnnouncements(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
-    const user = c.get("user");
-    const ids = items.map((r) => r.uuid);
-    const [readMap, reactMap, replyMap, pollMap] = await Promise.all([readsFor(c.get("deps"), ids), reactionsFor(c.get("deps"), ids, user.employeeId ?? null), repliesFor(c.get("deps"), ids, user.employeeId ?? null), pollDataFor(c.get("deps"), ids, user.employeeId ?? null)]);
-    return c.json({ results: items.map((r) => serializeWithReads(user, r, readMap.get(r.uuid) ?? [], reactMap.get(r.uuid) ?? [], replyMap.get(r.uuid) ?? [], pollMap.get(r.uuid))), next_page_token: nextPageToken });
-  })
-  .get("/:announcement_id", async (c) => {
-    const user = c.get("user");
-    const row = await getAnnouncement(c.get("deps"), user, c.req.param("announcement_id")!);
-    const [readMap, reactMap, replyMap, pollMap] = await Promise.all([readsFor(c.get("deps"), [row.uuid]), reactionsFor(c.get("deps"), [row.uuid], user.employeeId ?? null), repliesFor(c.get("deps"), [row.uuid], user.employeeId ?? null), pollDataFor(c.get("deps"), [row.uuid], user.employeeId ?? null)]);
-    return c.json(serializeWithReads(user, row, readMap.get(row.uuid) ?? [], reactMap.get(row.uuid) ?? [], replyMap.get(row.uuid) ?? [], pollMap.get(row.uuid), c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const user = c.get("user");
-    const b = c.req.valid("json");
-    const row = await createAnnouncement(c.get("deps"), user, b, c.req.query("id"));
-    const pollMap = await pollDataFor(c.get("deps"), [row.uuid], user.employeeId ?? null);
-    return c.json(serializeWithReads(user, row, [], [], [], pollMap.get(row.uuid), c.get("objectGrant")));
-  })
-  .patch("/:announcement_id", zValidator("json", writeSchema), async (c) => {
-    const user = c.get("user");
-    const row = await updateAnnouncement(c.get("deps"), user, c.req.param("announcement_id")!, c.req.valid("json"), c.req.header("If-Match"));
-    const [readMap, reactMap, replyMap, pollMap] = await Promise.all([readsFor(c.get("deps"), [row.uuid]), reactionsFor(c.get("deps"), [row.uuid], user.employeeId ?? null), repliesFor(c.get("deps"), [row.uuid], user.employeeId ?? null), pollDataFor(c.get("deps"), [row.uuid], user.employeeId ?? null)]);
-    return c.json(serializeWithReads(user, row, readMap.get(row.uuid) ?? [], reactMap.get(row.uuid) ?? [], replyMap.get(row.uuid) ?? [], pollMap.get(row.uuid), c.get("objectGrant")));
-  })
-  .delete("/:announcement_id", async (c) => {
-    const id = c.req.param("announcement_id")!;
-    const ifMatch = c.req.header("If-Match");
-    if (c.req.query("force") === "true") {
-      await purgeAnnouncement(c.get("deps"), c.get("user"), id, ifMatch);
-    } else {
-      await deleteAnnouncement(c.get("deps"), c.get("user"), id, ifMatch);
-    }
-    return c.body(null, 204);
-  })
-  .post("/:announcement_id", async (c) => {
-    const lc = await lifecycleVerb(c, { table: schema.announcements, singular: "announcement", collection: "announcements", serialize: toAnnouncementResource, publish: true, publishTime: true });
-    if (lc) return lc;
-    const { id, verb } = customMethod(c);
-    const user = c.get("user");
-    const reserialize = async (row: any) => {
-      const [readMap, reactMap, replyMap, pollMap] = await Promise.all([readsFor(c.get("deps"), [row.uuid]), reactionsFor(c.get("deps"), [row.uuid], user.employeeId ?? null), repliesFor(c.get("deps"), [row.uuid], user.employeeId ?? null), pollDataFor(c.get("deps"), [row.uuid], user.employeeId ?? null)]);
-      return serializeWithReads(user, row, readMap.get(row.uuid) ?? [], reactMap.get(row.uuid) ?? [], replyMap.get(row.uuid) ?? [], pollMap.get(row.uuid), c.get("objectGrant"));
-    };
-    if (verb === "markRead") {
-      // Idempotent self-action: record that the caller opened this post, then re-serialize with read info.
-      return c.json(await reserialize(await markAnnouncementRead(c.get("deps"), user, id)));
-    }
-    if (verb === "react") {
-      // Toggle the caller's reaction with the given emoji on the post, or on a reply when `reply` (its id) is
-      // given. Then re-serialize with the updated counts.
-      const { emoji, reply } = z.object({ emoji: z.string().min(1), reply: z.string().optional() }).strict().parse(await c.req.json().catch(() => ({})));
-      return c.json(await reserialize(await toggleReaction(c.get("deps"), user, id, emoji, reply ?? null)));
-    }
-    if (verb === "reply") {
-      // Append a reply, then re-serialize with the updated thread.
-      const { body } = z.object({ body: z.string().min(1) }).strict().parse(await c.req.json().catch(() => ({})));
-      return c.json(await reserialize(await addReply(c.get("deps"), user, id, body)));
-    }
-    if (verb === "vote") {
-      // Cast / change / clear the caller's vote on a poll option, then re-serialize with the new tallies.
-      const { option } = z.object({ option: z.string().min(1) }).strict().parse(await c.req.json().catch(() => ({})));
-      return c.json(await reserialize(await castVote(c.get("deps"), user, id, option)));
-    }
-    if (verb === "pin" || verb === "unpin") {
-      // Pin the post to the top of the board / take it down (moderation - gated by the verb grant).
-      return c.json(await reserialize(await setPinned(c.get("deps"), user, id, verb === "pin")));
-    }
-    if (verb !== "restore") return c.notFound();
-    const row = await restoreAnnouncement(c.get("deps"), c.get("user"), id);
-    return c.json(withAccess(toAnnouncementResource(row), c.get("user"), COL, row?.code as string | null | undefined, c.get("objectGrant")));
-  });
+// The board: announcements, generic posts, polls and kudos, all one collection. Create and update stay the
+// service's own (each kind has its own rules, a create broadcasts, an edit re-derives kudos points), the state
+// moves through the shared lifecycle verbs (:publish stamps publish_time and broadcasts), and delete/restore are
+// the shared soft-delete lane.
+export const announcements = collectionRoutes<AnnouncementInput, typeof schema.announcements>({
+  table: schema.announcements,
+  collection: COL,
+  auditName: "announcement",
+  notFound: "announcement not found",
+  param: "announcement_id",
+  writeSchema,
+  publish: true,
+  publishTime: true,
+  serialize: serializeAnnouncement,
+  decorate: decorateAnnouncements,
+  overrides: {
+    create: (deps, actor, input, id) => createAnnouncement(deps, actor, input, id),
+    update: (deps, actor, id, patch, ifMatch) => updateAnnouncement(deps, actor, id, patch, ifMatch),
+  },
+  // The board's own list: state visibility (drafts and disabled posts are editors-only) is bound in SQL there,
+  // alongside the caller's scope.
+  list: (c, page) => listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
+  verbs: {
+    // Idempotent self-action: record that the caller opened this post.
+    markRead: { run: (deps, user, id) => markAnnouncementRead(deps, user, id) },
+    // Toggle the caller's reaction with the given emoji on the post, or on a reply when `reply` (its id) is given.
+    react: {
+      schema: z.object({ emoji: z.string().min(1), reply: z.string().optional() }).strict(),
+      run: (deps, user, id, b) => toggleReaction(deps, user, id, b.emoji, b.reply ?? null),
+    },
+    reply: { schema: z.object({ body: z.string().min(1) }).strict(), run: (deps, user, id, b) => addReply(deps, user, id, b.body) },
+    // Cast / change / clear the caller's vote on a poll option.
+    vote: { schema: z.object({ option: z.string().min(1) }).strict(), run: (deps, user, id, b) => castVote(deps, user, id, b.option) },
+    // Pin the post to the top of the board / take it down (moderation - gated by the verb grant).
+    pin: { run: (deps, user, id) => setPinned(deps, user, id, true) },
+    unpin: { run: (deps, user, id) => setPinned(deps, user, id, false) },
+  },
+});

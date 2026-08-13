@@ -1,4 +1,4 @@
-import { eq, and, inArray, isNull, lte } from "drizzle-orm";
+import { eq, and, or, ne, inArray, isNull, lte, type SQL } from "drizzle-orm";
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -6,9 +6,9 @@ import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import { runBatch, chunk } from "../lib/dbBatch";
 import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
@@ -52,23 +52,37 @@ export type AnnouncementInput = {
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
-export async function listAnnouncements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  // Visibility was decided in the middleware (scopeFor over the grant + the manifest state rule); here we
-  // only bind it to columns: editors (scope.seeRestricted) see everything, everyone else only live posts.
-  const all = visibleByDelete(await deps.db.select().from(schema.announcements), showDeleted)
-    .filter((a) => scope.seeRestricted || (a.published && !a.disabled))
-    .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+// The rows a caller may see on the board, as SQL. Visibility was DECIDED in the middleware (scopeFor over the
+// grant plus the manifest's state rule); this only binds it to columns: the caller's scope, minus soft-deleted,
+// and - unless they may see restricted rows (an editor) - only what is live. One predicate, so the board list
+// and :markAllRead cannot drift on what "visible" means.
+function visibleWhere(scope: ListScope, showDeleted = false): SQL | undefined {
+  const conds = [applyScope(scope, schema.announcements.code, schema.announcements.authorEmployeeId)];
+  if (!showDeleted) conds.push(isNull(schema.announcements.deleteTime));
+  if (!scope.seeRestricted) conds.push(and(eq(schema.announcements.published, true), eq(schema.announcements.disabled, false)));
+  return and(...(conds.filter(Boolean) as SQL[]));
 }
 
-export async function getAnnouncement(deps: Deps, _actor: AppUser, id: string) {
+// Who may see a post's READERS. Its author (their own post's receipts) or anyone who may edit it (moderation);
+// nobody else, because a read receipt names a person. `can` is the caller's allowed verbs on this row - the
+// access hint the factory computes before serializing - so the question asked is what the caller MAY DO, not
+// which role they hold, and a per-object share that lifts someone to editor lifts this with it.
+export function readersVisibleTo(
+  row: { authorEmployeeId?: string | null },
+  viewerEmployeeId: string | null | undefined,
+  can?: string[],
+): boolean {
+  if (row.authorEmployeeId && row.authorEmployeeId === viewerEmployeeId) return true;
+  return !!can?.includes("update");
+}
+
+export async function listAnnouncements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false) {
+  return keysetPage(deps, schema.announcements, "announcements", visibleWhere(scope, showDeleted), { max: maxPageSize, pageToken });
+}
+
+// One row by id. Not exported: the collection factory's generic get answers the item read (services/crud.ts);
+// this is the internal fetch the verbs below share.
+async function getAnnouncement(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, id)).limit(1))[0];
   if (!row) throw notFound("announcement not found");
   return row;
@@ -235,24 +249,12 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   return updated;
 }
 
-export async function deleteAnnouncement(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.announcements, "announcement", "announcements", id, ifMatch);
-}
-
-export async function restoreAnnouncement(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.announcements, "announcement", "announcements", id);
-}
-
-export async function purgeAnnouncement(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.announcements, "announcement", "announcements", id, ifMatch);
-}
-
 // Pin a post to the top of the board, or take it back down. Who may pin is entirely the middleware's
 // :pin/:unpin verb grant (HR/moderation via announcements.**); this only flips the timestamp. Idempotent:
 // re-pinning a pinned post refreshes its pin time (moves it to the front of the pinned group), unpinning an
 // unpinned post is a no-op.
 export async function setPinned(deps: Deps, actor: AppUser, id: string, pinned: boolean) {
-  const row = await getAnnouncement(deps, actor, id);
+  const row = await getAnnouncement(deps, id);
   if (pinned && !row.published) throw invalidArgument("a draft can't be pinned - publish it first");
   const updated = (await deps.db
     .update(schema.announcements)
@@ -266,7 +268,7 @@ export async function setPinned(deps: Deps, actor: AppUser, id: string, pinned: 
 // Record that the caller opened a board item. Idempotent (no-op when a row already exists, or when the actor
 // has no employee record). Returns the announcement row so the route can re-serialize with the read flag.
 export async function markAnnouncementRead(deps: Deps, actor: AppUser, id: string) {
-  const row = await getAnnouncement(deps, actor, id);
+  const row = await getAnnouncement(deps, id);
   // The author is not a reader of their own post - never record a receipt for them.
   if (actor.employeeId && actor.employeeId !== row.authorEmployeeId) {
     const existing = (await deps.db
@@ -288,9 +290,11 @@ export async function markAnnouncementRead(deps: Deps, actor: AppUser, id: strin
 export async function markAllAnnouncementsRead(deps: Deps, actor: AppUser, scope: ListScope) {
   if (!actor.employeeId) throw invalidArgument("a read receipt needs an employee identity");
   const me = actor.employeeId;
-  const visible = visibleByDelete(await deps.db.select().from(schema.announcements), false)
-    .filter((a) => scope.seeRestricted || (a.published && !a.disabled))
-    .filter((a) => a.authorEmployeeId !== me);
+  // Everything the caller can see and did not write themselves. A post with no author counts as someone else's.
+  const visible = await deps.db
+    .select({ uuid: schema.announcements.uuid })
+    .from(schema.announcements)
+    .where(and(visibleWhere(scope), or(isNull(schema.announcements.authorEmployeeId), ne(schema.announcements.authorEmployeeId, me))));
   const already = new Set(
     (await deps.db
       .select({ id: schema.announcementReads.announcementId })
@@ -315,7 +319,7 @@ export async function markAllAnnouncementsRead(deps: Deps, actor: AppUser, scope
 export async function toggleReaction(deps: Deps, actor: AppUser, id: string, emoji: string, replyId?: string | null) {
   const glyph = (emoji ?? "").trim();
   if (!glyph) throw invalidArgument("emoji is required");
-  const row = await getAnnouncement(deps, actor, id);
+  const row = await getAnnouncement(deps, id);
   if (!actor.employeeId) throw invalidArgument("a reaction needs an employee identity");
   // The target is the post (reply_id null) or a specific reply. One reaction per viewer per target.
   const rx = schema.announcementReactions;
@@ -374,7 +378,7 @@ export async function reactionsFor(deps: Deps, announcementIds: string[], viewer
 export async function addReply(deps: Deps, actor: AppUser, id: string, body?: string | null) {
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("reply body is required");
-  const row = await getAnnouncement(deps, actor, id);
+  const row = await getAnnouncement(deps, id);
   assertNotLocked(row);
   await deps.db.insert(schema.announcementReplies).values({ announcementId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
   await audit(deps, actor, "announcement.reply", "announcements", id);
@@ -420,7 +424,7 @@ export function pollClosed(row: { locked?: boolean | null; pollClosesAt?: Date |
 // choice; re-selecting the same one clears it. Multi-choice: each call toggles that one option. Blocked once
 // the poll is closed. Returns the announcement row so the route can re-serialize with the tallies.
 export async function castVote(deps: Deps, actor: AppUser, id: string, optionId: string) {
-  const row = await getAnnouncement(deps, actor, id);
+  const row = await getAnnouncement(deps, id);
   if (row.kind !== "poll") throw invalidArgument("not a poll");
   if (pollClosed(row)) throw aborted("poll is closed");
   if (!actor.employeeId) throw invalidArgument("a vote needs an employee identity");

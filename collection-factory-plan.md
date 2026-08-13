@@ -27,8 +27,8 @@ the factory decides no permission.
 
 ## Current state
 
-**74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1231 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+**75 of 106 route files are on the factory. Four collections remain, and every one of them carries a recorded
+reason - none is simply unstarted work.** 1235 tests across 107 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
@@ -97,6 +97,12 @@ Behaviours worth knowing before converting anything:
   `pageToken`, `showDeleted`); it does not re-read the query string for them. It still reads its own filters
   (`?employee`, `?state`, `?q`) off the context. Five lists are unpaged by nature (positions, compensation,
   assets, bonuses, settlements) and simply ignore the argument.
+- A collection with a `STATE_VISIBILITY` rule binds `scope.seeRestricted` in its own list. `announcements` is
+  the only one, and `visibleWhere` in its service is the single predicate its list and `:markAllRead` share.
+- `announcements` is on the lane, so a board card's hint is derived from the methods it mounts. Its three
+  COLLECTION-level custom methods (`:post`, `:giveKudos`, `:markAllRead`) are separate routes gated by their own
+  verbs, so they still probe `ACCESS_VERBS.announcements`; they answer one row through the same
+  decorate/hint/serialize steps the factory uses.
 - `scope.seeRestricted` (state visibility) is still bound by hand in the services that have it. Only
   `announcements` carries a `STATE_VISIBILITY` rule and it is hand-rolled, so the generic list has nothing to
   honor yet; when a factory collection gets a state rule, the generic list must bind it.
@@ -118,21 +124,18 @@ five are in the table below.
 
 ## Remaining work
 
-Track A is done: the lane itself is hardened. What remains is **B**, converting the five collections that are
+Track A is done: the lane itself is hardened. What remains is **B**, converting the four collections that are
 still hand-rolled.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
-### Track B - the five hand-rolled collections
+### Track B - the hand-rolled collections
 
-**B1. `announcements`** (needs A7). A post carries `read_by` / `read_count` only for its author or someone who
-may edit it, and the second half is read off `access.can`. With the hint computed first, this is an ordinary
-`serialize(row, user, can)`. Converting also brings the biggest remaining verb set onto the lane.
-
-**B2. `automations`** (needs A5, plus a schema change). The table carries both `enabled` (the rule's own
+**B2. `automations`** (plus a schema change). The table carries both `enabled` (the rule's own
 switch, written by `setAutomationEnabled`) and the generic lifecycle `disabled` / `locked`. A5 stops the shared
-verb from answering `:enable` first, which is enough to convert safely, but the duplicate state is still wrong:
+verb from answering `:enable` first (a collection's own verb now wins), which is enough to convert safely, but
+the duplicate state is still wrong:
 collapse `enabled` and `disabled` into one column in the same squashed migration, and keep exactly one meaning
 of "this rule does not fire".
 
@@ -239,6 +242,15 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- `announcements` had the board's visibility rule written twice, in JS, over a whole-table read: the list and
+  `:markAllRead` each filtered `scope.seeRestricted || (published && !disabled)` in their own loop. It is now one
+  SQL predicate (`visibleWhere`) that both bind, and the caller's breadth is bound with it - the list had never
+  bound `applyScope` at all. Four service exports went with the conversion (`getAnnouncement`,
+  `deleteAnnouncement`, `restoreAnnouncement`, `purgeAnnouncement`) because the generic methods are
+  byte-equivalent; `getAnnouncement` stays as an internal fetch its own verbs share.
+- Three test files stubbed the middleware's list scope as `{ seeRestricted: true }`, which was enough while the
+  board ignored breadth. Binding `applyScope` made those stubs fail closed, which is the fix working: they now
+  carry a complete scope. No assertion changed.
 - Typing the spec against its table found seven places where a validated wire string was written to an enum
   column without narrowing: the guard was `if (!ALLOWED.includes(v as any)) throw`, which checks at runtime and
   tells the compiler nothing, so the column's type was satisfied by a cast rather than by the check. They now go

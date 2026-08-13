@@ -38,14 +38,7 @@ const PENDING = new Set([
   // lifecycle verb would answer :enable/:disable first and write the WRONG column, leaving a rule that reads
   // disabled but still fires. Collapsing the duplicate columns is a schema change, not a spec knob - do that
   // first, then convert.
-  "accessRules", "automations", "roles", "users",
-  // step 6
-  // announcements: a board post's response carries `read_by`/`read_count` ONLY for the author or someone who
-  // may edit it, and that second half is read off `access.can` - the hint the factory computes AFTER
-  // serializing, from the per-object grant that only it holds. The spec's `serialize(row, user)` runs before
-  // that and sees the caller's broad grant, so it cannot make the same decision. Expressing this needs a
-  // post-serialize hook, i.e. a 16th knob - hence the reason here instead.
-  "announcements", ]);
+  "accessRules", "automations", "roles", "users", ]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
 const NOT_COLLECTIONS = new Map([

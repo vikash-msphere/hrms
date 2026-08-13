@@ -6,6 +6,7 @@ const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query:
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
+import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { createAnnouncement, updateAnnouncement, listAnnouncements } from "../src/services/announcements";
@@ -41,7 +42,8 @@ async function seedActor(): Promise<AppUser> {
   return { uuid, email: `${uuid}@test.example`, role: "employee", status: "active", employeeId, employeeCode: null } as unknown as AppUser;
 }
 
-const scope = { seeRestricted: true } as never;
+// The list scope the authz middleware hands a board request: org-wide, and an editor for the drafts here.
+const scope: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true };
 
 describe("a post's sticker is its own", () => {
   it("editing one post's art leaves the others untouched", async () => {

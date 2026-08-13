@@ -6,6 +6,7 @@ const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query:
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
+import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import {
@@ -53,8 +54,10 @@ async function seedActor(first = "Poster"): Promise<AppUser> {
   return { uuid, email: `${uuid}@test.example`, role: "employee", status: "active", employeeId, employeeCode: null } as unknown as AppUser;
 }
 
-const editors = { seeRestricted: true } as never;
-const everyone = { seeRestricted: false } as never;
+// The list scope the authz middleware hands a board request. Org-wide breadth (every grant on `announcements`
+// is unscoped), so what these vary is `seeRestricted`: an editor sees drafts and disabled posts, nobody else does.
+const editors: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true };
+const everyone: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: false };
 const post = (actor: AppUser, title: string) => createAnnouncement(deps, actor, { kind: "post", title, body: `${title} body`, published: true });
 const notifications = () => deps.db.select().from(schema.notifications);
 const mentionRef = async (actor: AppUser) => `employees/${await deps.idCodec.encode("employees", actor.employeeId!)}`;
