@@ -9,7 +9,7 @@ import { audit } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type ApprovalDelegationInput = {
   delegator?: string | null;
@@ -107,8 +107,3 @@ export const approvalDelegationSpec: CrudSpec<ApprovalDelegationInput> = {
   },
 };
 
-export const {
-  get: getApprovalDelegation,
-  create: createApprovalDelegation,
-  update: updateApprovalDelegation,
-} = crudService(approvalDelegationSpec);

@@ -12,7 +12,7 @@ import { allocFlatCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
-import { notFound, aborted, unimplemented } from "../lib/errors";
+import { notFound, aborted, alreadyExists, unimplemented } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
@@ -115,10 +115,19 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
     async create(deps, actor, input, id) {
       if (!spec.insert) throw unimplemented(`${collection} are not created directly`);
       const values = await spec.insert(input, deps, actor);
-      const row = ((await deps.db
-        .insert(table)
-        .values({ code: await alloc(deps, table, values), ...(id ? { uuid: id } : {}), ...values })
-        .returning()) as Row[])[0]!;
+      const code = await alloc(deps, table, values);
+      let row: Row;
+      try {
+        row = ((await deps.db
+          .insert(table)
+          .values({ code, ...(id ? { uuid: id } : {}), ...values })
+          .returning()) as Row[])[0]!;
+      } catch (e) {
+        // A caller-supplied `?id` that is already taken is a CONFLICT, not a server fault - the resource it
+        // names exists. Without this the raw D1 constraint error surfaces as a 500.
+        if (id && /UNIQUE|PRIMARY KEY|constraint/i.test(String(e))) throw alreadyExists(`${collection}/${id} already exists`);
+        throw e;
+      }
       await audit(deps, actor, `${auditName}.create`, collection, row.uuid, undefined, row);
       if (spec.afterCreate) await spec.afterCreate(deps, actor, row, input);
       // Decorated on the way out like a read: a write answers with the same resource shape a GET would, so a

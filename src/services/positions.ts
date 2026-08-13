@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
-import { crudService, type CrudSpec } from "./crud";
+import { type CrudSpec } from "./crud";
 
 // Effective-dated role history (designation/department/location). A promotion or transfer is a NEW row
 // effective from a chosen date; the previously-current row is closed (effective_to set). Mirrors the
@@ -40,8 +40,6 @@ export const positionSpec: CrudSpec<PositionInput> = {
   auditName: "position",
   notFound: "position record not found",
 };
-
-export const { get: getPosition } = crudService(positionSpec);
 
 // Record a role change (promotion/transfer): close the current open row at the new effective date, insert the
 // new current row, and sync the employee's current designation/department to match.

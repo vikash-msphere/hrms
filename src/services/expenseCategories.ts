@@ -2,7 +2,7 @@
 // reference one. `requires_receipt` makes an invoice attachment mandatory; `gl_code` is the accounting code.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type ExpenseCategoryInput = { display_name?: string; requires_receipt?: boolean; gl_code?: string | null };
 
@@ -24,12 +24,3 @@ export const expenseCategorySpec: CrudSpec<ExpenseCategoryInput> = {
   },
 };
 
-export const {
-  list: listExpenseCategories,
-  get: getExpenseCategory,
-  create: createExpenseCategory,
-  update: updateExpenseCategory,
-  remove: deleteExpenseCategory,
-  restore: restoreExpenseCategory,
-  purge: purgeExpenseCategory,
-} = crudService(expenseCategorySpec);

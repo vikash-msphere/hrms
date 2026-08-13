@@ -174,11 +174,6 @@ export const payComponentSpec: CrudSpec<PayComponentInput> = {
 };
 
 export const {
-  list: listPayComponents,
-  get: getPayComponent,
   create: createPayComponent,
   update: updatePayComponent,
-  remove: deletePayComponent,
-  restore: restorePayComponent,
-  purge: purgePayComponent,
 } = crudService(payComponentSpec);

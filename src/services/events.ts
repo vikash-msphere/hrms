@@ -6,7 +6,7 @@ import { visibleByDelete } from "./softDelete";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type EventInput = {
   title?: string;
@@ -101,12 +101,3 @@ export const eventSpec: CrudSpec<EventInput> = {
   },
 };
 
-export const {
-  list: listEventsUnscoped,
-  get: getEvent,
-  create: createEvent,
-  update: updateEvent,
-  remove: deleteEvent,
-  restore: restoreEvent,
-  purge: purgeEvent,
-} = crudService(eventSpec);

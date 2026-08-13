@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type VendorInput = {
   display_name?: string;
@@ -59,12 +59,3 @@ export const vendorSpec: CrudSpec<VendorInput> = {
   },
 };
 
-export const {
-  list: listVendors,
-  get: getVendor,
-  create: createVendor,
-  update: updateVendor,
-  remove: deleteVendor,
-  restore: restoreVendor,
-  purge: purgeVendor,
-} = crudService(vendorSpec);

@@ -62,11 +62,5 @@ export const payPeriodSpec: CrudSpec<PayPeriodInput> = {
 };
 
 export const {
-  list: listPayPeriods,
-  get: getPayPeriod,
   create: createPayPeriod,
-  update: updatePayPeriod,
-  remove: deletePayPeriod,
-  restore: restorePayPeriod,
-  purge: purgePayPeriod,
 } = crudService(payPeriodSpec);

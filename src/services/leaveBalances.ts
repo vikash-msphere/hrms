@@ -5,7 +5,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { keysetPage } from "./keysetPage";
-import { crudService, type CrudSpec } from "./crud";
+import { type CrudSpec } from "./crud";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
@@ -27,4 +27,3 @@ export const leaveBalanceSpec: CrudSpec<never> = {
   notFound: "leave balance not found",
 };
 
-export const { get: getLeaveBalance } = crudService(leaveBalanceSpec);

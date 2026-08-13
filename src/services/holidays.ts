@@ -49,12 +49,4 @@ export const holidaySpec: CrudSpec<HolidayInput> = {
   },
 };
 
-export const {
-  list: listHolidays,
-  get: getHoliday,
-  create: createHoliday,
-  update: updateHoliday,
-  remove: deleteHoliday,
-  restore: restoreHoliday,
-  purge: purgeHoliday,
-} = crudService(holidaySpec);
+export const { list: listHolidays } = crudService(holidaySpec);

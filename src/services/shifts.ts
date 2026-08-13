@@ -1,7 +1,7 @@
 // Shifts: the named time windows a roster assigns (start/end as HH:MM local, an unpaid break, a display colour).
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 export type ShiftInput = {
@@ -53,12 +53,3 @@ export const shiftSpec: CrudSpec<ShiftInput> = {
   },
 };
 
-export const {
-  list: listShifts,
-  get: getShift,
-  create: createShift,
-  update: updateShift,
-  remove: deleteShift,
-  restore: restoreShift,
-  purge: purgeShift,
-} = crudService(shiftSpec);

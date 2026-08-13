@@ -2,7 +2,7 @@
 // rate), encashment and carry-forward policy; balances are accrued per type by services/leaveAccrual.ts.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 import { accrueLeave } from "./leaveAccrual";
 
 export type LeaveTypeInput = {
@@ -71,12 +71,3 @@ export const leaveTypeSpec: CrudSpec<LeaveTypeInput> = {
   },
 };
 
-export const {
-  list: listLeaveTypes,
-  get: getLeaveType,
-  create: createLeaveType,
-  update: updateLeaveType,
-  remove: deleteLeaveType,
-  restore: restoreLeaveType,
-  purge: purgeLeaveType,
-} = crudService(leaveTypeSpec);

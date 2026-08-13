@@ -9,7 +9,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 import { idFromPath } from "./documentsCommon";
 import { notify } from "./notifications";
 
@@ -94,11 +94,3 @@ export const complianceEventSpec: CrudSpec<ComplianceEventInput> = {
   },
 };
 
-export const {
-  get: getComplianceEvent,
-  create: createComplianceEvent,
-  update: updateComplianceEvent,
-  remove: deleteComplianceEvent,
-  restore: restoreComplianceEvent,
-  purge: purgeComplianceEvent,
-} = crudService(complianceEventSpec);

@@ -101,13 +101,7 @@ export const expenseBudgetSpec: CrudSpec<ExpenseBudgetInput> = {
 };
 
 export const {
-  list: listExpenseBudgets,
-  get: getExpenseBudget,
   create: createExpenseBudget,
-  update: updateExpenseBudget,
-  remove: deleteExpenseBudget,
-  restore: restoreExpenseBudget,
-  purge: purgeExpenseBudget,
 } = crudService(expenseBudgetSpec);
 
 // ---- Budget alerts (daily cron) -------------------------------------------------------------------------

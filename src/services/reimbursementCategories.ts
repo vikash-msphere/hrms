@@ -2,7 +2,7 @@
 // Settings; claims reference one. `requires_receipt` makes a receipt attachment mandatory on those claims.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type ReimbursementCategoryInput = { display_name?: string; requires_receipt?: boolean };
 
@@ -23,12 +23,3 @@ export const reimbursementCategorySpec: CrudSpec<ReimbursementCategoryInput> = {
   },
 };
 
-export const {
-  list: listReimbursementCategories,
-  get: getReimbursementCategory,
-  create: createReimbursementCategory,
-  update: updateReimbursementCategory,
-  remove: deleteReimbursementCategory,
-  restore: restoreReimbursementCategory,
-  purge: purgeReimbursementCategory,
-} = crudService(reimbursementCategorySpec);

@@ -67,10 +67,5 @@ export const dependentSpec: CrudSpec<DependentInput> = {
 };
 
 export const {
-  get: getDependent,
-  create: createDependent,
-  update: updateDependent,
   remove: deleteDependent,
-  restore: restoreDependent,
-  purge: purgeDependent,
 } = crudService(dependentSpec);

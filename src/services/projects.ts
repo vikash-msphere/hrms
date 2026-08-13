@@ -2,7 +2,7 @@
 // timesheet + utilization views.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type ProjectInput = {
   name?: string;
@@ -43,12 +43,3 @@ export const projectSpec: CrudSpec<ProjectInput> = {
   },
 };
 
-export const {
-  list: listProjects,
-  get: getProject,
-  create: createProject,
-  update: updateProject,
-  remove: deleteProject,
-  restore: restoreProject,
-  purge: purgeProject,
-} = crudService(projectSpec);

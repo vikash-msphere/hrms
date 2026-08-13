@@ -7,7 +7,7 @@ import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 import { idFromPath } from "./documentsCommon";
 import { dueDatesInRange, periodLabelFor } from "../domain/complianceRecurrence";
 
@@ -121,12 +121,3 @@ export const complianceRuleSpec: CrudSpec<ComplianceRuleInput> = {
   },
 };
 
-export const {
-  list: listComplianceRules,
-  get: getComplianceRule,
-  create: createComplianceRule,
-  update: updateComplianceRule,
-  remove: deleteComplianceRule,
-  restore: restoreComplianceRule,
-  purge: purgeComplianceRule,
-} = crudService(complianceRuleSpec);

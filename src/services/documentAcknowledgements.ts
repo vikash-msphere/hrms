@@ -4,7 +4,7 @@ import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { crudService, type CrudSpec } from "./crud";
+import { type CrudSpec } from "./crud";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
@@ -27,9 +27,3 @@ export const documentAcknowledgementSpec: CrudSpec<never> = {
   notFound: "acknowledgement not found",
 };
 
-export const {
-  get: getDocumentAcknowledgement,
-  remove: deleteDocumentAcknowledgement,
-  restore: restoreDocumentAcknowledgement,
-  purge: purgeDocumentAcknowledgement,
-} = crudService(documentAcknowledgementSpec);

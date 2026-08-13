@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 import type { LetterTemplate, TemplateBlock, TemplateInput } from "../domain/letters";
 
 // Letter templates as a first-class collection: each row is an addressable object, so per-template access is
@@ -65,12 +65,3 @@ export const letterTemplateSpec: CrudSpec<LetterTemplateInput> = {
   },
 };
 
-export const {
-  list: listLetterTemplates,
-  get: getLetterTemplate,
-  create: createLetterTemplate,
-  update: updateLetterTemplate,
-  remove: deleteLetterTemplate,
-  restore: restoreLetterTemplate,
-  purge: purgeLetterTemplate,
-} = crudService(letterTemplateSpec);

@@ -13,7 +13,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { app } from "../src/index";
 import { etagOf, toHolidayResource } from "../src/http/serialize";
-import { createHoliday, holidaySpec } from "../src/services/holidays";
+import { holidaySpec } from "../src/services/holidays";
 import { collectionRoutes, type CollectionRouteSpec } from "../src/http/collectionRoute";
 import { grantFor } from "../src/domain/grants";
 
@@ -93,11 +93,23 @@ describe("create", () => {
     expect(await deps.db.select().from(schema.holidays)).toEqual([]);
   });
 
-  it("honors a user-specified id (AEP `?id`), so a caller can make a create idempotent", async () => {
-    const actor = { uuid: "u", email: DEV_EMAIL, role: "super_admin", status: "active", employeeId: null, employeeCode: null, name: null } as unknown as AppUser;
+  it("honors a user-specified id (AEP `?id`), and 409s when that id is taken", async () => {
+    const { id } = await newHoliday();
     const chosen = genId();
-    const row = await createHoliday(deps, actor, { display_name: "Holi", date: "2099-03-03" }, chosen);
-    expect(row.uuid).toBe(chosen);
+    const res = await call(`/v1/holidays?id=${chosen}`, {
+      method: "POST",
+      body: JSON.stringify({ display_name: "Holi", date: "2099-03-03" }),
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(res.status).toBe(200);
+    expect((await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, chosen))).length).toBe(1);
+    // Re-using an id names a resource that exists: a conflict, not a server fault (it was a raw 500 before).
+    const dup = await call(`/v1/holidays?id=${id}`, {
+      method: "POST",
+      body: JSON.stringify({ display_name: "Clash", date: "2099-04-04" }),
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(dup.status).toBe(409);
   });
 });
 

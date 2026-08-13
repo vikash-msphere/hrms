@@ -2,7 +2,7 @@
 // `cost_period`; `auto_enroll` is what the new-hire automation picks up.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 type Category = typeof schema.benefitPlans.$inferSelect.category;
 export type BenefitPlanInput = {
@@ -56,12 +56,3 @@ export const benefitPlanSpec: CrudSpec<BenefitPlanInput> = {
   },
 };
 
-export const {
-  list: listBenefitPlans,
-  get: getBenefitPlan,
-  create: createBenefitPlan,
-  update: updateBenefitPlan,
-  remove: deleteBenefitPlan,
-  restore: restoreBenefitPlan,
-  purge: purgeBenefitPlan,
-} = crudService(benefitPlanSpec);

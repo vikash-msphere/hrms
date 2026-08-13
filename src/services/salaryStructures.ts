@@ -84,11 +84,5 @@ export const salaryStructureSpec: CrudSpec<SalaryStructureInput> = {
 };
 
 export const {
-  list: listSalaryStructures,
-  get: getSalaryStructure,
   create: createSalaryStructure,
-  update: updateSalaryStructure,
-  remove: deleteSalaryStructure,
-  restore: restoreSalaryStructure,
-  purge: purgeSalaryStructure,
 } = crudService(salaryStructureSpec);

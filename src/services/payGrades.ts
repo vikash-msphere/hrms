@@ -2,7 +2,7 @@
 // hard gate - see domain/payGrade.ts for the compa-ratio read side.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { has, type CrudSpec } from "./crud";
 
 export type PayGradeInput = {
   display_name?: string;
@@ -63,12 +63,3 @@ export const payGradeSpec: CrudSpec<PayGradeInput> = {
   },
 };
 
-export const {
-  list: listPayGrades,
-  get: getPayGrade,
-  create: createPayGrade,
-  update: updatePayGrade,
-  remove: deletePayGrade,
-  restore: restorePayGrade,
-  purge: purgePayGrade,
-} = crudService(payGradeSpec);
