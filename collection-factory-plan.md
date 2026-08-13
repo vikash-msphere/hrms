@@ -73,7 +73,40 @@ Two spec refinements the conversions earned after the plan was written:
   a read would (expense-budgets derives spend on every row).
 - A verb entry is `{schema?, run}` or `{raw}`; `run` returns the row and the factory serializes + hints it.
 
-Next: step 3 (read-only / partial collections), which exercises optional `insert`/`patch` in anger.
+| `7b7c6ff` | step 3: document-acknowledgements, leave-balances, event-log, cron-runs, automation-runs, workflow-instances |
+| `a936df9` `8f3dd89` `4608d23` `22162b1` `0d0ab95` | step 4 so far: events, dependents, positions, approval-delegations, holiday-selections, transition-tasks, compensation, assets, notifications |
+| `a4e4484` | step 7's drift test, pulled forward: test/collectionLaneDrift.test.ts with a 52-name PENDING ledger that can only shrink |
+
+**34 of 86 collections on the factory.** The delete lane became describable rather than assumed, which was forced
+by real collections:
+
+- `softDelete: false` - a HISTORY collection (positions, compensation) is superseded, never deleted, even though
+  its table carries delete_time for the employee cascade. Auto-mounting DELETE there would have handed HR a way
+  to delete role and salary history.
+- `overrides.remove` - a collection whose delete is permanent (approval-delegations, assets, holiday-selections)
+  gets a DELETE with no `:restore` and no `?force`. `activeDelegatesFor` matches on the date window alone, so a
+  soft-deleted delegation would have kept re-routing approvals.
+- A table with no delete_time gets no delete lane at all (event-log et al).
+- POST/PATCH mount when EITHER the generic mapper or an override supplies the method, so positions can keep
+  `changeRole` (closes the prior row, syncs the employee) as its create.
+- `serialize(row, user)` for viewer-dependent resources, and `list` may return `extra` for an aggregate beside
+  the page (notifications' snoozed_count).
+
+Also extracted `assertNotLocked` into `src/services/lockGuard.ts`: crud.ts imported it from lifecycle.ts, which
+pulls notifications -> approval-delegations -> back to crud.ts, and that cycle left `crudService` undefined at
+module-init depending on load order.
+
+Next: the rest of step 4 (11 files), then step 5. Two open questions for step 7 in "Decisions still needed" below.
+
+## Decisions still needed
+
+`policy`, `preferences`, `settings` and `payrollDebit` have the route shape of a collection (a `GET /` plus an
+item `GET /:id`) but are not AEP collections - key/value config, a per-user blob, a one-off debit action. They
+sit in PENDING with that note. Either they get converted anyway for uniformity, or step 7 documents them as a
+named non-collection category in the drift test. That is a scope call, not a mechanical one.
+
+Second: the spec now carries ~15 optional fields. Every one was forced by a real collection and none is
+speculative, but the count is worth a deliberate look before step 5 doubles the number of collections on it.
 
 ## Sequence
 
