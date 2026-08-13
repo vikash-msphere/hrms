@@ -10,8 +10,13 @@ import { describe, it, expect } from "vitest";
 //
 // PENDING is the shrinking list of files still hand-rolled. It is a budget, not an exemption list: this suite
 // fails BOTH when a new hand-rolled collection appears (use the factory) and when a listed one is converted
-// without being removed (keep the ledger honest). A collection that genuinely cannot use the factory belongs
-// here with a one-line reason instead - and none has needed that yet.
+// without being removed (keep the ledger honest).
+//
+// NOT_COLLECTIONS is the permanent exemption: key/value config surfaces that borrow the route shape but have no
+// collection semantics - the item id is a key the caller chooses, so PATCH upserts and there is nothing to
+// create or delete. Each carries its reason, and a test below pins the property that makes the claim true: no
+// `POST /` and no DELETE. If one ever grows a create or a delete it has become a collection, that test fails,
+// and it moves into the factory lane.
 const sources = import.meta.glob("../src/routes/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
 const basename = (path: string) => path.split("/").pop()!.replace(/\.ts$/, "");
@@ -36,9 +41,14 @@ const PENDING = new Set([
   "taxDeclarations", "ticketChecklists", "tickets", "timeEntries", "transitions", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",
-  // not AEP collections despite the route shape (key/value config, a queue, a one-off action surface): each
-  // needs a decision in step 7 - convert, or state here why it is not a collection.
-  "payrollDebit", "policy", "preferences", "settings",
+]);
+
+// Route shape without collection semantics. Not conversion debt - these are done.
+const NOT_COLLECTIONS = new Map([
+  ["payrollDebit", "one settings key rendered per bank: no table of its own, PATCH /:bank upserts the blob"],
+  ["policy", "leave-policy key/value: the id is the policy key, PATCH sets its value"],
+  ["preferences", "per-user key/value: the id is the preference key, PATCH upserts it"],
+  ["settings", "org key/value blobs: the id is the settings key, PATCH upserts it"],
 ]);
 
 describe("every collection is built by the factory", () => {
@@ -49,7 +59,9 @@ describe("every collection is built by the factory", () => {
   });
 
   it("has no hand-rolled collection outside the PENDING budget", () => {
-    const offenders = entries.filter((e) => isHandRolledCollection(e.src) && !usesFactory(e.src) && !PENDING.has(e.name)).map((e) => e.name);
+    const offenders = entries
+      .filter((e) => isHandRolledCollection(e.src) && !usesFactory(e.src) && !PENDING.has(e.name) && !NOT_COLLECTIONS.has(e.name))
+      .map((e) => e.name);
     expect(offenders, "build these with collectionRoutes() from src/http/collectionRoute.ts - a hand-rolled standard-method surface drifts").toEqual([]);
   });
 
@@ -67,5 +79,14 @@ describe("every collection is built by the factory", () => {
     // A converted file must not also hand-register the standard methods - that would mean two lanes in one file.
     const mixed = converted.filter((e) => isHandRolledCollection(e.src)).map((e) => e.name);
     expect(mixed, "a factory-built collection must not also register GET / and GET /:id by hand").toEqual([]);
+  });
+
+  // The exemption is only honest while the claim holds: a key/value surface has no create and no delete, because
+  // the caller names the key and PATCH upserts it. Growing either makes it a collection, and this test says so.
+  it.each([...NOT_COLLECTIONS])("keeps %s a key/value surface, not a collection (%s)", (name) => {
+    const entry = entries.find((e) => e.name === name);
+    expect(entry, `src/routes/${name}.ts is gone - drop it from NOT_COLLECTIONS`).toBeDefined();
+    expect(/\.post\(\s*(?:"|`)\//.test(entry!.src), `${name} grew a create - it is a collection now, build it with collectionRoutes()`).toBe(false);
+    expect(/\.delete\(/.test(entry!.src), `${name} grew a delete - it is a collection now, build it with collectionRoutes()`).toBe(false);
   });
 });
