@@ -1,12 +1,8 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { listSettlements, getSettlement, computeAndStoreSettlement } from "../services/settlements";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
+import { listSettlements, computeAndStoreSettlement, type SettlementInput } from "../services/settlements";
 import { toSettlementResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
-
-const COL = "settlements";
 
 // Full-and-final settlement (FnF). POST computes + stores a snapshot from the employee's data + exit inputs.
 const computeSchema = z
@@ -18,20 +14,24 @@ const computeSchema = z
   })
   .strict();
 
-export const settlements = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// A settlement is a computed snapshot, not an editable record: the create IS the computation (it consumes the
+// leaver's payables and can be recomputed, which releases what the previous one took). So there is no PATCH,
+// and the table carries no delete_time - the factory therefore mounts no DELETE and no `:restore` either.
+export const settlements = collectionRoutes<SettlementInput>({
+  table: schema.settlements,
+  collection: "settlements",
+  auditName: "settlement",
+  notFound: "settlement not found",
+  param: "settlement_id",
+  createSchema: computeSchema,
+  serialize: toSettlementResource,
+  overrides: {
+    // The create is the whole FnF computation (services/settlements.ts), audited as `settlement.compute`.
+    create: (deps, actor, input) => computeAndStoreSettlement(deps, actor, input),
+  },
+  list: (c) => {
     // The inbound edge (decodeWireIds) already decoded the query ref to its internal id; just take the id.
     const emp = c.req.query("employee");
-    const employeeId = emp ? emp.split("/").pop()! : undefined;
-    const rows = await listSettlements(c.get("deps"), c.get("scope"), employeeId);
-    const user = c.get("user");
-    return c.json({ results: rows.map((r) => withAccess(toSettlementResource(r), user, COL, r.code)) });
-  })
-  .get("/:settlement_id", async (c) => {
-    const row = await getSettlement(c.get("deps"), c.req.param("settlement_id"));
-    return c.json(withAccess(toSettlementResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", computeSchema), async (c) => {
-    const row = await computeAndStoreSettlement(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toSettlementResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  });
+    return listSettlements(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined).then((items) => ({ items, nextPageToken: undefined }));
+  },
+});

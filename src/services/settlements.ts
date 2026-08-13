@@ -50,12 +50,6 @@ export async function listSettlements(deps: Deps, scope: ListScope, employeeId?:
   return rows.sort((a, b) => +new Date(b.settlementDate) - +new Date(a.settlementDate) || b.uuid.localeCompare(a.uuid));
 }
 
-export async function getSettlement(deps: Deps, id: string) {
-  const row = (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("settlement not found");
-  return row;
-}
-
 // What one settlement consumed, stored on the row (settledJson) so a recompute can release it first.
 type SettledRefs = {
   reimbursements: string[];

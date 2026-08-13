@@ -58,12 +58,6 @@ export async function listBonuses(deps: Deps, scope: ListScope, employeeId?: str
   return rows.sort((a, b) => +new Date(b.awardDate) - +new Date(a.awardDate) || b.uuid.localeCompare(a.uuid));
 }
 
-export async function getBonus(deps: Deps, id: string) {
-  const row = (await deps.db.select().from(schema.bonuses).where(eq(schema.bonuses.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("bonus record not found");
-  return row;
-}
-
 export async function recordBonus(deps: Deps, actor: AppUser, input: BonusInput) {
   const employeeId = idFromPath(input.employee);
   const when = dayMs(input.award_date);

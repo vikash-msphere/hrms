@@ -13,13 +13,6 @@ export async function listPayslips(deps: Deps, scope: ListScope, maxPageSize: nu
   return keysetPage(deps, schema.payslips, "payslips", where, { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getPayslip(deps: Deps, _actor: AppUser, id: string) {
-  // Access (own vs hr/payroll/super) is enforced by the middleware on payslips/<code>.
-  const row = (await deps.db.select().from(schema.payslips).where(eq(schema.payslips.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("payslip not found");
-  return row;
-}
-
 // Read the stored PDF for a payslip. Access (own vs hr/payroll/super) is enforced by the middleware on
 // payslips/<code> plus the requested verb, so the two lanes below differ only in what the caller may DO with
 // the bytes: `download` saves a copy, `preview` renders it in-app. Both scope the same way (self/dept/all).
