@@ -93,7 +93,7 @@ export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: num
   return { items: slice, nextPageToken };
 }
 
-export async function getTicket(deps: Deps, _actor: AppUser, id: string) {
+async function getTicket(deps: Deps, _actor: AppUser, id: string) {
   // Read access (own / dept / all) is enforced by the middleware on tickets/<code>.
   const row = (await deps.db.select().from(schema.tickets).where(eq(schema.tickets.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("ticket not found");

@@ -38,11 +38,6 @@ export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: numbe
   return keysetPage(deps, schema.loans, "loans", and(...conds.filter(Boolean)), { dir: "desc", max: maxPageSize, pageToken });
 }
 
-export async function getLoan(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("loan not found");
-  return row;
-}
 
 // SELF-SERVICE ONLY: a loan/advance request is always for the caller. There is no on-behalf-of path - `employee`
 // is readOnly on the wire and this forces it, so no role (HR, payroll, super) can borrow in someone else's name.
@@ -203,7 +198,7 @@ function startedBy(loan: LoanRow, periodEnd?: Date | null): boolean {
 // math in domain/loans.ts), collected only from the agreed start date and only once per calendar month. The
 // payroll build turns each into a "Loan repayment" deduction line, itself capped so net can't go negative -
 // which is also what stops a heavily docked (unpaid-leave) month from over-collecting.
-export async function dueLoanInstallments(deps: Deps, employeeId: string, period?: LoanPeriod): Promise<{ loan: LoanRow; amount: number }[]> {
+async function dueLoanInstallments(deps: Deps, employeeId: string, period?: LoanPeriod): Promise<{ loan: LoanRow; amount: number }[]> {
   const loans = await deps.db
     .select()
     .from(schema.loans)
@@ -347,12 +342,3 @@ export function loanRepaymentWrites(
   return { stmts, events };
 }
 
-export async function deleteLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.loans, "loan", "loans", id, ifMatch);
-}
-export async function restoreLoan(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.loans, "loan", "loans", id);
-}
-export async function purgeLoan(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.loans, "loan", "loans", id, ifMatch);
-}

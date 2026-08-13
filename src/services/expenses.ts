@@ -44,7 +44,7 @@ type ExpenseSettings = {
   budget_alert_thresholds?: number[]; // percentages, e.g. [80, 100]
   default_payment_method?: "bank" | "card" | "cash" | "upi" | "cheque";
 };
-export async function expenseSettings(deps: Deps): Promise<ExpenseSettings> {
+async function expenseSettings(deps: Deps): Promise<ExpenseSettings> {
   return getSettingValue<ExpenseSettings>(deps, "expenses", {});
 }
 

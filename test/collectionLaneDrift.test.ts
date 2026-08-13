@@ -32,10 +32,10 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 const PENDING = new Set([
   // step 5 - collections whose custom methods are the bulk of the file
   "accessRules", "apiKeys", "applications", "automations", "bankFormats", "boards", "candidates",
-  "documentRoutes", "expenses", "goals", "interviewFeedback", "interviews", "leaveRequests", "loans", "offers",
+  "documentRoutes", "goals", "interviewFeedback", "interviews", "leaveRequests", "offers",
   "operations", "overtimeRequests", "payrollRuns", "referrals", "reimbursements", "remoteWorkRequests",
   "requisitions", "reviewCycles", "reviewFeedback", "reviews", "roles", "sprints", "suggestions",
-  "taxDeclarations", "ticketChecklists", "tickets", "timeEntries", "transitions", "users",
+  "taxDeclarations", "ticketChecklists", "timeEntries", "transitions", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",
 ]);

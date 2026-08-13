@@ -1,16 +1,14 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
   listExpenses, getExpense, createExpense, updateExpense,
   submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense,
+  type ExpenseInput,
 } from "../services/expenses";
 import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
 import { toExpenseResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
 
 const COL = "expenses";
 const INVOICE = "invoice"; // the attachment slot for an expense's invoice/receipt
@@ -37,50 +35,53 @@ const writeSchema = z
 // PATCH allows the same fields but with amount optional (partial edit of a draft).
 const patchSchema = writeSchema.partial();
 
-export const expenses = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// Company expenses. An expense is only editable while a DRAFT and is never deleted (it is cancelled), and the
+// table has no delete_time - so the factory mounts no DELETE and no `:restore`. Both writes stay the service's
+// own: the create resolves vendor/category/budget, the update refuses anything past DRAFT.
+export const expenses = collectionRoutes<ExpenseInput>({
+  table: schema.expenses,
+  collection: COL,
+  auditName: "expense",
+  notFound: "expense not found",
+  param: "expense_id",
+  createSchema: writeSchema,
+  updateSchema: patchSchema,
+  serialize: toExpenseResource,
+  // Whether the invoice/receipt is attached lives in the attachments table, so every single-row answer (get,
+  // create, update, and the verbs) resolves it here - one lookup, in one place.
+  decorate: async (deps, _actor, rows) =>
+    Promise.all(rows.map(async (r) => ({ ...r, hasInvoice: !!(await getAttachment(deps, COL, r.uuid, INVOICE)) }))),
+  overrides: {
+    create: (deps, actor, input) => createExpense(deps, actor, input),
+    update: (deps, actor, id, patch) => updateExpense(deps, actor, id, patch),
+  },
+  list: async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listExpenses(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("department"), c.req.query("q"));
-    const user = c.get("user");
-    const withInvoice = await attachedObjectIds(c.get("deps"), COL, INVOICE); // one query for the page's invoice flags
-    return c.json({ results: items.map((r) => withAccess(toExpenseResource({ ...r, hasInvoice: withInvoice.has(r.uuid) }), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:expense_id", async (c) => {
-    const row = await getExpense(c.get("deps"), c.get("user"), c.req.param("expense_id"));
-    const hasInvoice = !!(await getAttachment(c.get("deps"), COL, row.uuid, INVOICE));
-    return c.json(withAccess(toExpenseResource({ ...row, hasInvoice }), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const row = await createExpense(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toExpenseResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .patch("/:expense_id", zValidator("json", patchSchema), async (c) => {
-    const row = await updateExpense(c.get("deps"), c.get("user"), c.req.param("expense_id"), c.req.valid("json"));
-    return c.json(withAccess(toExpenseResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  // Custom methods. The wire path is the :verb form; dispatch on the parsed verb.
-  .post("/:expense_id", async (c) => {
-    const { id, verb } = customMethod(c);
     const deps = c.get("deps");
-    const user = c.get("user");
-    const hint = (row: any) => withAccess(toExpenseResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "submit") return c.json(hint(await submitExpense(deps, user, id)));
-    if (verb === "approve") return c.json(hint(await approveExpense(deps, user, id)));
-    if (verb === "reject") return c.json(hint(await rejectExpense(deps, user, id)));
-    if (verb === "cancel") return c.json(hint(await cancelExpense(deps, user, id)));
-    if (verb === "pay") {
-      const body = await c.req.json().catch(() => ({}));
-      return c.json(hint(await payExpense(deps, user, id, body)));
-    }
-    if (verb === "upload") {
-      const bytes = new Uint8Array(await c.req.arrayBuffer());
-      await putAttachment(deps, user, { collection: COL, objectId: id, slot: INVOICE, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
-      const row = await getExpense(deps, user, id);
-      return c.json(hint({ ...row, hasInvoice: true }));
-    }
-    if (verb === "download") {
-      const { bytes, row: att } = await downloadAttachment(deps, COL, id, INVOICE);
-      return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
-    }
-    return c.notFound();
-  });
+    const { items, nextPageToken } = await listExpenses(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("department"), c.req.query("q"));
+    const withInvoice = await attachedObjectIds(deps, COL, INVOICE); // one query for the page's invoice flags
+    return { items: items.map((r) => ({ ...r, hasInvoice: withInvoice.has(r.uuid) })), nextPageToken };
+  },
+  verbs: {
+    submit: { run: (deps, user, id) => submitExpense(deps, user, id) },
+    approve: { run: (deps, user, id) => approveExpense(deps, user, id) },
+    reject: { run: (deps, user, id) => rejectExpense(deps, user, id) },
+    cancel: { run: (deps, user, id) => cancelExpense(deps, user, id) },
+    // The payment details are optional and shaped by the service, so the body is taken as sent.
+    pay: { run: async (deps, user, id, _body, c) => payExpense(deps, user, id, await c.req.json().catch(() => ({}))) },
+    // The invoice goes up as raw bytes, but the answer is the expense itself (now carrying its invoice flag).
+    upload: {
+      run: async (deps, user, id, _body, c) => {
+        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        await putAttachment(deps, user, { collection: COL, objectId: id, slot: INVOICE, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
+        return getExpense(deps, user, id);
+      },
+    },
+    download: {
+      raw: async (c, id) => {
+        const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, INVOICE);
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+      },
+    },
+  },
+});

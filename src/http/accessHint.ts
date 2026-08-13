@@ -55,10 +55,10 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "reimbursement-categories": ["update", "delete"],
   "ticket-checklists": ["update", "delete"],
   bonuses: ["award"], // award a flat bonus across a scope (company/department/individual)
-  // NOTE: `tickets` is intentionally NOT listed. Each ticket action (start/resolve/comment/toggleTodo/...) is
-  // managed by its own verb-scoped access icon (the modal's verbMode handles a verb-target directly), so the
-  // collection/row icons stay scoped to the read/write/admin level instead of ballooning into drill-in chips
-  // for every verb. Verb rules validate by name (policyValidate), not against this map.
+  // NOTE: `tickets` is not listed because it does not need to be: the route is factory-built, so the hint is
+  // derived from the verbs it actually mounts (http/collectionRoute.ts) and this table is never consulted for
+  // it. That is also how the ticket list's bulk Resolve/Close learn whether the caller may act on a row - they
+  // read those verb names out of `access.can`. Verb rules validate by name (policyValidate), not against this map.
   "bank-formats": ["update", "uploadTemplate"],
   payslips: ["preview", "download"],
   "org-documents": ["update", "delete", "download", "acknowledge"],
