@@ -9,7 +9,6 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { createTransition, terminateForOffboarding } from "./transitions";
 import { notify, managerIdOf } from "./notifications";
 
@@ -46,7 +45,9 @@ export async function listNoticePeriods(deps: Deps, scope: ListScope, maxPageSiz
   return keysetPage<typeof schema.noticePeriods.$inferSelect>(deps, schema.noticePeriods, "notice-periods", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getNoticePeriod(deps: Deps, _actor: AppUser, id: string) {
+// The read side of the collection is the factory's generic get; this stays internal because the update needs
+// the stored row first, and refuses to edit one that is in the trash (restore it before editing).
+async function getNoticePeriod(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.noticePeriods).where(eq(schema.noticePeriods.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("notice period not found");
   return row;
@@ -134,9 +135,3 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   return updated;
 }
 
-export const deleteNoticePeriod = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) =>
-  softDeleteRow(deps, actor, schema.noticePeriods, "notice period", "notice-periods", id, ifMatch);
-export const restoreNoticePeriod = (deps: Deps, actor: AppUser, id: string) =>
-  restoreRow(deps, actor, schema.noticePeriods, "notice period", "notice-periods", id);
-export const purgeNoticePeriod = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) =>
-  purgeRow(deps, actor, schema.noticePeriods, "notice period", "notice-periods", id, ifMatch);

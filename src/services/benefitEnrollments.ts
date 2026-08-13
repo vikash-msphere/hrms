@@ -5,11 +5,10 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { audit } from "../lib/audit";
+import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { has, type CrudSpec } from "./crud";
 import { notify } from "./notifications";
 
 export type BenefitEnrollmentInput = {
@@ -76,57 +75,44 @@ export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPa
   return { items: slice, nextPageToken };
 }
 
-export async function getBenefitEnrollment(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.benefitEnrollments).where(eq(schema.benefitEnrollments.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("enrollment not found");
-  return row;
-}
-
-export async function createBenefitEnrollment(deps: Deps, actor: AppUser, input: BenefitEnrollmentInput, id?: string) {
-  const employeeId = idFromPath(input.employee) ?? actor.employeeId;
-  if (!employeeId) throw invalidArgument("employee is required");
-  const planId = idFromPath(input.plan);
-  if (!planId) throw invalidArgument("plan is required");
-  if (input.effective_date && Number.isNaN(dayMs(input.effective_date))) throw invalidArgument("effective_date is invalid");
-  const row = (await deps.db.insert(schema.benefitEnrollments).values({
-    code: await allocOwnedCode(deps, schema.benefitEnrollments, schema.benefitEnrollments.employeeId, employeeId),
-    ...(id ? { uuid: id } : {}),
-    employeeId,
-    planId,
-    status: input.status === "waived" ? "waived" : "enrolled",
-    effectiveDate: input.effective_date ? new Date(dayMs(input.effective_date)) : null,
-    dependentsJson: await ownDependentIds(deps, employeeId, input.dependents),
-  }).returning())[0]!;
-  await audit(deps, actor, "benefit-enrollment.create", "benefit-enrollments", row.uuid, undefined, row);
+// An enrollment is owned by its employee (the code embeds the owner, so own/dept/all scoping works), and the
+// only thing a write really decides is which plan, which status, from when, and for which of the employee's
+// own dependents. The rest - paging, If-Match, the audit diff, soft delete/restore - is the shared lane.
+export const benefitEnrollmentSpec: CrudSpec<BenefitEnrollmentInput> = {
+  table: schema.benefitEnrollments,
+  collection: "benefit-enrollments",
+  auditName: "benefit-enrollment",
+  notFound: "enrollment not found",
+  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.benefitEnrollments.employeeId, values.employeeId as string),
+  insert: async (input, deps, actor) => {
+    const employeeId = idFromPath(input.employee) ?? actor.employeeId;
+    if (!employeeId) throw invalidArgument("employee is required");
+    const planId = idFromPath(input.plan);
+    if (!planId) throw invalidArgument("plan is required");
+    if (input.effective_date && Number.isNaN(dayMs(input.effective_date))) throw invalidArgument("effective_date is invalid");
+    return {
+      employeeId,
+      planId,
+      status: input.status === "waived" ? "waived" : "enrolled",
+      effectiveDate: input.effective_date ? new Date(dayMs(input.effective_date)) : null,
+      dependentsJson: await ownDependentIds(deps, employeeId, input.dependents),
+    };
+  },
+  patch: async (patch, row, deps) => {
+    const set: Record<string, unknown> = {};
+    if (has(patch, "status")) set.status = patch.status === "waived" ? "waived" : "enrolled";
+    if (has(patch, "effective_date")) {
+      if (patch.effective_date && Number.isNaN(dayMs(patch.effective_date))) throw invalidArgument("effective_date is invalid");
+      set.effectiveDate = patch.effective_date ? new Date(dayMs(patch.effective_date)) : null;
+    }
+    // Elected dependents are re-filtered against the ROW's employee, not the patch's - a PATCH cannot move an
+    // enrollment to someone else, so the owner is the stored one.
+    if (has(patch, "dependents")) set.dependentsJson = await ownDependentIds(deps, row.employeeId, patch.dependents);
+    return set;
+  },
   // HR enrolling someone else notifies that employee (self-enrolment is silent).
-  if (employeeId !== actor.employeeId)
-    await notify(deps, { recipient: employeeId, type: row.status === "waived" ? "benefit.waived" : "benefit.enrolled", title: row.status === "waived" ? "Benefit waived" : "Enrolled in a benefit plan", body: row.status === "waived" ? "A benefit plan was marked waived for you." : "You've been enrolled in a benefit plan.", link: "benefits", subject: `benefit-enrollments/${row.uuid}`, actorId: actor.employeeId });
-  return row;
-}
-
-export async function updateBenefitEnrollment(deps: Deps, actor: AppUser, id: string, patch: BenefitEnrollmentInput, ifMatch?: string) {
-  const row = (await deps.db.select().from(schema.benefitEnrollments).where(eq(schema.benefitEnrollments.uuid, id)).limit(1))[0];
-  if (!row || row.deleteTime) throw notFound("enrollment not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
-  const has = (k: keyof BenefitEnrollmentInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  if (has("status")) set.status = patch.status === "waived" ? "waived" : "enrolled";
-  if (has("effective_date")) {
-    if (patch.effective_date && Number.isNaN(dayMs(patch.effective_date))) throw invalidArgument("effective_date is invalid");
-    set.effectiveDate = patch.effective_date ? new Date(dayMs(patch.effective_date)) : null;
-  }
-  if (has("dependents")) set.dependentsJson = await ownDependentIds(deps, row.employeeId, patch.dependents);
-  const updated = (await deps.db.update(schema.benefitEnrollments).set(set).where(eq(schema.benefitEnrollments.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "benefit-enrollment.update", "benefit-enrollments", id, diffMeta(row, updated, set), updated);
-  return updated;
-}
-
-export async function deleteBenefitEnrollment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.benefitEnrollments, "enrollment", "benefit-enrollments", id, ifMatch);
-}
-export async function restoreBenefitEnrollment(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.benefitEnrollments, "enrollment", "benefit-enrollments", id);
-}
-export async function purgeBenefitEnrollment(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.benefitEnrollments, "enrollment", "benefit-enrollments", id, ifMatch);
-}
+  afterCreate: async (deps, actor, row) => {
+    if (row.employeeId === actor.employeeId) return;
+    await notify(deps, { recipient: row.employeeId, type: row.status === "waived" ? "benefit.waived" : "benefit.enrolled", title: row.status === "waived" ? "Benefit waived" : "Enrolled in a benefit plan", body: row.status === "waived" ? "A benefit plan was marked waived for you." : "You've been enrolled in a benefit plan.", link: "benefits", subject: `benefit-enrollments/${row.uuid}`, actorId: actor.employeeId });
+  },
+};

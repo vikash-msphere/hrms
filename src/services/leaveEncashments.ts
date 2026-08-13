@@ -67,7 +67,9 @@ export async function listEncashments(deps: Deps, scope: ListScope, maxPageSize:
   return keysetPage<typeof schema.leaveEncashments.$inferSelect>(deps, schema.leaveEncashments, "leave-encashments", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getEncashment(deps: Deps, _actor: AppUser, id: string) {
+// The row the workflow verbs act on. The read side of the collection is the factory's generic get (same
+// select, same 404); this stays internal because approve/reject/cancel all need the stored row first.
+async function getEncashment(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.leaveEncashments).where(eq(schema.leaveEncashments.uuid, id)).limit(1))[0];
   if (!row) throw notFound("leave encashment not found");
   return row;
