@@ -1,14 +1,11 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { listPositions, getPosition, changeRole } from "../services/positions";
+import { collectionRoutes } from "../http/collectionRoute";
+import { positionSpec, listPositions, changeRole } from "../services/positions";
 import { toPositionResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 
-const COL = "positions";
-
-// Effective-dated role history. POST records a promotion/transfer (closes the current row, opens a new one).
+// Effective-dated role history. POST records a promotion/transfer (closes the current row, opens a new one),
+// so the create is the service's `changeRole` rather than a generic insert. There is no PATCH and no DELETE:
+// a role change supersedes, it never edits or removes what was true before.
 const changeSchema = z
   .object({
     employee: z.string(),
@@ -20,21 +17,18 @@ const changeSchema = z
   })
   .strict();
 
-export const positions = new Hono<AppEnv>()
-  .get("/", async (c) => {
+export const positions = collectionRoutes({
+  ...positionSpec,
+  param: "position_id",
+  createSchema: changeSchema,
+  serialize: toPositionResource,
+  softDelete: false,
+  overrides: { create: (deps, actor, input) => changeRole(deps, actor, input) },
+  list: (c) => {
     // Optional ?employee=employees/<token> filter. The inbound edge (decodeWireIds) already decoded the
-    // query ref to its internal id, so just take the id segment - do NOT decode again (that fails, dropping the filter).
+    // query ref to its internal id, so just take the id segment - do NOT decode again (that fails, dropping
+    // the filter). This list is unpaged: a role history is short by nature.
     const emp = c.req.query("employee");
-    const employeeId = emp ? emp.split("/").pop()! : undefined;
-    const rows = await listPositions(c.get("deps"), c.get("scope"), employeeId);
-    const user = c.get("user");
-    return c.json({ results: rows.map((r) => withAccess(toPositionResource(r), user, COL, r.code)) });
-  })
-  .get("/:position_id", async (c) => {
-    const row = await getPosition(c.get("deps"), c.req.param("position_id"));
-    return c.json(withAccess(toPositionResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", changeSchema), async (c) => {
-    const row = await changeRole(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toPositionResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  });
+    return listPositions(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined).then((items) => ({ items, nextPageToken: undefined }));
+  },
+});

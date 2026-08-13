@@ -55,6 +55,13 @@ export type CollectionRouteSpec<I> = CrudSpec<I> & {
   serialize: (row: any, user?: AppUser) => unknown;
   /** `singular` for the lifecycle verbs' audit actions, when it differs from `auditName`. */
   lifecycleName?: string;
+  /**
+   * Set false for a collection whose rows are HISTORY: an effective-dated position or compensation row is
+   * superseded, never deleted, so it gets no DELETE and no `:restore` even though its table carries a
+   * delete_time column (that column exists for the employee-level cascade, not for a caller). Leaving this
+   * unset keeps the table's own answer - see `softDeletable` below.
+   */
+  softDelete?: false;
   publish?: boolean; // resource supports :publish/:unpublish
   publishTime?: boolean; // also stamp publish_time on publish
   /** Replace individual generic service methods, keeping the rest (a bespoke create, a bespoke get, ...). */
@@ -81,8 +88,17 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
     c.json(withAccess(serialize(row, c.get("user")) as object, c.get("user"), collection, row?.code, c.get("objectGrant")));
   // Soft delete is a property of the TABLE: an append-only collection (event-log, cron-runs) has no
   // `delete_time` column, so it gets no DELETE and no `:restore` rather than a route that writes a column
-  // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleRoute.ts).
-  const softDeletable = !!(spec.table as Record<string, unknown>).deleteTime;
+  // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleRoute.ts). `softDelete: false`
+  // additionally opts a history collection out even though its table could store the mark.
+  const softDeletable = spec.softDelete !== false && !!(spec.table as Record<string, unknown>).deleteTime;
+  // A method exists if EITHER the generic mapper or a bespoke override provides it - `positions` has no
+  // `insert` (its create is a role change that closes the previous row) but very much has a create.
+  const canCreate = !!(spec.insert || spec.overrides?.create);
+  const canUpdate = !!(spec.patch || spec.overrides?.update);
+  // A collection can own a HARD delete (an approval delegation is revoked outright - leaving a soft-deleted
+  // row would keep re-routing approvals) while having no restore and no `?force`: that is `overrides.remove`
+  // plus `softDelete: false`.
+  const canDelete = softDeletable || !!spec.overrides?.remove;
 
   const app = new Hono<AppEnv>();
 
@@ -100,21 +116,22 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   // No `insert` means the collection is not created through its own endpoint (an acknowledgement is written by
   // org-documents :acknowledge), and no `patch` means it is read-only history. Mounting nothing is the honest
   // answer: the route does not exist, rather than existing and refusing.
-  if (spec.insert && createSchema) {
+  if (canCreate && createSchema) {
     app.post("/", zValidator("json", createSchema), async (c) =>
       item(c, await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, c.req.query("id"))));
   }
-  if (spec.patch && updateSchema) {
+  if (canUpdate && updateSchema) {
     app.patch(`/:${param}`, zValidator("json", updateSchema), async (c) =>
       item(c, await svc.update(c.get("deps"), c.get("user"), itemId(c), c.req.valid("json") as I, c.req.header("If-Match"))));
   }
 
-  if (softDeletable) {
+  if (canDelete) {
     app.delete(`/:${param}`, async (c) => {
       const id = itemId(c);
       const ifMatch = c.req.header("If-Match");
-      // ?force is the hard purge (admin); the plain call is the soft delete `:restore` can undo.
-      if (c.req.query("force") === "true") await svc.purge(c.get("deps"), c.get("user"), id, ifMatch);
+      // ?force is the hard purge (admin); the plain call is the soft delete `:restore` can undo. A collection
+      // whose delete is already permanent has neither - there is nothing to escalate to.
+      if (softDeletable && c.req.query("force") === "true") await svc.purge(c.get("deps"), c.get("user"), id, ifMatch);
       else await svc.remove(c.get("deps"), c.get("user"), id, ifMatch);
       return c.body(null, 204);
     });

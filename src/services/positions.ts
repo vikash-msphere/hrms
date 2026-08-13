@@ -7,6 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
+import { crudService, type CrudSpec } from "./crud";
 
 // Effective-dated role history (designation/department/location). A promotion or transfer is a NEW row
 // effective from a chosen date; the previously-current row is closed (effective_to set). Mirrors the
@@ -31,11 +32,16 @@ export async function listPositions(deps: Deps, scope: ListScope, employeeId?: s
   return rows.sort((a, b) => +new Date(b.effectiveFrom) - +new Date(a.effectiveFrom) || b.uuid.localeCompare(a.uuid));
 }
 
-export async function getPosition(deps: Deps, id: string) {
-  const row = (await deps.db.select().from(schema.positions).where(eq(schema.positions.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("position record not found");
-  return row;
-}
+// The standard lane for this collection is list + get only: `changeRole` below is its create (see
+// routes/positions.ts, which wires it as the create override), and a history row is never edited or deleted.
+export const positionSpec: CrudSpec<PositionInput> = {
+  table: schema.positions,
+  collection: "positions",
+  auditName: "position",
+  notFound: "position record not found",
+};
+
+export const { get: getPosition } = crudService(positionSpec);
 
 // Record a role change (promotion/transfer): close the current open row at the new effective date, insert the
 // new current row, and sync the employee's current designation/department to match.

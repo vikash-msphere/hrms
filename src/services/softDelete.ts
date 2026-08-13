@@ -7,7 +7,7 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { assertNotLocked } from "./lifecycle";
+import { assertNotLocked } from "./lockGuard";
 
 // Drizzle tables are heavily generic; we treat them structurally here.
 type Table = any;

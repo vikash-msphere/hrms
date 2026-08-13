@@ -3,15 +3,16 @@
 //
 // Who may call these verbs is decided ENTIRELY by the middleware (the :enable/:disable/:lock/:unlock/
 // :publish/:unpublish grant, code-scoped). This service only performs the state transition and writes
-// audit - it makes NO access decision. `assertNotLocked` is a WORKFLOW precondition (a locked row rejects
-// edits for everyone alike, regardless of who they are), not access control, so it stays here.
+// audit - it makes NO access decision. The `locked` precondition itself lives in services/lockGuard.ts and is
+// re-exported below, so the write paths that only need to REFUSE an edit don't import this module's graph.
 import { and, eq } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { notifyMany, activeEmployeeIds } from "./notifications";
 import { emitEvent } from "./eventBus";
-import { notFound, failedPrecondition } from "../lib/errors";
+import { notFound } from "../lib/errors";
+import { assertNotLocked } from "./lockGuard";
 import { postedTitle } from "../domain/board";
 import { notifyMentions } from "./mentions";
 
@@ -27,10 +28,9 @@ async function fetchRow(deps: Deps, table: Table, id: string): Promise<Row | und
   return (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1))[0] as Row | undefined;
 }
 
-/** Throw if the row is locked (block edits/deletes until it is unlocked). Workflow precondition, not access. */
-export function assertNotLocked(row: { locked?: boolean | null }) {
-  if (row.locked) throw failedPrecondition("item is locked; unlock it before editing");
-}
+// Lives in services/lockGuard.ts (a leaf) so crud.ts / softDelete.ts can enforce it without importing this
+// module's notification + event-bus graph. Re-exported here because callers have always found it at this path.
+export { assertNotLocked };
 
 async function set(deps: Deps, table: Table, id: string, fields: Record<string, unknown>) {
   await deps.db.update(table).set({ ...fields, updatedAt: new Date() }).where(eq(table.uuid, id));

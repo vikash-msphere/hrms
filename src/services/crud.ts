@@ -16,7 +16,7 @@ import { notFound, aborted, unimplemented } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
-import { assertNotLocked } from "./lifecycle";
+import { assertNotLocked } from "./lockGuard";
 
 // Drizzle tables are heavily generic; treated structurally here, as in services/softDelete.ts.
 type Table = any;
