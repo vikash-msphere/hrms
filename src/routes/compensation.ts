@@ -1,15 +1,13 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
-import { listCompensation, getCompensation, reviseCompensation } from "../services/compensation";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
+import { listCompensation, getCompensation, reviseCompensation, type CompensationInput } from "../services/compensation";
 import { toCompensationResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 
-const COL = "compensation";
-
-// Effective-dated base pay. POST is a salary revision/increment (closes the current row, opens a new one).
-// Compensation is entered as an annual CTC; the service derives the monthly basic + Special Allowance plug.
+// Effective-dated base pay. POST is a salary revision/increment (closes the current row, opens a new one), so
+// the create is the service's `reviseCompensation`. Compensation is entered as an annual CTC; the service
+// derives the monthly basic + Special Allowance plug. Like positions: no PATCH, and no DELETE - a revision
+// supersedes, and salary history is never removed (the table's delete_time exists for the employee cascade).
 const reviseSchema = z
   .object({
     employee: z.string(),
@@ -21,21 +19,24 @@ const reviseSchema = z
   })
   .strict();
 
-export const compensation = new Hono<AppEnv>()
-  .get("/", async (c) => {
-    // Optional ?employee=employees/<token> filter. The inbound edge (decodeWireIds) already decoded the
-    // query ref to its internal id, so just take the id segment - do NOT decode again (that fails, dropping the filter).
+export const compensation = collectionRoutes<CompensationInput>({
+  table: schema.compensation,
+  collection: "compensation",
+  auditName: "compensation",
+  notFound: "compensation record not found",
+  param: "compensation_id",
+  createSchema: reviseSchema,
+  serialize: toCompensationResource,
+  softDelete: false,
+  // Both reads carry the row's pay grade (withGrades), and the create is the revision itself.
+  overrides: {
+    get: (deps, _actor, id) => getCompensation(deps, id),
+    create: (deps, actor, input) => reviseCompensation(deps, actor, input),
+  },
+  list: (c) => {
+    // Optional ?employee=employees/<token> filter. The inbound edge (decodeWireIds) already decoded the query
+    // ref to its internal id, so just take the id segment - do NOT decode again (that drops the filter).
     const emp = c.req.query("employee");
-    const employeeId = emp ? emp.split("/").pop()! : undefined;
-    const rows = await listCompensation(c.get("deps"), c.get("scope"), employeeId);
-    const user = c.get("user");
-    return c.json({ results: rows.map((r) => withAccess(toCompensationResource(r), user, COL, r.code)) });
-  })
-  .get("/:compensation_id", async (c) => {
-    const row = await getCompensation(c.get("deps"), c.req.param("compensation_id"));
-    return c.json(withAccess(toCompensationResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", reviseSchema), async (c) => {
-    const row = await reviseCompensation(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toCompensationResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  });
+    return listCompensation(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined).then((items) => ({ items, nextPageToken: undefined }));
+  },
+});
