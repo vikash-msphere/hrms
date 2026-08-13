@@ -54,7 +54,7 @@ export async function listLeaveRequests(deps: Deps, scope: ListScope, maxPageSiz
   return keysetPage(deps, schema.leaveRequests, "leave-requests", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getLeaveRequest(deps: Deps, _actor: AppUser, id: string) {
+async function getLeaveRequest(deps: Deps, _actor: AppUser, id: string) {
   // Read access (own / dept / all) is enforced by the middleware on leave-requests/<code>.
   const row = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, id)).limit(1))[0];
   if (!row) throw notFound("leave request not found");

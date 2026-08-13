@@ -1,17 +1,13 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
-  listLeaveRequests, getLeaveRequest, createLeaveRequest,
+  listLeaveRequests, createLeaveRequest,
   approveLeaveRequest, rejectLeaveRequest, cancelLeaveRequest,
+  type LeaveRequestInput,
 } from "../services/leaveRequests";
 import { toLeaveRequestResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
-
-const COL = "leave-requests";
 
 const createSchema = z
   .object({
@@ -25,29 +21,28 @@ const createSchema = z
   })
   .strict();
 
-export const leaveRequests = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// Leave requests. The create reserves the balance and the three decisions consume or release it, so a filed
+// request is never edited or deleted - it is cancelled. The table has no delete_time, so no DELETE, no
+// `:restore`, and the access hint now offers exactly approve/reject/cancel (it used to claim a phantom
+// update+delete pair from the default, for routes that have never existed here).
+export const leaveRequests = collectionRoutes<LeaveRequestInput>({
+  table: schema.leaveRequests,
+  collection: "leave-requests",
+  auditName: "leave_request",
+  notFound: "leave request not found",
+  param: "leave_request_id",
+  createSchema,
+  serialize: toLeaveRequestResource,
+  overrides: {
+    create: (deps, actor, input) => createLeaveRequest(deps, actor, input),
+  },
+  list: (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listLeaveRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
-    const user = c.get("user");
-    return c.json({ results: items.map((r) => withAccess(toLeaveRequestResource(r), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:leave_request_id", async (c) => {
-    const row = await getLeaveRequest(c.get("deps"), c.get("user"), c.req.param("leave_request_id"));
-    return c.json(withAccess(toLeaveRequestResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", createSchema), async (c) => {
-    const row = await createLeaveRequest(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toLeaveRequestResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  // Custom methods. The wire path is the :verb form; dispatch on the parsed verb.
-  .post("/:leave_request_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    const deps = c.get("deps");
-    const user = c.get("user");
-    const hint = (row: { code: string | null } | undefined) => withAccess(toLeaveRequestResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "approve") return c.json(hint(await approveLeaveRequest(deps, user, id)));
-    if (verb === "reject") return c.json(hint(await rejectLeaveRequest(deps, user, id)));
-    if (verb === "cancel") return c.json(hint(await cancelLeaveRequest(deps, user, id)));
-    return c.notFound();
-  });
+    return listLeaveRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
+  },
+  verbs: {
+    approve: { run: (deps, user, id) => approveLeaveRequest(deps, user, id) },
+    reject: { run: (deps, user, id) => rejectLeaveRequest(deps, user, id) },
+    cancel: { run: (deps, user, id) => cancelLeaveRequest(deps, user, id) },
+  },
+});

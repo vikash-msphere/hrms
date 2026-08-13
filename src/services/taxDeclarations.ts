@@ -9,7 +9,6 @@ import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { notify } from "./notifications";
 
 type Status = typeof schema.taxDeclarations.$inferSelect.status;
@@ -109,12 +108,3 @@ export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   return updated;
 }
 
-export async function deleteTaxDeclaration(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.taxDeclarations, "tax-declaration", "tax-declarations", id, ifMatch);
-}
-export async function restoreTaxDeclaration(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.taxDeclarations, "tax-declaration", "tax-declarations", id);
-}
-export async function purgeTaxDeclaration(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.taxDeclarations, "tax-declaration", "tax-declarations", id, ifMatch);
-}

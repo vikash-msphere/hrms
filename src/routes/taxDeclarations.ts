@@ -1,19 +1,18 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
   listTaxDeclarations, getTaxDeclaration, createTaxDeclaration, updateTaxDeclaration,
-  verifyTaxDeclaration, rejectTaxDeclaration, deleteTaxDeclaration, restoreTaxDeclaration, purgeTaxDeclaration,
+  verifyTaxDeclaration, rejectTaxDeclaration,
+  type TaxDeclarationInput,
 } from "../services/taxDeclarations";
 import { putAttachment, downloadAttachment, getAttachment, attachedObjectIds } from "../services/attachments";
 import { toTaxDeclarationResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
 
 const COL = "tax-declarations";
 const PROOF = "proof"; // attachment slot for a declaration's proof document
+
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
   financial_year: z.string().optional(),
@@ -22,55 +21,47 @@ const writeSchema = z.object({
   declared_amount: z.number().optional(),
   note: z.string().nullable().optional(),
 }).strict();
+const verifySchema = z.object({ verified_amount: z.number().nullable().optional() }).strict();
 
-export const taxDeclarations = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// Investment declarations. Only a VERIFIED amount reduces withholding, so :verify and :reject are the whole
+// point; the employee edits their own declaration until then. Delete/restore are the shared soft-delete lane.
+export const taxDeclarations = collectionRoutes<TaxDeclarationInput>({
+  table: schema.taxDeclarations,
+  collection: COL,
+  auditName: "tax-declaration",
+  notFound: "declaration not found",
+  param: "decl_id",
+  writeSchema,
+  serialize: toTaxDeclarationResource,
+  // Whether the proof document is attached lives in the attachments table.
+  decorate: async (deps, _actor, rows) =>
+    Promise.all(rows.map(async (r) => ({ ...r, hasProof: !!(await getAttachment(deps, COL, r.uuid, PROOF)) }))),
+  overrides: {
+    create: (deps, actor, input, id) => createTaxDeclaration(deps, actor, input, id),
+    update: (deps, actor, id, patch, ifMatch) => updateTaxDeclaration(deps, actor, id, patch, ifMatch),
+  },
+  list: async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listTaxDeclarations(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), c.req.query("show_deleted") === "true");
-    const user = c.get("user");
-    const withProof = await attachedObjectIds(c.get("deps"), COL, PROOF);
-    return c.json({ results: items.map((r) => withAccess(toTaxDeclarationResource({ ...r, hasProof: withProof.has(r.uuid) }), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:decl_id", async (c) => {
-    const row = await getTaxDeclaration(c.get("deps"), c.get("user"), c.req.param("decl_id")!);
-    const hasProof = !!(await getAttachment(c.get("deps"), COL, row.uuid, PROOF));
-    return c.json(withAccess(toTaxDeclarationResource({ ...row, hasProof }), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", writeSchema), async (c) => {
-    const row = await createTaxDeclaration(c.get("deps"), c.get("user"), c.req.valid("json"), c.req.query("id"));
-    return c.json(withAccess(toTaxDeclarationResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .patch("/:decl_id", zValidator("json", writeSchema), async (c) => {
-    const row = await updateTaxDeclaration(c.get("deps"), c.get("user"), c.req.param("decl_id")!, c.req.valid("json"), c.req.header("If-Match"));
-    return c.json(withAccess(toTaxDeclarationResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .delete("/:decl_id", async (c) => {
-    const id = c.req.param("decl_id")!;
-    const ifMatch = c.req.header("If-Match");
-    if (c.req.query("force") === "true") await purgeTaxDeclaration(c.get("deps"), c.get("user"), id, ifMatch);
-    else await deleteTaxDeclaration(c.get("deps"), c.get("user"), id, ifMatch);
-    return c.body(null, 204);
-  })
-  .post("/:decl_id", async (c) => {
-    const { id, verb } = customMethod(c);
     const deps = c.get("deps");
-    const user = c.get("user");
-    const hint = (row: any) => withAccess(toTaxDeclarationResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "verify") {
-      const { verified_amount } = z.object({ verified_amount: z.number().nullable().optional() }).strict().parse(await c.req.json().catch(() => ({})));
-      return c.json(hint(await verifyTaxDeclaration(deps, user, id, verified_amount)));
-    }
-    if (verb === "reject") return c.json(hint(await rejectTaxDeclaration(deps, user, id)));
-    if (verb === "upload") {
-      const bytes = new Uint8Array(await c.req.arrayBuffer());
-      await putAttachment(deps, user, { collection: COL, objectId: id, slot: PROOF, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
-      const row = await getTaxDeclaration(deps, user, id);
-      return c.json(hint({ ...row, hasProof: true }));
-    }
-    if (verb === "download") {
-      const { bytes, row: att } = await downloadAttachment(deps, COL, id, PROOF);
-      return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
-    }
-    if (verb === "restore") return c.json(hint(await restoreTaxDeclaration(deps, user, id)));
-    return c.notFound();
-  });
+    const { items, nextPageToken } = await listTaxDeclarations(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), c.req.query("show_deleted") === "true");
+    const withProof = await attachedObjectIds(deps, COL, PROOF);
+    return { items: items.map((r) => ({ ...r, hasProof: withProof.has(r.uuid) })), nextPageToken };
+  },
+  verbs: {
+    verify: { schema: verifySchema, run: (deps, user, id, body) => verifyTaxDeclaration(deps, user, id, body.verified_amount) },
+    reject: { run: (deps, user, id) => rejectTaxDeclaration(deps, user, id) },
+    upload: {
+      run: async (deps, user, id, _body, c) => {
+        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        await putAttachment(deps, user, { collection: COL, objectId: id, slot: PROOF, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
+        return getTaxDeclaration(deps, user, id);
+      },
+    },
+    download: {
+      raw: async (c, id) => {
+        const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, PROOF);
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+      },
+    },
+  },
+});

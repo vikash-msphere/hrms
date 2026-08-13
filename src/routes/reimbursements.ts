@@ -1,16 +1,14 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
   listReimbursements, getReimbursement, createReimbursement,
   approveReimbursement, rejectReimbursement, cancelReimbursement, payReimbursement,
+  type ReimbursementInput,
 } from "../services/reimbursements";
 import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
 import { toReimbursementResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
 
 const COL = "reimbursements";
 const RECEIPT = "receipt"; // the attachment slot for a claim's receipt
@@ -25,42 +23,47 @@ const createSchema = z
   })
   .strict();
 
-export const reimbursements = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// Employee expense claims. A filed claim is answered, never edited or deleted (it is cancelled), and the table
+// has no delete_time - so list, get, create and the six verbs are the whole surface.
+export const reimbursements = collectionRoutes<ReimbursementInput>({
+  table: schema.reimbursements,
+  collection: COL,
+  auditName: "reimbursement",
+  notFound: "reimbursement not found",
+  param: "reimbursement_id",
+  createSchema,
+  serialize: toReimbursementResource,
+  // Whether the receipt is attached lives in the attachments table, so every single-row answer resolves it here.
+  decorate: async (deps, _actor, rows) =>
+    Promise.all(rows.map(async (r) => ({ ...r, hasReceipt: !!(await getAttachment(deps, COL, r.uuid, RECEIPT)) }))),
+  overrides: {
+    create: (deps, actor, input) => createReimbursement(deps, actor, input),
+  },
+  list: async (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listReimbursements(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
-    const user = c.get("user");
-    const withReceipt = await attachedObjectIds(c.get("deps"), COL, RECEIPT); // one query for the page's receipt flags
-    return c.json({ results: items.map((r) => withAccess(toReimbursementResource({ ...r, hasReceipt: withReceipt.has(r.uuid) }), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:reimbursement_id", async (c) => {
-    const row = await getReimbursement(c.get("deps"), c.get("user"), c.req.param("reimbursement_id"));
-    const hasReceipt = !!(await getAttachment(c.get("deps"), COL, row.uuid, RECEIPT));
-    return c.json(withAccess(toReimbursementResource({ ...row, hasReceipt }), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", createSchema), async (c) => {
-    const row = await createReimbursement(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toReimbursementResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  // Custom methods. The wire path is the :verb form; dispatch on the parsed verb.
-  .post("/:reimbursement_id", async (c) => {
-    const { id, verb } = customMethod(c);
     const deps = c.get("deps");
-    const user = c.get("user");
-    const hint = (row: any) => withAccess(toReimbursementResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "approve") return c.json(hint(await approveReimbursement(deps, user, id)));
-    if (verb === "reject") return c.json(hint(await rejectReimbursement(deps, user, id)));
-    if (verb === "cancel") return c.json(hint(await cancelReimbursement(deps, user, id)));
-    if (verb === "pay") return c.json(hint(await payReimbursement(deps, user, id)));
-    if (verb === "upload") {
-      const bytes = new Uint8Array(await c.req.arrayBuffer());
-      await putAttachment(deps, user, { collection: COL, objectId: id, slot: RECEIPT, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
-      const row = await getReimbursement(deps, user, id);
-      return c.json(hint({ ...row, hasReceipt: true }));
-    }
-    if (verb === "download") {
-      const { bytes, row: att } = await downloadAttachment(deps, COL, id, RECEIPT);
-      return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
-    }
-    return c.notFound();
-  });
+    const { items, nextPageToken } = await listReimbursements(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
+    const withReceipt = await attachedObjectIds(deps, COL, RECEIPT); // one query for the page's receipt flags
+    return { items: items.map((r) => ({ ...r, hasReceipt: withReceipt.has(r.uuid) })), nextPageToken };
+  },
+  verbs: {
+    approve: { run: (deps, user, id) => approveReimbursement(deps, user, id) },
+    reject: { run: (deps, user, id) => rejectReimbursement(deps, user, id) },
+    cancel: { run: (deps, user, id) => cancelReimbursement(deps, user, id) },
+    pay: { run: (deps, user, id) => payReimbursement(deps, user, id) },
+    // The receipt goes up as raw bytes; the answer is the claim itself, now carrying its receipt flag.
+    upload: {
+      run: async (deps, user, id, _body, c) => {
+        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        await putAttachment(deps, user, { collection: COL, objectId: id, slot: RECEIPT, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
+        return getReimbursement(deps, user, id);
+      },
+    },
+    download: {
+      raw: async (c, id) => {
+        const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, RECEIPT);
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+      },
+    },
+  },
+});
