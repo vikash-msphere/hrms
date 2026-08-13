@@ -8,7 +8,6 @@ import {
   type ReviewCycleInput,
 } from "../services/reviewCycles";
 import { toReviewCycleResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   name: z.string().min(1).optional(),
@@ -44,11 +43,10 @@ export const reviewCycles = collectionRoutes<ReviewCycleInput>({
     // A hard purge tears the cycle's children down bottom-up: 360 feedback, then the reviews, then the cycle.
     purge: (deps, actor, id, ifMatch) => purgeReviewCycle(deps, actor, id, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
     // This list scopes by the caller (a cycle is visible to whoever holds a review in it), not by a code filter.
-    const { items, nextPageToken } = await listReviewCycles(deps, c.get("user"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listReviewCycles(deps, c.get("user"), page.maxPageSize, page.pageToken, page.showDeleted);
     return { items: await withCounts(deps, items), nextPageToken };
   },
   verbs: {

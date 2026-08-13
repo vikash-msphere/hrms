@@ -7,7 +7,6 @@ import {
   type LeaveRequestInput,
 } from "../services/leaveRequests";
 import { toLeaveRequestResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const createSchema = z
   .object({
@@ -36,10 +35,7 @@ export const leaveRequests = collectionRoutes<LeaveRequestInput>({
   overrides: {
     create: (deps, actor, input) => createLeaveRequest(deps, actor, input),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listLeaveRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
-  },
+  list: (c, page) => listLeaveRequests(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
   verbs: {
     approve: { run: (deps, user, id) => approveLeaveRequest(deps, user, id) },
     reject: { run: (deps, user, id) => rejectLeaveRequest(deps, user, id) },

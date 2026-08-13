@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { shiftAssignmentSpec, listShiftAssignments, type ShiftAssignmentInput } from "../services/shiftAssignments";
 import { toShiftAssignmentResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -18,8 +17,5 @@ export const shiftAssignments = collectionRoutes<ShiftAssignmentInput>({
   param: "assignment_id",
   writeSchema,
   serialize: toShiftAssignmentResource,
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listShiftAssignments(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("from"), c.req.query("to"), c.req.query("show_deleted") === "true");
-  },
+  list: (c, page) => listShiftAssignments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), page.showDeleted),
 });

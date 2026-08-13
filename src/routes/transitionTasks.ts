@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listTransitionTasks, getTransitionTask, completeTransitionTask, reopenTransitionTask, uploadTransitionTaskDocument } from "../services/transitionTasks";
 import { toTransitionTaskResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // Onboarding / offboarding checklist items. A task is created by its transition (appendTask) and closed by a
 // verb, never by a POST or PATCH here, and never deleted - so the standard lane is list + get only.
@@ -15,12 +14,12 @@ export const transitionTasks = collectionRoutes({
   param: "task_id",
   serialize: toTransitionTaskResource,
   softDelete: false,
-  list: (c) =>
+  list: (c, page) =>
     listTransitionTasks(
       c.get("deps"),
       c.get("scope"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
+      page.maxPageSize,
+      page.pageToken,
       c.req.query("status"),
       c.req.query("transition"),
     ),

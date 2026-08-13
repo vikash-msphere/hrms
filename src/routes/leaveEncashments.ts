@@ -7,7 +7,6 @@ import {
   type EncashmentInput,
 } from "../services/leaveEncashments";
 import { toLeaveEncashmentResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // HR-driven only (gated by grants: only hr_admin holds write). Payout is always via payroll, so there is no
 // :pay verb - approved rows are swept into the next run.
@@ -34,11 +33,10 @@ export const leaveEncashments = collectionRoutes<EncashmentInput>({
     // The create is the eligibility check + pricing (services/leaveEncashments.ts), audited as `.compute`.
     create: (deps, actor, input) => computeAndStoreEncashment(deps, actor, input),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     // The inbound edge (decodeWireIds) already decoded the query ref to its internal id; just take the id.
     const emp = c.req.query("employee");
-    return listEncashments(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), emp ? emp.split("/").pop()! : undefined);
+    return listEncashments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), emp ? emp.split("/").pop()! : undefined);
   },
   verbs: {
     approve: { run: (deps, user, id) => approveEncashment(deps, user, id) },

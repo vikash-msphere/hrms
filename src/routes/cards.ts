@@ -7,7 +7,6 @@ import {
   type CardInput,
 } from "../services/cards";
 import { toCardResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 import { CARD_PRIORITIES } from "../domain/boards";
 const priorityEnum = z.enum(CARD_PRIORITIES);
 
@@ -75,10 +74,9 @@ export const cards = collectionRoutes<CardInput>({
     restore: (deps, actor, id) => restoreCard(deps, actor, id),
     purge: (deps, actor, id, ifMatch) => purgeCard(deps, actor, id, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     const board = c.req.query("board");
-    return listCards(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), board ? board.split("/").pop() : undefined, c.req.query("show_deleted") === "true");
+    return listCards(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, board ? board.split("/").pop() : undefined, page.showDeleted);
   },
   verbs: {
     move: {

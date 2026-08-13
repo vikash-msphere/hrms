@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { approvalDelegationSpec, listApprovalDelegations, deleteApprovalDelegation } from "../services/approvalDelegations";
 import { toApprovalDelegationResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   delegator: z.string().nullable().optional(),
@@ -20,12 +19,12 @@ export const approvalDelegations = collectionRoutes({
   // Revoking is permanent (see the service): no soft-delete mark, so no `:restore` and no `?force`.
   softDelete: false,
   overrides: { remove: deleteApprovalDelegation },
-  list: (c) =>
+  list: (c, page) =>
     listApprovalDelegations(
       c.get("deps"),
       c.get("scope"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
+      page.maxPageSize,
+      page.pageToken,
       c.req.query("employee"),
     ),
 });

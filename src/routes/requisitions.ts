@@ -4,7 +4,6 @@ import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listRequisitions, createRequisition, updateRequisition, applicantCountsByRequisition, type RequisitionInput } from "../services/ats";
 import { toRequisitionResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z
   .object({
@@ -40,10 +39,9 @@ export const requisitions = collectionRoutes<RequisitionInput>({
     create: (deps, actor, input, id) => createRequisition(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateRequisition(deps, actor, id, patch, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listRequisitions(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("status"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listRequisitions(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted);
     return { items: await withCounts(deps, items), nextPageToken };
   },
 });

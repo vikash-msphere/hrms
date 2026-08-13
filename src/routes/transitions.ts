@@ -8,7 +8,6 @@ import {
   type TransitionInput,
 } from "../services/transitions";
 import { toTransitionResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -51,10 +50,9 @@ export const transitions = collectionRoutes<TransitionInput>({
     // A hard purge has to take the transition's tasks with it - they carry the FK.
     purge: (deps, actor, id, ifMatch) => purgeTransition(deps, actor, id, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listTransitions(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("kind"), c.req.query("state"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listTransitions(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("kind"), c.req.query("state"), page.showDeleted);
     return { items: await withTasks(deps, items), nextPageToken };
   },
   verbs: {

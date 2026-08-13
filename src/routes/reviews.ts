@@ -5,7 +5,6 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { listReviews, submitSelf, submitManager, acknowledgeReview, skipReviewStage, nudgeReview, renderReviewPdf } from "../services/reviews";
 import { nominateFeedback, feedbackForReviews } from "../services/reviewFeedback";
 import { toReviewResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 type Feedback = typeof schema.reviewFeedback.$inferSelect;
 
@@ -52,10 +51,9 @@ export const reviews = collectionRoutes({
     else row._feedback = undefined; // employee, not yet shared: omit
     return toReviewResource(row);
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listReviews(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("cycle"), c.req.query("state"));
+    const { items, nextPageToken } = await listReviews(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("cycle"), c.req.query("state"));
     return { items: await withFeedback(deps, items), nextPageToken };
   },
   decorate: (deps, _actor, rows) => withFeedback(deps, rows),

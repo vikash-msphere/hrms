@@ -7,7 +7,6 @@ import {
   type LoanInput,
 } from "../services/loans";
 import { toLoanResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -35,10 +34,7 @@ export const loans = collectionRoutes<LoanInput>({
     create: (deps, actor, input, id) => createLoan(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateLoan(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listLoans(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("status"), c.req.query("show_deleted") === "true");
-  },
+  list: (c, page) => listLoans(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("status"), page.showDeleted),
   verbs: {
     approve: { run: (deps, user, id) => approveLoan(deps, user, id) },
     reject: { run: (deps, user, id) => rejectLoan(deps, user, id) },

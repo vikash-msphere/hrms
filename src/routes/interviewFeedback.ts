@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listInterviewFeedback, createInterviewFeedback, updateInterviewFeedback, type FeedbackInput } from "../services/ats";
 import { toInterviewFeedbackResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z
   .object({
@@ -31,11 +30,10 @@ export const interviewFeedback = collectionRoutes<FeedbackInput>({
     create: (deps, actor, input, id) => createInterviewFeedback(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateInterviewFeedback(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listInterviewFeedback(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), {
+  list: (c, page) => {
+    return listInterviewFeedback(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       interview: c.req.query("interview"),
-      showDeleted: c.req.query("show_deleted") === "true",
+      showDeleted: page.showDeleted,
     });
   },
 });

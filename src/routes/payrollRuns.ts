@@ -8,7 +8,6 @@ import { idFromPath } from "../services/documentsCommon";
 import { buildBankFile } from "../services/bankFile";
 import { buildStatutoryReport, buildPfEcr } from "../services/statutoryReport";
 import { toPayrollRunResource, toOperationResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 import { invalidArgument } from "../lib/errors";
 import type { RunState } from "../domain/payroll";
 
@@ -33,10 +32,7 @@ const runs = collectionRoutes<{ pay_period: string }>({
     create: (deps, actor, input) => createRun(deps, actor, input.pay_period),
     remove: (deps, actor, id, ifMatch) => deleteRun(deps, actor, id, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listRuns(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"));
-  },
+  list: (c, page) => listRuns(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken),
   verbs: {
     build: {
       run: async (deps, user, id, _body, c) => {

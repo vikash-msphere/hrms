@@ -375,6 +375,16 @@ describe("spec dimensions", () => {
     expect(holidays.results[0].access.can).toEqual(expect.arrayContaining(["update", "delete", "restore", "disable", "lock"]));
   });
 
+  it("hands a route-level list the paging it already resolved, rather than each hook re-deriving it", async () => {
+    let saw: unknown;
+    const call = mount({ ...holidaySpec, param: "id", list: async (_c, page) => { saw = page; return { items: [] }; } });
+    await call(`${COLLECTION}?max_page_size=500&page_token=abc&show_deleted=true`);
+    // 500 clamped to the 100-row cap, the cursor as sent, and the flag already read as a boolean.
+    expect(saw).toEqual({ maxPageSize: 100, pageToken: "abc", showDeleted: true });
+    await call(COLLECTION);
+    expect(saw).toEqual({ maxPageSize: 50, pageToken: undefined, showDeleted: false });
+  });
+
   it("binds the caller's list scope, and answers nothing when the request was never scoped", async () => {
     await deps.db.insert(schema.holidays).values({ uuid: genId(), code: "h-scope", name: "Onam", date: new Date("2099-09-01") });
     const spec = { ...holidaySpec, param: "id" };

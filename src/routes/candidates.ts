@@ -4,7 +4,6 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { listCandidates, getCandidate, createCandidate, updateCandidate, type CandidateInput } from "../services/ats";
 import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
 import { toCandidateResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const COL = "candidates";
 const RESUME = "resume"; // the attachment slot for a candidate's resume
@@ -37,10 +36,9 @@ export const candidates = collectionRoutes<CandidateInput>({
     create: (deps, actor, input, id) => createCandidate(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateCandidate(deps, actor, id, patch, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listCandidates(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listCandidates(deps, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted);
     const withResume = await attachedObjectIds(deps, COL, RESUME);
     return { items: items.map((r) => ({ ...r, hasResume: withResume.has(r.uuid) })), nextPageToken };
   },

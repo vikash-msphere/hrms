@@ -5,7 +5,6 @@ import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listNotifications, getNotification, patchNotification, markAllRead } from "../services/notifications";
 import { toNotificationResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // Recipient-driven state on a notification (rows are emitted server-side; content is not editable). `read`
 // toggles the read flag; `snooze_until_time` (ISO, or null to clear) hides it until a later time; `dismissed`
@@ -42,9 +41,9 @@ export const notifications = collectionRoutes<NotificationPatch>({
         ifMatch,
       ),
   },
-  list: async (c) => {
-    const res = await listNotifications(c.get("deps"), c.get("scope"), clampPageSize(Number(c.req.query("max_page_size")) || undefined), {
-      pageToken: c.req.query("page_token"),
+  list: async (c, page) => {
+    const res = await listNotifications(c.get("deps"), c.get("scope"), page.maxPageSize, {
+      pageToken: page.pageToken,
       unread: c.req.query("unread") === "true",
       snoozed: c.req.query("snoozed") === "true",
     });

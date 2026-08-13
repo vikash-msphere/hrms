@@ -7,7 +7,6 @@ import {
   type RegularizationInput,
 } from "../services/attendanceRegularizations";
 import { toAttendanceRegularizationResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const createSchema = z
   .object({
@@ -32,10 +31,9 @@ export const attendanceRegularizations = collectionRoutes<RegularizationInput>({
   overrides: {
     create: (deps, actor, input) => createRegularization(deps, actor, input),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     // Row visibility was decided in middleware (scopeFor over the grant); `?state` narrows it further.
-    return listRegularizations(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"));
+    return listRegularizations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"));
   },
   verbs: {
     approve: { run: (deps, user, id) => approveRegularization(deps, user, id) },

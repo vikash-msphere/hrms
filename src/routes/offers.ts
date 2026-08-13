@@ -7,7 +7,6 @@ import {
   type OfferInput,
 } from "../services/ats";
 import { toOfferResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z
   .object({
@@ -35,12 +34,11 @@ export const offers = collectionRoutes<OfferInput>({
     create: (deps, actor, input, id) => createOffer(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateOffer(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listOffers(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), {
+  list: (c, page) => {
+    return listOffers(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       application: c.req.query("application"),
       status: c.req.query("status"),
-      showDeleted: c.req.query("show_deleted") === "true",
+      showDeleted: page.showDeleted,
     });
   },
   verbs: {

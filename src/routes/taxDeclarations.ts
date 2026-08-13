@@ -8,7 +8,6 @@ import {
 } from "../services/taxDeclarations";
 import { putAttachment, downloadAttachment, getAttachment, attachedObjectIds } from "../services/attachments";
 import { toTaxDeclarationResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const COL = "tax-declarations";
 const PROOF = "proof"; // attachment slot for a declaration's proof document
@@ -40,10 +39,9 @@ export const taxDeclarations = collectionRoutes<TaxDeclarationInput>({
     create: (deps, actor, input, id) => createTaxDeclaration(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateTaxDeclaration(deps, actor, id, patch, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listTaxDeclarations(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listTaxDeclarations(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), page.showDeleted);
     const withProof = await attachedObjectIds(deps, COL, PROOF);
     return { items: items.map((r) => ({ ...r, hasProof: withProof.has(r.uuid) })), nextPageToken };
   },

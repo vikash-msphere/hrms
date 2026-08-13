@@ -4,7 +4,6 @@ import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listBoards, createBoard, updateBoard, configureBoard, boardMetrics, cardCountsFor, purgeBoard, type BoardInput } from "../services/boards";
 import { toBoardResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const modeEnum = z.enum(["kanban", "scrum"]);
 const createSchema = z.object({
@@ -59,11 +58,10 @@ export const boards = collectionRoutes<BoardInput>({
     // A hard purge tears the board's children down bottom-up (movements, then cards) before the row itself.
     purge: (deps, actor, id, ifMatch) => purgeBoard(deps, actor, id, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
     // Board visibility follows membership and department, so the list scopes by the caller.
-    const { items, nextPageToken } = await listBoards(deps, c.get("user"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listBoards(deps, c.get("user"), page.maxPageSize, page.pageToken, page.showDeleted);
     return { items: await withCounts(deps, items), nextPageToken };
   },
   verbs: {

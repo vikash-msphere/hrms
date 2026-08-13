@@ -19,7 +19,6 @@ import { identityDocSlot } from "../services/identityDetails";
 import { toEmployeeResource } from "../http/serialize";
 import { redactIdentity, redactFlat, deniedFieldKeys } from "../http/fieldAccess";
 import { invalidArgument, forbidden } from "../lib/errors";
-import { clampPageSize } from "../http/pagination";
 import { actorCan } from "../domain/access";
 
 const COL = "employees";
@@ -93,10 +92,7 @@ const records = collectionRoutes<EmployeeWrite>({
     create: (deps, actor, input, id) => createEmployee(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateEmployee(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listEmployees(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true", c.req.query("q"));
-  },
+  list: (c, page) => listEmployees(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q")),
   verbs: {
     // Profile photo: media + clear (no standard equivalent for a binary upload/download).
     getPhoto: { raw: async (c, id) => c.body(await getPhoto(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },

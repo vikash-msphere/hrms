@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listSprints, createSprint, updateSprint, activateSprint, completeSprint, purgeSprint, type SprintInput } from "../services/sprints";
 import { toSprintResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const createSchema = z.object({
   board: z.string().min(1),
@@ -35,11 +34,10 @@ export const sprints = collectionRoutes<SprintInput>({
     // A hard purge has to detach the sprint's cards first - they carry the FK.
     purge: (deps, actor, id, ifMatch) => purgeSprint(deps, actor, id, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     // A sprint is visible through its board, so the list scopes by the caller rather than by a code filter.
     const board = c.req.query("board");
-    return listSprints(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"), board ? board.split("/").pop() : undefined, c.req.query("show_deleted") === "true");
+    return listSprints(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken, board ? board.split("/").pop() : undefined, page.showDeleted);
   },
   verbs: {
     activate: { run: (deps, user, id) => activateSprint(deps, user, id) },

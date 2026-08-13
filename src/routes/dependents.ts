@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { dependentSpec, listDependents } from "../services/dependents";
 import { toDependentResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -16,13 +15,13 @@ export const dependents = collectionRoutes({
   param: "dependent_id",
   writeSchema,
   serialize: toDependentResource,
-  list: (c) =>
+  list: (c, page) =>
     listDependents(
       c.get("deps"),
       c.get("scope"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
+      page.maxPageSize,
+      page.pageToken,
       c.req.query("employee"),
-      c.req.query("show_deleted") === "true",
+      page.showDeleted,
     ),
 });

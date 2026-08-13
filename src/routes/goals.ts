@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listGoals, createGoal, updateGoal, updateGoalProgress, type GoalInput } from "../services/goals";
 import { toGoalResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const statusEnum = z.enum(["not_started", "in_progress", "completed", "cancelled"]);
 const createSchema = z
@@ -37,10 +36,7 @@ export const goals = collectionRoutes<GoalInput>({
     create: (deps, actor, input, id) => createGoal(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateGoal(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listGoals(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("status"), c.req.query("show_deleted") === "true");
-  },
+  list: (c, page) => listGoals(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted),
   verbs: {
     updateProgress: { schema: progressSchema, run: (deps, user, id, body) => updateGoalProgress(deps, user, id, body.progress, body.status, body.note) },
   },

@@ -28,14 +28,15 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1223 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1224 tests across 105 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
 
-The lane itself is not finished: it still has one copy-pasted block of its own in the 59 route-level list hooks,
-and derived data is computed twice in the 13 collections that declare both `list` and `decorate`. Track A under
+The lane itself is not finished: derived data is still computed twice in the 13 collections that declare both
+`list` and `decorate`, a collection's own verb is still shadowed by the shared lifecycle verb of the same name,
+the spec is not typed against its table, and the access hint is computed after serializing. Track A under
 "Remaining work" clears them; each is one fix now instead of forty.
 
 ### The spec, as it stands
@@ -74,6 +75,10 @@ Behaviours worth knowing before converting anything:
   narrowed to `dept` or `own` gets NO rows - fail closed. `collectionLaneDrift.test.ts` asserts every seeded
   role reads all 15 of them org-wide, so narrowing one in `domain/grants.ts` fails there rather than emptying a
   dropdown in the SPA.
+- A route-level `list(c, page)` is HANDED the resolved paging (`maxPageSize` clamped to the 100-row cap,
+  `pageToken`, `showDeleted`); it does not re-read the query string for them. It still reads its own filters
+  (`?employee`, `?state`, `?q`) off the context. Five lists are unpaged by nature (positions, compensation,
+  assets, bonuses, settlements) and simply ignore the argument.
 - `scope.seeRestricted` (state visibility) is still bound by hand in the services that have it. Only
   `announcements` carries a `STATE_VISIBILITY` rule and it is hand-rolled, so the generic list has nothing to
   honor yet; when a factory collection gets a state rule, the generic list must bind it.
@@ -99,21 +104,13 @@ Two tracks. **A** hardens the lane itself: the generic path still carries defect
 because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
 hand-rolled, three of which only become convertible after a step in A.
 
-Order matters: A3 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
+Order matters: A4 to A7 first, because B1 and B2 depend on A7 and A5, and because every A step changes the lane
 under all 74 converted collections, which is cheapest while the conversion is fresh.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track A - fix the lane
-
-**A3. Hand the resolved paging to `list(c)`.** 59 of the 74 converted files open their list hook with the same
-three lines (`clampPageSize(Number(c.req.query("max_page_size")) || undefined)`, `page_token`, `show_deleted`) -
-124 `clampPageSize` call sites across routes. The factory already computes all three for the generic path.
-Change the hook to `list(c, page)` where `page = {maxPageSize, pageToken, showDeleted}` and strip the
-duplicated lines. This is the last copy-pasted block in the lane, and copy-paste in exactly this position is
-what produced the defect class the conversion set out to kill. It is a signature change, not a 16th knob, so
-the frozen-spec policy stands.
 
 **A4. One implementation of derived data per collection.** 13 collections declare BOTH `list` and `decorate`
 (candidates, boards, employees, expenses, payroll-runs, reimbursements, review-cycles, reviews, referrals,

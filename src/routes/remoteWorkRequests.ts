@@ -7,7 +7,6 @@ import {
   type RemoteWorkInput,
 } from "../services/remoteWorkRequests";
 import { toRemoteWorkRequestResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const createSchema = z
   .object({
@@ -37,10 +36,7 @@ export const remoteWorkRequests = collectionRoutes<RemoteWorkInput>({
   overrides: {
     create: (deps, actor, input) => createRemoteWorkRequest(deps, actor, input),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listRemoteWorkRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
-  },
+  list: (c, page) => listRemoteWorkRequests(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c)) },
     reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c)) },

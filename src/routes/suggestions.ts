@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
 import { toSuggestionResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 import { invalidArgument } from "../lib/errors";
 
 const writeSchema = z
@@ -34,13 +33,12 @@ export const suggestions = collectionRoutes<SuggestionInput>({
     // A hard purge has to take the suggestion's votes with it - they are rows in another table.
     purge: (deps, actor, id, ifMatch) => purgeSuggestion(deps, actor, id, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listSuggestions(c.get("deps"), c.get("scope"), maxPageSize, {
-      pageToken: c.req.query("page_token"),
+  list: (c, page) => {
+    return listSuggestions(c.get("deps"), c.get("scope"), page.maxPageSize, {
+      pageToken: page.pageToken,
       status: c.req.query("status"),
       category: c.req.query("category"),
-      showDeleted: c.req.query("show_deleted") === "true",
+      showDeleted: page.showDeleted,
       actor: c.get("user"),
     });
   },

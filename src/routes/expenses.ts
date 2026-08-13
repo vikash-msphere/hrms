@@ -8,7 +8,6 @@ import {
 } from "../services/expenses";
 import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
 import { toExpenseResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const COL = "expenses";
 const INVOICE = "invoice"; // the attachment slot for an expense's invoice/receipt
@@ -55,10 +54,9 @@ export const expenses = collectionRoutes<ExpenseInput>({
     create: (deps, actor, input) => createExpense(deps, actor, input),
     update: (deps, actor, id, patch) => updateExpense(deps, actor, id, patch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listExpenses(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("department"), c.req.query("q"));
+    const { items, nextPageToken } = await listExpenses(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("department"), c.req.query("q"));
     const withInvoice = await attachedObjectIds(deps, COL, INVOICE); // one query for the page's invoice flags
     return { items: items.map((r) => ({ ...r, hasInvoice: withInvoice.has(r.uuid) })), nextPageToken };
   },

@@ -39,6 +39,20 @@ export type VerbEntry =
       schema?: never;
     };
 
+/**
+ * The paging the factory already resolved from the query string, handed to a route-level `list` so it does not
+ * re-derive it. Every list hook used to open with the same three lines, which is copy-paste in exactly the
+ * position that produced the drift this factory exists to remove.
+ */
+export type PageRequest = {
+  /** `?max_page_size`, clamped to the 100-row truncation cap (test/listTruncation.test.ts). */
+  maxPageSize: number;
+  /** `?page_token`, the opaque cursor as sent. */
+  pageToken?: string;
+  /** `?show_deleted=true`: include soft-deleted rows. */
+  showDeleted: boolean;
+};
+
 export type CollectionRouteSpec<I> = CrudSpec<I> & {
   /** The item path param, matching the name OpenAPI declares (`holiday_id`). */
   param: string;
@@ -69,9 +83,10 @@ export type CollectionRouteSpec<I> = CrudSpec<I> & {
   /**
    * Replaces the generic list. Takes the context because a scoped list needs `c.get("scope")` (the SQL-level
    * row filter the middleware computed) and often its own `?employee` / `?from` / `?to` filters - things a
-   * service-level signature cannot see. The factory still owns the response shape and the access hints.
+   * service-level signature cannot see. `page` is the standard paging, already resolved. The factory still owns
+   * the response shape and the access hints.
    */
-  list?: (c: Context<AppEnv>) => Promise<{ items: any[]; nextPageToken?: string; extra?: Record<string, unknown> }>;
+  list?: (c: Context<AppEnv>, page: PageRequest) => Promise<{ items: any[]; nextPageToken?: string; extra?: Record<string, unknown> }>;
   /** This collection's own custom methods, by verb. Reached after the lifecycle verbs and `:restore`. */
   verbs?: Record<string, VerbEntry>;
 };
@@ -116,11 +131,16 @@ export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
   const app = new Hono<AppEnv>();
 
   app.get("/", async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+    // Resolved ONCE, for the generic list and the route-level hook alike.
+    const page: PageRequest = {
+      maxPageSize: clampPageSize(Number(c.req.query("max_page_size")) || undefined),
+      pageToken: c.req.query("page_token"),
+      showDeleted: c.req.query("show_deleted") === "true",
+    };
     const user = c.get("user");
     const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = spec.list
-      ? await spec.list(c)
-      : await svc.list(c.get("deps"), user, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true");
+      ? await spec.list(c, page)
+      : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted);
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
     return c.json({

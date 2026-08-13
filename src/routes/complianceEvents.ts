@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { complianceEventSpec, listComplianceEvents } from "../services/complianceEvents";
 import { toComplianceEventResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // Statutory compliance calendar. NO access checks here - the middleware gates the path by grants (private by
 // default; super-only until access is granted via the ACL). Standard CRUD + soft-delete/restore.
@@ -26,12 +25,12 @@ export const complianceEvents = collectionRoutes({
   param: "compliance_event_id",
   writeSchema,
   serialize: toComplianceEventResource,
-  list: (c) =>
+  list: (c, page) =>
     listComplianceEvents(
       c.get("deps"),
       c.get("scope"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
-      c.req.query("show_deleted") === "true",
+      page.maxPageSize,
+      page.pageToken,
+      page.showDeleted,
     ),
 });

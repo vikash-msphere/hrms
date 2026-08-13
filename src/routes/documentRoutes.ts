@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
-import { clampPageSize } from "../http/pagination";
 import { signLetter } from "../services/letterSign";
 import { refreshEsign } from "../services/esign/callback";
 import type { makeDocumentService } from "../services/documentService";
@@ -55,10 +54,7 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
       purge: (deps, actor, id, ifMatch) => svc.purge(deps, actor, id, ifMatch),
       restore: (deps, actor, id) => svc.restore(deps, actor, id),
     },
-    list: (c) => {
-      const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-      return svc.list(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("show_deleted") === "true", c.get("user"));
-    },
+    list: (c, page) => svc.list(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.get("user")),
     verbs: {
       // The signatory name comes from the employee's legal name on file (not the request) - see the service.
       acknowledge: { run: (deps, user, id) => svc.acknowledge(deps, user, id) },

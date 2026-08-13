@@ -8,7 +8,6 @@ import {
 } from "../services/reimbursements";
 import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
 import { toReimbursementResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const COL = "reimbursements";
 const RECEIPT = "receipt"; // the attachment slot for a claim's receipt
@@ -39,10 +38,9 @@ export const reimbursements = collectionRoutes<ReimbursementInput>({
   overrides: {
     create: (deps, actor, input) => createReimbursement(deps, actor, input),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listReimbursements(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
+    const { items, nextPageToken } = await listReimbursements(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q"));
     const withReceipt = await attachedObjectIds(deps, COL, RECEIPT); // one query for the page's receipt flags
     return { items: items.map((r) => ({ ...r, hasReceipt: withReceipt.has(r.uuid) })), nextPageToken };
   },

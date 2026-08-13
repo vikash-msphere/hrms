@@ -8,7 +8,6 @@ import {
   deleteHolidaySelection,
 } from "../services/holidaySelections";
 import { toHolidaySelectionResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({ holiday: z.string().optional() }).strict();
 
@@ -30,11 +29,11 @@ export const holidaySelections = collectionRoutes({
     create: (deps, actor, input: { holiday?: string }) => createHolidaySelection(deps, actor, input.holiday),
     remove: (deps, actor, id) => deleteHolidaySelection(deps, actor, id),
   },
-  list: (c) =>
+  list: (c, page) =>
     listHolidaySelections(
       c.get("deps"),
       c.get("user"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
+      page.maxPageSize,
+      page.pageToken,
     ),
 });

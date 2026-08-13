@@ -8,7 +8,6 @@ import {
   type TicketInput,
 } from "../services/tickets";
 import { toTicketResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const createSchema = z
   .object({
@@ -48,10 +47,7 @@ export const tickets = collectionRoutes<TicketInput>({
     get: (deps, actor, id) => getTicketWithComments(deps, actor, id),
     create: (deps, actor, input) => createTicket(deps, actor, input),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listTickets(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("assignee"), c.get("user"), c.req.query("department"), c.req.query("q"));
-  },
+  list: (c, page) => listTickets(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("assignee"), c.get("user"), c.req.query("department"), c.req.query("q")),
   verbs: {
     // The five bodyless moves through the state machine; the service validates which are legal from where.
     start: { run: (deps, user, id) => transitionTicket(deps, user, id, "start") },

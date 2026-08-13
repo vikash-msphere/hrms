@@ -7,7 +7,6 @@ import {
   type TimeEntryInput,
 } from "../services/timeEntries";
 import { toTimeEntryResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -32,10 +31,7 @@ export const timeEntries = collectionRoutes<TimeEntryInput>({
     create: (deps, actor, input, id) => createTimeEntry(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateTimeEntry(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listTimeEntries(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("from"), c.req.query("to"), c.req.query("status"), c.req.query("show_deleted") === "true");
-  },
+  list: (c, page) => listTimeEntries(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("from"), c.req.query("to"), c.req.query("status"), page.showDeleted),
   verbs: {
     submit: { run: (deps, user, id) => submitTimeEntry(deps, user, id) },
     approve: { run: (deps, user, id) => approveTimeEntry(deps, user, id) },

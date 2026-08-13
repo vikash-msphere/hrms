@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listApplications, createApplication, updateApplication, advanceApplication, rejectApplication, type ApplicationInput } from "../services/ats";
 import { toApplicationResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z
   .object({
@@ -33,14 +32,13 @@ export const applications = collectionRoutes<ApplicationInput>({
     create: (deps, actor, input, id) => createApplication(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateApplication(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listApplications(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), {
+  list: (c, page) => {
+    return listApplications(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       requisition: c.req.query("requisition"),
       candidate: c.req.query("candidate"),
       stage: c.req.query("stage"),
       status: c.req.query("status"),
-      showDeleted: c.req.query("show_deleted") === "true",
+      showDeleted: page.showDeleted,
     });
   },
   verbs: {

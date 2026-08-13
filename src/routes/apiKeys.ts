@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listApiKeys, createApiKey, revokeApiKey, deleteApiKey, type ApiKeyInput } from "../services/apiKeys";
 import { toApiKeyResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const scopeSchema = z
   .object({
@@ -41,10 +40,7 @@ export const apiKeys = collectionRoutes<ApiKeyInput>({
     },
     remove: (deps, actor, id, ifMatch) => deleteApiKey(deps, actor, id, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    return listApiKeys(c.get("deps"), c.get("user"), maxPageSize, c.req.query("page_token"));
-  },
+  list: (c, page) => listApiKeys(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken),
   verbs: {
     revoke: { run: (deps, user, id) => revokeApiKey(deps, user, id) },
   },

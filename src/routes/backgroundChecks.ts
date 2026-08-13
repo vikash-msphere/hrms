@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { backgroundCheckSpec, listBackgroundChecks } from "../services/backgroundChecks";
 import { toBackgroundCheckResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // Background-verification tracking. NO access checks - the middleware gates the path by grants (private by
 // default; sensitive). Standard CRUD + soft-delete/restore, with a scope-filtered list.
@@ -24,12 +23,12 @@ export const backgroundChecks = collectionRoutes({
   param: "background_check_id",
   writeSchema,
   serialize: toBackgroundCheckResource,
-  list: (c) =>
+  list: (c, page) =>
     listBackgroundChecks(
       c.get("deps"),
       c.get("scope"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
-      c.req.query("show_deleted") === "true",
+      page.maxPageSize,
+      page.pageToken,
+      page.showDeleted,
     ),
 });

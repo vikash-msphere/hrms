@@ -3,7 +3,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listNoticePeriods, createNoticePeriod, updateNoticePeriod, type NoticePeriodInput } from "../services/noticePeriods";
 import { toNoticePeriodResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z
   .object({
@@ -34,9 +33,8 @@ export const noticePeriods = collectionRoutes<NoticePeriodInput>({
     create: (deps, actor, input) => createNoticePeriod(deps, actor, input),
     update: (deps, actor, id, patch, ifMatch) => updateNoticePeriod(deps, actor, id, patch, ifMatch),
   },
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     // Row visibility was decided in middleware (scopeFor over the grant); `?status` narrows it further.
-    return listNoticePeriods(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("status"), c.req.query("show_deleted") === "true");
+    return listNoticePeriods(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted);
   },
 });

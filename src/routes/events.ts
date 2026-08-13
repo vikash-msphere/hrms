@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { eventSpec, listEvents } from "../services/events";
 import { toEventResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z
   .object({
@@ -23,12 +22,12 @@ export const events = collectionRoutes({
   param: "event_id",
   writeSchema,
   serialize: toEventResource,
-  list: (c) =>
+  list: (c, page) =>
     listEvents(
       c.get("deps"),
       c.get("scope"),
-      clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      c.req.query("page_token"),
-      c.req.query("show_deleted") === "true",
+      page.maxPageSize,
+      page.pageToken,
+      page.showDeleted,
     ),
 });

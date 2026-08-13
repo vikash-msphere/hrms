@@ -4,7 +4,6 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { toOperationResource } from "../http/serialize";
 import { notFound } from "../lib/errors";
 import { applyScope } from "../services/listScope";
-import { clampPageSize } from "../http/pagination";
 import { runJob } from "../cron";
 
 // AEP-151 operations endpoints. Paths are matched by the linter, so they are exactly /v1/operations and
@@ -18,14 +17,13 @@ export const operations = collectionRoutes({
   notFound: "operation not found",
   param: "operation",
   serialize: toOperationResource,
-  list: async (c) => {
-    const limit = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const items = await c.get("deps").db
       .select()
       .from(schema.jobs)
       .where(applyScope(c.get("scope"), schema.jobs.code, schema.jobs.employeeId))
       .orderBy(desc(schema.jobs.createdAt))
-      .limit(limit);
+      .limit(page.maxPageSize);
     return { items, nextPageToken: undefined };
   },
   verbs: {

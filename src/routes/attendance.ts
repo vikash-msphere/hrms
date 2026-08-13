@@ -2,7 +2,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listSessions, clockIn, clockOut } from "../services/attendance";
 import { toAttendanceSessionResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // Attendance clock sessions. Self clock in/out is `attendance/me:clockIn` / `:clockOut` (the caller acts on
 // their own record, so the verbs ignore the path id). `GET /?open=true` lists who's currently clocked in
@@ -16,11 +15,10 @@ export const attendance = collectionRoutes({
   notFound: "attendance session not found",
   param: "attendance_id",
   serialize: toAttendanceSessionResource,
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     const from = c.req.query("from") ? Date.parse(c.req.query("from")!) : undefined;
     const to = c.req.query("to") ? Date.parse(c.req.query("to")!) : undefined;
-    return listSessions(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), {
+    return listSessions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
       open: c.req.query("open") === "true",
       from: Number.isNaN(from) ? undefined : from,
       to: Number.isNaN(to) ? undefined : to,

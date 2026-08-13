@@ -4,7 +4,6 @@ import { collectionRoutes } from "../http/collectionRoute";
 import { listReferrals, getReferral, createReferral, updateReferral, awardReferralBonusNow, type ReferralInput } from "../services/referrals";
 import { putAttachment, downloadAttachment, attachedObjectIds, getAttachment } from "../services/attachments";
 import { toReferralResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const COL = "referrals";
 const RESUME = "resume"; // the attachment slot for a candidate's resume
@@ -39,10 +38,9 @@ export const referrals = collectionRoutes<ReferralInput>({
     create: (deps, actor, input, id) => createReferral(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateReferral(deps, actor, id, patch, ifMatch),
   },
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     const deps = c.get("deps");
-    const { items, nextPageToken } = await listReferrals(deps, c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("status"), c.req.query("show_deleted") === "true");
+    const { items, nextPageToken } = await listReferrals(deps, c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("status"), page.showDeleted);
     const withResume = await attachedObjectIds(deps, COL, RESUME); // one query for the page's resume flags
     return { items: items.map((r) => ({ ...r, hasResume: withResume.has(r.uuid) })), nextPageToken };
   },

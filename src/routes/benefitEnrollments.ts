@@ -2,7 +2,6 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { benefitEnrollmentSpec, listBenefitEnrollments, type BenefitEnrollmentInput } from "../services/benefitEnrollments";
 import { toBenefitEnrollmentResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
@@ -19,9 +18,8 @@ export const benefitEnrollments = collectionRoutes<BenefitEnrollmentInput>({
   param: "enrollment_id",
   writeSchema,
   serialize: toBenefitEnrollmentResource,
-  list: (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: (c, page) => {
     // Row visibility was decided in middleware (scopeFor over the grant); `?employee` narrows it further.
-    return listBenefitEnrollments(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("employee"), c.req.query("show_deleted") === "true");
+    return listBenefitEnrollments(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), page.showDeleted);
   },
 });

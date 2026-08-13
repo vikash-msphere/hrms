@@ -2,7 +2,6 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listPayslips, downloadPayslip, previewPayslip } from "../services/payslips";
 import { toPayslipResource } from "../http/serialize";
-import { clampPageSize } from "../http/pagination";
 
 // Published payslips: a payroll run writes them, nobody edits them. Read-only (no insert, no patch) over a
 // table with no delete_time, so the factory mounts list + get and the two document verbs, nothing else.
@@ -13,10 +12,9 @@ export const payslips = collectionRoutes({
   notFound: "payslip not found",
   param: "payslip_id",
   serialize: toPayslipResource,
-  list: async (c) => {
-    const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
+  list: async (c, page) => {
     // Visibility (own / my-dept / org-wide) was decided in middleware; the service only binds it to columns.
-    return listPayslips(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"));
+    return listPayslips(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken);
   },
   // Both answer with PDF bytes rather than the resource, so they own their whole response (`raw`). Separate
   // verbs so the two can be granted independently: :preview renders the slip inline in the app, :download
