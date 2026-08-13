@@ -10,7 +10,6 @@ import { notify, notifyManager } from "./notifications";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 
 type Status = typeof schema.timeEntries.$inferSelect.status;
 export type TimeEntryInput = {
@@ -42,11 +41,6 @@ export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize:
   return { items: slice, nextPageToken };
 }
 
-export async function getTimeEntry(deps: Deps, _actor: AppUser, id: string) {
-  const row = (await deps.db.select().from(schema.timeEntries).where(eq(schema.timeEntries.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("time entry not found");
-  return row;
-}
 
 export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEntryInput, id?: string) {
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
@@ -108,12 +102,3 @@ export const submitTimeEntry = (deps: Deps, actor: AppUser, id: string) => trans
 export const approveTimeEntry = (deps: Deps, actor: AppUser, id: string) => transition(deps, actor, id, ["SUBMITTED"], "APPROVED", true);
 export const rejectTimeEntry = (deps: Deps, actor: AppUser, id: string) => transition(deps, actor, id, ["SUBMITTED"], "REJECTED", true);
 
-export async function deleteTimeEntry(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.timeEntries, "time-entry", "time-entries", id, ifMatch);
-}
-export async function restoreTimeEntry(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.timeEntries, "time-entry", "time-entries", id);
-}
-export async function purgeTimeEntry(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.timeEntries, "time-entry", "time-entries", id, ifMatch);
-}

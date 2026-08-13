@@ -37,7 +37,7 @@ export async function listRemoteWorkRequests(deps: Deps, scope: ListScope, maxPa
   return keysetPage<typeof schema.remoteWorkRequests.$inferSelect>(deps, schema.remoteWorkRequests, "remote-work-requests", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getRemoteWorkRequest(deps: Deps, _actor: AppUser, id: string) {
+async function getRemoteWorkRequest(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.remoteWorkRequests).where(eq(schema.remoteWorkRequests.uuid, id)).limit(1))[0];
   if (!row) throw notFound("remote work request not found");
   return row;

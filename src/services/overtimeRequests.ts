@@ -34,7 +34,7 @@ export async function listOvertimeRequests(deps: Deps, scope: ListScope, maxPage
   return keysetPage<typeof schema.overtimeRequests.$inferSelect>(deps, schema.overtimeRequests, "overtime-requests", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getOvertimeRequest(deps: Deps, _actor: AppUser, id: string) {
+async function getOvertimeRequest(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.overtimeRequests).where(eq(schema.overtimeRequests.uuid, id)).limit(1))[0];
   if (!row) throw notFound("overtime request not found");
   return row;

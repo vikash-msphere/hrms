@@ -1,17 +1,13 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
-  listOvertimeRequests, getOvertimeRequest, createOvertimeRequest,
+  listOvertimeRequests, createOvertimeRequest,
   approveOvertimeRequest, rejectOvertimeRequest, cancelOvertimeRequest,
+  type OvertimeInput,
 } from "../services/overtimeRequests";
 import { toOvertimeRequestResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
-
-const COL = "overtime-requests";
 
 const createSchema = z
   .object({
@@ -22,29 +18,29 @@ const createSchema = z
   })
   .strict();
 
-export const overtimeRequests = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// The approver's optional note is taken as sent, exactly as the hand-written route did.
+const noteOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c.req.json().catch(() => ({}))) as { note?: string })?.note;
+
+// Overtime requests. The create prices the hours and a decision either queues the payout or closes the request,
+// so a filed request is cancelled rather than edited or deleted - and the table has no delete_time.
+export const overtimeRequests = collectionRoutes<OvertimeInput>({
+  table: schema.overtimeRequests,
+  collection: "overtime-requests",
+  auditName: "overtime_request",
+  notFound: "overtime request not found",
+  param: "overtime_request_id",
+  createSchema,
+  serialize: toOvertimeRequestResource,
+  overrides: {
+    create: (deps, actor, input) => createOvertimeRequest(deps, actor, input),
+  },
+  list: (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listOvertimeRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
-    const user = c.get("user");
-    return c.json({ results: items.map((r) => withAccess(toOvertimeRequestResource(r), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:overtime_request_id", async (c) => {
-    const row = await getOvertimeRequest(c.get("deps"), c.get("user"), c.req.param("overtime_request_id"));
-    return c.json(withAccess(toOvertimeRequestResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", createSchema), async (c) => {
-    const row = await createOvertimeRequest(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toOvertimeRequestResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/:overtime_request_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    const deps = c.get("deps");
-    const user = c.get("user");
-    const body = await c.req.json().catch(() => ({} as { note?: string }));
-    const hint = (row: { code: string | null } | undefined) => withAccess(toOvertimeRequestResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "approve") return c.json(hint(await approveOvertimeRequest(deps, user, id, body?.note)));
-    if (verb === "reject") return c.json(hint(await rejectOvertimeRequest(deps, user, id, body?.note)));
-    if (verb === "cancel") return c.json(hint(await cancelOvertimeRequest(deps, user, id)));
-    return c.notFound();
-  });
+    return listOvertimeRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
+  },
+  verbs: {
+    approve: { run: async (deps, user, id, _body, c) => approveOvertimeRequest(deps, user, id, await noteOf(c)) },
+    reject: { run: async (deps, user, id, _body, c) => rejectOvertimeRequest(deps, user, id, await noteOf(c)) },
+    cancel: { run: (deps, user, id) => cancelOvertimeRequest(deps, user, id) },
+  },
+});

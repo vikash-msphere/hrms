@@ -1,17 +1,13 @@
-import { Hono } from "hono";
 import { z } from "zod";
-import { zValidator } from "@hono/zod-validator";
-import type { AppEnv } from "../env";
+import * as schema from "../db/schema";
+import { collectionRoutes } from "../http/collectionRoute";
 import {
-  listRemoteWorkRequests, getRemoteWorkRequest, createRemoteWorkRequest,
+  listRemoteWorkRequests, createRemoteWorkRequest,
   approveRemoteWorkRequest, rejectRemoteWorkRequest, cancelRemoteWorkRequest,
+  type RemoteWorkInput,
 } from "../services/remoteWorkRequests";
 import { toRemoteWorkRequestResource } from "../http/serialize";
-import { withAccess } from "../http/accessHint";
 import { clampPageSize } from "../http/pagination";
-import { customMethod } from "../http/customMethod";
-
-const COL = "remote-work-requests";
 
 const createSchema = z
   .object({
@@ -25,29 +21,29 @@ const createSchema = z
   })
   .strict();
 
-export const remoteWorkRequests = new Hono<AppEnv>()
-  .get("/", async (c) => {
+// The approver's optional note is taken as sent, exactly as the hand-written route did.
+const noteOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c.req.json().catch(() => ({}))) as { note?: string })?.note;
+
+// Work-from-home requests. Same shape as leave: filed, then approved, rejected or cancelled - never edited or
+// deleted, and the table has no delete_time.
+export const remoteWorkRequests = collectionRoutes<RemoteWorkInput>({
+  table: schema.remoteWorkRequests,
+  collection: "remote-work-requests",
+  auditName: "remote_work_request",
+  notFound: "remote work request not found",
+  param: "remote_work_request_id",
+  createSchema,
+  serialize: toRemoteWorkRequestResource,
+  overrides: {
+    create: (deps, actor, input) => createRemoteWorkRequest(deps, actor, input),
+  },
+  list: (c) => {
     const maxPageSize = clampPageSize(Number(c.req.query("max_page_size")) || undefined);
-    const { items, nextPageToken } = await listRemoteWorkRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
-    const user = c.get("user");
-    return c.json({ results: items.map((r) => withAccess(toRemoteWorkRequestResource(r), user, COL, r.code)), next_page_token: nextPageToken });
-  })
-  .get("/:remote_work_request_id", async (c) => {
-    const row = await getRemoteWorkRequest(c.get("deps"), c.get("user"), c.req.param("remote_work_request_id"));
-    return c.json(withAccess(toRemoteWorkRequestResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/", zValidator("json", createSchema), async (c) => {
-    const row = await createRemoteWorkRequest(c.get("deps"), c.get("user"), c.req.valid("json"));
-    return c.json(withAccess(toRemoteWorkRequestResource(row), c.get("user"), COL, row?.code, c.get("objectGrant")));
-  })
-  .post("/:remote_work_request_id", async (c) => {
-    const { id, verb } = customMethod(c);
-    const deps = c.get("deps");
-    const user = c.get("user");
-    const body = await c.req.json().catch(() => ({} as { note?: string }));
-    const hint = (row: { code: string | null } | undefined) => withAccess(toRemoteWorkRequestResource(row), user, COL, row?.code, c.get("objectGrant"));
-    if (verb === "approve") return c.json(hint(await approveRemoteWorkRequest(deps, user, id, body?.note)));
-    if (verb === "reject") return c.json(hint(await rejectRemoteWorkRequest(deps, user, id, body?.note)));
-    if (verb === "cancel") return c.json(hint(await cancelRemoteWorkRequest(deps, user, id)));
-    return c.notFound();
-  });
+    return listRemoteWorkRequests(c.get("deps"), c.get("scope"), maxPageSize, c.req.query("page_token"), c.req.query("state"), c.req.query("q"));
+  },
+  verbs: {
+    approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c)) },
+    reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c)) },
+    cancel: { run: (deps, user, id) => cancelRemoteWorkRequest(deps, user, id) },
+  },
+});

@@ -9,7 +9,6 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { notify, managerIdOf } from "./notifications";
 
@@ -68,12 +67,6 @@ export async function listGoals(deps: Deps, scope: ListScope, maxPageSize: numbe
   return keysetPage(deps, schema.goals, "goals", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export async function getGoal(deps: Deps, _actor: AppUser, id: string) {
-  // Read access (own / dept / all) is enforced by the middleware on goals/<code>.
-  const row = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, id)).limit(1))[0];
-  if (!row) throw notFound("goal not found");
-  return row;
-}
 
 export async function createGoal(deps: Deps, actor: AppUser, input: GoalInput, id?: string) {
   if (!input.title?.trim()) throw invalidArgument("title is required");
@@ -148,12 +141,3 @@ export async function updateGoalProgress(deps: Deps, actor: AppUser, id: string,
   return updated;
 }
 
-export async function deleteGoal(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.goals, "goal", "goals", id, ifMatch);
-}
-export async function restoreGoal(deps: Deps, actor: AppUser, id: string) {
-  return restoreRow(deps, actor, schema.goals, "goal", "goals", id);
-}
-export async function purgeGoal(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.goals, "goal", "goals", id, ifMatch);
-}
