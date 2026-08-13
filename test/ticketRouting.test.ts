@@ -73,7 +73,7 @@ async function seedWorld(): Promise<World> {
 
 // Does this user account hold a read share on this ticket code?
 const hasShare = (userUuid: string, ticketCode: string) =>
-  deps.db.select({ id: schema.accessRules.id }).from(schema.accessRules)
+  deps.db.select({ id: schema.accessRules.uuid }).from(schema.accessRules)
     .where(and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user"), eq(schema.accessRules.pattern, `tickets.${ticketCode}.**`), eq(schema.accessRules.effect, "allow")))
     .limit(1).then((r) => r.length > 0);
 

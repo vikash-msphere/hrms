@@ -259,7 +259,7 @@ export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"a
   // (stuck on "cannot create") and the rule shows up under the all-objects target instead.
   const createGate = toks.length === 1 && tail !== "**";
   return {
-    path: `access-rules/${r.id}`,
+    path: `access-rules/${r.uuid}`,
     create_time: iso(r.createdAt),
     update_time: iso(r.updatedAt),
     etag: etagOf(+new Date(r.updatedAt)),

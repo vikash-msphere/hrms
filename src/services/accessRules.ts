@@ -15,11 +15,10 @@ import { validateAccessRule, type AccessRuleInput } from "../domain/policyValida
 import { deriveNarrowing } from "../domain/compileGrants";
 import { EVERYONE_ROLE } from "../domain/grants";
 import { uuidToCode, codeToUuid } from "../lib/authzResolve";
-import { toAccessRuleResource } from "../http/serialize";
-import { paginate } from "../http/pagination";
 import { getSettingValue } from "./settings";
 import { accessAdminEmployeeIds } from "./accessRequest";
 import { notifyMany } from "./notifications";
+import { toAccessRuleResource } from "../http/serialize";
 
 // Build the verbatim pattern for a normalized rule. The id-position token encodes the scope (me / my-dept /
 // <code> / <code>-* / * for a field rule); a field rule inserts the field token; the tail is the verb for a
@@ -53,7 +52,7 @@ export async function buildPattern(deps: Deps, r: AccessRuleInput): Promise<stri
   return toks.join(".");
 }
 
-const ruleById = (id: string) => eq(schema.accessRules.id, id);
+const ruleById = (id: string) => eq(schema.accessRules.uuid, id);
 
 // Bust the cached broad grant a rule edit affects. A user rule busts that user's grant; a normal role rule
 // busts that role's grant; an `everyone` rule busts the WHOLE `grant:` band, since `everyone` is unioned into
@@ -87,7 +86,7 @@ export function ruleSentence(r: { collection: string; scope: string; field?: str
 // deleted (the access-change feed + the modal's "who added this rule" both read these fields), and enough
 // for a free-text `q` search on the collection name to find every change that touched it.
 const ruleMeta = (row: typeof schema.accessRules.$inferSelect, extra?: Record<string, unknown>) => ({
-  rule_id: row.id, // access-rules is not a code-bearing collection, so the trail carries the id in meta
+  rule_id: row.uuid, // access-rules is not a code-bearing collection, so the trail carries the id in meta
   subject_kind: row.subjectKind,
   subject: row.subject,
   collection: row.namespace,
@@ -146,22 +145,23 @@ async function notifyPending(deps: Deps, actor: AppUser, row: typeof schema.acce
   });
 }
 
-async function serialize(deps: Deps, r: typeof schema.accessRules.$inferSelect) {
-  const objectUuid = r.scopeKind === "exact" && r.matchCode ? await codeToUuid(deps, r.namespace, r.matchCode) : null;
-  return toAccessRuleResource(r, objectUuid);
+// One rule, serialized. Only for the collection-level :approve / :reject methods, which are their own routes and
+// answer with the rule they decided; the collection's own paths get this from the factory (decorate + serialize).
+async function serializeRule(deps: Deps, row: typeof schema.accessRules.$inferSelect) {
+  const [r] = await withObjectRefs(deps, [row]);
+  return toAccessRuleResource(r!, r!._objectUuid);
 }
 
-export async function listAccessRules(deps: Deps, maxPageSize = 50, pageToken?: string) {
-  const rows = await deps.db.select().from(schema.accessRules);
-  const page = paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.id);
-  const results = await Promise.all(page.items.map((r) => serialize(deps, r)));
-  return { results, nextPageToken: page.nextPageToken };
-}
-
-export async function getAccessRule(deps: Deps, id: string) {
-  const row = (await deps.db.select().from(schema.accessRules).where(ruleById(id)).limit(1))[0];
-  if (!row) throw notFound("access rule not found");
-  return serialize(deps, row);
+// A per-object rule stores the object's CODE (the matching key); the wire carries its id. Resolving that is the
+// collection's `decorate`, so it happens once per page on whichever path answers - and only for the exact-scope
+// rows that have an object at all.
+export async function withObjectRefs(deps: Deps, rows: (typeof schema.accessRules.$inferSelect)[]) {
+  return Promise.all(
+    rows.map(async (r) => ({
+      ...r,
+      _objectUuid: r.scopeKind === "exact" && r.matchCode ? await codeToUuid(deps, r.namespace, r.matchCode) : null,
+    })),
+  );
 }
 
 export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown) {
@@ -199,7 +199,7 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
   // effect) is a duplicate. Editing a level = delete the old rule then create the new one.
   const dup = (
     await deps.db
-      .select({ id: schema.accessRules.id })
+      .select({ id: schema.accessRules.uuid })
       .from(schema.accessRules)
       .where(and(eq(schema.accessRules.subject, subject), eq(schema.accessRules.subjectKind, r.subjectKind), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, r.effect)))
       .limit(1)
@@ -208,10 +208,10 @@ export async function createAccessRule(deps: Deps, actor: AppUser, body: unknown
 
   const [row] = await deps.db.insert(schema.accessRules).values(values).returning();
   bustGrantCache(r.subjectKind, subject); // bust the cached broad grant
-  await audit(deps, actor, values.status === "pending" ? "access-rule.request" : "access-rule.create", "access-rules", row!.id, ruleMeta(row!, { sentence: ruleSentence({ ...r, level: r.level, effect: r.effect }) }));
+  await audit(deps, actor, values.status === "pending" ? "access-rule.request" : "access-rule.create", "access-rules", row!.uuid, ruleMeta(row!, { sentence: ruleSentence({ ...r, level: r.level, effect: r.effect }) }));
   if (values.status === "pending") await notifyPending(deps, actor, row!, "grant").catch(() => {});
   else await notifyGranted(deps, actor, row!, r).catch(() => {});
-  return serialize(deps, row!);
+  return row!;
 }
 
 export async function deleteAccessRule(deps: Deps, actor: AppUser, id: string) {
@@ -272,7 +272,7 @@ export async function decideAccessRule(deps: Deps, actor: AppUser, id: string, d
     const r: AccessRuleInput = { subjectKind: row.subjectKind, subject: row.subject, collection: row.namespace, scope: row.scopeKind, level: row.level ?? undefined, effect: row.effect };
     await notifyGranted(deps, actor, { ...row, status: "active" }, r).catch(() => {});
   }
-  return serialize(deps, (await deps.db.select().from(schema.accessRules).where(ruleById(id)).limit(1))[0] ?? { ...row, status: applying && !removing ? "active" : row.status });
+  return serializeRule(deps, (await deps.db.select().from(schema.accessRules).where(ruleById(id)).limit(1))[0] ?? { ...row, status: applying && !removing ? "active" : row.status });
 }
 
 // Resolve the `{ rule }` body ref of the collection-level :approve / :reject methods to a rule id.
@@ -288,11 +288,11 @@ export function ruleIdFromRef(ref: unknown): string {
 export async function purgeExpiredAccessRules(deps: Deps): Promise<number> {
   const now = deps.clock.now();
   const expired = await deps.db
-    .select({ id: schema.accessRules.id, subject: schema.accessRules.subject, subjectKind: schema.accessRules.subjectKind })
+    .select({ id: schema.accessRules.uuid, subject: schema.accessRules.subject, subjectKind: schema.accessRules.subjectKind })
     .from(schema.accessRules)
     .where(and(isNotNull(schema.accessRules.expiresAt), lte(schema.accessRules.expiresAt, now)));
   if (!expired.length) return 0;
-  await deps.db.delete(schema.accessRules).where(inArray(schema.accessRules.id, expired.map((r) => r.id)));
+  await deps.db.delete(schema.accessRules).where(inArray(schema.accessRules.uuid, expired.map((r) => r.id)));
   for (const r of expired) bustGrantCache(r.subjectKind, r.subject);
   await audit(deps, "system", "access-rule.expire", "access-rules", undefined, { expired: expired.length });
   return expired.length;

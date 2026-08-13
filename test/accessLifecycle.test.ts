@@ -74,7 +74,7 @@ describe("expiring grants", () => {
   it("decides while unexpired and stops the moment it lapses - without the row being deleted", async () => {
     const soon = new Date(+deps.clock.now() + 60_000).toISOString();
     const rule = await createAccessRule(deps, ana(), grantEmployeeRead({ expire_time: soon }));
-    expect(rule.expire_time).toBeTruthy();
+    expect(rule.expiresAt).toBeTruthy();
     expect(await roleCanRead()).toBe(true);
 
     // Move the expiry into the past: the ROW is untouched, the engine simply stops loading it.
@@ -92,11 +92,11 @@ describe("expiring grants", () => {
     const temp = await createAccessRule(deps, ana(), grantEmployeeRead({ expire_time: new Date(+deps.clock.now() + 60_000).toISOString() }));
     const permanent = await createAccessRule(deps, ana(), { ...grantEmployeeRead(), collection: "holidays" });
     // Backdate ONLY the temporary rule, so the purge has both a lapsed and a live row to choose between.
-    await deps.db.update(schema.accessRules).set({ expiresAt: new Date(+deps.clock.now() - 1000) }).where(eq(schema.accessRules.id, temp.path.split("/")[1]!));
+    await deps.db.update(schema.accessRules).set({ expiresAt: new Date(+deps.clock.now() - 1000) }).where(eq(schema.accessRules.uuid, temp.uuid));
 
     expect(await purgeExpiredAccessRules(deps)).toBe(1);
     const left = await deps.db.select().from(schema.accessRules);
-    expect(left.map((r) => r.id)).toEqual([permanent.path.split("/")[1]!]);
+    expect(left.map((r) => r.uuid)).toEqual([permanent.uuid]);
   });
 });
 
@@ -113,8 +113,8 @@ describe("four-eyes approval", () => {
     expect(rule.status).toBe("pending");
     expect(await roleCanRead()).toBe(false); // authored, visible, and granting nothing
 
-    await expect(decideAccessRule(deps, ana(), rule.path.split("/")[1]!, "approve")).rejects.toThrow(/someone other than/);
-    const approved = await decideAccessRule(deps, bo(), rule.path.split("/")[1]!, "approve");
+    await expect(decideAccessRule(deps, ana(), rule.uuid, "approve")).rejects.toThrow(/someone other than/);
+    const approved = await decideAccessRule(deps, bo(), rule.uuid, "approve");
     expect(approved.status).toBe("active");
     clearCachePrefix("");
     expect(await roleCanRead()).toBe(true);
@@ -123,7 +123,7 @@ describe("four-eyes approval", () => {
   it("on: a removal KEEPS enforcing until approved, then the rule is gone", async () => {
     const rule = await createAccessRule(deps, ana(), grantEmployeeRead());
     await setApproval(true);
-    const id = rule.path.split("/")[1]!;
+    const id = rule.uuid;
 
     await deleteAccessRule(deps, ana(), id);
     clearCachePrefix("");
@@ -140,13 +140,13 @@ describe("four-eyes approval", () => {
   it("rejecting a pending grant drops it; rejecting a pending removal restores the rule", async () => {
     await setApproval(true);
     const pending = await createAccessRule(deps, ana(), grantEmployeeRead());
-    await decideAccessRule(deps, bo(), pending.path.split("/")[1]!, "reject");
+    await decideAccessRule(deps, bo(), pending.uuid, "reject");
     expect((await deps.db.select().from(schema.accessRules)).length).toBe(0);
 
     await setApproval(false);
     const live = await createAccessRule(deps, ana(), grantEmployeeRead());
     await setApproval(true);
-    const id = live.path.split("/")[1]!;
+    const id = live.uuid;
     await deleteAccessRule(deps, ana(), id);
     await decideAccessRule(deps, bo(), id, "reject");
     clearCachePrefix("");

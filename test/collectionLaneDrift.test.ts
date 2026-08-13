@@ -31,7 +31,7 @@ const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test
 
 // Remaining conversion work, by plan step (collection-factory-plan.md). Delete a name when its file lands on
 // the factory; never add one without a reason.
-const PENDING = new Set(["accessRules", "roles"]);
+const PENDING = new Set(["roles"]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
 const NOT_COLLECTIONS = new Map([
@@ -132,7 +132,7 @@ describe("every collection is built by the factory", () => {
     const GENERIC_LIST = [
       "benefit-plans", "compliance-rules", "expense-budgets", "expense-categories", "holidays", "leave-types",
       "letter-templates", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
-      "salary-structures", "shifts", "vendors",
+      "access-rules", "salary-structures", "shifts", "vendors",
     ];
     const genericListFiles = entries.filter((e) => usesFactory(e.src) && !/^\s*list:/m.test(e.src)).map((e) => e.name);
     expect(genericListFiles.length, `these list through crud.ts: ${genericListFiles.join(", ")} - keep GENERIC_LIST in step`).toBe(GENERIC_LIST.length);

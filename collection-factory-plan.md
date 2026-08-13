@@ -27,7 +27,7 @@ the factory decides no permission.
 
 ## Current state
 
-**77 of 106 route files are on the factory. Two collections remain, and every one of them carries a recorded
+**78 of 106 route files are on the factory. One collection remains, and every one of them carries a recorded
 reason - none is simply unstarted work.** 1238 tests across 108 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
@@ -125,21 +125,32 @@ five are in the table below.
 ## Remaining work
 
 Track A is done, and so is every convertible collection. What remains is one decision, not one conversion:
-`roles` and `accessRules` (B3) both key on something other than the standard `uuid` + `code` pair.
+`roles` keys on its NAME - a text primary key, not the standard generated `uuid`.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track B - the hand-rolled collections
 
-**B3. `roles` and `accessRules`** (identity). `roles` keys on the role NAME, the FK target every grant and user
-row points at; `accessRules` keys on an `id` column and has neither `uuid` nor `code`, and serializes inside
-list/get. Both need an identity decision before a conversion, not a conversion that overrides every method:
-either give the tables the standard `uuid` + `code` pair and keep the name/id as the display key, or accept
-that these two are configuration surfaces and move them to `NOT_COLLECTIONS` with that reason. Decide first,
-then act - a five-override conversion buys the list shape and nothing else.
+**B3. `roles`** (identity - BLOCKED, needs a decision). `roles.name` is a text PRIMARY KEY and there is no
+`uuid` column at all: the role name IS the identity, and it is what `users.role` and `access_rules.subject`
+store. Every generic method keys on `table.uuid`, so a conversion means overriding get, update, delete and purge,
+which buys the list shape and nothing else. Two ways out, and they are not equivalent:
 
-**B3. `roles` and `accessRules`** are BLOCKED on an identity decision, stated below, not on a conversion.
+1. Give `roles` the standard `uuid` + `code` pair and keep `name` as a unique display key. Correct on the lane,
+   but it adds a second identity that nothing references (every FK stores the name), and it means re-keying
+   `users.role` and `access_rules.subject` to make the uuid the real identity - a schema change reaching into
+   the authz tables.
+2. Leave it off the lane in a NAMED category with its reason, the way `NOT_COLLECTIONS` works. The existing
+   category does not fit: its pinned property is "no collection-level POST and no DELETE", and `roles` has both.
+   So this needs a second exemption - "the item id is the value other tables store as a foreign key" - with its
+   own pinned property, e.g. that the id path segment is not a wire token.
+
+`accessRules` turned out NOT to need this decision at all: its primary key column has always been named `uuid`
+(`pk()` names the column), and only the drizzle PROPERTY said `id`. Renaming the property converted it with no
+schema change and no migration.
+
+**B3. `roles`** is BLOCKED on an identity decision, stated below, not on a conversion.
 
 ### Not in scope
 
@@ -231,6 +242,13 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- `access-rules` was recorded as blocked on identity because it "has neither the `uuid` every generic method keys
+  on nor the `code` the access hint decides against". Half of that was wrong: `pk()` names its column `uuid`, so
+  the column had always been there and only the drizzle PROPERTY was called `id`. Renaming the property put the
+  collection on the lane with no schema change, no migration and no overrides beyond its own create and delete.
+  It has no `code`, which is honest - a rule is not a hierarchy node - so its rows carry no per-row access hint.
+- `access-rules` also serialized INSIDE its list and get, which is why it looked like it needed both. The
+  object-id resolution is a `decorate` and the shape is a `serialize`, the same split as every other collection.
 - **`GET /v1/users` leaked every account.** Its list bound no scope at all, and everyone holds `users.me.**` -
   which resolves to breadth `own`, i.e. they may reach the list - so any employee could read a page carrying
   every colleague's email and role. The list is now scoped on the account's employee link, so an admin

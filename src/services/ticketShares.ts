@@ -24,7 +24,7 @@ export async function usersForEmployees(deps: Deps, employeeIds: (string | null 
 export async function grantTicketRead(deps: Deps, ticketCode: string, userUuid: string) {
   const pattern = readPattern(ticketCode);
   const dup = (await deps.db
-    .select({ id: schema.accessRules.id })
+    .select({ id: schema.accessRules.uuid })
     .from(schema.accessRules)
     .where(and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user"), eq(schema.accessRules.pattern, pattern), eq(schema.accessRules.effect, "allow")))
     .limit(1))[0];

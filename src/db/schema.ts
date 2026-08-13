@@ -106,7 +106,7 @@ export const policy = sqliteTable("policy", {
 // fetches extra rows (decide filters them); never dropping a matching row is the security property, proven by
 // the differential test (compiled-rows decision == blob decision). Seed rows come from the typed `GRANTS`.
 export const accessRules = sqliteTable("access_rules", {
-  id: pk(),
+  uuid: pk(),
   subject: text("subject").notNull(), // role name OR user uuid
   subjectKind: text("subject_kind", { enum: ["role", "user"] }).notNull(),
   namespace: text("namespace").notNull(), // collection (first pattern token) or '*' (the super "**" pattern)
