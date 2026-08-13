@@ -15,7 +15,7 @@ import { describe, it, expect } from "vitest";
 // NOT_COLLECTIONS is the permanent exemption: key/value config surfaces that borrow the route shape but have no
 // collection semantics - the item id is a key the caller chooses, so PATCH upserts and there is nothing to
 // create or delete. Each carries its reason, and a test below pins the property that makes the claim true: no
-// `POST /` and no DELETE. If one ever grows a create or a delete it has become a collection, that test fails,
+// collection-level `POST /` (an item-level `POST /:id:verb` is a custom method, not a create) and no DELETE. If one ever grows a create or a delete it has become a collection, that test fails,
 // and it moves into the factory lane.
 const sources = import.meta.glob("../src/routes/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
@@ -36,13 +36,14 @@ const PENDING = new Set([
   // lifecycle verb would answer :enable/:disable first and write the WRONG column, leaving a rule that reads
   // disabled but still fires. Collapsing the duplicate columns is a schema change, not a spec knob - do that
   // first, then convert.
-  "accessRules", "apiKeys", "automations", "bankFormats", "documentRoutes", "operations", "payrollRuns", "reviewFeedback", "roles", "ticketChecklists", "users",
+  "accessRules", "apiKeys", "automations", "documentRoutes", "operations", "payrollRuns", "roles", "users",
   // step 6 - the heavy three, converted last
   "announcements", "cards", "employees",
 ]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
 const NOT_COLLECTIONS = new Map([
+  ["bankFormats", "per-bank column mappings kept in one settings key: the id is the bank, PATCH upserts its blob"],
   ["payrollDebit", "one settings key rendered per bank: no table of its own, PATCH /:bank upserts the blob"],
   ["policy", "leave-policy key/value: the id is the policy key, PATCH sets its value"],
   ["preferences", "per-user key/value: the id is the preference key, PATCH upserts it"],
@@ -101,7 +102,7 @@ describe("every collection is built by the factory", () => {
   it.each([...NOT_COLLECTIONS])("keeps %s a key/value surface, not a collection (%s)", (name) => {
     const entry = entries.find((e) => e.name === name);
     expect(entry, `src/routes/${name}.ts is gone - drop it from NOT_COLLECTIONS`).toBeDefined();
-    expect(/\.post\(\s*(?:"|`)\//.test(entry!.src), `${name} grew a create - it is a collection now, build it with collectionRoutes()`).toBe(false);
+    expect(/\.post\(\s*(?:"|`)\/(?:"|`)/.test(entry!.src), `${name} grew a create - it is a collection now, build it with collectionRoutes()`).toBe(false);
     expect(/\.delete\(/.test(entry!.src), `${name} grew a delete - it is a collection now, build it with collectionRoutes()`).toBe(false);
   });
 });

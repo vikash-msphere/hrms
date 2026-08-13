@@ -28,7 +28,7 @@ export async function listReviewFeedback(deps: Deps, scope: ListScope, maxPageSi
   return { items: slice, nextPageToken };
 }
 
-export async function getReviewFeedback(deps: Deps, _actor: AppUser, id: string) {
+async function getReviewFeedback(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.reviewFeedback).where(eq(schema.reviewFeedback.uuid, id)).limit(1))[0];
   if (!row) throw notFound("feedback request not found");
   return row;

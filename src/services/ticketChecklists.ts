@@ -10,7 +10,7 @@ import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, purgeRow } from "./softDelete";
+import { visibleByDelete } from "./softDelete";
 
 export type TicketChecklistInput = { display_name?: string; items?: string[] };
 
@@ -30,7 +30,7 @@ export async function listTicketChecklists(deps: Deps, _actor: AppUser, maxPageS
   return { items: slice, nextPageToken };
 }
 
-export async function getTicketChecklist(deps: Deps, _actor: AppUser, id: string) {
+async function getTicketChecklist(deps: Deps, _actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.ticketChecklists).where(eq(schema.ticketChecklists.uuid, id)).limit(1))[0];
   if (!row) throw notFound("ticket checklist not found");
   return row;
@@ -69,9 +69,3 @@ export async function updateTicketChecklist(deps: Deps, actor: AppUser, id: stri
   return updated;
 }
 
-export async function deleteTicketChecklist(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await softDeleteRow(deps, actor, schema.ticketChecklists, "ticket_checklist", "ticket-checklists", id, ifMatch);
-}
-export async function purgeTicketChecklist(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await purgeRow(deps, actor, schema.ticketChecklists, "ticket_checklist", "ticket-checklists", id, ifMatch);
-}
