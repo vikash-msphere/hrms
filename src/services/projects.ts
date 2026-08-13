@@ -2,7 +2,7 @@
 // timesheet + utilization views.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type ProjectInput = {
   name?: string;
@@ -12,7 +12,7 @@ export type ProjectInput = {
   status?: "active" | "archived";
 };
 
-export const projectSpec: CrudSpec<ProjectInput> = {
+export const projectSpec: CrudSpec<ProjectInput, typeof schema.projects> = {
   table: schema.projects,
   collection: "projects",
   auditName: "project",
@@ -30,7 +30,7 @@ export const projectSpec: CrudSpec<ProjectInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.projects> = {};
     if (has(patch, "name")) {
       if (!patch.name?.trim()) throw invalidArgument("name is required");
       set.name = patch.name.trim();

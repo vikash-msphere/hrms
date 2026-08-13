@@ -17,7 +17,7 @@ const computeSchema = z
 // A settlement is a computed snapshot, not an editable record: the create IS the computation (it consumes the
 // leaver's payables and can be recomputed, which releases what the previous one took). So there is no PATCH,
 // and the table carries no delete_time - the factory therefore mounts no DELETE and no `:restore` either.
-export const settlements = collectionRoutes<SettlementInput>({
+export const settlements = collectionRoutes<SettlementInput, typeof schema.settlements>({
   table: schema.settlements,
   collection: "settlements",
   auditName: "settlement",

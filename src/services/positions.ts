@@ -34,7 +34,7 @@ export async function listPositions(deps: Deps, scope: ListScope, employeeId?: s
 
 // The standard lane for this collection is list + get only: `changeRole` below is its create (see
 // routes/positions.ts, which wires it as the create override), and a history row is never edited or deleted.
-export const positionSpec: CrudSpec<PositionInput> = {
+export const positionSpec: CrudSpec<PositionInput, typeof schema.positions> = {
   table: schema.positions,
   collection: "positions",
   auditName: "position",

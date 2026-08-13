@@ -12,7 +12,7 @@ import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
-import { crudService, type CrudSpec } from "./crud";
+import { crudService, type CrudSpec, type SetOf } from "./crud";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 
@@ -43,7 +43,7 @@ export async function listDepartments(deps: Deps, scope: ListScope | undefined, 
 
 // A department is a node in the hierarchy, so its code IS its position in the tree: the create allocates one
 // under the chosen parent, and re-parenting (below) has to move the whole subtree with it.
-export const departmentSpec: CrudSpec<DepartmentInput> = {
+export const departmentSpec: CrudSpec<DepartmentInput, typeof schema.departments> = {
   table: schema.departments,
   collection: "departments",
   auditName: "department",
@@ -64,7 +64,7 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
   if (!row) throw notFound("department not found");
   assertNotLocked(row);
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.departments> = { updatedAt: new Date() };
   const has = (k: keyof DepartmentInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("display_name")) set.name = patch.display_name;
   if (has("managers")) set.managerIds = managerIdsJson(patch.managers);

@@ -42,7 +42,7 @@ const withCounts = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => 
 
 // Kanban / scrum boards. :configure owns the column, swimlane and label layout (a PATCH edits the board's
 // identity, not its shape); :metrics answers with flow analytics rather than the board resource.
-export const boards = collectionRoutes<BoardInput>({
+export const boards = collectionRoutes<BoardInput, typeof schema.boards>({
   table: schema.boards,
   collection: "boards",
   auditName: "board",

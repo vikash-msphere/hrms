@@ -8,6 +8,7 @@
 // This makes NO access decision: the middleware is still the single source of authorization, exactly as when
 // each service was written by hand. `assertNotLocked` is a workflow precondition, not access control.
 import { and, eq, isNull, type SQL } from "drizzle-orm";
+import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { allocFlatCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -20,8 +21,17 @@ import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import { assertNotLocked } from "./lockGuard";
 
-// Drizzle tables are heavily generic; treated structurally here, as in services/softDelete.ts.
-type Table = any;
+// A drizzle table, kept indexable: the generic helpers here reach for the standard columns by name
+// (`table.uuid`, `table.deleteTime`) the way services/softDelete.ts does, while `$inferInsert` still resolves to
+// THIS table's columns - which is what puts a compiler under a spec's column mapping.
+export type CrudTable = SQLiteTable & Record<string, any>;
+type Table = CrudTable;
+/**
+ * The columns a spec's `insert` / `patch` may set: this table's insert shape, every key optional (a patch sets
+ * only what the caller sent). A mistyped column name is a compile error here instead of a value that silently
+ * never lands or a D1 failure at runtime.
+ */
+export type SetOf<T extends Table> = Partial<T["$inferInsert"]>;
 type Row = {
   uuid: string;
   code: string | null;
@@ -32,8 +42,8 @@ type Row = {
   [k: string]: unknown;
 };
 
-export type CrudSpec<I> = {
-  table: Table;
+export type CrudSpec<I, T extends Table = Table> = {
+  table: T;
   /** Wire collection (`pay-grades`) - the audit entity and the access-hint key. */
   collection: string;
   /** Audit action stem and the `<name> not found` text the shared soft-delete helpers raise (`pay_grade`). */
@@ -46,13 +56,13 @@ export type CrudSpec<I> = {
    * org-documents :acknowledge; a leave balance is accrued) - the factory then mounts no POST at all, so the
    * absence of a create is expressed once, here, instead of as a missing route somebody has to notice.
    */
-  insert?: (input: I, deps: Deps, actor: AppUser) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  insert?: (input: I, deps: Deps, actor: AppUser) => SetOf<T> | Promise<SetOf<T>>;
   /**
    * Wire patch -> the `set` object: ONLY keys the caller actually sent (see `has`), so a diff stays honest.
    * Async when a field has to be resolved against another table (a reference the write must validate).
    * OMIT for a read-only collection (an event-log row is history; a cron run is a record of what happened).
    */
-  patch?: (input: I, row: any, deps: Deps) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  patch?: (input: I, row: any, deps: Deps) => SetOf<T> | Promise<SetOf<T>>;
   /**
    * Presentation order WITHIN a page. The DB always pages in the cursor's own (createdAt, uuid) order - that is
    * what makes a page boundary stable - and this reorders the rows of one page before they are serialized.
@@ -73,7 +83,7 @@ export type CrudSpec<I> = {
    * Code allocation, when the resource is not a flat one (owned/dept-scoped tables). Receives the resolved
    * insert values, since an owned code is allocated under the row's owner.
    */
-  allocCode?: (deps: Deps, table: Table, values: Record<string, unknown>) => Promise<string>;
+  allocCode?: (deps: Deps, table: Table, values: SetOf<T>) => Promise<string>;
 };
 
 export type CrudService<I> = {
@@ -94,13 +104,13 @@ export type CrudService<I> = {
 /** Did the caller actually send this key? A PATCH of `{x: undefined}` clears x; an absent x leaves it alone. */
 export const has = <T extends object>(patch: T, key: keyof T) => Object.prototype.hasOwnProperty.call(patch, key);
 
-export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
+export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): CrudService<I> {
   const { table, collection, auditName } = spec;
   // allocFlatCode's third parameter is a width, not the values bag - bind it explicitly.
   const alloc = spec.allocCode ?? ((deps: Deps, t: Table) => allocFlatCode(deps, t));
 
   const required = async (deps: Deps, id: string): Promise<Row> => {
-    const row = (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1))[0] as Row | undefined;
+    const row = (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1))[0] as unknown as Row | undefined;
     if (!row) throw notFound(spec.notFound);
     return row;
   };
@@ -136,7 +146,7 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
         row = ((await deps.db
           .insert(table)
           .values({ code, ...(id ? { uuid: id } : {}), ...values })
-          .returning()) as Row[])[0]!;
+          .returning()) as unknown as Row[])[0]!;
       } catch (e) {
         // A caller-supplied `?id` that is already taken is a CONFLICT, not a server fault - the resource it
         // names exists. Without this the raw D1 constraint error surfaces as a 500.
@@ -159,7 +169,7 @@ export function crudService<I>(spec: CrudSpec<I>): CrudService<I> {
       assertNotLocked(row);
       if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
       const set: Record<string, unknown> = { updatedAt: new Date(), ...(await spec.patch(patch, row, deps)) };
-      const updated = ((await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning()) as Row[])[0]!;
+      const updated = ((await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning()) as unknown as Row[])[0]!;
       await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set), updated);
       if (spec.afterUpdate) await spec.afterUpdate(deps, actor, updated, row, patch);
       return updated;

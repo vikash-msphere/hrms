@@ -56,7 +56,7 @@ const removeTodoSchema = z.object({ todo: z.string() }).strict();
 // restore re-rolls the parent goal's progress, and a purge tears down comments, todos, movements and any
 // "blocked by this card" links. What the lane supplies is one paging/If-Match/hint implementation and the verb
 // dispatch - eleven of them, which is most of what a card is.
-export const cards = collectionRoutes<CardInput>({
+export const cards = collectionRoutes<CardInput, typeof schema.cards>({
   table: schema.cards,
   collection: "cards",
   auditName: "card",

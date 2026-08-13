@@ -1,4 +1,5 @@
 import { z } from "zod";
+import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { benefitEnrollmentSpec, listBenefitEnrollments, type BenefitEnrollmentInput } from "../services/benefitEnrollments";
 import { toBenefitEnrollmentResource } from "../http/serialize";
@@ -13,7 +14,7 @@ const writeSchema = z.object({
 
 // Who is enrolled in (or has waived) which benefit plan. Plain CRUD plus soft delete/restore - all of it the
 // shared lane; the spec in the service owns the field mapping, the owner-scoped code and the notification.
-export const benefitEnrollments = collectionRoutes<BenefitEnrollmentInput>({
+export const benefitEnrollments = collectionRoutes<BenefitEnrollmentInput, typeof schema.benefitEnrollments>({
   ...benefitEnrollmentSpec,
   param: "enrollment_id",
   writeSchema,

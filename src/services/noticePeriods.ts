@@ -4,6 +4,7 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -106,7 +107,7 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   validate(patch);
   const has = (k: keyof NoticePeriodInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.noticePeriods> = { updatedAt: new Date() };
   if (has("type")) set.type = patch.type;
   if (has("notice_date") && patch.notice_date) set.noticeDate = new Date(dayMs(patch.notice_date, "notice_date"));
   if (has("last_working_day") && patch.last_working_day) set.lastWorkingDay = new Date(dayMs(patch.last_working_day, "last_working_day"));

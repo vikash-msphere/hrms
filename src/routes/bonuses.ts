@@ -48,7 +48,7 @@ export const bonusAward = new Hono<AppEnv>().post("/", zValidator("json", awardS
 
 // A recorded award is an immutable payable: payroll (or an FnF settlement) pays it, and the row is the
 // evidence of what was paid. Hence no PATCH, and no delete_time on the table - so no DELETE, no `:restore`.
-export const bonuses = collectionRoutes<BonusInput>({
+export const bonuses = collectionRoutes<BonusInput, typeof schema.bonuses>({
   table: schema.bonuses,
   collection: COL,
   auditName: "bonus",

@@ -4,7 +4,7 @@
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 
 export type PayComponentInput = {
   display_name?: string;
@@ -96,7 +96,7 @@ async function validatePt(deps: Deps, effective: { method?: string; kind?: strin
   if (dup) throw invalidArgument(`only one Professional Tax component may exist - ${dupHint(dup)}`);
 }
 
-export const payComponentSpec: CrudSpec<PayComponentInput> = {
+export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComponents> = {
   table: schema.payComponents,
   collection: "pay-components",
   auditName: "pay_component",
@@ -133,7 +133,7 @@ export const payComponentSpec: CrudSpec<PayComponentInput> = {
     };
   },
   patch: async (patch, row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.payComponents> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "kind")) set.kind = patch.kind;
     if (has(patch, "method")) set.method = patch.method;

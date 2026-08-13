@@ -24,7 +24,7 @@ const writeSchema = z
 // Machine credentials. No PATCH: a credential's scope is fixed at mint time. The DELETE is a real removal (the
 // table has no delete_time), so there is no `:restore` and no `?force` - and :revoke is the softer move that
 // kills the key while keeping the row, so the audit trail can still resolve it.
-export const apiKeys = collectionRoutes<ApiKeyInput>({
+export const apiKeys = collectionRoutes<ApiKeyInput, typeof schema.apiKeys>({
   table: schema.apiKeys,
   collection: "api-keys",
   auditName: "api_key",

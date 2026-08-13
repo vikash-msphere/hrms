@@ -37,7 +37,7 @@ type LcCfg = { table: any; singular: string; collection: string };
 // still supplies is the one paging/If-Match/hint implementation, the lifecycle verbs the table's columns earn,
 // and the verb dispatch.
 export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => any) {
-  return collectionRoutes<DocWrite>({
+  return collectionRoutes<DocWrite, LcCfg["table"]>({
     table: lc.table,
     collection: lc.collection,
     auditName: lc.singular,

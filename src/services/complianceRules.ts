@@ -7,7 +7,7 @@ import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import { idFromPath } from "./documentsCommon";
 import { dueDatesInRange, periodLabelFor } from "../domain/complianceRecurrence";
 
@@ -77,7 +77,7 @@ function validate(input: ComplianceRuleInput) {
   if (input.anchor_month != null && (typeof input.anchor_month !== "number" || input.anchor_month < 1 || input.anchor_month > 12)) throw invalidArgument("anchor_month must be 1-12");
 }
 
-export const complianceRuleSpec: CrudSpec<ComplianceRuleInput> = {
+export const complianceRuleSpec: CrudSpec<ComplianceRuleInput, typeof schema.complianceRules> = {
   table: schema.complianceRules,
   collection: "compliance-rules",
   auditName: "compliance-rule",
@@ -99,7 +99,7 @@ export const complianceRuleSpec: CrudSpec<ComplianceRuleInput> = {
   },
   patch: (patch) => {
     validate(patch);
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.complianceRules> = {};
     if (has(patch, "title")) { if (!patch.title) throw invalidArgument("title cannot be empty"); set.title = patch.title; }
     if (has(patch, "category")) set.category = patch.category ?? null;
     if (has(patch, "frequency")) set.frequency = patch.frequency;

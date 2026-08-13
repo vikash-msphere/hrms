@@ -9,7 +9,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import { idFromPath } from "./documentsCommon";
 import { notify } from "./notifications";
 
@@ -42,7 +42,7 @@ export async function listComplianceEvents(deps: Deps, scope: ListScope | undefi
   return keysetPage(deps, schema.complianceEvents, "compliance-events", where, { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export const complianceEventSpec: CrudSpec<ComplianceEventInput> = {
+export const complianceEventSpec: CrudSpec<ComplianceEventInput, typeof schema.complianceEvents> = {
   table: schema.complianceEvents,
   collection: "compliance-events",
   auditName: "compliance-event",
@@ -68,7 +68,7 @@ export const complianceEventSpec: CrudSpec<ComplianceEventInput> = {
     };
   },
   patch: (patch, row) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.complianceEvents> = {};
     if (has(patch, "title")) { if (!patch.title) throw invalidArgument("title cannot be empty"); set.title = patch.title; }
     if (has(patch, "category")) set.category = patch.category ?? null;
     if (has(patch, "frequency")) { if (patch.frequency && !FREQUENCIES.includes(patch.frequency)) throw invalidArgument("invalid frequency"); set.frequency = patch.frequency; }

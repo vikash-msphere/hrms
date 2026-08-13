@@ -9,7 +9,7 @@ import { audit } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type ApprovalDelegationInput = {
   delegator?: string | null;
@@ -65,7 +65,7 @@ export async function deleteApprovalDelegation(deps: Deps, actor: AppUser, id: s
   await audit(deps, actor, "approvalDelegation.delete", "approval-delegations", id);
 }
 
-export const approvalDelegationSpec: CrudSpec<ApprovalDelegationInput> = {
+export const approvalDelegationSpec: CrudSpec<ApprovalDelegationInput, typeof schema.approvalDelegations> = {
   table: schema.approvalDelegations,
   collection: "approval-delegations",
   auditName: "approvalDelegation",
@@ -90,7 +90,7 @@ export const approvalDelegationSpec: CrudSpec<ApprovalDelegationInput> = {
     };
   },
   patch: async (patch, row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.approvalDelegations> = {};
     if (has(patch, "delegate")) {
       const delegateId = idFromPath(patch.delegate);
       if (!delegateId) throw invalidArgument("delegate is required");

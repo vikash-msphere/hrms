@@ -22,7 +22,7 @@ const repaymentSchema = z.object({ amount: z.number() }).strict();
 // Employee loans and advances. Both writes stay the service's own: a loan can only be requested for yourself
 // and only edited while PENDING (past that it is a payable that payroll recovers). Delete/restore are the
 // shared soft-delete lane; the money movements are the four verbs.
-export const loans = collectionRoutes<LoanInput>({
+export const loans = collectionRoutes<LoanInput, typeof schema.loans>({
   table: schema.loans,
   collection: "loans",
   auditName: "loan",

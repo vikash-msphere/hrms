@@ -17,7 +17,7 @@ const buildSchema = z.object({ one_offs: z.record(z.any()).optional() }).strict(
 // A payroll run: created for a pay period, built, reviewed, approved, published. Deleting one is a real
 // removal and only legal while unpublished (the service refuses PUBLISHED), so there is no `:restore` and no
 // `?force`. There is no PATCH either - a run changes through its state machine, not by editing fields.
-const runs = collectionRoutes<{ pay_period: string }>({
+const runs = collectionRoutes<{ pay_period: string }, typeof schema.payrollRuns>({
   table: schema.payrollRuns,
   collection: "payroll-runs",
   auditName: "payroll_run",

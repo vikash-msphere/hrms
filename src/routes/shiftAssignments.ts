@@ -1,4 +1,5 @@
 import { z } from "zod";
+import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { shiftAssignmentSpec, listShiftAssignments, type ShiftAssignmentInput } from "../services/shiftAssignments";
 import { toShiftAssignmentResource } from "../http/serialize";
@@ -12,7 +13,7 @@ const writeSchema = z.object({
 
 // The roster: who works which shift on which day. Plain CRUD plus soft delete/restore - the shared lane; the
 // list is the collection's own because the schedule view asks for one employee and/or a date window.
-export const shiftAssignments = collectionRoutes<ShiftAssignmentInput>({
+export const shiftAssignments = collectionRoutes<ShiftAssignmentInput, typeof schema.shiftAssignments>({
   ...shiftAssignmentSpec,
   param: "assignment_id",
   writeSchema,

@@ -20,7 +20,7 @@ export async function listLeaveBalances(deps: Deps, scope: ListScope, maxPageSiz
 // Balances are produced by the accrual cron, never written through the API, and never deleted - so the spec
 // carries no insert/patch and the table no delete_time. The factory mounts exactly list + get from that.
 // Item access (own / dept / all) is enforced by the middleware on leave-balances/<code>.
-export const leaveBalanceSpec: CrudSpec<never> = {
+export const leaveBalanceSpec: CrudSpec<never, typeof schema.leaveBalances> = {
   table: schema.leaveBalances,
   collection: "leave-balances",
   auditName: "leave_balance",

@@ -21,7 +21,7 @@ const createSchema = z
 // A workflow resource: the create prices the payout, and the state moves only through :approve/:reject/:cancel
 // (PAID is set by the payroll run). Nothing edits a priced row, and the table has no delete_time - so no PATCH,
 // no DELETE, no `:restore`.
-export const leaveEncashments = collectionRoutes<EncashmentInput>({
+export const leaveEncashments = collectionRoutes<EncashmentInput, typeof schema.leaveEncashments>({
   table: schema.leaveEncashments,
   collection: "leave-encashments",
   auditName: "leave_encashment",

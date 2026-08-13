@@ -2,7 +2,7 @@
 // rate), encashment and carry-forward policy; balances are accrued per type by services/leaveAccrual.ts.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import { accrueLeave } from "./leaveAccrual";
 
 export type LeaveTypeInput = {
@@ -23,7 +23,7 @@ export type LeaveTypeInput = {
 
 const frequency = (v?: string) => (v === "semi_monthly" ? "semi_monthly" : "monthly");
 
-export const leaveTypeSpec: CrudSpec<LeaveTypeInput> = {
+export const leaveTypeSpec: CrudSpec<LeaveTypeInput, typeof schema.leaveTypes> = {
   table: schema.leaveTypes,
   collection: "leave-types",
   auditName: "leave_type",
@@ -47,7 +47,7 @@ export const leaveTypeSpec: CrudSpec<LeaveTypeInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.leaveTypes> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "accrual_days_per_year")) set.accrualDaysPerYear = patch.accrual_days_per_year;
     if (has(patch, "accrual_frequency")) set.accrualFrequency = frequency(patch.accrual_frequency);

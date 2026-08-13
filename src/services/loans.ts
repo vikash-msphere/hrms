@@ -4,6 +4,7 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -74,7 +75,7 @@ export async function updateLoan(deps: Deps, actor: AppUser, id: string, patch: 
   if (!row || row.deleteTime) throw notFound("loan not found");
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be edited");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.loans> = { updatedAt: new Date() };
   const has = (k: keyof LoanInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("kind")) set.kind = patch.kind === "advance" ? "advance" : "loan";
   if (has("principal")) { if (!(Number(patch.principal) > 0)) throw invalidArgument("principal must be greater than 0"); set.principal = round2(patch.principal!); }

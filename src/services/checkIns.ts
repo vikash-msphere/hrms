@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
 export type ActionItem = { text: string; done?: boolean };
@@ -43,7 +43,7 @@ export async function listCheckIns(deps: Deps, scope: ListScope, maxPageSize: nu
 // A 1:1 record, owned by the employee it is about (the code embeds the owner, so own/dept/all scoping works).
 // The write decides who the counterpart is, when they met, the notes and the action items; paging, If-Match,
 // the audit diff and soft delete/restore are the shared lane.
-export const checkInSpec: CrudSpec<CheckInInput> = {
+export const checkInSpec: CrudSpec<CheckInInput, typeof schema.checkIns> = {
   table: schema.checkIns,
   collection: "check-ins",
   auditName: "check-in",
@@ -69,7 +69,7 @@ export const checkInSpec: CrudSpec<CheckInInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.checkIns> = {};
     if (has(patch, "counterpart")) set.counterpartId = idFromPath(patch.counterpart) ?? null;
     if (has(patch, "meeting_date")) {
       if (patch.meeting_date && Number.isNaN(dayMs(patch.meeting_date))) throw invalidArgument("meeting_date is invalid");

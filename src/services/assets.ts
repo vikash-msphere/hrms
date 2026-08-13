@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -73,7 +74,7 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   if (!row) throw notFound("asset not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   const has = (k: keyof AssetInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.assets> = { updatedAt: new Date() };
   if (has("asset_tag")) set.assetTag = patch.asset_tag?.trim() || null;
   if (has("name")) {
     if (!patch.name?.trim()) throw invalidArgument("name cannot be empty");

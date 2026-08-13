@@ -1,6 +1,7 @@
 import { eq, inArray } from "drizzle-orm";
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -75,7 +76,7 @@ export async function updateReviewCycle(deps: Deps, actor: AppUser, id: string, 
   const row = (await deps.db.select().from(schema.reviewCycles).where(eq(schema.reviewCycles.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("review cycle not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.reviewCycles> = { updatedAt: new Date() };
   const has = (k: keyof ReviewCycleInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) {
     if (!patch.name?.trim()) throw invalidArgument("name is required");

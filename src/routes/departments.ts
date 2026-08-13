@@ -1,4 +1,5 @@
 import { z } from "zod";
+import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { departmentSpec, listDepartments, updateDepartment, type DepartmentInput } from "../services/departments";
 import { toDepartmentResource } from "../http/serialize";
@@ -9,7 +10,7 @@ const writeSchema = z.object({ display_name: z.string().min(1).optional(), paren
 // soft delete/restore. The update stays the service's own: changing `parent` re-codes this department and
 // cascades the new code through its subtree - sub-departments, employees, their owned rows and any access-rule
 // codes - which is a good deal more than a column write.
-export const departments = collectionRoutes<DepartmentInput>({
+export const departments = collectionRoutes<DepartmentInput, typeof schema.departments>({
   ...departmentSpec,
   param: "department_id",
   writeSchema,

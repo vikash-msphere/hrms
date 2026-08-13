@@ -12,7 +12,7 @@ const writeSchema = z.object({
 // Predefined checklists a ticket can be seeded from. Plain CRUD over the shared lane; the list scopes by the
 // caller. Its soft delete now comes with the `:restore` the hand-written route never mounted - the table has
 // always kept a delete_time, so a deleted checklist was recoverable in the database and not through the API.
-export const ticketChecklists = collectionRoutes<TicketChecklistInput>({
+export const ticketChecklists = collectionRoutes<TicketChecklistInput, typeof schema.ticketChecklists>({
   table: schema.ticketChecklists,
   collection: "ticket-checklists",
   auditName: "ticket_checklist",

@@ -28,14 +28,14 @@ the factory decides no permission.
 ## Current state
 
 **74 of 106 route files are on the factory. Five collections remain, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1229 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
+reason - none is simply unstarted work.** 1230 tests across 106 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
 and each is independently shippable.
 
 The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
 the five key/value config surfaces the drift test names.
 
-The lane itself is not finished: the spec is not typed against its table, and the access hint is computed after
-serializing. Track A under "Remaining work" clears them; each is one fix now instead of forty.
+The lane itself is not finished: the access hint is still computed after serializing. Track A under "Remaining
+work" clears that; it is one fix now instead of forty.
 
 ### The spec, as it stands
 
@@ -72,6 +72,12 @@ Behaviours worth knowing before converting anything:
   collection that means something specific by `:enable` says so in `verbs` instead of being answered by the
   generic column write, and `collectionLaneDrift.test.ts` names every such overlap so one is visible.
 - A caller-supplied `?id=` that is already taken is a 409 ALREADY_EXISTS, not a 500.
+- The spec is typed against its own table. `CrudSpec<Input, typeof schema.x>` makes `insert` / `patch` return
+  `SetOf<T>` - this table's insert columns, all optional - so a mistyped column is a compile error rather than a
+  value that never lands. Write the `set` object with that type too (`const set: SetOf<typeof schema.x> = {}`):
+  a block-bodied `return {...}` gets no excess-property check from TypeScript, so the typed `set` is what
+  actually catches a typo, and it covers the hand-written `update<X>` functions wired as `overrides.update`.
+  `collectionLaneDrift.test.ts` fails a `collectionRoutes<Input>(...)` that omits the table type.
 - The lock guard lives in `src/services/lockGuard.ts` (a leaf). Importing it from `services/lifecycle.ts` inside
   `crud.ts` created a cycle through notifications and left `crudService` undefined at module-init.
 - The generic list pages in SQL through `services/keysetPage.ts`: one page per request, ordered and seeked on
@@ -113,18 +119,13 @@ Two tracks. **A** hardens the lane itself: the generic path still carries defect
 because it is now one path each is one fix instead of forty. **B** converts the five collections that are still
 hand-rolled, three of which only become convertible after a step in A.
 
-Order matters: A6 and A7 first, because B1 depends on A7, and because every A step changes the lane
+Order matters: A7 first, because B1 depends on A7, and because every A step changes the lane
 under all 74 converted collections, which is cheapest while the conversion is fresh.
 
 Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
 shippable.
 
 ### Track A - fix the lane
-
-**A6. Type the spec against its table.** `type Table = any` and `insert` returns `Record<string, unknown>`, so
-a mistyped column name compiles and then either drops silently or fails at D1. Parametrize `CrudSpec` on the
-table and type `insert` / `patch` returns as `Partial<T["$inferInsert"]>`. Mechanical, and it puts a compiler
-under the one thing every spec has to get right.
 
 **A7. Compute the access hint before serializing.** `item()` serializes, then computes the hint. A resource
 whose SHAPE depends on what the caller may do therefore cannot be expressed. `computeCan` is pure and already
@@ -246,6 +247,14 @@ Defects the copied code was hiding, now fixed:
 - `ticket-checklists` had a soft delete with no `:restore` route: deleted rows were recoverable in the database
   but not through the API.
 - `operations` answered 400 for an unknown verb where every other collection answers 404.
+- Typing the spec against its table found seven places where a validated wire string was written to an enum
+  column without narrowing: the guard was `if (!ALLOWED.includes(v as any)) throw`, which checks at runtime and
+  tells the compiler nothing, so the column's type was satisfied by a cast rather than by the check. They now go
+  through `oneOf(v, ALLOWED, detail)` (`lib/errors.ts`), where the check and the narrowing are one statement.
+  Same 400s, same messages.
+- Four `set` objects stay `Record<string, unknown>` because their table is a parameter, not a constant: the
+  generic patch in `crud.ts`, the two document-service writers, and the e-sign callback (both run over either
+  document table). `announcements` is the fifth and is still hand-rolled.
 - Still open, recorded here rather than fixed: a shared lifecycle verb's response does not go through the
   factory's item path (`http/lifecycleRoute.ts` serializes and answers itself), so `:disable` / `:lock` /
   `:publish` answer WITHOUT `access.can` and without the collection's derived fields, unlike every other item

@@ -25,6 +25,14 @@ export class AppError extends Error {
 
 // Canonical constructors (map to HTTP status). Use these everywhere.
 export const invalidArgument = (d?: string) => new AppError(400, "/errors/invalid-argument", "Invalid Argument", d);
+// Validate a wire value against the set a column actually accepts, NARROWING it as it goes: the runtime check
+// and the type are one statement, so a value cannot be checked and then assigned as a bare `string`. `detail` is
+// the 400's message, kept per call site because it is user-facing text.
+export const oneOf = <T extends string>(v: unknown, allowed: readonly T[], detail: string): T => {
+  if (typeof v !== "string" || !allowed.includes(v as T)) throw invalidArgument(detail);
+  return v as T;
+};
+
 export const unauthenticated = (d?: string) => new AppError(401, "/errors/unauthenticated", "Unauthenticated", d);
 export const forbidden = (d?: string) => new AppError(403, "/errors/permission-denied", "Permission Denied", d);
 export const notFound = (d?: string) => new AppError(404, "/errors/not-found", "Not Found", d);

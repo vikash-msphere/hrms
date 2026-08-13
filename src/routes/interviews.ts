@@ -18,7 +18,7 @@ const writeSchema = z
   .strict();
 
 // Scheduled interviews for an application. :complete and :cancel close the slot out.
-export const interviews = collectionRoutes<InterviewInput>({
+export const interviews = collectionRoutes<InterviewInput, typeof schema.interviews>({
   table: schema.interviews,
   collection: "interviews",
   auditName: "interview",

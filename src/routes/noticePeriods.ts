@@ -21,7 +21,7 @@ const writeSchema = z
 // A departing employee's notice + last working day. Both writes reach past this row - the create can start an
 // offboarding transition and link it back, the update keeps that transition in sync and terminates the employee
 // when the notice completes - so they stay the service's own. Delete/restore are the shared soft-delete lane.
-export const noticePeriods = collectionRoutes<NoticePeriodInput>({
+export const noticePeriods = collectionRoutes<NoticePeriodInput, typeof schema.noticePeriods>({
   table: schema.noticePeriods,
   collection: "notice-periods",
   auditName: "notice_period",

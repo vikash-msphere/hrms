@@ -4,6 +4,7 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -104,7 +105,7 @@ export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: 
   const row = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("goal not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.goals> = { updatedAt: new Date() };
   const has = (k: keyof GoalInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("title")) {
     if (!patch.title?.trim()) throw invalidArgument("title is required");
@@ -132,7 +133,7 @@ export async function updateGoalProgress(deps: Deps, actor: AppUser, id: string,
   const row = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("goal not found");
   if (progress == null || Number.isNaN(Number(progress))) throw invalidArgument("progress is required");
-  const set: Record<string, unknown> = { progress: clampPct(Number(progress)), updatedAt: new Date() };
+  const set: SetOf<typeof schema.goals> = { progress: clampPct(Number(progress)), updatedAt: new Date() };
   if (status) set.status = status;
   const updated = (await deps.db.update(schema.goals).set(set).where(eq(schema.goals.uuid, id)).returning())[0]!;
   // from/to (+ optional note) land in the audit meta so the activity feed can render a progress history.

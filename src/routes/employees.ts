@@ -77,7 +77,7 @@ const withCompleteness = async (deps: Deps, actor: AppUser, row: any) => {
   return { ...row, _profileCompleteness: flags };
 };
 
-const records = collectionRoutes<EmployeeWrite>({
+const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
   table: schema.employees,
   collection: COL,
   auditName: "employee",

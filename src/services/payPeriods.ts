@@ -2,7 +2,7 @@
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 
 export type PayPeriodInput = {
   display_name?: string;
@@ -31,7 +31,7 @@ async function assertValidRange(deps: Deps, start: Date, end: Date, selfId?: str
   }
 }
 
-export const payPeriodSpec: CrudSpec<PayPeriodInput> = {
+export const payPeriodSpec: CrudSpec<PayPeriodInput, typeof schema.payPeriods> = {
   table: schema.payPeriods,
   collection: "pay-periods",
   auditName: "pay_period",
@@ -48,7 +48,7 @@ export const payPeriodSpec: CrudSpec<PayPeriodInput> = {
     return { label: input.display_name, periodStart, periodEnd, payDate };
   },
   patch: async (patch, row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.payPeriods> = {};
     if (has(patch, "display_name")) set.label = patch.display_name;
     if (has(patch, "period_start") && patch.period_start) set.periodStart = parseDate(patch.period_start);
     if (has(patch, "period_end") && patch.period_end) set.periodEnd = parseDate(patch.period_end);

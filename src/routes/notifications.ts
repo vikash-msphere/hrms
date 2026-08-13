@@ -20,7 +20,7 @@ const patchSchema = z
 
 type NotificationPatch = z.infer<typeof patchSchema>;
 
-export const notifications = collectionRoutes<NotificationPatch>({
+export const notifications = collectionRoutes<NotificationPatch, typeof schema.notifications>({
   table: schema.notifications,
   collection: "notifications",
   auditName: "notification",

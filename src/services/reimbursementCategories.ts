@@ -2,11 +2,11 @@
 // Settings; claims reference one. `requires_receipt` makes a receipt attachment mandatory on those claims.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type ReimbursementCategoryInput = { display_name?: string; requires_receipt?: boolean };
 
-export const reimbursementCategorySpec: CrudSpec<ReimbursementCategoryInput> = {
+export const reimbursementCategorySpec: CrudSpec<ReimbursementCategoryInput, typeof schema.reimbursementCategories> = {
   table: schema.reimbursementCategories,
   collection: "reimbursement-categories",
   auditName: "reimbursement_category",
@@ -16,7 +16,7 @@ export const reimbursementCategorySpec: CrudSpec<ReimbursementCategoryInput> = {
     return { name: input.display_name, requiresReceipt: input.requires_receipt ?? false };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.reimbursementCategories> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "requires_receipt")) set.requiresReceipt = patch.requires_receipt;
     return set;

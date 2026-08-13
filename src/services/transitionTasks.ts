@@ -2,6 +2,7 @@ import { eq, and } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
@@ -37,7 +38,7 @@ export async function getTransitionTask(deps: Deps, _actor: AppUser, id: string)
 export async function completeTransitionTask(deps: Deps, actor: AppUser, id: string, note?: string | null) {
   const row = (await deps.db.select().from(schema.transitionTasks).where(eq(schema.transitionTasks.uuid, id)).limit(1))[0];
   if (!row) throw notFound("task not found");
-  const set: Record<string, unknown> = { status: "DONE", completedAt: new Date(), updatedAt: new Date() };
+  const set: SetOf<typeof schema.transitionTasks> = { status: "DONE", completedAt: new Date(), updatedAt: new Date() };
   if (note !== undefined) set.note = note?.trim() || null;
   const updated = (await deps.db.update(schema.transitionTasks).set(set).where(eq(schema.transitionTasks.uuid, id)).returning())[0]!;
   await audit(deps, actor, "transition-task.complete", "transition-tasks", id);

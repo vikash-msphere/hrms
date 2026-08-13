@@ -19,7 +19,7 @@ const writeSchema = z.object({
 
 // Timesheet entries. Create and update stay the service's own (an entry is only editable while it is a draft,
 // and the hours are checked against the day); the three verbs move it through submit -> approve/reject.
-export const timeEntries = collectionRoutes<TimeEntryInput>({
+export const timeEntries = collectionRoutes<TimeEntryInput, typeof schema.timeEntries>({
   table: schema.timeEntries,
   collection: "time-entries",
   auditName: "time-entry",

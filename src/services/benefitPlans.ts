@@ -2,7 +2,7 @@
 // `cost_period`; `auto_enroll` is what the new-hire automation picks up.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 type Category = typeof schema.benefitPlans.$inferSelect.category;
 export type BenefitPlanInput = {
@@ -19,7 +19,7 @@ export type BenefitPlanInput = {
 
 const period = (v?: string) => (v === "year" ? "year" : "month");
 
-export const benefitPlanSpec: CrudSpec<BenefitPlanInput> = {
+export const benefitPlanSpec: CrudSpec<BenefitPlanInput, typeof schema.benefitPlans> = {
   table: schema.benefitPlans,
   collection: "benefit-plans",
   auditName: "benefit-plan",
@@ -39,7 +39,7 @@ export const benefitPlanSpec: CrudSpec<BenefitPlanInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.benefitPlans> = {};
     if (has(patch, "name")) {
       if (!patch.name?.trim()) throw invalidArgument("name is required");
       set.name = patch.name.trim();

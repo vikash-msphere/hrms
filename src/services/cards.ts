@@ -4,11 +4,12 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldDiff } from "../lib/audit";
 import { getDefaultDepartmentId } from "./settings";
-import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
+import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
@@ -211,7 +212,7 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
   const row = await getCard(deps, actor, id);
   if (row.deleteTime) throw notFound("card not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.cards> = { updatedAt: new Date() };
   const has = (k: keyof CardInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("title")) {
     if (!patch.title?.trim()) throw invalidArgument("title is required");
@@ -288,17 +289,15 @@ export async function moveCard(
   }
 
   const now = new Date();
-  const set: Record<string, unknown> = { columnKey: toColumn, updatedAt: now };
+  const set: SetOf<typeof schema.cards> = { columnKey: toColumn, updatedAt: now };
   if (toSwimlane !== undefined) set.swimlaneKey = idFromPath(toSwimlane) ?? toSwimlane ?? null;
   // Derived swimlanes (assignee/goal) are real card fields — dragging a card into another such lane reassigns them.
   const changingAssignee = toAssignee !== undefined && (idFromPath(toAssignee) ?? null) !== (row.assigneeId ?? null);
   const changingGoal = toGoal !== undefined && (idFromPath(toGoal) ?? null) !== (row.goalId ?? null);
   if (toAssignee !== undefined) set.assigneeId = idFromPath(toAssignee) ?? null;
   if (toGoal !== undefined) set.goalId = idFromPath(toGoal) ?? null;
-  if (toPriority) { // priority is a required enum — a NONE lane drop leaves it unchanged
-    if (!CARD_PRIORITIES.includes(toPriority as (typeof CARD_PRIORITIES)[number])) throw invalidArgument("priority is invalid");
-    set.priority = toPriority;
-  }
+  // priority is a required enum - a NONE lane drop leaves it unchanged
+  if (toPriority) set.priority = oneOf(toPriority, CARD_PRIORITIES, "priority is invalid");
   if (toDepartment !== undefined) set.departmentId = idFromPath(toDepartment) ?? null;
   // Backlog <-> sprint in the same atomic move (null = backlog), same semantics as PATCH `sprint`.
   if (toSprint !== undefined) set.sprintId = idFromPath(toSprint) ?? null;

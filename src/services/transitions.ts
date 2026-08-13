@@ -4,6 +4,7 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -132,7 +133,7 @@ export async function updateTransition(deps: Deps, actor: AppUser, id: string, p
   const row = (await deps.db.select().from(schema.transitions).where(eq(schema.transitions.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("transition not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.transitions> = { updatedAt: new Date() };
   const has = (k: keyof TransitionInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) { if (!patch.name?.trim()) throw invalidArgument("name is required"); set.name = patch.name.trim(); }
   if (has("anchor_date")) {

@@ -4,12 +4,13 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { purgeRow } from "./softDelete";
 
@@ -97,7 +98,7 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   if (!row || row.deleteTime) throw notFound("suggestion not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   const has = (k: keyof SuggestionInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.suggestions> = { updatedAt: new Date() };
   if (has("title")) { const t = (patch.title ?? "").trim(); if (!t) throw invalidArgument("title cannot be empty"); set.title = t; }
   if (has("body")) { const b = (patch.body ?? "").trim(); if (!b) throw invalidArgument("body cannot be empty"); set.body = b; }
   if (has("category")) set.category = patch.category?.trim() || null;
@@ -111,11 +112,8 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
 export async function respondSuggestion(deps: Deps, actor: AppUser, id: string, input: { status?: string; response?: string | null }) {
   const row = (await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("suggestion not found");
-  const set: Record<string, unknown> = { updatedAt: new Date(), respondedById: actor.uuid };
-  if (input.status !== undefined) {
-    if (!STATUSES.includes(input.status as Status)) throw invalidArgument("invalid status");
-    set.status = input.status;
-  }
+  const set: SetOf<typeof schema.suggestions> = { updatedAt: new Date(), respondedById: actor.uuid };
+  if (input.status !== undefined) set.status = oneOf(input.status, STATUSES, "invalid status");
   if (input.response !== undefined) set.response = input.response?.trim() || null;
   const updated = (await deps.db.update(schema.suggestions).set(set).where(eq(schema.suggestions.uuid, id)).returning())[0]!;
   await audit(deps, actor, "suggestion.respond", "suggestions", id, { status: set.status });

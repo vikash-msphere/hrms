@@ -20,7 +20,7 @@ const writeSchema = z
 // stage and :reject a reason, both as sent - the hand-written route validated neither.
 const bodyOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c.req.json().catch(() => ({}))) as { stage?: string; reason?: string });
 
-export const applications = collectionRoutes<ApplicationInput>({
+export const applications = collectionRoutes<ApplicationInput, typeof schema.applications>({
   table: schema.applications,
   collection: "applications",
   auditName: "application",

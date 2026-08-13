@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import type { LetterTemplate, TemplateBlock, TemplateInput } from "../domain/letters";
 
 // Letter templates as a first-class collection: each row is an addressable object, so per-template access is
@@ -39,7 +39,7 @@ export async function findLetterTemplate(deps: Deps, ref: string): Promise<Lette
   return row && !row.deleteTime ? rowToLetterTemplate(row) : undefined;
 }
 
-export const letterTemplateSpec: CrudSpec<LetterTemplateInput> = {
+export const letterTemplateSpec: CrudSpec<LetterTemplateInput, typeof schema.letterTemplates> = {
   table: schema.letterTemplates,
   collection: "letter-templates",
   auditName: "letter-template",
@@ -55,7 +55,7 @@ export const letterTemplateSpec: CrudSpec<LetterTemplateInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.letterTemplates> = {};
     if (has(patch, "label")) { if (!patch.label) throw invalidArgument("label cannot be empty"); set.label = patch.label; }
     if (has(patch, "category")) set.category = patch.category ?? null;
     if (has(patch, "filename")) set.filename = patch.filename ?? null;

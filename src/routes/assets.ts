@@ -22,7 +22,7 @@ const writeSchema = z
 
 // Company assets (laptops, phones, access cards) and who holds them. Retiring an asset is a status, so the
 // DELETE here is a real removal of the record - permanent, with no restore.
-export const assets = collectionRoutes<AssetInput>({
+export const assets = collectionRoutes<AssetInput, typeof schema.assets>({
   table: schema.assets,
   collection: "assets",
   auditName: "asset",

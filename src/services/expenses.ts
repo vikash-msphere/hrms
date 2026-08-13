@@ -8,6 +8,7 @@ import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -124,7 +125,7 @@ export async function createExpense(deps: Deps, actor: AppUser, input: ExpenseIn
 export async function updateExpense(deps: Deps, actor: AppUser, id: string, patch: ExpenseInput) {
   const row = await getExpense(deps, actor, id);
   if (row.state !== "DRAFT") throw failedPrecondition("only draft expenses can be edited");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.expenses> = { updatedAt: new Date() };
   const has = (k: keyof ExpenseInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("amount")) {
     const amount = Number(patch.amount);

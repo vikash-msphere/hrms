@@ -22,7 +22,7 @@ const noteOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c
 
 // Overtime requests. The create prices the hours and a decision either queues the payout or closes the request,
 // so a filed request is cancelled rather than edited or deleted - and the table has no delete_time.
-export const overtimeRequests = collectionRoutes<OvertimeInput>({
+export const overtimeRequests = collectionRoutes<OvertimeInput, typeof schema.overtimeRequests>({
   table: schema.overtimeRequests,
   collection: "overtime-requests",
   auditName: "overtime_request",

@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type VendorInput = {
   display_name?: string;
@@ -27,7 +27,7 @@ async function resolveCategory(deps: Deps, path?: string | null): Promise<string
   return id;
 }
 
-export const vendorSpec: CrudSpec<VendorInput> = {
+export const vendorSpec: CrudSpec<VendorInput, typeof schema.vendors> = {
   table: schema.vendors,
   collection: "vendors",
   auditName: "vendor",
@@ -46,7 +46,7 @@ export const vendorSpec: CrudSpec<VendorInput> = {
     };
   },
   patch: async (patch, _row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.vendors> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "contact_email")) set.contactEmail = patch.contact_email ?? null;
     if (has(patch, "contact_phone")) set.contactPhone = patch.contact_phone ?? null;

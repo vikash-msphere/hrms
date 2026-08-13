@@ -23,7 +23,7 @@ const progressSchema = z.object({ progress: z.number(), status: statusEnum.optio
 // Goals and OKRs. Create and update stay the service's own (a goal rolls its progress up to its parent, and an
 // aligned child re-weights its siblings); :updateProgress is the narrow move for someone who may report
 // progress without full edit rights. Delete/restore are the shared soft-delete lane.
-export const goals = collectionRoutes<GoalInput>({
+export const goals = collectionRoutes<GoalInput, typeof schema.goals>({
   table: schema.goals,
   collection: "goals",
   auditName: "goal",

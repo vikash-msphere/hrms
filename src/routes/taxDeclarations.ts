@@ -24,7 +24,7 @@ const verifySchema = z.object({ verified_amount: z.number().nullable().optional(
 
 // Investment declarations. Only a VERIFIED amount reduces withholding, so :verify and :reject are the whole
 // point; the employee edits their own declaration until then. Delete/restore are the shared soft-delete lane.
-export const taxDeclarations = collectionRoutes<TaxDeclarationInput>({
+export const taxDeclarations = collectionRoutes<TaxDeclarationInput, typeof schema.taxDeclarations>({
   table: schema.taxDeclarations,
   collection: COL,
   auditName: "tax-declaration",

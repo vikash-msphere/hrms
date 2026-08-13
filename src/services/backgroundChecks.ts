@@ -8,7 +8,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 import { idFromPath } from "./documentsCommon";
 
 const CHECK_TYPES = ["identity", "address", "education", "employment", "criminal", "reference", "credit", "other"] as const;
@@ -47,7 +47,7 @@ export async function listBackgroundChecks(deps: Deps, scope: ListScope | undefi
   return keysetPage(deps, schema.backgroundChecks, "background-checks", where, { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput> = {
+export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.backgroundChecks> = {
   table: schema.backgroundChecks,
   collection: "background-checks",
   auditName: "background-check",
@@ -70,7 +70,7 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput> = {
   },
   patch: (patch, row) => {
     validate(patch);
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.backgroundChecks> = {};
     if (has(patch, "employee")) {
       const e = idFromPath(patch.employee);
       if (!e) throw invalidArgument("employee cannot be empty");

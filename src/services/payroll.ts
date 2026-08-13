@@ -2,6 +2,7 @@ import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 // FSM + LRO resource template. Uses the verified pure domain logic in domain/payroll.ts.
 import { and, eq, inArray, gt, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
@@ -760,7 +761,7 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
     }
   }
 
-  const set: Record<string, unknown> = { state: to, updatedAt: new Date() };
+  const set: SetOf<typeof schema.payrollRuns> = { state: to, updatedAt: new Date() };
   if (to === "REVIEW") set.submittedBy = actor.uuid;
   // Approve is super-only, enforced centrally by the grant (deny payroll-runs.*.approve for payroll_admin).
   if (to === "APPROVED") set.approvedBy = actor.uuid;

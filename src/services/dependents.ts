@@ -8,7 +8,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 
 type Relationship = typeof schema.dependents.$inferSelect.relationship;
 export type DependentInput = {
@@ -35,7 +35,7 @@ export async function listDependents(deps: Deps, scope: ListScope, maxPageSize: 
   return { items: slice, nextPageToken };
 }
 
-export const dependentSpec: CrudSpec<DependentInput> = {
+export const dependentSpec: CrudSpec<DependentInput, typeof schema.dependents> = {
   table: schema.dependents,
   collection: "dependents",
   auditName: "dependent",
@@ -55,7 +55,7 @@ export const dependentSpec: CrudSpec<DependentInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.dependents> = {};
     if (has(patch, "name")) { if (!patch.name?.trim()) throw invalidArgument("name is required"); set.name = patch.name.trim(); }
     if (has(patch, "relationship")) set.relationship = patch.relationship;
     if (has(patch, "date_of_birth")) {

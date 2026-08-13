@@ -24,7 +24,7 @@ const writeSchema = z
   .strict();
 
 // Employee referrals. :award pays the referral bonus now rather than waiting for the milestone cron.
-export const referrals = collectionRoutes<ReferralInput>({
+export const referrals = collectionRoutes<ReferralInput, typeof schema.referrals>({
   table: schema.referrals,
   collection: COL,
   auditName: "referral",

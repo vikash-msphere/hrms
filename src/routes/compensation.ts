@@ -19,7 +19,7 @@ const reviseSchema = z
   })
   .strict();
 
-export const compensation = collectionRoutes<CompensationInput>({
+export const compensation = collectionRoutes<CompensationInput, typeof schema.compensation>({
   table: schema.compensation,
   collection: "compensation",
   auditName: "compensation",

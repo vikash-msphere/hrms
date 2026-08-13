@@ -1,7 +1,7 @@
 // Shifts: the named time windows a roster assigns (start/end as HH:MM local, an unpaid break, a display colour).
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 export type ShiftInput = {
@@ -14,7 +14,7 @@ export type ShiftInput = {
 
 const validTime = (t?: string) => t === undefined || HHMM.test(t);
 
-export const shiftSpec: CrudSpec<ShiftInput> = {
+export const shiftSpec: CrudSpec<ShiftInput, typeof schema.shifts> = {
   table: schema.shifts,
   collection: "shifts",
   auditName: "shift",
@@ -34,7 +34,7 @@ export const shiftSpec: CrudSpec<ShiftInput> = {
     };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.shifts> = {};
     if (has(patch, "name")) {
       if (!patch.name?.trim()) throw invalidArgument("name is required");
       set.name = patch.name.trim();

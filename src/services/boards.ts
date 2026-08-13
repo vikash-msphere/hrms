@@ -1,6 +1,7 @@
 import { eq, inArray } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta, fieldDiff } from "../lib/audit";
@@ -94,7 +95,7 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
   const row = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("board not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.boards> = { updatedAt: new Date() };
   const has = (k: keyof BoardInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) {
     if (!patch.name?.trim()) throw invalidArgument("name is required");
@@ -112,7 +113,7 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
 // goal roll-up) in one edit. Kept off the plain PATCH so the config is an explicit, grantable action.
 export async function configureBoard(deps: Deps, actor: AppUser, id: string, input: BoardInput) {
   const row = await getBoard(deps, actor, id);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.boards> = { updatedAt: new Date() };
   const has = (k: keyof BoardInput) => Object.prototype.hasOwnProperty.call(input, k);
   if (has("columns")) set.columnsJson = JSON.stringify(asArgError(() => normalizeColumns(input.columns)));
   if (has("swimlane_mode")) {

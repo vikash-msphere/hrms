@@ -5,7 +5,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 
 export type HolidayInput = { display_name?: string; date?: string; kind?: "fixed" | "optional" };
 
@@ -26,7 +26,7 @@ async function selectedIds(deps: Deps, actor: AppUser): Promise<Map<string, stri
   return new Map(rows.map((r) => [r.holidayId, r.uuid]));
 }
 
-export const holidaySpec: CrudSpec<HolidayInput> = {
+export const holidaySpec: CrudSpec<HolidayInput, typeof schema.holidays> = {
   table: schema.holidays,
   collection: "holidays",
   auditName: "holiday",
@@ -37,7 +37,7 @@ export const holidaySpec: CrudSpec<HolidayInput> = {
     return { name: input.display_name, date: dayOf(input.date), kind: input.kind ?? "fixed" };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.holidays> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "kind")) set.kind = patch.kind;
     if (has(patch, "date") && patch.date) set.date = dayOf(patch.date);

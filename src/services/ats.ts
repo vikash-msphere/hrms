@@ -8,10 +8,11 @@ import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import { keysetPage } from "./keysetPage";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
-import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
+import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { idFromPath } from "./documentsCommon";
 import { getSettingValue } from "./settings";
@@ -103,12 +104,12 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
   const row = await getRequisition(deps, id);
   if (row.deleteTime) throw notFound("requisition not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.jobRequisitions> = { updatedAt: new Date() };
   if (patch.title !== undefined) { const t = (patch.title ?? "").trim(); if (!t) throw invalidArgument("title cannot be blank"); set.title = t; }
   if (patch.department !== undefined) set.departmentId = patch.department ? idFromPath(patch.department) : null;
   if (patch.hiring_manager !== undefined) set.hiringManagerId = patch.hiring_manager ? idFromPath(patch.hiring_manager) : null;
   if (patch.location !== undefined) set.location = patch.location?.trim() || null;
-  if (patch.employment_type !== undefined) { if (patch.employment_type && !EMPLOYMENT_TYPES.includes(patch.employment_type as any)) throw invalidArgument("invalid employment_type"); set.employmentType = patch.employment_type || null; }
+  if (patch.employment_type !== undefined) set.employmentType = patch.employment_type ? oneOf(patch.employment_type, EMPLOYMENT_TYPES, "invalid employment_type") : null;
   if (patch.openings !== undefined && patch.openings != null) { if (!(patch.openings > 0)) throw invalidArgument("openings must be greater than 0"); set.openings = patch.openings; }
   if (patch.description !== undefined) set.description = patch.description?.trim() || null;
   if (patch.opened_date !== undefined) set.openedDate = patch.opened_date ? parseDate(patch.opened_date, "opened_date") : null;
@@ -177,7 +178,7 @@ export async function updateCandidate(deps: Deps, actor: AppUser, id: string, pa
   const row = await getCandidate(deps, id);
   if (row.deleteTime) throw notFound("candidate not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.candidates> = { updatedAt: new Date() };
   if (patch.name !== undefined) { const n = (patch.name ?? "").trim(); if (!n) throw invalidArgument("name cannot be blank"); set.name = n; }
   if (patch.email !== undefined) set.email = patch.email?.trim() || null;
   if (patch.phone !== undefined) set.phone = patch.phone?.trim() || null;
@@ -272,7 +273,7 @@ export async function updateApplication(deps: Deps, actor: AppUser, id: string, 
   if (row.deleteTime) throw notFound("application not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   if (patch.stage !== undefined && patch.stage) return setStage(deps, actor, id, patch.stage);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.applications> = { updatedAt: new Date() };
   if (patch.source !== undefined) set.source = patch.source?.trim() || null;
   if (patch.referral !== undefined) set.referralId = patch.referral ? idFromPath(patch.referral) : null;
   if (patch.applied_date !== undefined) set.appliedDate = patch.applied_date ? parseDate(patch.applied_date, "applied_date") : null;
@@ -382,9 +383,9 @@ export async function updateInterview(deps: Deps, actor: AppUser, id: string, pa
   const row = await getInterview(deps, id);
   if (row.deleteTime) throw notFound("interview not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.interviews> = { updatedAt: new Date() };
   if (patch.title !== undefined) { const t = (patch.title ?? "").trim(); if (!t) throw invalidArgument("title cannot be blank"); set.title = t; }
-  if (patch.mode !== undefined) { if (patch.mode && !INTERVIEW_MODES.includes(patch.mode as any)) throw invalidArgument("invalid mode"); set.mode = patch.mode || "video"; }
+  if (patch.mode !== undefined) set.mode = patch.mode ? oneOf(patch.mode, INTERVIEW_MODES, "invalid mode") : "video";
   if (patch.scheduled_start_time !== undefined) set.scheduledStart = patch.scheduled_start_time ? parseTs(patch.scheduled_start_time, "scheduled_start_time") : null;
   if (patch.scheduled_end_time !== undefined) set.scheduledEnd = patch.scheduled_end_time ? parseTs(patch.scheduled_end_time, "scheduled_end_time") : null;
   if (patch.interviewers !== undefined) set.interviewerIds = interviewersJson(patch.interviewers);
@@ -468,10 +469,10 @@ export async function updateInterviewFeedback(deps: Deps, actor: AppUser, id: st
   const row = await getInterviewFeedback(deps, id);
   if (row.deleteTime) throw notFound("scorecard not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.interviewFeedback> = { updatedAt: new Date() };
   if (patch.ratings !== undefined) set.ratingsJson = patch.ratings ? JSON.stringify(patch.ratings) : null;
   if (patch.overall_rating !== undefined) set.overallRating = patch.overall_rating ?? null;
-  if (patch.recommendation !== undefined) { if (patch.recommendation && !RECOMMENDATIONS.includes(patch.recommendation as any)) throw invalidArgument("invalid recommendation"); set.recommendation = patch.recommendation || null; }
+  if (patch.recommendation !== undefined) set.recommendation = patch.recommendation ? oneOf(patch.recommendation, RECOMMENDATIONS, "invalid recommendation") : null;
   if (patch.comment !== undefined) set.comment = patch.comment?.trim() || null;
   const updated = (await deps.db.update(schema.interviewFeedback).set(set).where(eq(schema.interviewFeedback.uuid, id)).returning())[0]!;
   await audit(deps, actor, "interview-feedback.update", "interview-feedback", id, diffMeta(row, updated, set), updated);
@@ -534,7 +535,7 @@ export async function updateOffer(deps: Deps, actor: AppUser, id: string, patch:
   if (row.deleteTime) throw notFound("offer not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   if (row.status !== "draft") throw failedPrecondition("only a draft offer can be edited");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.offers> = { updatedAt: new Date() };
   if (patch.base_comp !== undefined) set.baseComp = patch.base_comp ?? null;
   if (patch.currency_code !== undefined) set.currency = patch.currency_code?.trim() || "INR";
   if (patch.offer_date !== undefined) set.offerDate = patch.offer_date ? parseDate(patch.offer_date, "offer_date") : null;

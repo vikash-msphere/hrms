@@ -22,7 +22,7 @@ const writeSchema = z
   .strict();
 
 // The talent pool. Plain CRUD plus soft delete/restore, with the resume as an attachment.
-export const candidates = collectionRoutes<CandidateInput>({
+export const candidates = collectionRoutes<CandidateInput, typeof schema.candidates>({
   table: schema.candidates,
   collection: COL,
   auditName: "candidate",

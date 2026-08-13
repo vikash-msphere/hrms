@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument, notFound } from "../lib/errors";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 import type { StructureLine } from "../domain/payroll";
 
 // A structure line on the wire: `component` is a `pay-components/<id>` ref (the inbound edge decodes the
@@ -61,7 +61,7 @@ export async function structureLinesById(deps: Deps, structureId?: string | null
   return parseLines(s.linesJson);
 }
 
-export const salaryStructureSpec: CrudSpec<SalaryStructureInput> = {
+export const salaryStructureSpec: CrudSpec<SalaryStructureInput, typeof schema.salaryStructures> = {
   table: schema.salaryStructures,
   collection: "salary-structures",
   auditName: "salary_structure",
@@ -75,7 +75,7 @@ export const salaryStructureSpec: CrudSpec<SalaryStructureInput> = {
     };
   },
   patch: async (patch, _row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.salaryStructures> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "description")) set.description = patch.description ?? null;
     if (has(patch, "lines")) set.linesJson = JSON.stringify(await normalizeLines(deps, patch.lines ?? []));

@@ -20,7 +20,7 @@ export async function listDocumentAcknowledgements(deps: Deps, scope: ListScope,
   return keysetPage<typeof schema.documentAcknowledgements.$inferSelect>(deps, schema.documentAcknowledgements, "document-acknowledgements", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
 }
 
-export const documentAcknowledgementSpec: CrudSpec<never> = {
+export const documentAcknowledgementSpec: CrudSpec<never, typeof schema.documentAcknowledgements> = {
   table: schema.documentAcknowledgements,
   collection: "document-acknowledgements",
   auditName: "document_acknowledgement",

@@ -27,7 +27,7 @@ const withCounts = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => 
 // Review cycles. Create and update stay the service's own (the dates drive every review the cycle will hold);
 // :launch mints the reviews, :enroll adds late joiners, :close/:reopen move the state. Delete/restore are the
 // shared soft-delete lane.
-export const reviewCycles = collectionRoutes<ReviewCycleInput>({
+export const reviewCycles = collectionRoutes<ReviewCycleInput, typeof schema.reviewCycles>({
   table: schema.reviewCycles,
   collection: "review-cycles",
   auditName: "review-cycle",

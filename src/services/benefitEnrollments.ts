@@ -8,7 +8,7 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
 export type BenefitEnrollmentInput = {
@@ -78,7 +78,7 @@ export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPa
 // An enrollment is owned by its employee (the code embeds the owner, so own/dept/all scoping works), and the
 // only thing a write really decides is which plan, which status, from when, and for which of the employee's
 // own dependents. The rest - paging, If-Match, the audit diff, soft delete/restore - is the shared lane.
-export const benefitEnrollmentSpec: CrudSpec<BenefitEnrollmentInput> = {
+export const benefitEnrollmentSpec: CrudSpec<BenefitEnrollmentInput, typeof schema.benefitEnrollments> = {
   table: schema.benefitEnrollments,
   collection: "benefit-enrollments",
   auditName: "benefit-enrollment",
@@ -99,7 +99,7 @@ export const benefitEnrollmentSpec: CrudSpec<BenefitEnrollmentInput> = {
     };
   },
   patch: async (patch, row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.benefitEnrollments> = {};
     if (has(patch, "status")) set.status = patch.status === "waived" ? "waived" : "enrolled";
     if (has(patch, "effective_date")) {
       if (patch.effective_date && Number.isNaN(dayMs(patch.effective_date))) throw invalidArgument("effective_date is invalid");

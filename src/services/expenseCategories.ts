@@ -2,11 +2,11 @@
 // reference one. `requires_receipt` makes an invoice attachment mandatory; `gl_code` is the accounting code.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type ExpenseCategoryInput = { display_name?: string; requires_receipt?: boolean; gl_code?: string | null };
 
-export const expenseCategorySpec: CrudSpec<ExpenseCategoryInput> = {
+export const expenseCategorySpec: CrudSpec<ExpenseCategoryInput, typeof schema.expenseCategories> = {
   table: schema.expenseCategories,
   collection: "expense-categories",
   auditName: "expense_category",
@@ -16,7 +16,7 @@ export const expenseCategorySpec: CrudSpec<ExpenseCategoryInput> = {
     return { name: input.display_name, requiresReceipt: input.requires_receipt ?? false, glCode: input.gl_code ?? null };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.expenseCategories> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "requires_receipt")) set.requiresReceipt = patch.requires_receipt;
     if (has(patch, "gl_code")) set.glCode = patch.gl_code ?? null;

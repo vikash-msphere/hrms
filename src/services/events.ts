@@ -6,7 +6,7 @@ import { visibleByDelete } from "./softDelete";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type EventInput = {
   title?: string;
@@ -49,7 +49,7 @@ export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPa
   return { items: slice, nextPageToken };
 }
 
-export const eventSpec: CrudSpec<EventInput> = {
+export const eventSpec: CrudSpec<EventInput, typeof schema.events> = {
   table: schema.events,
   collection: "events",
   auditName: "event",
@@ -75,7 +75,7 @@ export const eventSpec: CrudSpec<EventInput> = {
     };
   },
   patch: (patch, row) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.events> = {};
     if (has(patch, "title")) {
       const title = (patch.title ?? "").trim();
       if (!title) throw invalidArgument("title cannot be empty");

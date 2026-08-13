@@ -22,7 +22,7 @@ const writeSchema = z
 
 // Offers. The five verbs are the offer's whole life after it is drafted: approved internally, extended to the
 // candidate, then accepted (which converts them to an employee), declined or rescinded.
-export const offers = collectionRoutes<OfferInput>({
+export const offers = collectionRoutes<OfferInput, typeof schema.offers>({
   table: schema.offers,
   collection: "offers",
   auditName: "offer",

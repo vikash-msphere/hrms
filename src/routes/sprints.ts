@@ -19,7 +19,7 @@ const updateSchema = z.object({
 }).strict();
 
 // Scrum sprints on a board. :activate starts one (only one at a time) and :complete rolls unfinished cards on.
-export const sprints = collectionRoutes<SprintInput>({
+export const sprints = collectionRoutes<SprintInput, typeof schema.sprints>({
   table: schema.sprints,
   collection: "sprints",
   auditName: "sprint",

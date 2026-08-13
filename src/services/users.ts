@@ -1,16 +1,17 @@
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
-import { notFound, aborted, invalidArgument } from "../lib/errors";
+import { notFound, aborted, invalidArgument, oneOf } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { EVERYONE_ROLE } from "../domain/grants";
 
 export type UserInput = { role?: string; status?: string; employee?: string | null };
 
-const STATUSES = ["active", "disabled"];
+const STATUSES = ["active", "disabled"] as const;
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
 export async function listUsers(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string) {
@@ -40,7 +41,7 @@ export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: 
   if (!row) throw notFound("user not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
 
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.users> = { updatedAt: new Date() };
   const has = (k: keyof UserInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("role")) {
     // Validate against the roles TABLE (roles are data) - no hardcoded role list. Rare path (admin
@@ -53,10 +54,7 @@ export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: 
     if (!known) throw invalidArgument("invalid role");
     set.role = role;
   }
-  if (has("status")) {
-    if (!STATUSES.includes(patch.status as string)) throw invalidArgument("invalid status");
-    set.status = patch.status;
-  }
+  if (has("status")) set.status = oneOf(patch.status, STATUSES, "invalid status");
   if (has("employee")) set.employeeId = idFromPath(patch.employee) ?? null;
 
   // Self-lockout guard: an admin cannot strip their own super_admin role or disable themselves.

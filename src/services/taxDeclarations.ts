@@ -3,6 +3,7 @@ import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -72,7 +73,7 @@ export async function updateTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   if (!row || row.deleteTime) throw notFound("declaration not found");
   if (row.status === "VERIFIED") throw failedPrecondition("a verified declaration can't be edited");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date(), status: "DECLARED" };
+  const set: SetOf<typeof schema.taxDeclarations> = { updatedAt: new Date(), status: "DECLARED" };
   const has = (k: keyof TaxDeclarationInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("financial_year")) { if (!patch.financial_year?.trim()) throw invalidArgument("financial_year is required"); set.financialYear = patch.financial_year.trim(); }
   if (has("section")) { if (!patch.section?.trim()) throw invalidArgument("section is required"); set.section = patch.section.trim(); }

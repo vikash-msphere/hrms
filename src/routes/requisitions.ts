@@ -26,7 +26,7 @@ const withCounts = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => 
   return rows.map((r) => ({ ...r, applicantCount: counts.get(r.uuid) ?? 0 }));
 };
 
-export const requisitions = collectionRoutes<RequisitionInput>({
+export const requisitions = collectionRoutes<RequisitionInput, typeof schema.jobRequisitions>({
   table: schema.jobRequisitions,
   collection: "job-requisitions",
   auditName: "requisition",

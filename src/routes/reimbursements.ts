@@ -24,7 +24,7 @@ const createSchema = z
 
 // Employee expense claims. A filed claim is answered, never edited or deleted (it is cancelled), and the table
 // has no delete_time - so list, get, create and the six verbs are the whole surface.
-export const reimbursements = collectionRoutes<ReimbursementInput>({
+export const reimbursements = collectionRoutes<ReimbursementInput, typeof schema.reimbursements>({
   table: schema.reimbursements,
   collection: COL,
   auditName: "reimbursement",

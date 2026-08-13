@@ -3,6 +3,7 @@ import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -69,7 +70,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   if (!row || row.deleteTime) throw notFound("time entry not found");
   if (row.status === "APPROVED") throw failedPrecondition("an approved entry can't be edited");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.timeEntries> = { updatedAt: new Date() };
   const has = (k: keyof TimeEntryInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("project")) { const p = idFromPath(patch.project); if (!p) throw invalidArgument("project is required"); set.projectId = p; }
   if (has("date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }

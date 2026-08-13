@@ -3,13 +3,14 @@ import { eq, and, isNull, inArray } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { notify } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { recordBonus } from "./bonuses";
-import { invalidArgument, notFound, failedPrecondition, aborted } from "../lib/errors";
+import { invalidArgument, notFound, failedPrecondition, aborted, oneOf } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { getSettingValue } from "./settings";
@@ -79,17 +80,14 @@ export async function updateReferral(deps: Deps, actor: AppUser, id: string, pat
   const row = await getReferral(deps, actor, id);
   if (row.deleteTime) throw notFound("referral not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.referrals> = { updatedAt: new Date() };
   if (patch.candidate_name !== undefined) { const n = (patch.candidate_name ?? "").trim(); if (!n) throw invalidArgument("candidate_name cannot be blank"); set.candidateName = n; }
   if (patch.candidate_email !== undefined) set.candidateEmail = patch.candidate_email?.trim() || null;
   if (patch.candidate_phone !== undefined) set.candidatePhone = patch.candidate_phone?.trim() || null;
   if (patch.position_title !== undefined) set.positionTitle = patch.position_title?.trim() || null;
   if (patch.department !== undefined) set.departmentId = patch.department ? idFromPath(patch.department)! : null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
-  if (patch.status !== undefined) {
-    if (!STATUSES.includes(patch.status as Status)) throw invalidArgument("invalid status");
-    set.status = patch.status;
-  }
+  if (patch.status !== undefined) set.status = oneOf(patch.status, STATUSES, "invalid status");
   if (patch.hired_employee !== undefined) set.hiredEmployeeId = patch.hired_employee ? idFromPath(patch.hired_employee)! : null;
   if (patch.bonus_amount !== undefined) {
     if (patch.bonus_amount != null && !(patch.bonus_amount > 0)) throw invalidArgument("bonus_amount must be greater than 0");

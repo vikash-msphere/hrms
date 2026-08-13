@@ -1,6 +1,7 @@
 import { eq, and, isNull } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -68,7 +69,7 @@ export async function updateSprint(deps: Deps, actor: AppUser, id: string, patch
   const row = (await deps.db.select().from(schema.sprints).where(eq(schema.sprints.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("sprint not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.sprints> = { updatedAt: new Date() };
   const has = (k: keyof SprintInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) {
     if (!patch.name?.trim()) throw invalidArgument("name is required");

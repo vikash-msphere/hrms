@@ -2,7 +2,7 @@
 // hard gate - see domain/payGrade.ts for the compa-ratio read side.
 import * as schema from "../db/schema";
 import { invalidArgument } from "../lib/errors";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 
 export type PayGradeInput = {
   display_name?: string;
@@ -23,7 +23,7 @@ function validateBand(effective: { bandMin?: number | null; bandMid?: number | n
   if (bandMin != null && bandMax != null && bandMin > bandMax) throw invalidArgument("band_min must not exceed band_max");
 }
 
-export const payGradeSpec: CrudSpec<PayGradeInput> = {
+export const payGradeSpec: CrudSpec<PayGradeInput, typeof schema.payGrades> = {
   table: schema.payGrades,
   collection: "pay-grades",
   auditName: "pay_grade",
@@ -44,7 +44,7 @@ export const payGradeSpec: CrudSpec<PayGradeInput> = {
     };
   },
   patch: (patch, row) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.payGrades> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
     if (has(patch, "level")) set.level = patch.level ?? 0;
     if (has(patch, "band_min")) set.bandMin = patch.band_min ?? null;

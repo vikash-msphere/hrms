@@ -33,7 +33,7 @@ const removeTodoSchema = z.object({ todo: z.string() }).strict();
 // Helpdesk tickets. A ticket is never edited or deleted through the API - it moves through its state machine
 // and accumulates comments - so there is no PATCH and, despite the table's delete_time (which exists for the
 // requester cascade), `softDelete: false` keeps DELETE and `:restore` unmounted.
-export const tickets = collectionRoutes<TicketInput>({
+export const tickets = collectionRoutes<TicketInput, typeof schema.tickets>({
   table: schema.tickets,
   collection: "tickets",
   auditName: "ticket",

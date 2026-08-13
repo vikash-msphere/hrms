@@ -4,6 +4,7 @@
 import { eq } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -56,7 +57,7 @@ export async function updateTicketChecklist(deps: Deps, actor: AppUser, id: stri
   const row = (await deps.db.select().from(schema.ticketChecklists).where(eq(schema.ticketChecklists.uuid, id)).limit(1))[0];
   if (!row) throw notFound("ticket checklist not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.ticketChecklists> = { updatedAt: new Date() };
   const has = (k: keyof TicketChecklistInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("display_name")) {
     const name = (patch.display_name ?? "").trim();

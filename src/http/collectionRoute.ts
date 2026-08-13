@@ -19,7 +19,7 @@ import { customMethod } from "./customMethod";
 import { lifecycleVerb } from "./lifecycleRoute";
 import { withAccess } from "./accessHint";
 import { clampPageSize } from "./pagination";
-import { crudService, type CrudService, type CrudSpec } from "../services/crud";
+import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
 
 /**
  * One custom method. The common shape is `{schema?, run}`: the factory parses the body, calls `run`, then
@@ -53,7 +53,7 @@ export type PageRequest = {
   showDeleted: boolean;
 };
 
-export type CollectionRouteSpec<I> = CrudSpec<I> & {
+export type CollectionRouteSpec<I, T extends CrudTable = CrudTable> = CrudSpec<I, T> & {
   /** The item path param, matching the name OpenAPI declares (`holiday_id`). */
   param: string;
   /** Body schema for both POST and PATCH, when they take the same fields. */
@@ -91,7 +91,7 @@ export type CollectionRouteSpec<I> = CrudSpec<I> & {
   verbs?: Record<string, VerbEntry>;
 };
 
-export function collectionRoutes<I>(spec: CollectionRouteSpec<I>) {
+export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: CollectionRouteSpec<I, T>) {
   const svc: CrudService<I> = { ...crudService(spec), ...spec.overrides };
   const { param, collection, serialize } = spec;
   const createSchema = spec.createSchema ?? spec.writeSchema;

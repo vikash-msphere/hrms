@@ -34,7 +34,7 @@ const withTasks = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => {
 // Onboarding / offboarding runs. Create and update stay the service's own (a create instantiates the chosen
 // template's tasks; an update can move the anchor date and every task's due date with it), and the three
 // state moves plus appendTask are the verbs. Delete/restore are the shared soft-delete lane.
-export const transitions = collectionRoutes<TransitionInput>({
+export const transitions = collectionRoutes<TransitionInput, typeof schema.transitions>({
   table: schema.transitions,
   collection: "transitions",
   auditName: "transition",

@@ -25,7 +25,7 @@ const noteOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c
 
 // Work-from-home requests. Same shape as leave: filed, then approved, rejected or cancelled - never edited or
 // deleted, and the table has no delete_time.
-export const remoteWorkRequests = collectionRoutes<RemoteWorkInput>({
+export const remoteWorkRequests = collectionRoutes<RemoteWorkInput, typeof schema.remoteWorkRequests>({
   table: schema.remoteWorkRequests,
   collection: "remote-work-requests",
   auditName: "remote_work_request",

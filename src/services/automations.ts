@@ -4,6 +4,7 @@
 import { eq } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
@@ -124,7 +125,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
   );
   assertValid(merged);
   assertMayAuthorActions(actor, merged.actions);
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.automations> = { updatedAt: new Date() };
   if (has("name")) set.name = merged.name;
   if (has("description")) set.description = patch.description ?? null;
   if (has("trigger_type")) set.triggerType = merged.triggerType;

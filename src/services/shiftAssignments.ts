@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument } from "../lib/errors";
 import { encodeCursor, decodeCursor } from "../http/pagination";
-import { has, type CrudSpec } from "./crud";
+import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
 export type ShiftAssignmentInput = {
@@ -38,7 +38,7 @@ export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPage
 
 // One employee rostered onto one shift on one day. Owned by that employee (the code embeds the owner, so
 // own/dept/all scoping works); the write only decides which shift, which day and the note.
-export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput> = {
+export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput, typeof schema.shiftAssignments> = {
   table: schema.shiftAssignments,
   collection: "shift-assignments",
   auditName: "shift-assignment",
@@ -54,7 +54,7 @@ export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput> = {
     return { employeeId, shiftId, date: new Date(ms), note: input.note?.trim() || null };
   },
   patch: (patch) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.shiftAssignments> = {};
     if (has(patch, "shift")) { const s = idFromPath(patch.shift); if (!s) throw invalidArgument("shift is required"); set.shiftId = s; }
     if (has(patch, "date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }
     if (has(patch, "note")) set.note = patch.note?.trim() || null;

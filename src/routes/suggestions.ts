@@ -17,7 +17,7 @@ const respondSchema = z.object({ status: z.string().max(64).optional(), response
 
 // The suggestion box. The create carries anonymity (the submitter is stored but hidden from readers), HR
 // triages with :respond, and everyone else moves the count with :upvote / :downvote.
-export const suggestions = collectionRoutes<SuggestionInput>({
+export const suggestions = collectionRoutes<SuggestionInput, typeof schema.suggestions>({
   table: schema.suggestions,
   collection: "suggestions",
   auditName: "suggestion",

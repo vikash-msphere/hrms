@@ -12,7 +12,7 @@ import { periodBounds, budgetUtilization, type PeriodType } from "../domain/expe
 import { invalidArgument } from "../lib/errors";
 import { visibleByDelete } from "./softDelete";
 import type { AppUser } from "../env";
-import { crudService, has, type CrudSpec } from "./crud";
+import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 
 export type ExpenseBudgetInput = {
   department?: string | null; // "departments/<id>"
@@ -60,7 +60,7 @@ function validatePeriod(type?: string, key?: string): asserts type is PeriodType
   periodBounds(type, key); // throws on a malformed key
 }
 
-export const expenseBudgetSpec: CrudSpec<ExpenseBudgetInput> = {
+export const expenseBudgetSpec: CrudSpec<ExpenseBudgetInput, typeof schema.expenseBudgets> = {
   table: schema.expenseBudgets,
   collection: "expense-budgets",
   auditName: "expense_budget",
@@ -80,7 +80,7 @@ export const expenseBudgetSpec: CrudSpec<ExpenseBudgetInput> = {
     };
   },
   patch: async (patch, row, deps) => {
-    const set: Record<string, unknown> = {};
+    const set: SetOf<typeof schema.expenseBudgets> = {};
     if (has(patch, "department")) set.departmentId = await resolve(deps, schema.departments, patch.department, "department");
     if (has(patch, "category")) set.categoryId = await resolve(deps, schema.expenseCategories, patch.category, "expense category");
     if (has(patch, "period_type") || has(patch, "period_key")) {

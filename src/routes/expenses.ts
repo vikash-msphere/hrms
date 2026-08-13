@@ -37,7 +37,7 @@ const patchSchema = writeSchema.partial();
 // Company expenses. An expense is only editable while a DRAFT and is never deleted (it is cancelled), and the
 // table has no delete_time - so the factory mounts no DELETE and no `:restore`. Both writes stay the service's
 // own: the create resolves vendor/category/budget, the update refuses anything past DRAFT.
-export const expenses = collectionRoutes<ExpenseInput>({
+export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
   table: schema.expenses,
   collection: COL,
   auditName: "expense",

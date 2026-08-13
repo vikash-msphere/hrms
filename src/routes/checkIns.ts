@@ -1,4 +1,5 @@
 import { z } from "zod";
+import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { checkInSpec, listCheckIns, type CheckInInput } from "../services/checkIns";
 import { toCheckInResource } from "../http/serialize";
@@ -15,7 +16,7 @@ const writeSchema = z.object({
 
 // 1:1 check-ins. Plain CRUD plus soft delete/restore, all of it the shared lane; the list is the one part that
 // is this collection's own, because a page reads newest-meeting-first and is scoped to what the caller may see.
-export const checkIns = collectionRoutes<CheckInInput>({
+export const checkIns = collectionRoutes<CheckInInput, typeof schema.checkIns>({
   ...checkInSpec,
   param: "check_in_id",
   writeSchema,

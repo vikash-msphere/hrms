@@ -4,6 +4,7 @@ import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
 import { eq, and, isNull, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
+import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldDiff } from "../lib/audit";
@@ -133,7 +134,7 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   assertNotLocked(row);
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
 
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: SetOf<typeof schema.employees> = { updatedAt: new Date() };
   const has = (k: keyof EmployeeInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("first_name")) set.firstName = patch.first_name;
   if (has("last_name")) set.lastName = patch.last_name;

@@ -24,7 +24,7 @@ const createSchema = z
 // request is never edited or deleted - it is cancelled. The table has no delete_time, so no DELETE, no
 // `:restore`, and the access hint now offers exactly approve/reject/cancel (it used to claim a phantom
 // update+delete pair from the default, for routes that have never existed here).
-export const leaveRequests = collectionRoutes<LeaveRequestInput>({
+export const leaveRequests = collectionRoutes<LeaveRequestInput, typeof schema.leaveRequests>({
   table: schema.leaveRequests,
   collection: "leave-requests",
   auditName: "leave_request",

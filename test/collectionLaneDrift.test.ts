@@ -103,6 +103,17 @@ describe("every collection is built by the factory", () => {
     expect(stranded, "a bespoke purge nothing calls - wire it as overrides.purge, or delete it if the generic purge is enough").toEqual([]);
   });
 
+  // The spec is typed against its own table: `insert` / `patch` return `SetOf<T>`, so a mistyped column name is
+  // a compile error instead of a value that silently never lands. That only holds while the table type reaches
+  // the spec. `collectionRoutes<Input>(...)` with one type argument leaves it at the permissive default and
+  // quietly turns the checking off, so name the table: `collectionRoutes<Input, typeof schema.x>(...)`.
+  it("types every factory spec against its table", () => {
+    const untyped = entries
+      .filter((e) => /collectionRoutes<[^<>,]*>\s*\(/.test(e.src))
+      .map((e) => e.name);
+    expect(untyped, "pass the table type too: collectionRoutes<Input, typeof schema.<table>>({ ... })").toEqual([]);
+  });
+
   // A collection's own verb is answered BEFORE the shared lifecycle lane (http/collectionRoute.ts), so an
   // overlap is resolved rather than silent. It is still worth seeing: a collection that claims `:disable` owns
   // the whole meaning of that verb, including whether the row's `disabled` column is written at all. This lists

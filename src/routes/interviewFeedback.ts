@@ -18,7 +18,7 @@ const writeSchema = z
 // Interview scorecards. Plain CRUD plus soft delete/restore - the lane, with the field mapping in the ATS
 // service. The delete-side audit stems join the create/update ones on `interview-feedback.*` (they used to
 // read `scorecard.*`, which nothing depends on); the 404 text stays the scorecard wording callers see.
-export const interviewFeedback = collectionRoutes<FeedbackInput>({
+export const interviewFeedback = collectionRoutes<FeedbackInput, typeof schema.interviewFeedback>({
   table: schema.interviewFeedback,
   collection: "interview-feedback",
   auditName: "interview-feedback",
