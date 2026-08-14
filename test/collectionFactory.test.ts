@@ -200,6 +200,17 @@ describe("custom methods", () => {
     expect((await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!.disabled).toBe(false);
   });
 
+  it("answers a lifecycle verb the way it answers any item read: hint, derived field and all", async () => {
+    const { id } = await newHoliday();
+    // The board found this the hard way: `publishDraft` folds the verb's response into its cached row, and a
+    // response without `access.can` took every control off the card until the next refetch.
+    const disabled = await body(await call(`/v1/holidays/${id}:disable`, { method: "POST" }));
+    const read = await body(await call(`/v1/holidays/${id}`));
+    expect(disabled.access?.can, "the same verb list the item read carries").toEqual(read.access.can);
+    // `selected` is holidays' own decorate() hook. A bare `serialize(row)` could not produce it.
+    expect(disabled).toMatchObject({ display_name: "Diwali", selected: false, disabled: true });
+  });
+
   it("404s a verb the collection does not declare, rather than falling through to another handler", async () => {
     const { id } = await newHoliday();
     expect((await call(`/v1/holidays/${id}:teleport`, { method: "POST" })).status).toBe(404);
@@ -390,6 +401,24 @@ describe("spec dimensions", () => {
     const editor = await body(await mount(spec)(`${COLLECTION}/${id}`));
     expect(editor.editors_only, "super may update, so the field is there").toBe("Diwali");
     expect(editor.access.can, "and the same verb list is what the hint ships").toContain("update");
+  });
+
+  it("hands a lifecycle verb's row to a viewer-dependent serializer with the caller and the hint", async () => {
+    const { id } = await newHoliday();
+    const seen: { user: boolean; can: string[] | undefined }[] = [];
+    const call = mount({
+      ...holidaySpec,
+      param: "id",
+      serialize: (row: any, user?: AppUser, can?: string[]) => {
+        seen.push({ user: !!user, can });
+        return { ...(toHolidayResource(row) as object), editable: !!can?.includes("update") };
+      },
+    } as unknown as Omit<CollectionRouteSpec<any>, "serialize">);
+    const res = await body(await post(call, `${COLLECTION}/${id}:lock`));
+    expect(seen.length).toBe(1);
+    expect(seen[0]!.user, "serialize used to be called with one argument on this path").toBe(true);
+    expect(seen[0]!.can, "and with no idea what the caller may do").toContain("update");
+    expect(res.editable).toBe(true);
   });
 
   it("answers a collection's own verb before the shared lifecycle verb of the same name", async () => {

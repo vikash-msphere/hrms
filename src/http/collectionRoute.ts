@@ -16,7 +16,7 @@ import type { ZodTypeAny } from "zod";
 import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import { customMethod } from "./customMethod";
-import { lifecycleVerb } from "./lifecycleRoute";
+import { lifecycleVerb } from "./lifecycleVerb";
 import { accessHint, withAccess } from "./accessHint";
 import { clampPageSize } from "./pagination";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
@@ -118,7 +118,7 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   };
   // Soft delete is a property of the TABLE: an append-only collection (event-log, cron-runs) has no
   // `delete_time` column, so it gets no DELETE and no `:restore` rather than a route that writes a column
-  // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleRoute.ts). `softDelete: false`
+  // which does not exist. Same rule the lifecycle verbs follow (http/lifecycleVerb.ts). `softDelete: false`
   // additionally opts a history collection out even though its table could store the mark.
   const softDeletable = spec.softDelete !== false && !!(spec.table as Record<string, unknown>).deleteTime;
   // A method exists if EITHER the generic mapper or a bespoke override provides it - `positions` has no
@@ -209,15 +209,17 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
       return item(c, (await own.run(c.get("deps"), c.get("user"), id, body, c)) as { code?: string | null });
     }
     if (verb === "restore" && softDeletable) return item(c, await svc.restore(c.get("deps"), c.get("user"), id));
+    // A shared lifecycle verb answers through `item()` like every other item response, so it carries the access
+    // hint and the collection's derived fields instead of a bare row.
     const lc = await lifecycleVerb(c, {
       table: spec.table,
       singular: spec.lifecycleName ?? spec.auditName,
       collection,
-      serialize,
       publish: spec.publish,
       publishTime: spec.publishTime,
     });
-    return lc ?? c.notFound();
+    if (lc) return item(c, lc.row as { code?: string | null } | undefined);
+    return c.notFound();
   });
 
   return app;

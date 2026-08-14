@@ -30,7 +30,7 @@ the factory decides no permission.
 **Every collection is on the lane: 78 of 106 route files, and nothing is pending.** The six route files that
 expose a standard-method surface without going through the factory each carry a recorded reason and a test that
 fails if the reason stops being true - five key/value config surfaces (`NOT_COLLECTIONS`) and `roles`, whose
-identity is its name (`KEYED_BY_NAME`). 1239 tests across 108 files green. Every commit typechecks and passes the
+identity is its name (`KEYED_BY_NAME`). 1241 tests across 108 files green. Every commit typechecks and passes the
 full suite with pre-existing tests unmodified, and each is independently shippable.
 
 The other 28 non-factory route files are not collections at all - sub-resource routes and action surfaces.
@@ -95,6 +95,9 @@ Behaviours worth knowing before converting anything:
   narrowed to `dept` or `own` gets NO rows - fail closed. `collectionLaneDrift.test.ts` asserts every seeded
   role reads all 15 of them org-wide, so narrowing one in `domain/grants.ts` fails there rather than emptying a
   dropdown in the SPA.
+- A shared lifecycle verb answers through `item()` too: `http/lifecycleVerb.ts` performs the transition and hands
+  the row back, so `:disable` / `:lock` / `:publish` carry the access hint and the collection's derived fields like
+  any other item response. A collection's own verb of the same name still wins (see above).
 - A route-level `list(c, page)` is HANDED the resolved paging (`maxPageSize` clamped to the 100-row cap,
   `pageToken`, `showDeleted`); it does not re-read the query string for them. It still reads its own filters
   (`?employee`, `?state`, `?q`) off the context. Five lists are unpaged by nature (positions, compensation,
@@ -198,11 +201,12 @@ grep -rn "\b<exportedName>\b" src test web/src | grep -v "^src/services/<file>.t
 
 ## Verification
 
-- Per batch: `npm run typecheck`, `npm run test` (108 files / 1239 tests today), pre-existing tests unmodified.
-- `test/collectionFactory.test.ts` (29 tests) pins the shared surface: paging cursor, keyset paging across a page
+- Per batch: `npm run typecheck`, `npm run test` (108 files / 1241 tests today), pre-existing tests unmodified.
+- `test/collectionFactory.test.ts` (31 tests) pins the shared surface: paging cursor, keyset paging across a page
   boundary under a custom `sort`, no internal id in the page token, the bound list scope (and no rows for an
   unscoped request), the resolved paging handed to a route-level list, `decorate` on list + get + write, a
-  collection verb beating the shared lifecycle verb, a serializer reading `can`, If-Match, the lock guard,
+  collection verb beating the shared lifecycle verb, a serializer reading `can`, a lifecycle verb answering with
+  the hint and the derived field, If-Match, the lock guard,
   delete/`?show_deleted`/restore/`?force`, unknown-verb 404, unsupported lifecycle verb 404, audit stems,
   create/update schema split, verb entries (schema / no schema / raw), append-only tables, read-only specs,
   `?id=` conflict, and that the hint lists only mounted actions.
@@ -275,11 +279,11 @@ Defects the copied code was hiding, now fixed:
 - Four `set` objects stay `Record<string, unknown>` because their table is a parameter, not a constant: the
   generic patch in `crud.ts`, the two document-service writers, and the e-sign callback (both run over either
   document table). `announcements` is the fifth and is still hand-rolled.
-- Still open, recorded here rather than fixed: a shared lifecycle verb's response does not go through the
-  factory's item path (`http/lifecycleRoute.ts` serializes and answers itself), so `:disable` / `:lock` /
-  `:publish` answer WITHOUT `access.can` and without the collection's derived fields, unlike every other item
-  response. Routing it through `item()` means making the lifecycle helper return the row instead of a Response,
-  which changes the response shape of ~40 collections at once - its own change, not a rider on another step.
+- A shared lifecycle verb built its own response (`c.json(serialize(row))`), so `:disable` / `:lock` / `:publish`
+  answered without `access.can`, without the collection's derived fields, and with a viewer-dependent serializer
+  called without a viewer. It bit for real on the board: `publishDraft` folds the response into the cached row, so
+  publishing a draft took every control off the card and blanked its reaction thread until a refetch. Fixed - the
+  verb hands back the row and `item()` answers it. Record in `lifecycle-response-plan.md`.
 - **A regression the conversion introduced and this pass fixed:** `profile_completeness` disappeared from
   `GET /v1/employees/{id}`. The employees spec expressed it as `decorate`, but `overrides.get` replaces the
   service method that applied decorate, and create/update are overridden too - so the flags were computed on
