@@ -28,6 +28,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { stateColumn } from "@/components/common/stateColumn";
@@ -127,7 +128,7 @@ type Mode = { kind: "create" } | { kind: "edit"; doc: DocumentResource };
 const EMPTY = { name: "", type: "OTHER", expire: "", employee: ORG, requireAck: false, ackMethod: "internal" as "internal" | "cashfree", signAnchor: null as SignBox | null, published: true, audience: "none" as "none" | "everyone" | "specific", audienceEmployees: [] as string[] };
 
 export default function Documents({ me }: { me: Me }) {
-  const { rows, state, error, reload } = useDocuments({ showDeleted: true });
+  const { rows, state, error, reload, reloadOrg, reloadPersonal } = useDocuments({ showDeleted: true });
   const { rows: employees } = useCollection<Employee>("employees");
   const { rows: departments } = useCollection<Department>("departments");
   const [pickAudience, setPickAudience] = useState(false);
@@ -138,10 +139,12 @@ export default function Documents({ me }: { me: Me }) {
   const myLegalName = myEmp ? (myEmp.legal_name || myName) : "";
   const { toast } = useToast();
   // Per-resource soft-delete/lifecycle flows; the right one is picked per row by ownership (org vs personal).
-  const sdOrg = useSoftDelete("org-documents", "document", reload);
-  const sdPersonal = useSoftDelete("personal-documents", "document", reload);
-  const lcOrg = useLifecycle("org-documents", "document", reload);
-  const lcPersonal = useLifecycle("personal-documents", "document", reload);
+  // Each takes the reload for ITS OWN resource: acting on an org document has nothing to say about personal ones,
+  // and reloading both is how this page used to spend two list reads per action.
+  const sdOrg = useSoftDelete("org-documents", "document", reloadOrg);
+  const sdPersonal = useSoftDelete("personal-documents", "document", reloadPersonal);
+  const lcOrg = useLifecycle("org-documents", "document", reloadOrg);
+  const lcPersonal = useLifecycle("personal-documents", "document", reloadPersonal);
   const sd = (d: DocumentResource) => (docCollection(d) === "personal-documents" ? sdPersonal : sdOrg);
   const lc = (d: DocumentResource) => (docCollection(d) === "personal-documents" ? lcPersonal : lcOrg);
 
@@ -700,6 +703,9 @@ export default function Documents({ me }: { me: Me }) {
         </div>
       )}
 
+      {/* Both resources are capped at one server page and this view filters/sorts the cached rows, so it has to
+          admit when it is looking at a window rather than the whole shelf. */}
+      <TruncationNotice collection={["org-documents", "personal-documents"]} what="documents" className="mb-3" />
       <DataState state={state} error={error} onRetry={reload}>
         {rows.length === 0 ? (
           <EmptyState

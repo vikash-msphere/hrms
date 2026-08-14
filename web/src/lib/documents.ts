@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import { list, create as apiCreate } from "@/api";
+import { useCallback, useMemo } from "react";
+import { create as apiCreate } from "@/api";
 import type { DocumentResource } from "@/types";
-import type { LoadState } from "@/hooks/useCollection";
+import { useCollection, type LoadState } from "@/hooks/useCollection";
 
 // The backend splits documents into two resources gated separately by the authz middleware: org-documents
 // (flat, company-wide) and personal-documents (employee-owned). The UI presents them as one "Documents"
@@ -64,35 +64,39 @@ export function createDocument(body: DocumentBody) {
   return apiCreate<DocumentResource>("org-documents", rest);
 }
 
-// Merged list of both document resources, newest first. Each side is fetched independently so a permission
-// difference on one resource (e.g. an employee who can read only their own personal docs) still yields the
-// rows they can see from the other.
+// Merged list of both document resources, newest first, read through the shared resource store like every other
+// collection view. Each side is a separate `useCollection`, which is what makes a write to one of them refresh
+// only that one: the page used to hold its own state and re-list BOTH on every action, so half of every refetch
+// was for the collection that had not changed. Going through the store also buys the cache/TTL, the cross-tab
+// row broadcast, the `<collection>.read` capability gate and the truncation signal.
 export function useDocuments(opts: { showDeleted?: boolean } = {}) {
   const { showDeleted = false } = opts;
-  const [rows, setRows] = useState<DocumentResource[]>([]);
-  const [state, setState] = useState<LoadState>("loading");
-  const [error, setError] = useState<string | null>(null);
+  const org = useCollection<DocumentResource>("org-documents", { showDeleted });
+  const personal = useCollection<DocumentResource>("personal-documents", { showDeleted });
 
-  const reload = useCallback(async () => {
-    try {
-      setState("loading");
-      const [org, personal] = await Promise.all([
-        list<DocumentResource>("org-documents", { showDeleted }).then((r) => r.results ?? []).catch(() => [] as DocumentResource[]),
-        list<DocumentResource>("personal-documents", { showDeleted }).then((r) => r.results ?? []).catch(() => [] as DocumentResource[]),
-      ]);
-      const merged = [...org, ...personal].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""));
-      setRows(merged);
-      setState("ready");
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-      setState("error");
-    }
-  }, [showDeleted]);
+  const rows = useMemo(
+    () => [...org.rows, ...personal.rows].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? "")),
+    [org.rows, personal.rows],
+  );
 
-  useEffect(() => {
-    reload();
-  }, [reload]);
+  // A permission difference on one resource must not blank the other: an employee who may read only their own
+  // personal documents sees those, and `useCollection` already answers ready+empty for a resource they cannot
+  // read at all. So this is an error only when BOTH sides failed - one failing half stays as quiet as it was
+  // when each list swallowed its own rejection - and loading only until a side that IS fetching has landed
+  // (the store keeps ready rows visible through a revalidation rather than flipping back to a skeleton).
+  const state: LoadState =
+    org.state === "error" && personal.state === "error" ? "error"
+      : org.state === "loading" || personal.state === "loading" ? "loading"
+        : "ready";
 
-  return { rows, setRows, state, error, reload };
+  const reloadOrg = org.reload;
+  const reloadPersonal = personal.reload;
+  // Both sides, for the writes that genuinely touch both (filing a signed copy of an org document as a personal
+  // one). A per-row action should take the reload for ITS OWN collection instead - see docCollection.
+  const reload = useCallback(() => {
+    reloadOrg();
+    reloadPersonal();
+  }, [reloadOrg, reloadPersonal]);
+
+  return { rows, state, error: org.error ?? personal.error, reload, reloadOrg, reloadPersonal };
 }
