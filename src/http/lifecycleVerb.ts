@@ -25,7 +25,7 @@ type Handled = { row: unknown };
  * `item()` in http/collectionRoute.ts, which decorates the row, computes the access hint and serializes with
  * `(row, user, can)`. Building a response here is what left `:publish` answering without `access.can` and with an
  * empty reaction thread, since a serializer called with one argument cannot know the caller and `decorate` never
- * ran (see lifecycle-response-plan.md).
+ * ran.
  *
  * Returns null when the verb is not one of these, so the caller can try its own.
  */

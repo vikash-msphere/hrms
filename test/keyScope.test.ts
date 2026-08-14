@@ -3,7 +3,7 @@ import { GRANTS } from "../src/domain/grants";
 import { resolveRequest, decide, type Grant } from "../src/domain/permissions";
 import { narrowGrant, inScope, parseScope, scopeToWire, FULL_SCOPE, type KeyScope } from "../src/domain/keyScope";
 
-// The API-key ceiling. The security claim under test is invariant 1 of api-keys-plan.md: a key is NEVER
+// The API-key ceiling. The security claim under test (see docs/authz.md section 5.1) is that a key is NEVER
 // stronger than its owner. The property test at the bottom is that claim stated executably; the unit tests
 // above it pin the individual narrowing rules so a regression names itself.
 

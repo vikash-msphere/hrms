@@ -7,6 +7,11 @@
 // PKI.js (not node-forge) is used deliberately: modern Aadhaar eSign certificates are ECDSA, which node-forge
 // cannot parse or verify. PKI.js verifies both ECDSA and RSA through WebCrypto. This module is dynamically
 // imported by the viewer, so PKI.js stays out of the main bundle until a signature is actually inspected.
+//
+// Two known limits, neither reachable with Indian Aadhaar eSign today: results are correlated to signature
+// widgets by document order, which is exact for the single-signer case but would need field-name matching if
+// multi-signer PDFs ever appear; and WebCrypto only implements ECDSA over P-256/384/521, so a signer on an
+// exotic curve verifies as "unknown" (amber) rather than valid.
 import * as pkijs from "pkijs";
 import * as asn1js from "asn1js";
 import { TRUSTED_ROOT_PEMS } from "./ccaRoots";

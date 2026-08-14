@@ -283,7 +283,7 @@ Defects the copied code was hiding, now fixed:
   answered without `access.can`, without the collection's derived fields, and with a viewer-dependent serializer
   called without a viewer. It bit for real on the board: `publishDraft` folds the response into the cached row, so
   publishing a draft took every control off the card and blanked its reaction thread until a refetch. Fixed - the
-  verb hands back the row and `item()` answers it. Record in `lifecycle-response-plan.md`.
+  verb hands back the row and `item()` answers it.
 - **A regression the conversion introduced and this pass fixed:** `profile_completeness` disappeared from
   `GET /v1/employees/{id}`. The employees spec expressed it as `decorate`, but `overrides.get` replaces the
   service method that applied decorate, and create/update are overridden too - so the flags were computed on
