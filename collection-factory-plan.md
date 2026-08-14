@@ -27,12 +27,13 @@ the factory decides no permission.
 
 ## Current state
 
-**78 of 106 route files are on the factory. One collection remains, and every one of them carries a recorded
-reason - none is simply unstarted work.** 1238 tests across 108 files green. Every commit typechecks and passes the full suite with pre-existing tests unmodified,
-and each is independently shippable.
+**Every collection is on the lane: 78 of 106 route files, and nothing is pending.** The six route files that
+expose a standard-method surface without going through the factory each carry a recorded reason and a test that
+fails if the reason stops being true - five key/value config surfaces (`NOT_COLLECTIONS`) and `roles`, whose
+identity is its name (`KEYED_BY_NAME`). 1239 tests across 108 files green. Every commit typechecks and passes the
+full suite with pre-existing tests unmodified, and each is independently shippable.
 
-The remaining 36 non-factory route files are not collections at all - sub-resource routes, action surfaces and
-the five key/value config surfaces the drift test names.
+The other 28 non-factory route files are not collections at all - sub-resource routes and action surfaces.
 
 The lane is now hardened as well as shared: it pages in SQL, binds the caller's scope, hands the resolved paging
 to a route-level list, applies derived data on every path it owns, lets a collection's own verb beat the shared
@@ -46,9 +47,10 @@ Optional: `insert`, `patch` (omit either to mount no POST / no PATCH), `writeSch
 `updateSchema`, `sort`, `decorate`, `afterCreate`, `afterUpdate`, `allocCode`, `lifecycleName`, `publish`,
 `publishTime`, `softDelete: false`, `overrides`, `list`, `verbs`.
 
-That is the same 15 knobs the conversion started with. Nothing was added: every collection converted went on
-the lane with them, and the five that could not be expressed are recorded as blocked rather than as a 16th
-knob.
+That is the same 15 knobs the conversion started with. Nothing was added: every collection went on the lane with
+them. The five that once looked like they needed a 16th did not - four were unblocked by hardening the lane
+(`list(c, page)`, the collection-verb precedence, the hint computed before serializing) or by a schema/property
+correction, and the fifth (`roles`) is an identity decision, not a missing knob.
 
 Behaviours worth knowing before converting anything:
 
@@ -117,54 +119,30 @@ one grows either, it has become a collection and the test pulls it into the lane
 
 **2. The spec surface is frozen.** No new optional fields. A collection that appears to need a 16th knob goes
 into `PENDING` with its reason instead, to be reviewed on its own merits. Custom methods, the biggest source of
-variation, are already covered by `verbs`, so this rarely binds - it bound five times out of eighty, and all
-five are in the table below.
+variation, are already covered by `verbs`, so this rarely binds. It bound five times out of eighty, and every one
+of those five turned out to want something other than a knob: three wanted a signature change in the lane, one
+wanted a property rename, and one wants an identity decision.
 
 **3. Convert biggest-first, in batches of 3-6.** Verb-heavy files pay the most: they are the files people edit.
 
-## Remaining work
+**4. A collection keyed by a natural key stays off the lane, and a test checks that too.** `roles` has no `uuid`
+column: the role NAME is the identity, and it is what `users.role` and `access_rules.subject` store. Every
+generic method in `crud.ts` keys on `table.uuid`, so the lane cannot serve it, and giving it a uuid would add a
+second identity nothing references - making that uuid the REAL identity means re-keying the authz tables, which
+is a far bigger change than the list shape it would buy. It sits in a named `KEYED_BY_NAME` category in the drift
+test, and the test pins the claim: the table has **no `uuid` column**, its declared key **is** a primary key, and
+the columns that carry that key by value still exist. If `roles` ever gains a `uuid`, the claim is stale, the
+test fails, and it moves onto the lane. This is a second exemption rather than a `NOT_COLLECTIONS` entry because
+`roles` genuinely creates and deletes - it is a collection, just not a uuid-keyed one.
 
-Track A is done, and so is every convertible collection. What remains is one decision, not one conversion:
-`roles` keys on its NAME - a text primary key, not the standard generated `uuid`.
+## Nothing pending
 
-Each step is one commit: `npm run typecheck && npm run test` green, pre-existing tests unmodified, independently
-shippable.
+Every collection is on the lane. `PENDING` in the drift test is empty, so a hand-rolled standard-method surface
+appearing in `src/routes` fails the suite rather than joining a budget. The two permanent exemptions
+(`NOT_COLLECTIONS`, `KEYED_BY_NAME`) each carry a reason and a pinned property that fails if the reason stops
+being true.
 
-### Track B - the hand-rolled collections
-
-**B3. `roles`** (identity - BLOCKED, needs a decision). `roles.name` is a text PRIMARY KEY and there is no
-`uuid` column at all: the role name IS the identity, and it is what `users.role` and `access_rules.subject`
-store. Every generic method keys on `table.uuid`, so a conversion means overriding get, update, delete and purge,
-which buys the list shape and nothing else. Two ways out, and they are not equivalent:
-
-1. Give `roles` the standard `uuid` + `code` pair and keep `name` as a unique display key. Correct on the lane,
-   but it adds a second identity that nothing references (every FK stores the name), and it means re-keying
-   `users.role` and `access_rules.subject` to make the uuid the real identity - a schema change reaching into
-   the authz tables.
-2. Leave it off the lane in a NAMED category with its reason, the way `NOT_COLLECTIONS` works. The existing
-   category does not fit: its pinned property is "no collection-level POST and no DELETE", and `roles` has both.
-   So this needs a second exemption - "the item id is the value other tables store as a foreign key" - with its
-   own pinned property, e.g. that the id path segment is not a wire token.
-
-`accessRules` turned out NOT to need this decision at all: its primary key column has always been named `uuid`
-(`pk()` names the column), and only the drizzle PROPERTY said `id`. Renaming the property converted it with no
-schema change and no migration.
-
-**B3. `roles`** is BLOCKED on an identity decision, stated below, not on a conversion.
-
-### Not in scope
-
-The 36 remaining non-factory route files are sub-resource routes and action surfaces, not collections. The five
-`NOT_COLLECTIONS` key/value surfaces stay where they are, with the drift test holding them to the claim (no
-collection-level `POST /`, no DELETE).
-
-### What each step has to prove
-
-The standing gates are under "Verification" below and all of them apply. On top of that: A4 changes behavior
-under all 74 converted collections at once, so it runs the three delta audits in "Audits to run per batch" as
-well - a lane-wide change is exactly where a green suite is least convincing. Extend
-`test/collectionFactory.test.ts` per step: one derived field on both list and get (A4), a collection verb that
-shadows a lifecycle verb (A5), and a serializer that reads `can` (A7).
+The 28 remaining non-factory route files are sub-resource routes and action surfaces, not collections.
 
 ## Per-collection recipe
 
@@ -180,9 +158,11 @@ shadows a lifecycle verb (A5), and a serializer that reads `can` (A7).
    a different singular). Where a service used one stem for create/update and another for delete/restore/purge,
    they unify on the create/update stem - check nothing reads the old one first. `test/apiKeys.test.ts` asserts
    on `holiday.%`; the activity feed renders these.
-5. Scoped list becomes a route-level `list(c)`. An owned code becomes `allocCode(deps, table, values)`. Side
-   effects become `afterCreate` / `afterUpdate`. Derived data attached to every answer becomes `decorate` - and
-   because a route-level `list` bypasses `decorate`, attach it in the list hook too, in one query for the page.
+5. A scoped list becomes a route-level `list(c, page)` - it is handed the resolved paging and reads only its own
+   filters. An owned code becomes `allocCode(deps, table, values)`. Side effects become `afterCreate` /
+   `afterUpdate`. Derived data becomes `decorate`, written to take the whole PAGE: the factory applies it to the
+   list, the item read and every write response, so the list hook must NOT attach it a second time. Derived data
+   that must not ride a page cannot be a `decorate` - put it in the collection's own item path and say why.
 6. **A bespoke purge means the row has children.** Before deleting a `purge<X>` helper, read it: a board's cards,
    a cycle's reviews, a transition's tasks and a suggestion's votes are all torn down by hand before the row.
    Wire it as `overrides.purge` or the parent goes and the children are orphaned.
@@ -218,13 +198,18 @@ grep -rn "\b<exportedName>\b" src test web/src | grep -v "^src/services/<file>.t
 
 ## Verification
 
-- Per batch: `npm run typecheck`, `npm run test` (105 files / 1219 tests today), pre-existing tests unmodified.
-- `test/collectionFactory.test.ts` (22 tests) pins the shared surface: paging cursor, If-Match, lock guard,
+- Per batch: `npm run typecheck`, `npm run test` (108 files / 1239 tests today), pre-existing tests unmodified.
+- `test/collectionFactory.test.ts` (29 tests) pins the shared surface: paging cursor, keyset paging across a page
+  boundary under a custom `sort`, no internal id in the page token, the bound list scope (and no rows for an
+  unscoped request), the resolved paging handed to a route-level list, `decorate` on list + get + write, a
+  collection verb beating the shared lifecycle verb, a serializer reading `can`, If-Match, the lock guard,
   delete/`?show_deleted`/restore/`?force`, unknown-verb 404, unsupported lifecycle verb 404, audit stems,
   create/update schema split, verb entries (schema / no schema / raw), append-only tables, read-only specs,
   `?id=` conflict, and that the hint lists only mounted actions.
-- `test/collectionLaneDrift.test.ts` gates the lane itself: the PENDING budget, the NOT_COLLECTIONS exemption and
-  its no-create/no-delete property, and that every bespoke purge has a caller.
+- `test/collectionLaneDrift.test.ts` gates the lane itself: the (now empty) PENDING budget, both exemptions and
+  their pinned properties, that every factory spec names its table type, which collection verbs shadow a shared
+  lifecycle verb, that every generic-list catalog stays readable org-wide, and that every bespoke purge has a
+  caller.
 - Existing contract gates stay: `openapiRoutesDrift`, `customMethodsDrift`, `serializerContractDrift`,
   `accessHint`, `parity` (route × role), `bola` (item-level isolation), plus `npm run api:lint` (spectral) in the
   pre-commit `verify` hook.
@@ -249,6 +234,10 @@ Defects the copied code was hiding, now fixed:
   It has no `code`, which is honest - a rule is not a hierarchy node - so its rows carry no per-row access hint.
 - `access-rules` also serialized INSIDE its list and get, which is why it looked like it needed both. The
   object-id resolution is a `decorate` and the shape is a `serialize`, the same split as every other collection.
+- `roles` is the one collection that stays hand-rolled, by decision rather than by debt (see Decided policy 4).
+  Its name is a text primary key that `users.role` and `access_rules.subject` store by value; a uuid would be a
+  second identity nothing references, and promoting it to the real one means re-keying the authz tables. The
+  drift test's `KEYED_BY_NAME` entry pins exactly that claim, so the exemption cannot outlive its reason.
 - **`GET /v1/users` leaked every account.** Its list bound no scope at all, and everyone holds `users.me.**` -
   which resolves to breadth `own`, i.e. they may reach the list - so any employee could read a page carrying
   every colleague's email and role. The list is now scoped on the account's employee link, so an admin

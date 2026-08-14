@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
+import * as schema from "../src/db/schema";
 import { GRANTS } from "../src/domain/grants";
 import { actorCan, actorScope } from "../src/domain/access";
 
@@ -10,15 +11,24 @@ import { actorCan, actorScope } from "../src/domain/access";
 // (a `?id=` silently dropped in five collections, a lifecycle verb 500ing on a column that does not exist, a
 // missing lock guard, a collection with no tests at all).
 //
-// PENDING is the shrinking list of files still hand-rolled. It is a budget, not an exemption list: this suite
-// fails BOTH when a new hand-rolled collection appears (use the factory) and when a listed one is converted
-// without being removed (keep the ledger honest).
+// PENDING is the list of files still hand-rolled. It is a budget, not an exemption list: this suite fails BOTH
+// when a new hand-rolled collection appears (use the factory) and when a listed one is converted without being
+// removed (keep the ledger honest). The budget is now ZERO - every collection is on the lane.
 //
-// NOT_COLLECTIONS is the permanent exemption: key/value config surfaces that borrow the route shape but have no
-// collection semantics - the item id is a key the caller chooses, so PATCH upserts and there is nothing to
-// create or delete. Each carries its reason, and a test below pins the property that makes the claim true: no
-// collection-level `POST /` (an item-level `POST /:id:verb` is a custom method, not a create) and no DELETE. If one ever grows a create or a delete it has become a collection, that test fails,
-// and it moves into the factory lane.
+// Two permanent exemptions, each with its own reason and its own pinned property, so neither can quietly become
+// a place to dump a collection somebody did not want to convert:
+//
+//   NOT_COLLECTIONS - key/value config surfaces that borrow the route shape but have no collection semantics:
+//     the item id is a key the caller chooses, so PATCH upserts it. Pinned property: no collection-level
+//     `POST /` (an item-level `POST /:id:verb` is a custom method, not a create) and no DELETE. Grow either and
+//     it has become a collection, the test fails, and it moves onto the lane.
+//
+//   KEYED_BY_NAME - a real collection (it creates and deletes) whose identity is a NATURAL key that other
+//     tables store BY VALUE. Every generic method in services/crud.ts keys on `table.uuid`; a table without one
+//     cannot be served by them, and bolting a uuid on would add a second identity that nothing references.
+//     Pinned property: the table has no `uuid` column, its declared key column is a primary key, and the columns
+//     that carry the key by value still exist. If it ever gains a `uuid` the claim is stale, the test fails, and
+//     it moves onto the lane.
 const sources = import.meta.glob("../src/routes/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
 const basename = (path: string) => path.split("/").pop()!.replace(/\.ts$/, "");
@@ -29,9 +39,25 @@ const isHandRolledCollection = (src: string) => /\.get\("\/"/.test(src) && /\.ge
 // missing it would silently under-count converted collections.
 const usesFactory = (src: string) => /collectionRoutes\s*(?:<[^>]*>)?\s*\(/.test(src);
 
-// Remaining conversion work, by plan step (collection-factory-plan.md). Delete a name when its file lands on
-// the factory; never add one without a reason.
-const PENDING = new Set(["roles"]);
+// Remaining conversion work, by plan step (collection-factory-plan.md). Empty: there is nothing left to convert,
+// so a name appearing here again is a regression that owes a reason.
+const PENDING = new Set<string>();
+
+// A collection whose identity is a natural key other tables store by value. Not conversion debt - the lane keys
+// on `table.uuid` and this table deliberately has none.
+const KEYED_BY_NAME = new Map([
+  [
+    "roles",
+    {
+      table: schema.roles as Record<string, any>,
+      // The role NAME is the identity, and it is what every grant row and every account stores. A generated uuid
+      // would be a second identity nothing references, and making it the real one means re-keying the authz
+      // tables - a bigger change than the list shape it would buy.
+      key: schema.roles.name,
+      carriedByValue: { "users.role": schema.users.role, "access_rules.subject": schema.accessRules.subject },
+    },
+  ],
+]);
 
 // Route shape without collection semantics. Not conversion debt - these are done.
 const NOT_COLLECTIONS = new Map([
@@ -51,7 +77,7 @@ describe("every collection is built by the factory", () => {
 
   it("has no hand-rolled collection outside the PENDING budget", () => {
     const offenders = entries
-      .filter((e) => isHandRolledCollection(e.src) && !usesFactory(e.src) && !PENDING.has(e.name) && !NOT_COLLECTIONS.has(e.name))
+      .filter((e) => isHandRolledCollection(e.src) && !usesFactory(e.src) && !PENDING.has(e.name) && !NOT_COLLECTIONS.has(e.name) && !KEYED_BY_NAME.has(e.name))
       .map((e) => e.name);
     expect(offenders, "build these with collectionRoutes() from src/http/collectionRoute.ts - a hand-rolled standard-method surface drifts").toEqual([]);
   });
@@ -148,6 +174,20 @@ describe("every collection is built by the factory", () => {
       }
     }
     expect(narrowed, "a flat catalog has no owner column, so a narrowed read grant lists NOTHING - give the collection a route-level scoped list before narrowing it").toEqual([]);
+  });
+
+  // The exemption is only honest while the claim holds. The claim is about IDENTITY: every generic method keys on
+  // `table.uuid`, so a table without one cannot be served by them - and the reason it has none is that its key is
+  // a natural one other rows store by value. Gain a `uuid` and the first half is false; drop the columns that
+  // carry the key and the second half is. Either way this fails and the collection is reconsidered.
+  it.each([...KEYED_BY_NAME])("keeps %s keyed by a natural key the lane cannot serve", (name, spec) => {
+    expect(entries.find((e) => e.name === name), `src/routes/${name}.ts is gone - drop it from KEYED_BY_NAME`).toBeDefined();
+    expect(spec.table.uuid, `${name} now has a uuid column - services/crud.ts can key on it, so build it with collectionRoutes()`).toBeUndefined();
+    expect(spec.key?.primary, `${name}'s declared key is not a primary key - the claim about its identity is stale`).toBe(true);
+    // The key is only worth keeping as the identity while other tables actually store it.
+    for (const [where, column] of Object.entries(spec.carriedByValue)) {
+      expect(column, `${where} is gone - ${name}'s key is no longer carried by value, so reconsider the exemption`).toBeDefined();
+    }
   });
 
   // The exemption is only honest while the claim holds: a key/value surface has no create and no delete, because
