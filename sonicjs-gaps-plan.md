@@ -7,6 +7,21 @@ Each phase is independently shippable. Nothing here changes access-control seman
 the single source of authorization, and every new lane resolves to a principal that the existing engine
 already understands.
 
+## Status (2026-08-16)
+
+| Phase | State |
+|---|---|
+| 1 - Machine principals (API keys) | **DONE.** `routes/apiKeys.ts`, `services/apiKeys.ts`, `domain/keyScope.ts`; a key acts as its owning user with a narrowed grant. `test/apiKeys.test.ts` + `test/keyScope.test.ts` |
+| 2a/2b - Collection factory | **DONE.** `http/collectionRoute.ts` + `services/crud.ts`; 78 of 106 route files on the lane, the rest are not collections. `test/collectionLaneDrift.test.ts` gates it. Full account in `collection-factory-plan.md` |
+| 2c - Generate OpenAPI from the specs | **NOT STARTED.** `openapi.yaml` is still 557KB by hand; `openapiRoutesDrift` / `customMethodsDrift` keep it honest meanwhile |
+| 3 - KV cache tier | **NOT STARTED**, and now contested: the app added a client-side resource store, a batch endpoint and `dbBatch.ts` prefetching, so cold-isolate D1 reads are a smaller share of the budget than when this was written. Re-measure before building |
+| 4 - Revision history and restore | **NOT STARTED.** No `revisions` table |
+| 5 - Custom fields | **NOT STARTED.** Schema is still fixed at compile time (100 tables) |
+| 6 - MCP server | **NOT STARTED.** No `/mcp` endpoint. Its two prerequisites (1 and 2) are now in place, so the estimate of ~1 day holds |
+| 7 - Semantic search | **NOT STARTED.** Global search is FTS5 with per-collection scoping (`domain/searchIndex.ts`, `db/searchDdl.ts`), which shipped after this plan was written and covers the practical need |
+
+Phase text below is the original design, unchanged except where a status line says otherwise.
+
 ---
 
 ## Phase 1 - Machine principals (scoped API keys)
@@ -216,7 +231,13 @@ the middleware already computes, so semantic hits cannot leak rows a keyword sea
 - **Migration versioning.** The single-squashed-migration policy is correct while nothing is deployed.
   Revisit the day a live instance exists that cannot be reseeded.
 
-## Recommended start
+## Recommended start (superseded - see Status above)
+
+Phases 1 and 2 were taken first and are done. Of what remains, phase 6 (MCP) is the cheapest real
+capability now that both its prerequisites exist; phase 3 should be re-measured before it is believed; and
+phase 4 is the one users would notice. Original ordering advice below.
+
+
 
 Phase 3 first if you want a same-day win, phase 1 first if you want the unblocking one. Phase 1 then 3 then
 2a is the sequence I would take.

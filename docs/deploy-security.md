@@ -1,13 +1,22 @@
 # Deployment security runbook
 
 Operational controls that live outside the application code. Complete these before the first production deploy.
-Code-level findings and their fixes are tracked in `docs/security-review.md`.
+Current code-level posture and the open pre-launch items are in `production-readiness.md` (root);
+`docs/security-review.md` is the archived 2026-07-04 review that preceded it.
 
 ## 1. Rate limiting (WAF)
 
 The Worker enforces no volumetric limits.
 
-**This deployment is on the Cloudflare Free plan**, whose WAF rate limiting is tightly bounded:
+**Plan tier decides which set of rules you get, and it is not only a rate-limiting question.**
+`wrangler.toml` ships `[limits] cpu_ms = 60000`, which is a Workers Standard (paid) feature. On the Free
+plan the fixed 10ms CPU cap breaks every server-side PDF path - payslips, letters, Form 16, e-sign stamping
+- so deploying on Free means commenting that block out and losing those features (`docs/deploy.md` §0).
+Decide the tier before launch, then follow the matching section below.
+
+### Free plan
+
+Its WAF rate limiting is tightly bounded:
 
 - **one** rate-limiting rule total (not one per path class);
 - a **fixed 10-second** counting window (no per-minute periods);
@@ -33,7 +42,14 @@ the plan is upgraded.
 runs a provider lookup + HMAC compute before its signature check rejects, so this IP bound blunts a flood
 before either path burns budget.
 
-**When you upgrade to Pro+**, add the per-identity rules below (per-minute windows):
+Two more unauthenticated surfaces deserve a rule the moment you have more than one: `/found/*` (the public
+asset-tag lookup, which hits D1 on every call and is exactly the shape a token-guessing sweep would hammer)
+and `/readyz` (an unauthenticated `SELECT 1` against D1, so an easy way to burn read quota). On Free, fold
+`/found/*` into the single rule's match expression if asset tags are enabled publicly.
+
+### Pro+ / Workers Standard
+
+Add the per-identity rules below (per-minute windows) alongside the sign-in rule:
 
 | Path (method)                                   | Why                                   | Suggested limit          |
 |-------------------------------------------------|---------------------------------------|--------------------------|
@@ -42,6 +58,7 @@ before either path burns budget.
 | `POST /v1/batch:run`                            | fan-out amplifier                     | ~60 / min / user         |
 | `POST /v1/cron-runs:run`                        | triggers full scheduled jobs (super)  | ~5 / min                 |
 | `POST /v1/automations/*:test`                   | rule dry-run                          | ~30 / min / user         |
+| `GET /found/*`, `GET /readyz`                   | unauthenticated, each touches D1      | ~30 / min / IP           |
 
 ## 2. Secrets
 

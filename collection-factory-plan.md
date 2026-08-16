@@ -30,7 +30,8 @@ the factory decides no permission.
 **Every collection is on the lane: 78 of 106 route files, and nothing is pending.** The six route files that
 expose a standard-method surface without going through the factory each carry a recorded reason and a test that
 fails if the reason stops being true - five key/value config surfaces (`NOT_COLLECTIONS`) and `roles`, whose
-identity is its name (`KEYED_BY_NAME`). 1241 tests across 108 files green. Every commit typechecks and passes the
+identity is its name (`KEYED_BY_NAME`). Green at the time of the conversion at 1241 tests across 108 files;
+the suite has since grown to 1252 across 110. Every commit typechecks and passes the
 full suite with pre-existing tests unmodified, and each is independently shippable.
 
 The other 28 non-factory route files are not collections at all - sub-resource routes and action surfaces.

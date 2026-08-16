@@ -24,8 +24,8 @@ typechecked; the last section lists what stays open.
   action columns ride top-right. Children of expandable rows are always visible.
 - **Server paging**: `useCollection` exposes `loadMore()` (resourceStore follows `next_page_token` and
   appends). Tables pass it as `onLoadMore`; the footer's "first page only" notice becomes a Load more
-  button. Wired on Directory + Tickets (both also have server-side `q` search); other pages adopt with one
-  prop each.
+  button. Wired on Directory, Tickets (both also have server-side `q` search) and Boards; other pages adopt
+  with one prop each.
 
 ## Approvals
 
@@ -88,9 +88,10 @@ selected for retry. Bulk reject sends no note (individual reject still does).
 ## Still open
 
 - Per-page `mobilePriority` tuning and a 375px pass over the top employee-facing pages (generic card layout
-  is in).
-- `onLoadMore`/`search` adoption beyond Directory and Tickets (one prop per page).
-- Bulk actions on more DataTable pages (Transitions, payroll items).
+  is in; only Boards sets `mobilePriority` today).
+- `onLoadMore`/`search` adoption beyond Directory, Tickets and Boards (one prop per page).
+- Bulk actions on more DataTable pages (Transitions, payroll items). Only Tickets uses the `bulkActions`
+  prop; Approvals runs its own selection over `bulkInvoke` because its rows span collections.
 - Column filters translated to server query params on paged tables (client filters carry a truncation hint
   meanwhile).
 - Draft autosave beyond leave/post composer (reviews, scorecards, ticket replies).

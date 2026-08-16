@@ -1,5 +1,10 @@
 # Plan: fix open production-readiness issues
 
+> **Where this stands (2026-08-16).** Phases 1 and 2 shipped. Phase 3 was rejected in favour of the
+> harden-only alternative; only its follow-up tripwire is still open. Phase 4 is superseded by
+> `production-readiness.md`, which is the current release-readiness ledger. This file is kept for the
+> reasoning behind the concurrency and re-parenting work.
+
 ## Context
 
 An independent pre-prod review (see memory `concurrency-money-atomicity`) fixed the money/balance
@@ -43,9 +48,11 @@ applied once" case per family (leave/encashment already covered). `npm run verif
 
 ---
 
-> **DECISION (locked):** greenfield, no constraints — implement the BEST solution for every phase.
-> Phase 2 = full re-parenting cascade. Phase 3 = full integer minor-units conversion (money = paise,
-> leave-days = centidays), NOT the harden-only alternative.
+> **DECISION (superseded 2026-08-14):** the original decision here was a full integer minor-units
+> conversion for Phase 3. What shipped is the harden-only alternative, and that is now the standing
+> decision: money stays `real`, with `round2` / `sum2` as the single rounding discipline
+> (`src/domain/money.ts`, ~160 call sites, `src/db/schema.ts:6` states the invariant). Phase 2 shipped as
+> planned (full re-parenting cascade).
 
 ## Phase 2 — Department / employee re-parenting (feature) — ✅ DONE (657 tests green)
 
@@ -86,7 +93,19 @@ change. Reorgs are core HRMS. Because scope = code prefix, a move must recompute
 
 ---
 
-## Phase 3 — Money precision — FULL INTEGER MINOR-UNITS CONVERSION
+## Phase 3 — Money precision — NOT DONE, and deliberately not doing it
+
+**Status:** the integer conversion below was designed and then rejected. 55 `real()` columns remain and
+`src/domain/money.ts` exposes only `round2` / `sum2`. Reason: the conversion touches every money column,
+every domain calculation and every money test to close a gap that no test or production incident has shown,
+right before launch. 1252 tests cover the money flows end to end (EMI recovery, settlement, statutory,
+arrears) with the discipline in place.
+
+**What to do instead (still open, ~1 h):** convert the convention into a gate. A drift test in the style of
+`serializerContractDrift` / `collectionLaneDrift` that scans `src/domain` and `src/services` for writes to
+known money columns and fails when the value did not come from `round2` / `sum2` or a bound parameter.
+
+The original design is kept below for the record; do not implement it without re-deciding.
 
 **Problem:** all monetary + leave-day columns are SQLite `REAL` (IEEE-754). Correct-by-construction fix =
 store integers internally, never float.
@@ -117,14 +136,15 @@ in rupees. One-migration squash for the column type changes.
 
 ---
 
-## Phase 4 — Ops / deploy (mostly config + docs)
+## Phase 4 — Ops / deploy — superseded by `production-readiness.md`
 
-- `wrangler.toml` staging `database_id` still `REPLACE_WITH_STAGING_D1_ID`. Requires you to
-  `wrangler d1 create hrms-staging` + `r2 bucket create hrms-staging`; then fill the id. (User action.)
-- **CF Access is the security perimeter** — `auth.ts` auto-provisions ANY JWT-authenticated email as an
-  `employee`. Document in the deploy runbook: the Access application policy MUST be restricted to org emails.
-  Optionally add a startup/allowlist guard (env `ALLOWED_EMAIL_DOMAINS`) that rejects provisioning outside it.
-- Confirm the DR export (scheduled `wrangler d1 export` to R2) exists or add it to the deploy runbook.
+The live ops punch list is `production-readiness.md` (2026-08-14). State of the three items raised here:
+
+- Staging `database_id` is still `REPLACE_WITH_STAGING_D1_ID` — **open** (production-readiness item 10).
+- Identity perimeter — **done**: `ALLOWED_EMAIL_DOMAINS` gates first-login auto-provisioning, fail-closed,
+  and `makeDeps` refuses to boot Google mode without it (`test/productionReadiness.test.ts`).
+- DR export — **done**: `.github/workflows/d1-backup.yml` exports D1 to R2 nightly plus a 30-day artifact.
+  R2 object backup is the remaining gap (production-readiness item 11).
 
 ---
 

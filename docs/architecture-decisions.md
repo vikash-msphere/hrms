@@ -9,7 +9,7 @@ A blueprint for an internal Human Resource Management System, authenticated thro
 
 ## 1. Executive summary
 
-The recommended stack is **TypeScript on Cloudflare Workers** (V8-native, not WASM), serving a **React SPA** as static assets from the same Worker, with **Hono** as the API framework, **D1 (SQLite)** as the relational database, **R2** for documents, **D1** plus a small in-isolate cache for config and reference data, and **Cloudflare Access + Google Workspace** for authentication. Background work runs on **Cron Triggers**. Transactional email is the one piece that lives off Cloudflare (Resend or Amazon SES).
+The recommended stack is **TypeScript on Cloudflare Workers** (V8-native, not WASM), serving a **React SPA** as static assets from the same Worker, with **Hono** as the API framework, **D1 (SQLite)** as the relational database, **R2** for documents, **D1** plus a small in-isolate cache for config and reference data, and **Google** for authentication (through Cloudflare Access, or the Worker's own OIDC flow — §4; this deployment runs the latter). Background work runs on **Cron Triggers**. Transactional email is the one piece that lives off Cloudflare (Resend or Amazon SES).
 
 Three decisions deserve emphasis up front:
 
@@ -88,9 +88,13 @@ flowchart TB
 
 ## 4. Authentication — "offload to Google"
 
-There are two clean ways to do this on Cloudflare. Path A is the default; choose Path B if you exceed the free Access seat limit or want full control of the login UX.
+There are two clean ways to do this on Cloudflare, and **both are implemented**: configuration picks one at
+runtime. Access mode is the default; setting `GOOGLE_CLIENT_ID` selects Google mode. This deployment runs
+**Path B (Google mode)**, because per-seat Access pricing above 50 users is the one cost the free-tier
+design could not absorb. Operational setup for the live path is `docs/deploy.md` §3; the runtime contract
+is `src/routes/authRoutes.ts` + `src/middleware/auth.ts`.
 
-### Path A — Cloudflare Access + Google (recommended for ≤ 50 users)
+### Path A — Cloudflare Access + Google (implemented; default when `GOOGLE_CLIENT_ID` is unset)
 
 You write **no OAuth code at all**. Cloudflare handles the Google login, MFA, device posture, and audit logging; you just trust and verify a JWT.
 
@@ -107,13 +111,20 @@ In the Worker, validate that JWT on each request:
 
 Trade-off: the free Zero Trust plan covers **50 users**. Beyond that it becomes a paid per-seat plan, at which point Path B may be cheaper.
 
-### Path B — DIY Google OIDC inside the Worker (for scale / control)
+### Path B — Google OIDC inside the Worker (implemented; the live path here)
 
 Implement the standard **Authorization Code + PKCE** flow with Hono routes:
 - `GET /auth/login` → redirect to Google's authorize endpoint with `scope=openid email profile`, a `state`, PKCE challenge, and an `hd=yourcompany.com` hint.
 - `GET /auth/callback` → exchange the code for tokens, verify the **ID token** against Google's JWKS, and **enforce the email domain** (`hd` / verified email) server-side. Then establish your app session.
 
 **Session strategy on the free tier (important):** use a **stateless signed JWT** in an `HttpOnly; Secure; SameSite=Lax` cookie (sign with a key from Worker Secrets, short expiry + refresh), signed/verified with `jose`. This avoids a per-request session write entirely. If you need revocation, keep a *small* deny-list in a D1 table (low write volume). Protect state-changing requests with a CSRF token (double-submit) in addition to `SameSite`.
+
+**As built:** the session cookie is a stateless HMAC-signed token (`src/lib/session.ts`, `AUTH_SESSION_KEY`,
+12h TTL) with the nonce tying the id token to the browser that started the login; CSRF is a required
+`X-Requested-By` header on every mutation; `ALLOWED_EMAIL_DOMAINS` is the fail-closed org perimeter, and
+`makeDeps` refuses to boot Google mode without it. Revocation is not a deny-list: `auth.ts` re-reads the
+user row and its grant on every request, so disabling a user or changing their role takes effect on the
+next call.
 
 > Whichever path you choose, Cloudflare/Google only tell you **who** the user is. **What** they can see and do is your application's job — see §7.
 
@@ -222,7 +233,7 @@ The layers, outermost to innermost:
 
 - **domain** — pure types and rule functions (accrual math, balance changes, approval transitions, permission checks, payroll earning/deduction totals). No framework or DB imports.
 - **services** (use cases) — orchestrate the domain and call ports, e.g. `requestLeave(deps, input)`.
-- **routes** (interface adapters) — Hono handlers validate with Zod, call a service, format the response. They never pass `Context` or `Request` inward.
+- **routes** (interface adapters) — validate with Zod, call a service, format the response. They never pass `Context` or `Request` inward. As built, most of this layer is *declarative*: `http/collectionRoute.ts` + `services/crud.ts` generate the AEP standard-method lane from a per-collection spec, so a route file states only what is specific to its collection (see `docs/03-add-a-resource.md`).
 - **db / lib** (adapters) — Drizzle/D1, R2, and the email client live here, behind the boundary.
 
 The repository layout reflects these layers:
@@ -234,8 +245,7 @@ hrms/
 ├─ vitest.config.ts
 ├─ package.json
 ├─ .spectral.yaml           # extends the official @aep_dev/aep-openapi-linter ruleset
-├─ api/
-│  └─ openapi.yaml          # OpenAPI 3.1 — SOURCE OF TRUTH for the API
+├─ openapi.yaml             # OpenAPI 3.1 — SOURCE OF TRUTH for the API
 ├─ src/                     # the Worker (Hono API; the built SPA is served as static assets)
 │  ├─ index.ts              # app entry: middleware chain + /v1 routing; scheduled() for cron
 │  ├─ env.ts                # Bindings, AppUser, AppEnv types
@@ -250,16 +260,17 @@ hrms/
 │  │  └─ grants.ts / manifests.ts  #   TYPED POLICY DEFAULTS (seed only; runtime policy is DB data)
 │  ├─ services/             # use cases: orchestrate domain, call ports + DB, write audit
 │  │  ├─ employees.ts  departments.ts  leaveRequests.ts  payroll.ts
-│  ├─ routes/               # Hono handlers: validate (Zod) -> service -> serialize
+│  ├─ routes/               # one file per collection: a spec on collectionRoutes(), or a bespoke handler
 │  │  ├─ employees.ts  departments.ts  leaveRequests.ts  payrollRuns.ts
 │  │  ├─ operations.ts      #   AEP-151 LRO poll endpoints (/v1/operations[, /{operation}])
 │  │  └─ users.ts           #   users resource; caller identity via the `me` self-alias (GET /v1/users/me)
 │  ├─ http/                 # the AEP wire boundary
+│  │  ├─ collectionRoute.ts #   the ONE standard-method lane every collection is generated from
 │  │  ├─ serialize.ts       #   row -> AEP resource (path, snake_case, etag); omits *Enc
 │  │  └─ pagination.ts      #   opaque cursor + page-size clamp
 │  ├─ ports/                # interfaces for real seams: Encryptor, EmailSender, DocumentStore, Clock
 │  │  └─ index.ts
-│  ├─ middleware/           # auth (Access-JWT verify + grant/policy ride-along), authz (single gate),
+│  ├─ middleware/           # auth (Access JWT / session cookie / API key + grant/policy ride-along), authz (single gate),
 │  │                        #   encodeWireIds/decodeWireIds (opaque ids), csrf, dbContext, errorHandler (RFC 9457)
 │  ├─ lib/                  # adapters: crypto (field encryption), email, docstore (R2), cache, audit, pdf, errors
 │  └─ db/
@@ -276,24 +287,36 @@ Define ports only where a seam is real: an **`EmailSender`** (Resend/SES adapter
 
 ---
 
-## 9. Phased delivery roadmap
+## 9. Scope as delivered
 
-| Phase | Focus | Outcome |
-|---|---|---|
-| **0 — Foundations** (wk 1–2) | Repo + Wrangler + bindings; baseline D1 schema & migrations; **Access + Google auth** and RBAC skeleton; CI/CD with preview deploys; base UI shell + nav. | A deployed, authenticated empty app where only `@yourcompany.com` users get in and roles are wired. |
-| **1 — MVP** (wk 3–6) | Employee directory & profiles; org structure + org chart; document upload/download via R2 with authz; HR-admin screens; audit log. | A usable internal directory with documents. |
-| **2 — Time off** (wk 7–10) | Leave types, balances, **cron-based accrual**; request → approval workflow; holiday calendar; **email notifications** (Resend/SES). | The core day-to-day HR feature employees actually use. |
-| **3 — Workflows & engagement** (wk 11–14) | Onboarding/offboarding checklists; announcements; automated reminders (probation end, doc expiry, anniversaries); reporting & CSV exports. | A rounded HRMS for a small/medium org. |
-| **4 — Payroll (comp & payslips)** (wk 15–18) | Salary structures & pay components; effective-dated comp history; payroll-run workflow (draft → review → approve → lock → publish) with loss-of-pay from leave; batched payslip PDF generation into R2; self-service payslips; payroll registers. | In-house compensation & payslips for a single jurisdiction — no tax engine, payments, or filing. |
-| **5 — Later** | Performance reviews & goals; attendance/timesheets; asset tracking; optional policy search / HR assistant (Workers AI + Vectorize). | Growth features as needed. |
+The whole planned scope is built: identity and RBAC, directory and org chart, documents, time off with
+accrual, engagement and workflows, payroll, and the "later" tier (performance, attendance and timesheets,
+asset tracking) as well. The system now also carries hiring (a full ATS), helpdesk tickets, kanban boards,
+operational expenses, benefits, loans, compliance tracking and e-signature - all on the same layering, all
+as collections on one standard-method lane.
+
+Two scope lines moved from the original plan, deliberately:
+
+- **Statutory calculation is in.** EPF, ESI, professional tax and TDS (new regime, with 87A and surcharge
+  marginal relief), employer contributions, and Form 16 are computed in `src/domain/`. The line that has
+  NOT moved is money movement and filing: bank files are generated as output, nothing is paid or submitted.
+- **Search is FTS5, not a vector index.** The "optional policy search / HR assistant (Workers AI +
+  Vectorize)" idea became a generated FTS5 index with per-collection scoping (`src/domain/searchIndex.ts`),
+  which costs two D1 reads instead of an embedding pipeline. Semantic search remains an unstarted option.
+
+What is genuinely still open is release-path, not product: see `production-readiness.md`.
 
 ---
 
 ## 10. When you outgrow the free tier
 
-The free tier holds for a small/medium internal org. You'll move to **Workers Paid (~$5/mo base)** when you cross ~100k requests/day, need higher D1 throughput, want Queues, or need more cron and Durable Object capacity. **Cloudflare Access** moves to per-seat pricing past 50 users (the point to re-evaluate Path B). Storage scales gracefully and cheaply on D1/R2 with no egress fees. None of these require re-architecting — they're quota bumps on the same design.
+The free tier holds for a small/medium internal org. You'll move to **Workers Paid (~$5/mo base)** when you cross ~100k requests/day, need higher D1 throughput, want Queues, or need more cron and Durable Object capacity. **Cloudflare Access** moves to per-seat pricing past 50 users, which is exactly why Google mode (Path B) exists and is the mode this deployment runs. Storage scales gracefully and cheaply on D1/R2 with no egress fees. None of these require re-architecting — they're quota bumps on the same design.
+
+One caveat that is not a quota bump: server-side PDF rendering (payslips, letters, Form 16, e-sign
+stamping) exceeds the free plan's fixed 10ms CPU cap. Running those features at all means Workers Standard
+and the `[limits] cpu_ms` block in `wrangler.toml` (`docs/deploy.md` §0).
 
 ---
 
 ### TL;DR
-TypeScript + Hono on one Cloudflare Worker, React/Vite SPA served as static assets, D1 for data (config and reference data cached in-isolate), R2 for documents, Cron for jobs, and Cloudflare Access + Google for login. Keep a light Clean Architecture — business logic free of Hono/Drizzle, CRUD thin, ports only at real seams. Payroll is in scope as compensation & payslips for a single jurisdiction — but keep tax calculation, payments, and filing out — and treat the 50-user Access limit and external email as known constraints from day one.
+TypeScript + Hono on one Cloudflare Worker, React/Vite SPA served as static assets, D1 for data (config and reference data cached in-isolate), R2 for documents, Cron for jobs, and Google for login (Access mode or the Worker's own OIDC). Keep a light Clean Architecture — business logic free of Hono/Drizzle, CRUD thin, ports only at real seams. Payroll covers compensation, statutory deductions and payslips for a single jurisdiction and a single currency; payments and filing stay out. External email and the CPU ceiling on PDF rendering are the two constraints to plan around from day one.
