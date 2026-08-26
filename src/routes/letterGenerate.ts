@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { makeDocumentService } from "../services/documentService";
+import { jsonBody } from "../http/jsonRequest";
 import { toPersonalDocumentResource } from "../http/serialize";
 import { assembleLetterContext } from "../services/letterData";
 import { findLetterTemplate } from "../services/letterTemplates";
@@ -29,7 +30,7 @@ const svc = makeDocumentService({ table: schema.personalDocuments, collection: "
 const bodySchema = z.object({ employee: z.string(), letter_type: z.string(), input: z.record(z.string(), z.string().max(20_000)).refine((o) => Object.keys(o).length <= 200, "too many input fields").optional(), esign: z.boolean().optional() }).strict();
 
 export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
-  const parsed = bodySchema.safeParse(await c.req.json().catch(() => ({})));
+  const parsed = bodySchema.safeParse(await jsonBody(c));
   if (!parsed.success) throw invalidArgument("body must be { employee, letter_type }");
   const { employee, letter_type, input, esign: esignOverride } = parsed.data;
   const employeeId = idFromPath(employee);
@@ -101,7 +102,7 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
     esignFields.esignProvider = providerId;
     esignFields.esignRequestId = res.providerRef;
     esignFields.esignStatus = res.status;
-    esignFields.esignUrl = res.signUrl ?? null;
+    esignFields.esignUri = res.signUrl ?? null;
     esignFields.esignSentAt = new Date();
   } else if (wantEsign) {
     // internal: mark it awaiting in-app signature so the UI prompts the owner.

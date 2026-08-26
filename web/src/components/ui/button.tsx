@@ -17,11 +17,16 @@ const buttonVariants = cva(
         link: "text-primary underline-offset-4 hover:underline",
         success: "bg-success text-success-foreground shadow-sm hover:bg-success/90",
       },
+      // Sizes grow on a coarse pointer, where 36px is a target people miss. Deliberately NOT uniform:
+      // `default` and `lg` are the page's real actions (a form's Save, a dialog's Confirm) and get the full
+      // 44px; `icon` gets a smaller bump because those sit in table rows and action clusters where 44px per
+      // button pushes the row's own content off screen; `sm` is the explicitly dense variant and is left alone
+      // so a caller can still opt into density on purpose.
       size: {
-        default: "h-9 px-4 py-2",
+        default: "h-9 px-4 py-2 coarse:h-11 coarse:px-5",
         sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-10 rounded-md px-6",
-        icon: "h-9 w-9",
+        lg: "h-10 rounded-md px-6 coarse:h-12",
+        icon: "h-9 w-9 coarse:h-10 coarse:w-10",
       },
     },
     defaultVariants: { variant: "default", size: "default" },

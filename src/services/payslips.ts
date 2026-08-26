@@ -10,7 +10,7 @@ import { keysetPage } from "./keysetPage";
 export async function listPayslips(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string) {
   // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
   const where = applyScope(scope, schema.payslips.code, schema.payslips.employeeId);
-  return keysetPage(deps, schema.payslips, "payslips", where, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.payslips, "payslips", where, { max: maxPageSize, pageToken });
 }
 
 // Read the stored PDF for a payslip. Access (own vs hr/payroll/super) is enforced by the middleware on

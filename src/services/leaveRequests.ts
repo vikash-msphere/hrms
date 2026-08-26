@@ -13,18 +13,45 @@ import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
+import { dateWindow } from "./dateWindow";
 import { leaveDays } from "../domain/leave";
+import { holidayApplies } from "./holidays";
 import { getSettingValue } from "./settings";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance";
+import { refHolidays } from "../lib/refData";
 
-// Holidays (UTC YYYY-MM-DD) in [startMs, endMs] - the days leave shouldn't count. Mirrors the payroll/LOP set:
-// non-deleted, non-disabled holidays of any kind.
-async function holidaysInRange(deps: Deps, startMs: number, endMs: number): Promise<Set<string>> {
-  return new Set(
-    (await deps.db.select().from(schema.holidays))
-      .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= startMs && +new Date(h.date) <= endMs)
-      .map((h) => new Date(h.date).toISOString().slice(0, 10)),
+// Holidays (UTC YYYY-MM-DD) in [startMs, endMs] - the days leave shouldn't count. Non-deleted, non-disabled
+// holidays of any kind, minus the location-scoped ones that aren't this employee's (a Mumbai-only holiday must
+// not quietly stop a Delhi employee's leave being charged). Half-day holidays come back separately: they cost
+// half a leave day, not none.
+async function holidaysInRange(
+  deps: Deps,
+  startMs: number,
+  endMs: number,
+  location: string | null,
+): Promise<{ full: Set<string>; half: Set<string> }> {
+  const rows = (await refHolidays(deps)).filter(
+    (h) =>
+      !h.deleteTime &&
+      !h.disabled &&
+      +new Date(h.date) >= startMs &&
+      +new Date(h.date) <= endMs &&
+      holidayApplies(h.location, location),
   );
+  const ymd = (h: (typeof rows)[number]) => new Date(h.date).toISOString().slice(0, 10);
+  return {
+    full: new Set(rows.filter((h) => !h.halfDay).map(ymd)),
+    half: new Set(rows.filter((h) => h.halfDay).map(ymd)),
+  };
+}
+
+/** The work location of the employee the request is FOR (not the caller - a manager may file on their behalf). */
+async function employeeLocation(deps: Deps, employeeId: string): Promise<string | null> {
+  const rows = await deps.db
+    .select({ location: schema.positions.location, effectiveTo: schema.positions.effectiveTo })
+    .from(schema.positions)
+    .where(eq(schema.positions.employeeId, employeeId));
+  return rows.find((r) => !r.effectiveTo)?.location ?? null;
 }
 
 export type LeaveRequestInput = {
@@ -43,19 +70,47 @@ const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 // (back-dating allowed); HR can turn it off in Settings.
 export const DEFAULT_LEAVE_REQUEST_CONFIG = { allow_backdated: true };
 
-export async function listLeaveRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string) {
+export async function listLeaveRequests(
+  deps: Deps,
+  scope: ListScope,
+  maxPageSize: number,
+  pageToken?: string,
+  stateFilter?: string,
+  q?: string,
+  leaveTypeFilter?: string,
+  fromYmd?: string,
+  toYmd?: string,
+  employeeFilter?: string,
+) {
   // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
   const conds = [applyScope(scope, schema.leaveRequests.code, schema.leaveRequests.employeeId)];
   // Server-side text filter (FTS). Narrows the scope above; it can never widen it.
   const textMatch = await searchFilter(deps, "leave-requests", q, schema.leaveRequests.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.leaveRequests.state, stateFilter as typeof schema.leaveRequests.$inferSelect.state));
+  // One leave type, as `leave-types/{leave_type_id}`. The edge already decoded the wire token, so the id is
+  // internal here. Narrowing at the DB reaches rows past the 100-row page a client-side filter can only window.
+  const leaveTypeId = idFromPath(leaveTypeFilter);
+  if (leaveTypeId) conds.push(eq(schema.leaveRequests.leaveTypeId, leaveTypeId));
+  // One person, as `employees/{employee_id}` (the edge decoded the token, so this is an internal id). What an
+  // employee's profile asks for: without it that page read a page of the whole collection and filtered it in
+  // the browser - dearer, and blind to any request of theirs sitting past the cursor. Narrows the scope above,
+  // never widens it: a caller who may not see this person's leave still gets nothing.
+  const employeeId = idFromPath(employeeFilter);
+  if (employeeId) conds.push(eq(schema.leaveRequests.employeeId, employeeId));
+  // `?from=&to=`: the window a calendar month asks for (see services/dateWindow.ts).
+  conds.push(...dateWindow(schema.leaveRequests.startDate, schema.leaveRequests.endDate, fromYmd, toYmd));
   // SQL-side keyset pagination (DB orders + LIMITs) so an all-scope list never loads the whole table.
-  return keysetPage(deps, schema.leaveRequests, "leave-requests", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.leaveRequests, "leave-requests", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 async function getLeaveRequest(deps: Deps, _actor: AppUser, id: string) {
-  // Read access (own / dept / all) is enforced by the middleware on leave-requests/<code>.
+  return getLeaveRequestRow(deps, id);
+}
+
+// The stored row by id. Read access (own / dept / all) is enforced by the middleware on leave-requests/<code>,
+// so this is a plain fetch - exported for the attachment verbs, which answer with the request they documented.
+export async function getLeaveRequestRow(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, id)).limit(1))[0];
   if (!row) throw notFound("leave request not found");
   return row;
@@ -111,8 +166,8 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
 
   // Chargeable days = configured working days in the range, minus holidays, honoring the start/end sessions.
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
-  const holidays = await holidaysInRange(deps, start, end);
-  const days = leaveDays(start, end, startSession, endSession, att.work_days, holidays);
+  const holidays = await holidaysInRange(deps, start, end, await employeeLocation(deps, employeeId));
+  const days = leaveDays(start, end, startSession, endSession, att.work_days, holidays.full, holidays.half);
   if (days <= 0) throw invalidArgument("no working days in the selected range (weekends and holidays aren't counted) - pick a working day");
 
   // Balance check: a paid (entitlement-tracked) leave type can't be drawn below zero. The balance is reserved

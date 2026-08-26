@@ -68,7 +68,8 @@ export function PdfPreviewDialog({ source, onClose }: { source: PdfSource | null
 
   return (
     <Dialog open={!!source} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="flex max-h-[92vh] max-w-3xl flex-col overflow-hidden">
+      {/* Height ceiling from `sm` up; a phone keeps the shared sheet height (see ui/dialog.tsx). */}
+      <DialogContent className="flex max-w-3xl flex-col overflow-hidden sm:max-h-[92vh] lg:max-w-4xl">
         <DialogHeader>
           <DialogTitle>{source?.title}</DialogTitle>
           {source?.description && <DialogDescription>{source.description}</DialogDescription>}
@@ -78,7 +79,7 @@ export function PdfPreviewDialog({ source, onClose }: { source: PdfSource | null
             <Loader2 className="h-4 w-4 animate-spin" /> Rendering…
           </p>
         ) : (
-          <iframe title={source?.title ?? "PDF preview"} src={url} className="h-[70vh] w-full rounded-md border bg-muted/30" />
+          <iframe title={source?.title ?? "PDF preview"} src={url} className="h-[70dvh] w-full rounded-md border bg-muted/30" />
         )}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Close</Button>

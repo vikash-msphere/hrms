@@ -17,7 +17,7 @@ export async function listDocumentAcknowledgements(deps: Deps, scope: ListScope,
   const documentId = idFromPath(documentRef);
   if (documentId) conds.push(eq(schema.documentAcknowledgements.documentId, documentId));
   if (!showDeleted) conds.push(isNull(schema.documentAcknowledgements.deleteTime));
-  return keysetPage<typeof schema.documentAcknowledgements.$inferSelect>(deps, schema.documentAcknowledgements, "document-acknowledgements", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage<typeof schema.documentAcknowledgements.$inferSelect>(deps, schema.documentAcknowledgements, "document-acknowledgements", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 
 export const documentAcknowledgementSpec: CrudSpec<never, typeof schema.documentAcknowledgements> = {

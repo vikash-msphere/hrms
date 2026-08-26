@@ -46,7 +46,13 @@ export function AccessItem({
 
   return (
     <AccessScope collection={col} objectPath={objectPath ?? ambientObject}>
-      <div className={className ? `relative ${className}` : "relative"}>
+      {/* `min-w-0`: this wrapper exists only to position the corner icon, and it must not become a width floor
+          for the card inside it. It usually IS a grid or flex item, and a grid/flex item's automatic minimum
+          size is its min-content width (the same rule docs/06-responsive-ui.md #16 states for flex - it holds
+          for grid tracks too). Without this, a card whose content cannot shrink pushes the ITEM past its
+          track and the whole page scrolls sideways: the goals grid was 494px wide inside a 360px screen,
+          measured in a real browser. A positioning wrapper should be transparent to layout. */}
+      <div className={className ? `relative min-w-0 ${className}` : "relative min-w-0"}>
         <AccessItemCorner target={target} iconClassName={iconClassName} />
         {children}
       </div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { navigate } from "@/router";
-import { navItem, workspaceForKey, itemVisible, navPerm } from "@/nav";
+import { workspaceForKey, navPerm, pageVisible } from "@/nav";
 import { hasCapability } from "@/lib/perm";
 import type { Me } from "@/useMe";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -32,12 +32,10 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return n.tagName === "INPUT" || n.tagName === "TEXTAREA" || n.tagName === "SELECT" || n.isContentEditable;
 }
 
-// Whether a chord destination is visible to this user, by the sidebar's own rules. Routes without a nav
-// item (notifications, tickets live under other affordances) are allowed - their pages self-gate.
+// Whether a chord destination is visible to this user - the route gate the router itself applies, so a chord
+// can only land where the sidebar would have taken them.
 function canGo(route: string, me: Me): boolean {
-  const item = navItem(route);
-  if (!item) return true;
-  return itemVisible(item, (p) => hasCapability(me.capabilities, p));
+  return pageVisible(route, (p) => hasCapability(me.capabilities, p));
 }
 
 /** Global keyboard layer: `?` opens the shortcut reference, `g`+letter jumps between pages, `[`/`]` walk the
@@ -89,7 +87,7 @@ export function ShortcutLayer({ me, page }: { me: Me; page: string }) {
   const chords = GO.filter(([, route]) => canGo(route, me));
   return (
     <Dialog open={helpOpen} onOpenChange={setHelpOpen}>
-      <DialogContent className="max-w-lg">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>Press ? anywhere to open this reference.</DialogDescription>
@@ -102,6 +100,10 @@ export function ShortcutLayer({ me, page }: { me: Me; page: string }) {
             <ShortcutRow keys={["]"]} label="Next workspace tab" />
             <ShortcutRow keys={["↑", "↓"]} label="Move between table rows" />
             <ShortcutRow keys={["Enter"]} label="Open the focused row" />
+            {/* The feed and the work queues (tasks, tickets, goals, suggestions) walk with j/k the way an
+                issue tracker does; the feed also takes / for its search box. */}
+            <ShortcutRow keys={["j", "k"]} label="Move down / up a feed or queue" />
+            <ShortcutRow keys={["/"]} label="Search within the page" />
           </div>
           <div>
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Go to (press g, then…)</p>

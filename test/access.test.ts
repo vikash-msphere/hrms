@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { actorCan, hasCapability, actorScope, stateReadAllowed } from "../src/domain/access";
+import { actorCan, hasCapability, actorScope, actorVerbScope, stateReadAllowed } from "../src/domain/access";
 import { grantFor } from "../src/domain/grants";
 import { STATE_VISIBILITY } from "../src/domain/manifests";
 
@@ -41,10 +41,30 @@ describe("access.actorCan", () => {
     expect(actorScope(a("manager", "04-001"), "payslips")).toBe("own");
   });
 
+  it("actorVerbScope derives APPROVE breadth from the grant, and null when the verb isn't held", () => {
+    // The approvals badge counts rows the caller may decide on, so the breadth comes from the `approve` verb
+    // rather than a list read - and the two genuinely differ: an employee READS their own leave requests but
+    // approves nothing, so their queue is empty rather than "their own rows".
+    expect(actorVerbScope(a("employee", "04-002"), "leave-requests", "approve")).toBeNull();
+    expect(actorVerbScope(a("manager", "04-001"), "leave-requests", "approve")).toBe("dept");
+    expect(actorVerbScope(a("hr_admin", "07-001"), "leave-requests", "approve")).toBe("all");
+    expect(actorVerbScope(a("super_admin", null), "leave-requests", "approve")).toBe("all");
+    // A collection the role holds no approve grant on at any scope contributes nothing.
+    expect(actorVerbScope(a("manager", "04-001"), "loans", "approve")).toBeNull();
+  });
+
   it("hasCapability wildcard semantics match the frontend", () => {
     expect(hasCapability(["**.admin", "**.**"], "operations.admin")).toBe(true);
     expect(hasCapability(["operations.read"], "operations.admin")).toBe(false);
     expect(hasCapability(["employees.bank-account.write"], "employees.bank-account.write")).toBe(true);
+  });
+
+  it("a collection's wildcard-verb rule answers for one verb by name, but not for the level ladder", () => {
+    // `assets.**` is what an access rule with verb:"*" compiles to: every custom method of that collection.
+    expect(hasCapability(["assets.**"], "assets.batchCreate")).toBe(true);
+    expect(hasCapability(["assets.**"], "assets.printTag")).toBe(true);
+    expect(hasCapability(["assets.**"], "assets.write")).toBe(false); // a level is a different grant
+    expect(hasCapability(["assets.**"], "stocktakes.close")).toBe(false); // and it is one collection's
   });
 });
 

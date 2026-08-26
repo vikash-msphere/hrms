@@ -1,18 +1,20 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
+import { contentDisposition } from "../http/contentDisposition";
 import {
   listOffers, createOffer, updateOffer,
   approveOffer, extendOffer, acceptOffer, declineOffer, rescindOffer,
   type OfferInput,
 } from "../services/ats";
 import { toOfferResource } from "../http/serialize";
+import { renderOfferLetter } from "../services/offerLetter";
 
 const writeSchema = z
   .object({
     application: z.string().nullable().optional(),
     base_comp: z.number().nullable().optional(),
-    currency: z.string().nullable().optional(),
+    currency_code: z.string().nullable().optional(),
     offer_date: z.string().nullable().optional(),
     join_date: z.string().nullable().optional(),
     expiry_date: z.string().nullable().optional(),
@@ -47,5 +49,14 @@ export const offers = collectionRoutes<OfferInput, typeof schema.offers>({
     accept: { run: (deps, user, id) => acceptOffer(deps, user, id) },
     decline: { run: (deps, user, id) => declineOffer(deps, user, id) },
     rescind: { run: (deps, user, id) => rescindOffer(deps, user, id) },
+    // The letter itself, rendered from the offer and streamed inline: nothing is persisted, so a draft can be
+    // read before it is approved and a signed copy is filed on the hire's shelf afterwards like any document.
+    letter: {
+      raw: async (c, id) => {
+        const { bytes, fileName } = await renderOfferLetter(c.get("deps"), id);
+        const pdf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        return c.body(pdf, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
+      },
+    },
   },
 });

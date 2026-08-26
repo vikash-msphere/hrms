@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { get, patch } from "@/api";
+import { readPref, writePrefDeferred } from "@/lib/prefs";
 import type { KpiCategory } from "@/lib/dashboardConfig";
 
 // The viewer's PERSONAL dashboard layout - distinct from the org-wide settings/dashboard blob (who may see
@@ -33,17 +33,15 @@ function loadLocal(): DashPersonalPrefs {
   }
 }
 
-let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function persist(p: DashPersonalPrefs) {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(p));
   } catch {
     /* private mode */
   }
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    patch(`preferences/${PREF_KEY}`, { value: p }).catch(() => {});
-  }, 700);
+  // Coalesced like the other high-churn preferences: one request per quiet window (or when the tab is hidden),
+  // not one per pin/hide/reorder.
+  writePrefDeferred(PREF_KEY, p, 5_000);
 }
 
 /** Personal dashboard prefs: localStorage snapshot immediately, the server row (cross-device) once it
@@ -52,18 +50,18 @@ export function useDashPrefs(): [DashPersonalPrefs, (patch: Partial<DashPersonal
   const [prefs, setPrefs] = useState<DashPersonalPrefs>(loadLocal);
   useEffect(() => {
     let live = true;
-    get<{ value?: DashPersonalPrefs }>(`preferences/${PREF_KEY}`)
-      .then((r) => {
-        if (live && r?.value && typeof r.value === "object") {
-          setPrefs(r.value);
+    readPref<DashPersonalPrefs>(PREF_KEY)
+      .then((v) => {
+        if (live && v && typeof v === "object") {
+          setPrefs(v);
           try {
-            localStorage.setItem(LS_KEY, JSON.stringify(r.value));
+            localStorage.setItem(LS_KEY, JSON.stringify(v));
           } catch {
             /* private mode */
           }
         }
       })
-      .catch(() => {}); // 404 (none yet) or offline - the local snapshot stands
+      .catch(() => {}); // no row yet or offline - the local snapshot stands
     return () => {
       live = false;
     };

@@ -49,7 +49,7 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent>
         <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <div className="flex flex-wrap items-center gap-2">
           <Select value={dept} onValueChange={setDept}>
@@ -61,7 +61,7 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
           </Select>
           <div className="relative flex-1">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name…" className="h-9 pl-8" />
+            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name…" className="h-9 pl-8" />
           </div>
         </div>
         {suggestedRows.length > 0 && (

@@ -4,7 +4,9 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { notFound, failedPrecondition } from "../lib/errors";
 import { esiEmployerContribution } from "../domain/statutory";
+import { round2 } from "../domain/money";
 import { readIdentityValues } from "./identityDetails";
+import { refPayComponents } from "../lib/refData";
 
 // Statutory compliance report for a payroll run: the PF / ESI / PT / TDS contributions to remit, per employee
 // + totals, as a multi-sheet .xlsx. Derived from the finalized run's stored line items (EPF/ESI/PT lines, the
@@ -12,10 +14,18 @@ import { readIdentityValues } from "./identityDetails";
 // ₹15,000 wage, balance to employer EPF) computed here and EDLI / administration charges taken from the run.
 // Per-employee UAN / PAN / ESI-IP come from the encrypted identity fields, so the PF ECR text below is a real
 // EPFO upload; the 24Q return itself is still out of scope (this is the contribution register, not an FVU file).
-type Line = { code: string; name: string; kind: string; amount: number; taxable?: boolean };
+type Line = { code: string; name: string; kind: string; amount: number; taxable?: boolean; units?: number; basis?: number };
 const r0 = (n: number) => Math.round(n);
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const lineAmt = (lines: Line[], code: string) => sum(lines.filter((l) => l.code === code).map((l) => l.amount));
+// The wage a statutory line was priced on, as the run recorded it. Reverse-deriving it from the contribution
+// (amount / rate) returns the CEILING whenever one applied, and for ESI it divides a figure already rounded up
+// to the rupee - both of which put a wrong wage on a remittance return. `fallback` covers a stored item that
+// predates the recorded basis.
+const lineBasis = (lines: Line[], code: string, fallback: number) => {
+  const l = lines.find((x) => x.code === code);
+  return l?.basis != null ? r0(l.basis) : fallback;
+};
 
 type Row = {
   code: string; name: string; pan: string; uan: string; esiIp: string;
@@ -33,7 +43,7 @@ async function collect(deps: Deps, runId: string) {
   if (!items.length) throw failedPrecondition("build the run first");
 
   const employees = new Map((await deps.db.select().from(schema.employees)).map((e) => [e.uuid, e]));
-  const components = await deps.db.select().from(schema.payComponents);
+  const components = await refPayComponents(deps);
   const epfRate = components.find((c) => c.method === "epf" && c.kind === "deduction")?.rate ?? 12;
   const esiRate = components.find((c) => c.method === "esi" && c.kind === "deduction")?.rate ?? 0.75;
   // Employer ESI rate is data: the employer_contribution ESI component (defaults to the statutory 3.25%).
@@ -51,8 +61,11 @@ async function collect(deps: Deps, runId: string) {
     const esi = lineAmt(lines, "ESI");
     const pt = lineAmt(lines, "PT");
     const tds = it.tax ?? lineAmt(lines, "TDS");
-    const epfWages = epf > 0 ? r0(epf / (epfRate / 100)) : 0;
-    const eps = epf > 0 ? r0(0.0833 * Math.min(epfWages, 15000)) : 0; // EPS capped at the ₹15,000 pension wage
+    const epfWages = epf > 0 ? lineBasis(lines, "EPF", r0(epf / (epfRate / 100))) : 0;
+    // EPS: 8.33% of the pension wage, carved out of the employer's share. Skipped for an employee HR has
+    // declared EPS-excluded (they first joined EPF above the pension wage), whose whole employer share stays
+    // in EPF instead.
+    const eps = epf > 0 && !e?.epsExcluded ? r0(0.0833 * Math.min(epfWages, 15000)) : 0;
     // The employer's PF share as the RUN computed it (its own component's rate/ceiling), falling back to matching
     // the employee share for runs built before employer lines were carried. Whether the org counts it inside CTC
     // is a compensation question and changes nothing here - the whole share is remitted either way.
@@ -62,13 +75,14 @@ async function collect(deps: Deps, runId: string) {
     // default). Part of the PF challan and of the real cost of employing someone, so the register states them.
     const edli = r0(lineAmt(lines, "ER_EDLI"));
     const pfAdmin = r0(lineAmt(lines, "ER_PF_ADMIN"));
-    const esiWages = esi > 0 ? r0(esi / (esiRate / 100)) : 0;
+    const esiWages = esi > 0 ? lineBasis(lines, "ESI", r0(esi / (esiRate / 100))) : 0;
     // Eligibility already proven by the employee ESI line; gate with Infinity so the ceil-inflated reverse wage
     // can't falsely drop a near-ceiling worker. Shared domain fn => same up-to-rupee rounding everywhere.
     const erEsi = lineAmt(lines, "ER_ESI") || (esi > 0 ? esiEmployerContribution(esiWages, erEsiRate, Infinity) : 0);
-    // Non-contributing-period (LOP) days come from the run's LOP line label "Loss of pay (Xd)".
-    const lopLine = lines.find((l) => l.code === "LOP");
-    const ncpDays = lopLine ? Number(/\(([\d.]+)d\)/.exec(lopLine.name)?.[1] ?? 0) : 0;
+    // Non-contributing-period (LOP) days, summed over EVERY loss-of-pay line (a run can carry both an
+    // automatic and a manually keyed one) from the day-units each line records. The label is display text and
+    // a manual line does not carry the "(Xd)" shape at all, so parsing it reported zero NCP days.
+    const ncpDays = round2(sum(lines.filter((l) => l.code === "LOP").map((l) => l.units ?? 0)));
     rows.push({
       code: e?.code ?? "", name: e ? `${e.firstName} ${e.lastName}` : it.employeeId,
       pan: ids.pan ?? "", uan: ids.uan ?? "", esiIp: ids.esi_ip ?? ids.esi ?? ids.ip ?? "",

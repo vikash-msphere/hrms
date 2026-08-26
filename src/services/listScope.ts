@@ -39,7 +39,14 @@ export function applyScope(
   if (shares.length && base !== undefined) pred = or(base, ...shares.map(subtree));
 
   // AND NOT per-object denies (deny-wins, even against 'all'): a denied subtree is hidden regardless of breadth.
+  //
+  // A deny is the one half of this function that must never soften. On a table with NO code column there is
+  // nothing to match it against, and expressing it through `subtree` (which answers `1 = 0` for a missing
+  // column) inverted to `not(1 = 0)` - always true - so the deny silently evaporated and the row it was meant
+  // to hide was listed. Every other branch above fails CLOSED on a missing column; this one failed open, in
+  // the direction that leaks. So: no column to bind a deny to means no rows, not no deny.
   if (denies.length) {
+    if (!code) return sql`1 = 0`;
     const denied = not(or(...denies.map(subtree))!);
     pred = pred === undefined ? denied : and(pred, denied);
   }

@@ -15,6 +15,7 @@ const writeSchema = z
     initiated_date: z.string().nullable().optional(),
     completed_date: z.string().nullable().optional(),
     notes: z.string().nullable().optional(),
+    document: z.string().nullable().optional(), // personal-documents/<id>: the vendor's report
   })
   .strict();
 

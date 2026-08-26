@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
+import { jsonBody } from "../http/jsonRequest";
 import { renderPayslipPdf, type PayslipData } from "../lib/pdf";
 import { parsePayslipTemplate, payslipTemplateOrDefault } from "../domain/payslipTemplate";
 import { getSettingValue } from "../services/settings";
@@ -54,7 +55,7 @@ function sampleData(orgName: string, address: string | undefined, logo: string |
 
 export const payslipTemplatePreview = new Hono<AppEnv>().post("/", async (c) => {
   const deps = c.get("deps");
-  const body = (await c.req.json().catch(() => ({}))) as { template?: unknown };
+  const body = await jsonBody<{ template?: unknown }>(c);
   let template;
   if (body.template != null) {
     try {

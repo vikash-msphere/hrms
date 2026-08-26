@@ -9,16 +9,21 @@ import type { Bonus, Department, Employee } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
 
 const KINDS = ["Performance Bonus", "Joining Bonus", "Retention Bonus", "Festival Bonus", "Incentive", "Spot Award"];
 const todayYmd = () => new Date().toISOString().slice(0, 10);
@@ -31,6 +36,7 @@ export function PayrollBonuses() {
   const { rows: employees } = useCollection<Employee>("employees");
   const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
+  const confirm = useConfirm();
   const money = useMoney();
   const canAward = usePermission("bonuses.award");
 
@@ -66,12 +72,47 @@ export function PayrollBonuses() {
 
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const [form, setForm] = useState({ scope: "company" as "company" | "department" | "individual", department: "", employee: "", amount: "", kind: "", reason: "", award_date: todayYmd() });
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "award" });
+
+  // A per-person amount times a headcount nobody counted is how a company-wide award becomes a surprise. The
+  // form works out who it lands on and what the whole thing costs, before it's awarded rather than after.
+  // An award repeated by accident pays twice, and group awards make it easy: same scope, same amount, same day.
+  const duplicate = useMemo(() => {
+    if (!(Number(form.amount) > 0)) return undefined;
+    const target = form.scope === "department" ? idOf(form.department) : form.scope === "individual" ? idOf(form.employee) : "";
+    return entries.find((e) => {
+      const b = e.rows[0]!;
+      const scope = e.scope === "individual" ? "individual" : b.scope ?? "company";
+      if (scope !== form.scope) return false;
+      const ref = scope === "individual" ? idOf(b.employee ?? "") : idOf(b.scope_ref ?? "");
+      if (scope !== "company" && ref !== target) return false;
+      return Math.abs(b.amount - Number(form.amount)) < 0.01 && (b.award_date ?? "").slice(0, 10) === form.award_date;
+    });
+  }, [entries, form.scope, form.department, form.employee, form.amount, form.award_date]);
+
+  const recipients = useMemo(() => {
+    const live = employees.filter((e) => !e.delete_time);
+    if (form.scope === "company") return live.length;
+    if (form.scope === "department") return form.department ? live.filter((e) => e.department && idOf(e.department) === idOf(form.department)).length : 0;
+    return form.employee ? 1 : 0;
+  }, [employees, form.scope, form.department, form.employee]);
 
   async function submit() {
     const amount = Number(form.amount);
-    if (!(amount > 0)) { toast({ variant: "destructive", title: "Enter an amount greater than 0" }); return; }
+    if (!(amount > 0)) { setErr("Enter an amount greater than 0."); return; }
+    // One click here can create a bonus row for every employee in the company and put it on the next payroll
+    // run. The dialog's own button is not enough of a checkpoint for that, so the headcount and the total are
+    // said out loud first.
+    const ok = await confirm({
+      title: `Award this bonus to ${recipients} ${recipients === 1 ? "person" : "people"}?`,
+      description: `${money(amount)} each, ${money(amount * recipients)} in total. It is picked up by the next payroll run for each of them.`,
+      confirmLabel: "Award bonus",
+    });
+    if (!ok) return;
     setBusy(true);
+    setErr(null);
     try {
       await invoke("bonuses", "award", undefined, {
         scope: form.scope,
@@ -87,7 +128,7 @@ export function PayrollBonuses() {
       setForm({ scope: "company", department: "", employee: "", amount: "", kind: "", reason: "", award_date: todayYmd() });
       reload();
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't award", description: (e as Error).message });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -142,11 +183,15 @@ export function PayrollBonuses() {
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog open={open} onOpenChange={(o) => { guard.onOpenChange(o); if (!o) setErr(null); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && valid) void submit(); }}>
+          <AccessScope collection="bonuses">
           <DialogHeader>
             <DialogTitle>Award bonus</DialogTitle>
+            <DialogDescription>Paid as a taxable earning by the next payroll run that covers the award date. Recipients see it on that payslip.</DialogDescription>
           </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
           <Field label="Who">
             <Select value={form.scope} onValueChange={(v) => setForm({ ...form, scope: v as typeof form.scope })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -180,10 +225,28 @@ export function PayrollBonuses() {
               />
             </Field>
           )}
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Amount (per person)"><Input type="number" min="0" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
-            <Field label="Award date"><Input type="date" value={form.award_date} onChange={(e) => setForm({ ...form, award_date: e.target.value })} /></Field>
-          </div>
+          <FieldRow>
+            <Field label={form.scope === "individual" ? "Amount" : "Amount (per person)"}>
+              <MoneyInput value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} min={0} suffix={form.scope === "individual" ? undefined : "each"} />
+            </Field>
+            <Field label="Award date" hint="Decides which payroll run pays it.">
+              <Input type="date" value={form.award_date} onChange={(e) => setForm({ ...form, award_date: e.target.value })} />
+            </Field>
+          </FieldRow>
+          {Number(form.amount) > 0 && recipients > 0 && form.scope !== "individual" && (
+            <div className="flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2 text-sm">
+              <span className="text-muted-foreground">{money(Number(form.amount))} × {recipients} {recipients === 1 ? "person" : "people"}</span>
+              <span className="font-semibold tabular-nums">{money(Number(form.amount) * recipients)}</span>
+            </div>
+          )}
+          {form.scope === "department" && form.department && recipients === 0 && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">Nobody is in that department right now, so this award would reach no one.</p>
+          )}
+          {duplicate && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              An identical award already exists for {duplicate.who.toLowerCase()} on {formatDate(form.award_date)}. Awarding again pays it twice.
+            </p>
+          )}
           <Field label="Kind">
             <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v })}>
               <SelectTrigger><SelectValue placeholder="Select a kind…" /></SelectTrigger>
@@ -192,11 +255,13 @@ export function PayrollBonuses() {
               </SelectContent>
             </Select>
           </Field>
-          <Field label="Reason (optional)"><Textarea rows={2} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
+          <Field label="Reason (optional)" hint="Shown on the payslip line and in the bonus letter."><Textarea rows={2} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
             <Button onClick={submit} loading={busy} disabled={!valid}>Award</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>

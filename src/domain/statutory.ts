@@ -35,14 +35,18 @@ export function esiEmployerContribution(grossWages: number, ratePct: number, cei
 // is null (open-ended top) or >= the gross gives the deduction. A common case (e.g. Karnataka) is nil up to
 // ₹25,000 and ₹200 above. (Some states - Maharashtra - charge a higher amount in one month; model that as a
 // separate slab set later if needed.)
+// `annual_cap` is the ceiling on a financial year's total PT for one employee. Article 276(2) of the
+// Constitution caps professional tax at ₹2,500 a year, and every state act sits under it, so the payroll build
+// stops charging once the year's collection reaches the cap. null disables the check.
 export type PtSlab = { up_to: number | null; amount: number };
-export type PtConfig = { slabs: PtSlab[] };
+export type PtConfig = { slabs: PtSlab[]; annual_cap?: number | null };
 
 export const DEFAULT_PT_CONFIG: PtConfig = {
   slabs: [
     { up_to: 25000, amount: 0 },
     { up_to: null, amount: 200 },
   ],
+  annual_cap: 2500,
 };
 
 // Slabs are matched in ASCENDING order; the table is HR-editable settings data, so sort rather than trust the

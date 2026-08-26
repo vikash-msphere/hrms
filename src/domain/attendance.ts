@@ -6,6 +6,10 @@
 export type LopBasis = "working_days" | "days_30";
 // How a partial-employment month is prorated: by calendar days in the period, or by scheduled working days.
 export type ProrationBasis = "calendar_days" | "working_days";
+// WHICH monthly wage an absent day is docked from. "gross" (default) is the period's regular earnings - basic
+// plus every recurring allowance and the Special Allowance plug - because an unworked day earns none of them.
+// "basic" docks the contractual basic only, for an org whose allowances are contractually unconditional.
+export type LopWageBasis = "gross" | "basic";
 
 // The attendance schedule as stored in settings/attendance (only the fields payroll needs).
 export type AttendanceConfig = {
@@ -14,7 +18,8 @@ export type AttendanceConfig = {
   full_day_minutes?: number; // worked minutes for a full day; from half_day_minutes up to this counts as a half day
   half_day_minutes?: number; // minimum worked minutes to earn a half day; below this the day doesn't count (full absence)
   lop_enabled?: boolean;
-  lop_basis?: LopBasis;
+  lop_basis?: LopBasis; // the DIVISOR: scheduled working days in the period, or a fixed 30
+  lop_wage_basis?: LopWageBasis; // the WAGE the divisor divides (see LopWageBasis)
   proration_basis?: ProrationBasis; // basis for prorating a mid-period joiner/leaver's regular earnings
 };
 
@@ -25,6 +30,7 @@ export const DEFAULT_ATTENDANCE: AttendanceConfig = {
   half_day_minutes: 240,
   lop_enabled: false,
   lop_basis: "working_days",
+  lop_wage_basis: "gross",
   proration_basis: "calendar_days",
 };
 
@@ -158,10 +164,14 @@ export function lopDayUnits(opts: {
   return Math.round(units * 2) / 2; // stay on the half-day grid
 }
 
-// LOP = (monthly base pay / divisor) * absent days. Divisor is the period's scheduled working days, or a
-// fixed 30 ("days_30"). Rounded to paise. Clamped at 0.
-export function lopAmount(basePay: number, absentDays: number, basis: LopBasis, workingDaysInPeriod: number): number {
-  if (absentDays <= 0 || basePay <= 0) return 0;
+// LOP = (monthly wage / divisor) * absent days. `monthlyWage` is the wage the org docks from - the period's
+// regular GROSS by default, not the bare basic: an unworked day earns neither the basic nor the allowances
+// stacked on it, so docking basic alone charges roughly half of the day the employee did not work (and leaves
+// the ESI/PF/tax bases inflated by the allowances that kept paying). The caller picks the wage per
+// `lop_wage_basis`; this function only divides it. Divisor is the period's scheduled working days, or a fixed
+// 30 ("days_30"). Rounded to paise. Clamped at 0.
+export function lopAmount(monthlyWage: number, absentDays: number, basis: LopBasis, workingDaysInPeriod: number): number {
+  if (absentDays <= 0 || monthlyWage <= 0) return 0;
   const divisor = basis === "days_30" ? 30 : Math.max(1, workingDaysInPeriod);
-  return round2((basePay / divisor) * absentDays);
+  return round2((monthlyWage / divisor) * absentDays);
 }

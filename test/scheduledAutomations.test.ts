@@ -8,7 +8,7 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
-import { runScheduledAutomations, invalidateAutomationCache } from "../src/services/automationEngine";
+import { runScheduledAutomations, invalidateAutomationCache, withDispatchBudget, dispatchAutomations } from "../src/services/automationEngine";
 import { queueForDigest, flushDigests } from "../src/services/notificationDigest";
 import { activeDelegatesFor } from "../src/services/approvalDelegations";
 import { SCHEDULE_TRIGGER, type Schedule, type Condition, type Action } from "../src/domain/automations";
@@ -147,6 +147,57 @@ describe("notification digest", () => {
 
     // Queue is drained; a second flush delivers nothing.
     expect(await flushDigests(deps)).toBe(0);
+  });
+});
+
+describe("automation dispatch budget: one allowance per originating action, and drops are reported", () => {
+  // The ceiling exists so a rule whose `apiCall` re-triggers its own trigger cannot loop forever. It lives on
+  // the shared Deps, and the scheduled handler builds ONE Deps for the whole nightly tick - so an unreset
+  // counter turned a per-action guard into a budget for the entire NIGHT: past the fiftieth event, every later
+  // per-employee emission and every subsequent subtask was dropped with nothing but a console.warn to show it,
+  // while the cron_runs row still stamped `done`. withDispatchBudget re-arms per subtask and hands the drop
+  // count back so it can reach the row.
+
+  it("re-arms per call and restores the caller's own counter", async () => {
+    const outer = { n: 7, dropped: 0 };
+    deps.automationBudget = outer;
+
+    const { result, dropped } = await withDispatchBudget(deps, async () => {
+      // Inside, the counter is fresh - the outer 7 must not eat into this action's allowance.
+      expect(deps.automationBudget!.n).toBe(0);
+      deps.automationBudget!.n = 3;
+      deps.automationBudget!.dropped = 2;
+      return "done";
+    });
+
+    expect(result).toBe("done");
+    expect(dropped).toBe(2);
+    // The caller's counter is handed back untouched, so a nested action cannot reset its parent's guard.
+    expect(deps.automationBudget).toBe(outer);
+    expect(deps.automationBudget!.n).toBe(7);
+    deps.automationBudget = undefined;
+  });
+
+  it("counts what the ceiling refused, and gives the next subtask a full allowance", async () => {
+    // The budget is spent by EVENT dispatch, which is what the emitting cron subtasks (probation ending, work
+    // anniversary, document expiring, asset custody) do once per employee or per asset. Sixty events crosses
+    // the fifty ceiling, so the tail is refused.
+    const emp = await seedEmployee({ code: "04-900" });
+    const fire = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        await dispatchAutomations(deps, { type: "schedule.workAnniversary", subject: `employees/${emp}`, employeeId: emp, payload: { years: 1 }, occurredAt: new Date() }, null, 0);
+      }
+    };
+
+    const first = await withDispatchBudget(deps, () => fire(60).then(() => 0));
+    // Ten refused, and SAID so - the number that used to exist only in Workers Logs while the cron row stayed
+    // green. subtasks() turns this into the `error` state on cron_runs.
+    expect(first.dropped).toBe(10);
+
+    // A second subtask on the SAME Deps - the shape the nightly tick has, since it builds one Deps for the
+    // whole night. Sharing the counter, this subtask was refused outright; re-armed, it dispatches in full.
+    const second = await withDispatchBudget(deps, () => fire(10).then(() => 0));
+    expect(second.dropped).toBe(0);
   });
 });
 

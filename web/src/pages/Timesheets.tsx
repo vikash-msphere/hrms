@@ -1,25 +1,32 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Timer, ChevronLeft, ChevronRight, Plus, Send, Check, X } from "lucide-react";
+import { Timer, ChevronLeft, ChevronRight, CopyPlus, Minus, Plus, Send, Check, X, Trash2 } from "lucide-react";
 import { get, create, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
 import type { Employee, Me, Project, TimeEntry, TimeEntryStatus } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
+import { Chart, ChartCard } from "@/components/common/Chart";
+import { topSlices } from "@/lib/chartTheme";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { useDiscardGuard } from "@/hooks/useDiscardGuard";
 import { StatusBadge } from "@/components/common/StatusBadge";
+import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 
 const DAY = 86_400_000;
 // Local calendar date - toISOString() would shift local midnight into the previous UTC day
@@ -51,7 +58,9 @@ export default function Timesheets({ me }: { me: Me }) {
   const { rows: projects, state: projectsState } = useCollection<Project>("projects");
   const { rows: employees } = useCollection<Employee>("employees");
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [submitting, setSubmitting] = useState(false);
+  const [copying, setCopying] = useState(false); // "copy last week" in flight
   const [deciding, setDeciding] = useState<string | null>(null); // "<path>|<verb>" of the in-flight decision
   const canApprove = usePermission("time-entries.approve");
   const meRef = me.employee_id ? `employees/${me.employee_id}` : "";
@@ -93,10 +102,65 @@ export default function Timesheets({ me }: { me: Me }) {
     for (const e of mine) if (e.project && e.date) m.set(`${idOf(e.project)}|${e.date}`, e);
     return m;
   }, [mine]);
+  // The same entries the grid draws, totalled two ways. Billable is split out rather than shown as a share,
+  // because the useful reading is "how much of Tuesday was billable", not "what percent of the week was".
+  const weekCharts = useMemo(() => {
+    const billableByDay = new Map<string, number>();
+    const nonBillableByDay = new Map<string, number>();
+    for (const e of mine) {
+      if (!e.date) continue;
+      const target = e.billable ? billableByDay : nonBillableByDay;
+      target.set(e.date, Math.round(((target.get(e.date) ?? 0) + e.hours) * 100) / 100);
+    }
+    return {
+      billableByDay,
+      nonBillableByDay,
+      projects: topSlices(mine, (e) => projectById.get(idOf(e.project ?? ""))?.name ?? "Project", (e) => e.hours, 7),
+    };
+  }, [mine, projectById]);
+
   const gridProjects = useMemo(() => {
     const ids = new Set<string>([...mine.map((e) => idOf(e.project ?? "")), ...extraProjects].filter(Boolean));
     return [...ids].map((id) => projectById.get(id)).filter(Boolean) as Project[];
   }, [mine, extraProjects, projectById]);
+
+  // Distinct descriptions this person has already used on a project (newest first), for the log dialog's
+  // suggestion list. Drawn from what's loaded - no extra query for a convenience.
+  const descriptionsFor = (projectId: string) => [
+    ...new Set(mine.filter((e) => e.project && idOf(e.project) === projectId && e.description?.trim()).map((e) => e.description!.trim())),
+  ].slice(0, 8);
+  // The next day of the visible week whose cell for this project is still editable (a submitted or approved
+  // entry is not), so "save & next day" never lands on a locked cell.
+  const nextEditableDay = (projectId: string, from: string) => {
+    for (const d of days.filter((x) => x > from)) {
+      const at = byCell.get(`${projectId}|${d}`);
+      if (!at || at.status === "DRAFT" || at.status === "REJECTED") return d;
+    }
+    return undefined;
+  };
+
+  // One cell of the week grid, shared by the phone card layout and the table: same target, same states, so
+  // the two layouts can never drift apart.
+  const dayCell = (p: Project, d: string) => {
+    const e = byCell.get(`${idOf(p.path)}|${d}`);
+    const locked = e && (e.status === "SUBMITTED" || e.status === "APPROVED");
+    return (
+      <button
+        type="button"
+        disabled={!!locked}
+        aria-label={`${p.name}, ${d}${e ? `, ${fmt(e.hours)} hours` : ", no hours logged"}`}
+        onClick={() => setCell({ projectId: idOf(p.path), date: d, existing: e })}
+        className={cn(
+          "h-10 w-full rounded-md text-sm tabular-nums transition-colors",
+          e ? "font-medium" : "text-muted-foreground",
+          locked ? "cursor-default" : "hover:bg-muted/50",
+          e && CELL[e.status],
+        )}
+      >
+        {e ? `${fmt(e.hours)}h` : "·"}
+      </button>
+    );
+  };
 
   const dayTotal = (d: string) => mine.filter((e) => e.date === d).reduce((s, e) => s + e.hours, 0);
   const weekTotal = mine.reduce((s, e) => s + e.hours, 0);
@@ -104,6 +168,9 @@ export default function Timesheets({ me }: { me: Me }) {
 
   async function submitWeek() {
     const toSubmit = mine.filter((e) => e.status === "DRAFT" || e.status === "REJECTED");
+    // Submitting hands the whole week to an approver and freezes it - the entries stop being editable, so a
+    // half-finished week submitted by accident has to be rejected before it can be fixed.
+    if (!(await confirmDecision(confirm, "submit", `${toSubmit.length} ${toSubmit.length === 1 ? "entry" : "entries"} (${weekTotal}h)`))) return;
     setSubmitting(true);
     try {
       for (const e of toSubmit) await invoke(`time-entries/${idOf(e.path)}`, "submit");
@@ -112,7 +179,33 @@ export default function Timesheets({ me }: { me: Me }) {
     } catch (e) { toast({ title: "Couldn't submit", description: (e as Error).message, variant: "destructive" }); }
     finally { setSubmitting(false); }
   }
+  // Seed this week from the previous one: same project, same weekday, same hours and description, as fresh
+  // drafts. Cells that already hold an entry this week are left alone, so it is safe to run twice.
+  async function copyLastWeek() {
+    if (!meRef) return;
+    setCopying(true);
+    try {
+      const from = ymd(new Date(+weekStart - 7 * DAY));
+      const to = ymd(new Date(+weekStart - DAY));
+      const r = await get<{ results: TimeEntry[] }>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${from}&to=${to}&max_page_size=500`);
+      const source = (r.results ?? []).filter((e) => e.project && e.date);
+      const todo = source
+        .map((e) => ({ e, date: ymd(new Date(+new Date(e.date! + "T00:00:00") + 7 * DAY)) }))
+        .filter(({ e, date }) => days.includes(date) && !byCell.get(`${idOf(e.project!)}|${date}`));
+      if (todo.length === 0) {
+        toast({ title: source.length ? "Nothing to copy" : "Last week is empty", description: source.length ? "Every day last week already has an entry here." : undefined });
+        return;
+      }
+      for (const { e, date } of todo) {
+        await create("time-entries", { project: e.project, date, hours: e.hours, description: e.description || undefined, billable: e.billable });
+      }
+      toast({ title: `Copied ${todo.length} ${todo.length === 1 ? "entry" : "entries"}`, variant: "success" });
+      loadWeek();
+    } catch (e) { toast({ title: "Couldn't copy last week", description: (e as Error).message, variant: "destructive" }); }
+    finally { setCopying(false); }
+  }
   async function decide(e: TimeEntry, verb: "approve" | "reject") {
+    if (!(await confirmDecision(confirm, verb, `${e.hours}h logged on ${formatDate(e.date)}`))) return;
     setDeciding(`${e.path}|${verb}`);
     try {
       await invoke(`time-entries/${idOf(e.path)}`, verb);
@@ -153,9 +246,16 @@ export default function Timesheets({ me }: { me: Me }) {
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w - 7 * DAY))} aria-label="Previous week"><ChevronLeft className="h-4 w-4" /></Button>
-        <span className="min-w-[12rem] text-center text-sm font-medium tabular-nums">{dayNum(days[0])} - {dayNum(days[6])}</span>
+        {/* "6 - 12 Oct" needs nothing like 12rem; that floor exists to stop the label jittering as the
+            week changes. On a phone it is a third of the screen reserved for eight characters, so the
+            floor only applies once there is room for it. */}
+        <span className="min-w-[8rem] text-center text-sm font-medium tabular-nums sm:min-w-[12rem]">{dayNum(days[0])} - {dayNum(days[6])}</span>
         <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w + 7 * DAY))} aria-label="Next week"><ChevronRight className="h-4 w-4" /></Button>
         <Button variant="ghost" size="sm" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</Button>
+        {/* Most weeks repeat the last one, so the whole grid can be seeded in a click and then corrected. */}
+        <AccessAction create label="Time entry">
+          <Button variant="outline" size="sm" loading={copying} onClick={copyLastWeek}><CopyPlus className="h-3.5 w-3.5" /> Copy last week</Button>
+        </AccessAction>
         <span className="ml-auto text-sm text-muted-foreground">Week total <span className="font-semibold tabular-nums text-foreground">{fmt(weekTotal)}h</span></span>
         {draftCount > 0 && (
           <AccessAction verb="submit" label="Submit time entries">
@@ -163,6 +263,37 @@ export default function Timesheets({ me }: { me: Me }) {
           </AccessAction>
         )}
       </div>
+
+      {/* The week the grid holds, read two ways the grid cannot: how the hours fall across the days (a
+          fourteen-hour Thursday is a fact worth seeing), and which projects they went to. */}
+      {weekLoaded && weekTotal > 0 && (
+        <div className="mb-4 grid gap-4 lg:grid-cols-2">
+          <ChartCard title="Hours across the week" description="What was logged on each day, billable and not.">
+            <Chart
+              type="bar"
+              height={180}
+              labels={days.map((d, i) => `${WEEKDAY[i]} ${new Date(d + "T00:00:00").getDate()}`)}
+              datasets={[
+                { name: "Billable", values: days.map((d) => weekCharts.billableByDay.get(d) ?? 0) },
+                { name: "Non-billable", values: days.map((d) => weekCharts.nonBillableByDay.get(d) ?? 0) },
+              ]}
+              stacked
+              format={(v) => `${fmt(v)}h`}
+              ariaLabel="Hours logged on each day of this week, split billable and non-billable"
+            />
+          </ChartCard>
+          <ChartCard title="Where the week went" description="This week's hours by project.">
+            <Chart
+              type="donut"
+              height={180}
+              labels={weekCharts.projects.labels}
+              datasets={[{ name: "Hours", values: weekCharts.projects.values }]}
+              format={(v) => `${fmt(v)}h`}
+              ariaLabel="Hours logged this week by project"
+            />
+          </ChartCard>
+        </div>
+      )}
 
       {!weekLoaded || projectsState === "loading" ? (
         <div className="space-y-2">
@@ -174,7 +305,36 @@ export default function Timesheets({ me }: { me: Me }) {
         <EmptyState icon={Timer} title="No projects" description="Ask HR to add projects in Settings → Payroll → Projects before logging time." />
       ) : (
         <>
-          <div className="overflow-x-auto rounded-lg border">
+          {/* A week grid is eight columns wide, which a phone cannot hold however narrow the cells get - and
+              the project name is the column that must not be cut. Below `sm` the grid turns itself inside
+              out: one card per project, with its seven days as a row of buttons underneath the name. Same
+              cells, same taps, no sideways scrolling. */}
+          <div className="space-y-2 sm:hidden">
+            {gridProjects.map((p) => (
+              <div key={p.path} className="rounded-lg border p-3">
+                <div className="mb-2 truncate text-sm font-medium">{p.name}{p.client ? <span className="ml-1 text-xs text-muted-foreground">· {p.client}</span> : null}</div>
+                <div className="grid grid-cols-7 gap-1">
+                  {days.map((d, i) => (
+                    <div key={d} className="min-w-0 text-center">
+                      <div className={cn("text-[10px] font-medium uppercase tracking-wide text-muted-foreground", d === ymd(new Date()) && "text-primary")}>{WEEKDAY[i]}</div>
+                      <div className="text-[10px] tabular-nums text-muted-foreground">{new Date(d + "T00:00:00").getDate()}</div>
+                      {dayCell(p, d)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="rounded-lg border p-3">
+              <AddProjectRow projects={activeProjects.filter((p) => !gridProjects.some((g) => g.path === p.path))} onAdd={(id) => setExtraProjects((x) => [...x, id])} />
+              <div className="mt-2 grid grid-cols-7 gap-1 border-t pt-2">
+                {days.map((d) => (
+                  <div key={d} className="text-center text-[11px] font-medium tabular-nums text-muted-foreground">{dayTotal(d) ? `${fmt(dayTotal(d))}h` : "-"}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="scroll-shadow-x hidden overflow-x-auto rounded-lg border sm:block">
             <table className="w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b bg-muted/40">
@@ -190,18 +350,9 @@ export default function Timesheets({ me }: { me: Me }) {
                 {gridProjects.map((p) => (
                   <tr key={p.path} className="border-b last:border-0">
                     <td className="sticky left-0 z-10 whitespace-nowrap border-r bg-card px-3 py-2 font-medium">{p.name}{p.client ? <span className="ml-1 text-xs text-muted-foreground">· {p.client}</span> : null}</td>
-                    {days.map((d) => {
-                      const e = byCell.get(`${idOf(p.path)}|${d}`);
-                      const locked = e && (e.status === "SUBMITTED" || e.status === "APPROVED");
-                      return (
-                        <td key={d} className="border-r p-1 last:border-0 text-center align-middle">
-                          <button type="button" disabled={!!locked} onClick={() => setCell({ projectId: idOf(p.path), date: d, existing: e })}
-                            className={cn("h-10 w-full rounded-md text-sm tabular-nums transition-colors", e ? "font-medium" : "text-muted-foreground", locked ? "cursor-default" : "hover:bg-muted/50", e && CELL[e.status])}>
-                            {e ? `${fmt(e.hours)}h` : "·"}
-                          </button>
-                        </td>
-                      );
-                    })}
+                    {days.map((d) => (
+                      <td key={d} className="border-r p-1 text-center align-middle last:border-0">{dayCell(p, d)}</td>
+                    ))}
                   </tr>
                 ))}
                 <tr className="border-t bg-muted/20">
@@ -227,20 +378,29 @@ export default function Timesheets({ me }: { me: Me }) {
 
       {cell && (
         <LogDialog
+          // Remount per cell: "save & next day" moves the dialog to another day, and a stale hours field
+          // carried across would silently re-log the previous day's number.
+          key={`${cell.projectId}|${cell.date}`}
           project={projectById.get(cell.projectId)!}
           date={cell.date}
           existing={cell.existing}
+          // Everything else logged that day, so the dialog can show the day's total as edited.
+          otherHours={dayTotal(cell.date) - (cell.existing?.hours ?? 0)}
+          // What this person has written on this project before, so a repeated task is picked, not retyped.
+          suggestions={descriptionsFor(cell.projectId)}
+          // The next day of the week this project can still be edited on, for the keep-going path.
+          nextDate={nextEditableDay(cell.projectId, cell.date)}
+          onAdvance={(date) => setCell({ projectId: cell.projectId, date, existing: byCell.get(`${cell.projectId}|${date}`) })}
           onClose={() => setCell(null)}
+          // Errors propagate to the dialog, which keeps them next to the field that caused them.
           onSave={async (hours, description) => {
-            try {
-              if (cell.existing) await patch(`time-entries/${idOf(cell.existing.path)}`, { hours, description: description || null }, cell.existing.etag);
-              else await create("time-entries", { project: `projects/${cell.projectId}`, date: cell.date, hours, description: description || undefined, billable: projectById.get(cell.projectId)?.billable ?? true });
-              setCell(null); loadWeek();
-            } catch (e) { toast({ title: "Couldn't save the entry", description: (e as Error).message, variant: "destructive" }); }
+            if (cell.existing) await patch(`time-entries/${idOf(cell.existing.path)}`, { hours, description: description || null }, cell.existing.etag);
+            else await create("time-entries", { project: `projects/${cell.projectId}`, date: cell.date, hours, description: description || undefined, billable: projectById.get(cell.projectId)?.billable ?? true });
+            loadWeek();
           }}
           onRemove={cell.existing ? async () => {
-            try { await remove(`time-entries/${idOf(cell.existing!.path)}`); setCell(null); loadWeek(); }
-            catch (e) { toast({ title: "Couldn't remove the entry", description: (e as Error).message, variant: "destructive" }); }
+            await remove(`time-entries/${idOf(cell.existing!.path)}`);
+            setCell(null); loadWeek();
           } : undefined}
         />
       )}
@@ -260,40 +420,117 @@ function AddProjectRow({ projects, onAdd }: { projects: Project[]; onAdd: (id: s
   );
 }
 
-function LogDialog({ project, date, existing, onClose, onSave, onRemove }: {
+const QUICK_HOURS = [0.5, 1, 2, 4, 8];
+const dayFull = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
+// Index into WEEKDAY (Monday-first), for naming the day a "save & next" button jumps to.
+const days7Index = (s: string) => (new Date(s + "T00:00:00").getDay() + 6) % 7;
+
+// Timesheet cell editor. Hours are the only real input, so they get the whole affordance: quick amounts, quarter-hour
+// steppers, and the running day total this entry lands in - typing "7.25" into a bare number box tells you nothing
+// about whether the day now adds up.
+function LogDialog({ project, date, existing, otherHours, suggestions, nextDate, onAdvance, onClose, onSave, onRemove }: {
   project: Project;
   date: string;
   existing?: TimeEntry;
+  // Hours already logged that day on OTHER projects, so the dialog can show what the day totals after this save.
+  otherHours: number;
+  // Descriptions this person has used on this project before.
+  suggestions: string[];
+  // Next editable day of the week for this project, when there is one.
+  nextDate?: string;
+  onAdvance: (date: string) => void;
   onClose: () => void;
   onSave: (hours: number, description: string) => Promise<void>;
   onRemove?: () => Promise<void>;
 }) {
+  const guardClose = useDiscardGuard();
   const [hours, setHours] = useState(existing ? String(existing.hours) : "");
   const [description, setDescription] = useState(existing?.description ?? "");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const busy = saving || removing;
   const n = Number(hours);
   const valid = hours.trim() !== "" && !Number.isNaN(n) && n > 0 && n <= 24;
-  const save = async () => { setSaving(true); try { await onSave(n, description.trim()); } finally { setSaving(false); } };
+  // Steppers stay inside the valid range (a quarter hour up to 24), so clicking minus on an empty box can't
+  // land on a zero the form then rejects.
+  const bump = (by: number) => setHours(String(Math.min(24, Math.max(0.25, Math.round(((Number.isNaN(n) ? 0 : n) + by) * 4) / 4))));
+  const dayAfter = otherHours + (valid ? n : 0);
+  const dirty = hours !== (existing ? String(existing.hours) : "") || description.trim() !== (existing?.description ?? "");
+  const close = () => guardClose(dirty, onClose)(false);
+  // `advance` keeps the run going: save this cell, then reopen on the next editable day of the same project,
+  // which is how a week of one project actually gets logged.
+  const save = async (advance = false) => {
+    setSaving(true); setError(null);
+    try {
+      await onSave(n, description.trim());
+      if (advance && nextDate) onAdvance(nextDate);
+      else onClose();
+    } catch (e) { setError((e as Error).message); }
+    finally { setSaving(false); }
+  };
   return (
-    <Dialog open onOpenChange={(o) => !o && !busy && onClose()}>
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) close(); }}>
       <DialogContent onEnterSubmit={() => { if (!busy && valid) save(); }}>
-        <DialogHeader><DialogTitle>Log time</DialogTitle></DialogHeader>
-        <p className="text-sm text-muted-foreground"><span className="font-medium text-foreground">{project.name}</span> · {dayNum(date)}{existing ? <> · <StatusBadge state={existing.status} /></> : null}</p>
+        <DialogHeader>
+          <DialogTitle>{existing ? "Edit time" : "Log time"}</DialogTitle>
+          <DialogDescription asChild>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">{project.name}</span>
+              {project.client && <span>· {project.client}</span>}
+              <span>· {dayFull(date)}</span>
+              <Badge variant={project.billable ? "secondary" : "muted"}>{project.billable ? "Billable" : "Non-billable"}</Badge>
+              {existing && <StatusBadge state={existing.status} />}
+            </div>
+          </DialogDescription>
+        </DialogHeader>
         <Field label="Hours" error={hours.trim() !== "" && !valid ? "Enter between 0 and 24 hours." : undefined}>
-          <Input type="number" min={0} max={24} step={0.25} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus />
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={() => bump(-0.25)} aria-label="Quarter hour less"><Minus className="h-4 w-4" /></Button>
+              <Input type="number" min={0} max={24} step={0.25} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus
+                className="h-10 w-24 text-center text-base tabular-nums" />
+              <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={() => bump(0.25)} aria-label="Quarter hour more"><Plus className="h-4 w-4" /></Button>
+              <span className="ml-auto text-xs text-muted-foreground">
+                Day total <span className="font-semibold tabular-nums text-foreground">{fmt(dayAfter)}h</span>
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {QUICK_HOURS.map((q) => (
+                <button key={q} type="button" onClick={() => setHours(String(q))}
+                  className={cn(
+                    "rounded-full px-2.5 py-1 text-xs font-medium tabular-nums transition-colors",
+                    n === q ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-primary hover:text-primary-foreground",
+                  )}>
+                  {fmt(q)}h
+                </button>
+              ))}
+            </div>
+          </div>
         </Field>
-        <Field label="Description (optional)"><Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What did you work on?" /></Field>
+        <Field label="Description (optional)" hint="Approvers read this when the week is submitted.">
+          {/* A datalist, not a combobox: typing stays primary and past descriptions are one keystroke away. */}
+          <Input list={suggestions.length ? `desc-${project.path}` : undefined} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What did you work on?" />
+          {suggestions.length > 0 && (
+            <datalist id={`desc-${project.path}`}>{suggestions.map((s) => <option key={s} value={s} />)}</datalist>
+          )}
+        </Field>
+        <FormError error={error} />
         <DialogFooter className="items-center">
           {onRemove && (
             <Button variant="ghost" size="sm" className="mr-auto text-destructive" loading={removing} disabled={saving}
-              onClick={async () => { setRemoving(true); try { await onRemove(); } finally { setRemoving(false); } }}>
-              Remove
+              onClick={async () => {
+                setRemoving(true); setError(null);
+                try { await onRemove(); }
+                catch (e) { setError((e as Error).message); }
+                finally { setRemoving(false); }
+              }}>
+              <Trash2 className="h-3.5 w-3.5" /> Remove
             </Button>
           )}
-          <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button onClick={save} loading={saving} disabled={!valid || removing}>Save</Button>
+          <Button variant="outline" onClick={close} disabled={busy}>Cancel</Button>
+          {nextDate && <Button variant="outline" onClick={() => save(true)} loading={saving} disabled={!valid || removing}>Save &amp; {WEEKDAY[days7Index(nextDate)]}</Button>}
+          <Button onClick={() => save()} loading={saving} disabled={!valid || removing}>Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -24,6 +24,16 @@ describe("round2", () => {
     expect(round2(Infinity)).toBe(0);
     expect(round2(1e-9)).toBe(0);
   });
+  it("stays a number at the top of the range, where JS stringifies exponentially", () => {
+    // The decimal-string scaling (`${n}e2`) only parses while `n` is positional. At 1e21 JS switches to
+    // exponential and "1e21e2" is NaN - so the guard has to cover BOTH ends, not just the sub-paise one.
+    // No real payroll figure lands here; a rounding helper that silently answers NaN is the problem.
+    for (const n of [1e21, -1e21, 5e30, Number.MAX_VALUE]) {
+      expect(Number.isFinite(round2(n)), String(n)).toBe(true);
+    }
+    expect(round2(1e21)).toBe(1e21);
+    expect(round2(-1e21)).toBe(-1e21);
+  });
 });
 
 describe("sum2", () => {

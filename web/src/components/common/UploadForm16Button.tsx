@@ -1,21 +1,18 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Upload } from "lucide-react";
 import { upload } from "@/api";
 import { usePermission } from "@/lib/perm";
 import type { DocumentResource } from "@/types";
+import { currentFy, fyOptions, fySpan } from "@/lib/fy";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field } from "@/components/common/Field";
-import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FileDropField } from "@/components/common/FileDropField";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 
-// Indian FY label (Apr–Mar) - defaults the dialog to the current financial year.
-function currentFy(): string {
-  const d = new Date();
-  const y = d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
-  return `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
-}
+const isPdf = (f: File) => f.type === "application/pdf" || /\.pdf$/i.test(f.name);
 
 /** Upload the OFFICIAL TRACES Form 16 PDF for an employee + financial year. Filed as their personal document
  *  with official=true, so it takes precedence over the HRMS-generated Part-B copy. Gated to HR + super (server
@@ -26,31 +23,21 @@ export function UploadForm16Button({ employeeId, onUploaded }: { employeeId: str
   const [open, setOpen] = useState(false);
   const [fy, setFy] = useState(currentFy());
   const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   if (!canUpload) return null;
 
   async function submit() {
     if (!file) return;
-    setBusy(true);
-    try {
-      const doc = await upload<DocumentResource>("personal-documents", file, {
-        verb: "uploadForm16",
-        params: { employee: `employees/${employeeId}`, financial_year: fy.trim() },
-      });
-      toast({ title: "Official Form 16 uploaded", description: doc.display_name, variant: "success" });
-      setOpen(false);
-      setFile(null);
-      onUploaded?.();
-    } catch (e) {
-      toast({ title: "Couldn't upload Form 16", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    const doc = await upload<DocumentResource>("personal-documents", file, {
+      verb: "uploadForm16",
+      params: { employee: `employees/${employeeId}`, financial_year: fy },
+    });
+    toast({ title: "Official Form 16 uploaded", description: doc.display_name, variant: "success" });
+    setFile(null);
+    onUploaded?.();
   }
 
-  const fyValid = /^\d{4}-\d{2}$/.test(fy.trim());
+  const wrongType = !!file && !isPdf(file);
 
   return (
     <>
@@ -59,20 +46,29 @@ export function UploadForm16Button({ employeeId, onUploaded }: { employeeId: str
           <Upload className="h-4 w-4" /> Upload official Form 16
         </Button>
       </AccessAction>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Upload official Form 16</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">The official TRACES-issued Form 16 (PDF). It replaces the generated copy for the year.</p>
-          <Field label="Financial year" hint="Apr–Mar, e.g. 2025-26."><Input value={fy} onChange={(e) => setFy(e.target.value)} placeholder="2025-26" /></Field>
-          <Field label="File" hint="PDF only.">
-            <Input ref={fileRef} type="file" accept="application/pdf,.pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-          </Field>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!fyValid || !file}>Upload</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Upload official Form 16"
+        description="The TRACES-issued Form 16. It takes precedence over the generated Part-B copy for that year, which is what the employee then sees."
+        collection="personal-documents"
+        guardLabel="Form 16"
+        form={{ fy, file: file ? `${file.name}:${file.size}` : null }}
+        submitLabel="Upload"
+        canSubmit={!!file && !wrongType}
+        whyNot={!file ? "Attach the Form 16 PDF." : "Form 16 must be a PDF."}
+        onSubmit={submit}
+      >
+        <Field label="Financial year" hint={`${fySpan(fy)}.`}>
+          <Select value={fy} onValueChange={setFy}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>{fyOptions().map((y) => <SelectItem key={y} value={y}>FY {y}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+        <Field label="File" error={wrongType ? "Form 16 must be a PDF." : undefined} eager>
+          <FileDropField file={file} onFile={setFile} accept="application/pdf,.pdf" hint="PDF only, as issued by TRACES." />
+        </Field>
+      </WriteDialog>
     </>
   );
 }

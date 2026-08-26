@@ -8,9 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Field } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { FieldAccess } from "@/components/access/FieldAccess";
 import { AccessAction } from "@/components/access/AccessAction";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 /** Configured identity fields (PAN/UAN/Aadhaar etc.) for one employee. The set of fields and
@@ -22,7 +22,6 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
   const [denied, setDenied] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
   // Hidden file input for attaching/replacing a field's supporting document.
   const fileRef = useRef<HTMLInputElement>(null);
   const docTarget = useRef<string | null>(null);
@@ -66,22 +65,17 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
   }
 
   async function save() {
-    setSaving(true);
-    try {
-      const updated = await patch<IdentityDetails>(`employees/${employeeId}/identity`, { values: form });
-      setData(updated);
-      toast({ title: "Identity details saved", variant: "success" });
-      onSaved?.();
-      setOpen(false);
-    } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setSaving(false);
-    }
+    const updated = await patch<IdentityDetails>(`employees/${employeeId}/identity`, { values: form });
+    setData(updated);
+    toast({ title: "Identity details saved", variant: "success" });
+    onSaved?.();
   }
 
   if (denied) return null;
   const fields = data?.fields ?? [];
+  // A mandatory field is only missing if it ends up empty: a sensitive one that already holds a value is left
+  // blank on purpose ("leave blank to keep"), so it counts as filled.
+  const missing = fields.filter((f) => f.mandatory && !f.denied && !(form[f.key] ?? "").trim() && !(f.sensitive && f.has_value));
 
   return (
     <Card>
@@ -129,32 +123,48 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
         )}
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!saving) save(); }}>
-          <DialogHeader>
-            <DialogTitle>Edit identity details</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            {fields.map((f) => (
-              <Field
-                key={f.key}
-                label={f.label + (f.mandatory ? " *" : "")}
-                hint={f.sensitive ? (f.has_value ? "Leave blank to keep the current value." : "Shown masked once saved.") : undefined}
-              >
-                <Input
-                  value={form[f.key] ?? ""}
-                  onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
-                  placeholder={f.sensitive && f.has_value ? f.value : ""}
-                />
-              </Field>
-            ))}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={save} loading={saving}>Save</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Edit identity details"
+        description="Government IDs used for payroll, statutory filings and background checks. Sensitive values are encrypted and only ever shown masked."
+        collection="employees"
+        objectPath={`employees/${employeeId}`}
+        guardLabel="identity details"
+        form={form}
+        submitLabel="Save"
+        canSubmit={missing.length === 0}
+        whyNot={missing.length ? `Required: ${missing.map((f) => f.label).join(", ")}.` : undefined}
+        onSubmit={save}
+      >
+            {fields.map((f) => {
+              const docMode = f.document ?? "none";
+              const empty = !(form[f.key] ?? "").trim() && !(f.sensitive && f.has_value);
+              return (
+                <Field
+                  key={f.key}
+                  label={f.label}
+                  field={`identity.${f.key}`}
+                  error={f.mandatory && empty ? "Required." : undefined}
+                  hint={
+                    f.sensitive
+                      ? f.has_value
+                        ? "Leave blank to keep the current value."
+                        : "Shown masked once saved."
+                      : docMode === "required" && !f.has_doc
+                        ? "A supporting document is required - attach it from the card after saving."
+                        : undefined
+                  }
+                >
+                  <Input
+                    value={form[f.key] ?? ""}
+                    onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+                    placeholder={f.sensitive && f.has_value ? f.value : ""}
+                  />
+                </Field>
+              );
+            })}
+      </WriteDialog>
     </Card>
   );
 }

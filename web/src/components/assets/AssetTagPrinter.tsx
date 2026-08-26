@@ -1,30 +1,34 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { Printer, X, Search, AlertTriangle, Check, Ruler, Eraser, FilePlus2, FileDown, Crosshair, Ban, Trash2, RefreshCw } from "lucide-react";
-import { get, patch } from "@/api";
+import { Printer, X, Search, AlertTriangle, Check, Ruler, Eraser, FilePlus2, FileDown, Crosshair, Ban, Trash2 } from "lucide-react";
+import { get, invoke } from "@/api";
 import { cn, idOf, formatDate } from "@/lib/utils";
-import type { Asset, Me } from "@/types";
+import type { Asset, AssetCategory, Me } from "@/types";
 import { useOrg } from "@/lib/org";
 import {
-  allFormats, formatById, slotsPerSheet, scanOrder, slotPos, resolveTagConfig, nextTag, duplicateTags, buildScanPayload,
-  DEFAULT_TAG_SETTINGS, type AssetTagSettings, type SheetFormat, type TagConfig, type QrMode,
+  allFormats, formatById, slotsPerSheet, scanOrder, slotPos, buildScanPayload,
+  fitLabelBlock, labelLineSpecs, labelTextBox, LABEL_LINE_HEIGHT,
+  DEFAULT_TAG_SETTINGS, type AssetTagSettings, type SheetFormat, type QrMode,
 } from "@/lib/assetTags";
+import { useCollection } from "@/hooks/useCollection";
 import { SettingsButton } from "@/components/common/SettingsButton";
 import { useConfirm } from "@/components/common/confirm";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/components/ui/use-toast";
+import { getSetting } from "@/lib/settingsStore";
 
-// Physical sticker-sheet asset-tag printer. Policy is org DATA, not code: the tag pattern, category
-// codes, sheet formats (presets + org custom grids) and default code/label content come from the
-// `settings/asset-tags` blob (gear in the header, same panel as Settings → Asset tags). Tags print
-// straight from the real inventory rows - the asset's saved asset_tag is what lands on the sticker.
+// Physical sticker-sheet asset-tag printer. Policy is org DATA, not code: the tag pattern, sheet formats
+// (presets + org custom grids) and default code/label content come from the `settings/asset-tags` blob
+// (gear in the header, same panel as Settings → Asset tags). Tags print straight from the real inventory
+// rows - the asset's saved asset_tag is what lands on the sticker, and nothing here invents one: the
+// server allocated it when the asset was created (services/assets.ts), so print and database cannot drift.
 // The code can be a QR (deep link, public found-page URL, or plain text) or a Code128 barcode for
-// orgs with 1D laser scanners. Assets without a tag get one generated in the configured pattern and
-// saved onto the record (PATCH) at queue time - print and database can't drift. "Mark printed"
+// orgs with 1D laser scanners. "Mark printed"
 // stamps `tag_printed_time` on each asset (server data - visible to every device and teammate).
 //
 // Only genuinely device-bound state lives in localStorage: printer offsets and the used/queued slot
@@ -82,39 +86,75 @@ function Backdrop({ onClose, children }: { onClose: () => void; children: ReactN
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex h-full max-h-[94vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-lg border bg-background shadow-lg">{children}</div>
+      {/* dvh so the toolbar and the sheet both stay inside the visible viewport on a phone. */}
+      <div className="flex h-full max-h-[94dvh] w-full max-w-[1500px] flex-col overflow-hidden rounded-lg border bg-background shadow-lg">{children}</div>
     </div>
   );
 }
 
 type LabelData = { tag: string; name: string; serial?: string; codeDataUrl?: string };
 
+// Text width in mm for the label font, from one offscreen canvas. Width scales linearly with the font
+// size, so each string is measured once at 100px and scaled - a full sheet is 65 labels.
+let measureCtx: CanvasRenderingContext2D | null | undefined;
+const measureCache = new Map<string, number>();
+function measureMm(text: string, sizeMm: number, bold: boolean): number {
+  const key = (bold ? "bold|" : "reg|") + text;
+  let unit = measureCache.get(key);
+  if (unit === undefined) {
+    if (measureCtx === undefined) measureCtx = document.createElement("canvas").getContext("2d");
+    if (!measureCtx) return text.length * sizeMm * 0.55; // no canvas: rough average glyph width
+    measureCtx.font = `${bold ? "bold " : ""}100px Arial, Helvetica, sans-serif`;
+    unit = measureCtx.measureText(text).width / 100;
+    measureCache.set(key, unit);
+  }
+  return unit * sizeMm;
+}
+
+// Ink per line, indexed the way labelLineSpecs() orders them (org, tag, name, serial, footer).
+const LINE_COLOR = ["#555", "#000", "#333", "#555", "#555"];
+
 // One printed label, all dimensions derived from the label height so every sheet format gets a
 // proportionate layout. QR: code left, text right. Code128: text on top, wide barcode along the
 // bottom. Paper is white regardless of app theme.
 function Label({ data, org, show, footer, logo, f, codeType }: { data: LabelData; org: string; show: Show; footer?: string; logo?: string; f: SheetFormat; codeType: CodeType }) {
   const qr = Math.round(f.h * 0.78 * 10) / 10;
+  const box = labelTextBox(f, codeType);
+  const withLogo = show.org && show.logo && !!logo;
+  // A long asset name neither widens the label nor spills off it: the whole column is wrapped and, only
+  // if the wrapped lines still overflow, scaled down as one block. Nothing is ever cut. Same helper as
+  // the PDF export, so the sticker on screen is the sticker on paper.
+  const fitted = fitLabelBlock(
+    labelLineSpecs({
+      org: show.org && !withLogo ? org : "",
+      tag: data.tag,
+      name: show.name ? data.name : "",
+      serial: show.serial ? data.serial : "",
+      footer: show.footer ? footer : "",
+    }),
+    box,
+    f.h,
+    measureMm,
+    withLogo ? f.h * 0.14 * 1.2 : 0,
+  );
   const text = (
-    <div style={{ marginLeft: codeType === "qr" ? `${(f.h * 0.05).toFixed(2)}mm` : 0, overflow: "hidden", lineHeight: 1.25 }}>
-      {show.org && show.logo && logo ? (
-        <img src={logo} alt="" style={{ height: `${(f.h * 0.14).toFixed(2)}mm`, maxWidth: `${(f.w * 0.4).toFixed(2)}mm`, objectFit: "contain", display: "block" }} />
-      ) : show.org ? (
-        <div style={{ fontSize: `${(f.h * 0.07).toFixed(2)}mm`, color: "#555", whiteSpace: "nowrap" }}>{org}</div>
-      ) : null}
-      <div style={{ fontSize: `${(f.h * 0.12).toFixed(2)}mm`, fontWeight: 700, whiteSpace: "nowrap" }}>{data.tag}</div>
-      {show.name && <div style={{ fontSize: `${(f.h * 0.08).toFixed(2)}mm`, color: "#333", whiteSpace: "nowrap" }}>{data.name}</div>}
-      {show.serial && data.serial && <div style={{ fontSize: `${(f.h * 0.07).toFixed(2)}mm`, color: "#555", whiteSpace: "nowrap" }}>SN {data.serial}</div>}
-      {show.footer && footer && <div style={{ fontSize: `${(f.h * 0.065).toFixed(2)}mm`, color: "#555", whiteSpace: "nowrap" }}>{footer}</div>}
+    <div style={{ marginLeft: codeType === "qr" ? `${(f.h * 0.05).toFixed(2)}mm` : 0, minWidth: 0, overflow: "hidden", lineHeight: LABEL_LINE_HEIGHT }}>
+      {withLogo && (
+        <img src={logo} alt="" style={{ height: `${(f.h * 0.14).toFixed(2)}mm`, maxWidth: `${box.width.toFixed(2)}mm`, objectFit: "contain", display: "block", marginBottom: `${(f.h * 0.14 * 0.2).toFixed(2)}mm` }} />
+      )}
+      {fitted.lines.map((l, i) => (
+        <div key={i} style={{ fontSize: `${l.size.toFixed(3)}mm`, fontWeight: l.bold ? 700 : undefined, color: LINE_COLOR[l.spec], whiteSpace: "pre" }}>{l.text}</div>
+      ))}
     </div>
   );
   if (codeType === "code128") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", width: "100%", height: "100%" }}>
+      <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", width: "100%", minWidth: 0, height: "100%", overflow: "hidden" }}>
         {text}
         {data.codeDataUrl ? (
-          <img src={data.codeDataUrl} alt="" style={{ width: "100%", height: `${(f.h * 0.34).toFixed(2)}mm`, objectFit: "fill" }} />
+          <img src={data.codeDataUrl} alt="" style={{ width: "100%", height: `${(f.h * 0.34).toFixed(2)}mm`, flexShrink: 0, objectFit: "fill" }} />
         ) : (
-          <div style={{ height: `${(f.h * 0.34).toFixed(2)}mm` }} />
+          <div style={{ height: `${(f.h * 0.34).toFixed(2)}mm`, flexShrink: 0 }} />
         )}
       </div>
     );
@@ -206,12 +246,12 @@ function SheetView({
   );
 }
 
-export function AssetTagPrinter(props: { me: Me; assets: Asset[]; onClose: () => void; onReload: () => Promise<void> | void; initialAssetId?: string }) {
+export function AssetTagPrinter(props: { me: Me; assets: Asset[]; onClose: () => void; onReload: () => Promise<void> | void; initialAssetIds?: string[] }) {
   // Load the org config first; the body's initial state (format, code mode, label content) derives from it.
   const [tagSettings, setTagSettings] = useState<AssetTagSettings | undefined>();
   const [cfgLoaded, setCfgLoaded] = useState(false);
   useEffect(() => {
-    get<{ value?: AssetTagSettings }>("settings/asset-tags")
+    getSetting<AssetTagSettings>("asset-tags")
       .then((s) => setTagSettings(s.value))
       .catch(() => {}) // no row yet / offline -> built-in defaults
       .finally(() => setCfgLoaded(true));
@@ -220,20 +260,24 @@ export function AssetTagPrinter(props: { me: Me; assets: Asset[]; onClose: () =>
   if (!cfgLoaded) {
     return (
       <Backdrop onClose={props.onClose}>
-        <div className="flex h-40 items-center justify-center">
-          <p className="text-sm text-muted-foreground">Loading printer…</p>
-        </div>
+        <PanelSkeleton className="p-4" />
       </Backdrop>
     );
   }
   return <PrinterBody {...props} tagSettings={tagSettings} />;
 }
 
-function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSettings }: { me: Me; assets: Asset[]; onClose: () => void; onReload: () => Promise<void> | void; initialAssetId?: string; tagSettings?: AssetTagSettings }) {
+function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettings }: { me: Me; assets: Asset[]; onClose: () => void; onReload: () => Promise<void> | void; initialAssetIds?: string[]; tagSettings?: AssetTagSettings }) {
   const { org } = useOrg();
   const { toast } = useToast();
   const confirm = useConfirm();
-  const tagCfg: TagConfig = useMemo(() => resolveTagConfig(org.name, tagSettings), [org.name, tagSettings]);
+  // Category names for the label/filter: an asset carries a reference, and the tag it already has carries the
+  // category's code, so nothing here needs to compute a tag - only to say what kind of thing this is.
+  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories");
+  const catName = useMemo(() => {
+    const m = new Map(assetCategories.map((c) => [idOf(c.path), c.display_name ?? ""]));
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "" : "");
+  }, [assetCategories]);
   const [state, setState] = useState<StoredState>(() => loadStored(tagSettings));
   // Session-scoped display choices, defaulted from org config (change them for one run without
   // touching the org's settings; the gear edits the real defaults).
@@ -248,9 +292,8 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [untaggedOnly, setUntaggedOnly] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [bulkBusy, setBulkBusy] = useState(false);
+  // Every asset already has a tag, so the queue that matters is the one that has no sticker on it yet.
+  const [unprintedOnly, setUnprintedOnly] = useState(false);
   const [marking, setMarking] = useState(false);
   const [exporting, setExporting] = useState(false);
   // Target slot for the next queued tag ({sheet, slot}); null = first empty in fill order.
@@ -260,8 +303,6 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
   // Hover magnifier: a 2x readable preview of the label under the cursor.
   const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null);
   const [printedBanner, setPrintedBanner] = useState(false);
-  // Tags saved onto assets from this dialog, until the collection reload catches up.
-  const [justAssigned] = useState(() => new Map<string, string>());
   const [codeUrls, setCodeUrls] = useState<Map<string, string>>(new Map());
 
   const fmt = formatById(state.formatId, tagSettings);
@@ -306,7 +347,6 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
     return m;
   }, [state.sheets]);
   const queuedCount = useMemo(() => [...queueCounts.values()].reduce((a, b) => a + b, 0), [queueCounts]);
-  const dupTags = useMemo(() => duplicateTags(assets.map((a) => a.asset_tag)), [assets]);
 
   // A queued asset deleted elsewhere (or left over in localStorage from another org) frees its slot.
   useEffect(() => {
@@ -314,7 +354,8 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
     setState((s) => ({ ...s, sheets: s.sheets.map((sheet) => sheet.map((c) => (c && c !== "used" && !byId.has(c.assetId) ? null : c))) }));
   }, [queueCounts, byId]);
 
-  const tagOf = (a: Asset) => a.asset_tag || justAssigned.get(idOf(a.path)) || "";
+  // Every asset is tagged by the server on create, so this is a read, not a fallback chain.
+  const tagOf = (a: Asset) => a.asset_tag ?? "";
 
   const labels = useMemo(() => {
     const m = new Map<string, LabelData>();
@@ -325,7 +366,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
     }
     return m;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queueCounts, byId, codeUrls, justAssigned]);
+  }, [queueCounts, byId, codeUrls]);
 
   // Generate code images for queued assets: QR (qrcode lib) or Code128 (jsbarcode), both lazy-loaded.
   // Code128 always encodes the plain tag - that's what 1D laser scanners expect.
@@ -354,7 +395,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
         entries = await Promise.all(
           missing.map(async (id) => {
             const a = byId.get(id)!;
-            const payload = buildScanPayload(qrMode, { id, tag: tagOf(a), serial: a.serial_number }, location.origin);
+            const payload = buildScanPayload(qrMode, { id, tag: tagOf(a), serial: a.serial_number, secret: a.tag_secret }, location.origin);
             return [id, await QRCode.toDataURL(payload, { width: 220, margin: 0, errorCorrectionLevel: "M" })] as const;
           }),
         );
@@ -431,24 +472,10 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
   }
 
   // Queue an asset into `target`, the aimed slot, or the first empty in fill order (growing onto a
-  // fresh sheet when everything is full). Tagless assets first get a tag generated in the org's
-  // configured pattern and saved onto the record - the sticker must print what the database says.
-  async function queueAsset(a: Asset, target?: { s: number; i: number }): Promise<boolean> {
+  // fresh sheet when everything is full). The sticker prints the tag the record already carries - the number
+  // was allocated when the asset was created, so opening the printer never writes to an asset.
+  function queueAsset(a: Asset, target?: { s: number; i: number }): void {
     const id = idOf(a.path);
-    if (!a.asset_tag && !justAssigned.get(id)) {
-      const tag = nextTag(tagCfg, a.category, [...assets.map((x) => x.asset_tag), ...justAssigned.values()]);
-      setBusyId(id);
-      try {
-        await patch(a.path, { asset_tag: tag }, a.etag);
-        justAssigned.set(id, tag);
-        await onReload();
-      } catch (e) {
-        toast({ variant: "destructive", title: "Couldn't save the generated tag", description: (e as Error).message });
-        return false;
-      } finally {
-        setBusyId(null);
-      }
-    }
     setState((st) => {
       const sheets = st.sheets.map((sh) => [...sh]);
       let t: { s: number; i: number } | null =
@@ -474,7 +501,6 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
       return { ...st, sheets };
     });
     setSelected(null);
-    return true;
   }
 
   // Drag & drop: an asset row dropped on an empty slot queues it right there; a queued label
@@ -501,44 +527,14 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
     }
   }
 
-  async function bulkAdd(list: Asset[]) {
-    setBulkBusy(true);
-    try {
-      for (const a of list) {
-        if (!(await queueAsset(a))) break; // a failed tag save stops the run rather than skipping silently
-      }
-    } finally {
-      setBulkBusy(false);
-    }
-  }
-
-  // Two assets sharing one tag print identical stickers - regenerate a fresh unique tag for this one.
-  async function fixDuplicate(a: Asset) {
-    const id = idOf(a.path);
-    const tag = nextTag(tagCfg, a.category, [...assets.map((x) => x.asset_tag), ...justAssigned.values()]);
-    setBusyId(id);
-    try {
-      await patch(a.path, { asset_tag: tag }, a.etag);
-      justAssigned.set(id, tag);
-      setCodeUrls((prev) => {
-        const next = new Map(prev);
-        next.delete(id);
-        return next;
-      });
-      await onReload();
-      toast({ title: "Tag replaced", description: `${a.name} is now ${tag}.`, variant: "success" });
-    } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't replace the tag", description: (e as Error).message });
-    } finally {
-      setBusyId(null);
-    }
+  function bulkAdd(list: Asset[]) {
+    for (const a of list) queueAsset(a);
   }
 
   // The physical outcome of a successful print: queued slots on sheet 1 are now spent stickers,
   // overflow sheets came off fresh sheets (nothing to remember), and every printed asset gets its
   // `tag_printed_time` stamped on the SERVER - so "printed" is visible to every device and teammate.
   async function markPrinted() {
-    const now = new Date().toISOString();
     const ids = [...queueCounts.keys()];
     let stamped = 0;
     let skipped = 0;
@@ -546,12 +542,14 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
     try {
       for (const id of ids) {
         const a = byId.get(id);
-        if (!a || !(a.access?.can?.includes("update") ?? false)) {
+        if (!a || !(a.access?.can?.includes("printTag") ?? false)) {
           skipped++;
           continue;
         }
         try {
-          await patch(a.path, { tag_printed_time: now }, a.etag);
+          // The verb owns the stamp (and mints a tag secret if the row somehow lacks one), so the printed
+          // sticker and the server's idea of "printed" can never disagree.
+          await invoke(a.path, "printTag");
           stamped++;
         } catch {
           skipped++;
@@ -613,30 +611,41 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
     }
   }
 
-  // Queue the launching row once (from the per-row "print tag" action on the Assets table).
+  // Queue the launching rows once: one asset from the per-row "print tag" action on the Assets table, or the
+  // whole run a bulk add just created - twenty new adapters want twenty stickers, and having to find them in
+  // the picker is the boring half of the job the printer is for.
   const initialDone = useRef(false);
   useEffect(() => {
-    if (initialDone.current || !initialAssetId) return;
+    if (initialDone.current || !initialAssetIds?.length) return;
+    const opening = initialAssetIds.map((id) => byId.get(id)).filter((a): a is Asset => !!a);
+    // Nothing matched YET: a run created a moment ago reaches this list only once the page's reload lands, so
+    // stay armed rather than spending the one chance on a stale inventory.
+    if (!opening.length) return;
     initialDone.current = true;
-    const a = byId.get(initialAssetId);
-    if (!a) return;
-    if (a.asset_tag) void queueAsset(a);
-    else setSearch(a.name); // don't silently PATCH a generated tag just from opening - surface the row instead
+    const tagged = opening.filter((a) => a.asset_tag);
+    // Don't silently PATCH a generated tag just from opening - surface the row instead.
+    if (tagged.length) bulkAdd(tagged);
+    else if (opening[0]) setSearch(opening[0].name);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialAssetId, byId]);
+  }, [initialAssetIds, byId]);
 
-  const categories = useMemo(() => [...new Set(assets.map((a) => a.category).filter((c): c is string => !!c))].sort(), [assets]);
+  // Only the categories something in this inventory is actually filed under - an empty catalog entry is not a
+  // useful filter here.
+  const categories = useMemo(() => {
+    const used = new Set(assets.map((a) => a.category).filter((c): c is string => !!c));
+    return assetCategories.filter((c) => used.has(c.path));
+  }, [assets, assetCategories]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return assets.filter((a) => {
       if (catFilter !== "all" && a.category !== catFilter) return false;
       if (statusFilter !== "all" && a.status !== statusFilter) return false;
-      if (untaggedOnly && (a.asset_tag || justAssigned.get(idOf(a.path)))) return false;
+      if (unprintedOnly && a.tag_printed_time) return false;
       if (!q) return true;
-      return [a.asset_tag, a.name, a.category, a.serial_number].some((v) => v?.toLowerCase().includes(q));
+      return [a.asset_tag, a.name, catName(a.category), a.serial_number].some((v) => v?.toLowerCase().includes(q));
     });
-  }, [assets, search, catFilter, statusFilter, untaggedOnly, justAssigned]);
+  }, [assets, search, catFilter, statusFilter, unprintedOnly, catName]);
 
   const codesPending = [...queueCounts.keys()].some((id) => byId.has(id) && !codeUrls.has(id));
   const freeOnSheet1 = state.sheets[0].filter((c) => c === null).length;
@@ -662,35 +671,52 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
   return (
     <Backdrop onClose={onClose}>
       <style>{printCss}</style>
-      <div className="flex items-center gap-3 border-b px-4 py-3">
-        <Printer className="h-5 w-5 text-muted-foreground" />
+      {/* Title on one line, the four actions on their own line below it when they will not fit beside it.
+          The action group is one flex child rather than four siblings, so it moves as a block instead of
+          leaving a stray Close button orphaned on the second line. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-3">
+        <Printer className="hidden h-5 w-5 shrink-0 text-muted-foreground sm:block" />
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold">Print asset tags</h2>
-          <p className="truncate text-xs text-muted-foreground">{fmt.label} · print at 100% scale, margins off, headers/footers off - or export the PDF for exact output.</p>
+          {/* The print-settings advice is long and only actionable next to a print dialog, so it is a
+              desktop line. The format label is the part worth keeping on a phone. */}
+          <p className="truncate text-xs text-muted-foreground">
+            {fmt.label}
+            <span className="hidden sm:inline"> · print at 100% scale, margins off, headers/footers off - or export the PDF for exact output.</span>
+          </p>
         </div>
-        <SettingsButton me={me} settingKey="asset-tags" />
-        <Button variant="outline" loading={exporting} disabled={calibrate ? false : queuedCount === 0 || codesPending} onClick={exportPdf} title="Exact-geometry PDF - immune to print-dialog rescaling">
-          <FileDown className="h-4 w-4" /> PDF
-        </Button>
-        <Button onClick={() => window.print()} disabled={calibrate ? false : queuedCount === 0 || codesPending}>
-          <Printer className="h-4 w-4" /> Print {calibrate ? "calibration outline" : `${queuedCount} tag${queuedCount === 1 ? "" : "s"}`}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
-          <X className="h-4 w-4" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <SettingsButton me={me} settingKey="asset-tags" />
+          <Button variant="outline" loading={exporting} disabled={calibrate ? false : queuedCount === 0 || codesPending} onClick={exportPdf} title="Exact-geometry PDF - immune to print-dialog rescaling">
+            <FileDown className="h-4 w-4" /> PDF
+          </Button>
+          <Button onClick={() => window.print()} disabled={calibrate ? false : queuedCount === 0 || codesPending}>
+            <Printer className="h-4 w-4" />
+            {/* "Print calibration outline" / "Print 24 tags" is the desktop label; a phone gets the verb
+                and the count, which is all the button needs to say next to a queue it can see. */}
+            <span className="hidden sm:inline">Print {calibrate ? "calibration outline" : `${queuedCount} tag${queuedCount === 1 ? "" : "s"}`}</span>
+            <span className="sm:hidden">{calibrate ? "Print" : `Print ${queuedCount}`}</span>
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       {printedBanner && queuedCount > 0 && (
-        <div className="flex items-center gap-3 border-b bg-primary/5 px-4 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-3 border-b bg-primary/5 px-4 py-2 text-xs">
           <Check className="h-4 w-4 text-primary" />
-          <span className="flex-1">Sheet sent to the printer. If it came out right, mark these tags printed - that frees the slots and records the print date on each asset.</span>
+          <span className="flex-1 basis-48">Sheet sent to the printer. If it came out right, mark these tags printed - that frees the slots and records the print date on each asset.</span>
           <Button size="sm" loading={marking} onClick={markPrinted}>Mark printed</Button>
           <Button size="sm" variant="ghost" disabled={marking} onClick={() => setPrintedBanner(false)}>Not yet</Button>
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex w-[360px] flex-shrink-0 flex-col border-r">
+      {/* Picker beside sheet on a laptop, stacked on a phone: a 360px fixed pane next to the sheet preview
+          does not fit a 390px screen, and side-by-side is not the point - picking the assets and seeing the
+          sheet fill up are two steps, and on a phone they are two screens' worth of scroll. */}
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        <div className="flex w-full flex-shrink-0 flex-col border-b lg:w-[360px] lg:border-b-0 lg:border-r">
           <Tabs defaultValue="add" className="flex min-h-0 flex-1 flex-col">
             <TabsList className="mx-4 mt-3 grid grid-cols-2">
               <TabsTrigger value="add">Add assets</TabsTrigger>
@@ -699,14 +725,14 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
             <TabsContent value="add" className="mt-0 flex min-h-0 flex-1 flex-col p-4 pt-3">
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input className="pl-8" placeholder="Search tag, name, serial…" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <Input type="search" className="pl-8" placeholder="Search tag, name, serial…" value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
             <div className="mt-2 flex gap-2">
               <Select value={catFilter} onValueChange={setCatFilter}>
                 <SelectTrigger className="flex-1 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All categories</SelectItem>
-                  {categories.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {categories.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}
                 </SelectContent>
               </Select>
               <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -721,44 +747,32 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
               </Select>
             </div>
             <label className="mt-2 flex items-center gap-2 text-xs">
-              <Checkbox checked={untaggedOnly} onCheckedChange={(v) => setUntaggedOnly(v === true)} />
-              Untagged assets only
+              <Checkbox checked={unprintedOnly} onCheckedChange={(v) => setUnprintedOnly(v === true)} />
+              Never-printed assets only
             </label>
             <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border">
               {filtered.length === 0 && <div className="p-3 text-xs text-muted-foreground">No matching assets.</div>}
               {filtered.map((a) => {
                 const id = idOf(a.path);
-                const tag = a.asset_tag || justAssigned.get(id);
-                const canEdit = a.access?.can?.includes("update") ?? false;
-                const canTag = !!tag || canEdit;
+                const tag = a.asset_tag;
                 const copies = queueCounts.get(id) ?? 0;
                 const printedAt = a.tag_printed_time;
                 return (
                   <div
                     key={a.path}
                     className="flex items-center gap-2 border-b p-2 text-xs last:border-b-0"
-                    draggable={canTag && busyId === null && !bulkBusy}
+                    draggable={!!tag}
                     onDragStart={(e) => e.dataTransfer.setData("text/plain", `asset:${id}`)}
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium">{a.name}{a.category && <span className="ml-1.5 font-normal text-muted-foreground">· {a.category}</span>}</div>
+                      <div className="truncate font-medium">{a.name}{a.category && <span className="ml-1.5 font-normal text-muted-foreground">· {catName(a.category)}</span>}</div>
                       <div className="flex flex-wrap items-center gap-x-2 text-muted-foreground">
-                        {tag ? <span className="font-mono">{tag}</span> : <span>no tag - will save <span className="font-mono">{nextTag(tagCfg, a.category, [...assets.map((x) => x.asset_tag), ...justAssigned.values()])}</span></span>}
-                        {tag && dupTags.has(tag) && (
-                          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400" title="Another asset has this same tag - two identical stickers would print">
-                            <AlertTriangle className="h-3 w-3" /> duplicate
-                            {canEdit && (
-                              <button className="inline-flex items-center gap-0.5 underline decoration-dotted underline-offset-2 hover:text-foreground" title="Generate a fresh unique tag for this asset" onClick={() => fixDuplicate(a)}>
-                                <RefreshCw className="h-3 w-3" /> fix
-                              </button>
-                            )}
-                          </span>
-                        )}
+                        {tag ? <span className="font-mono">{tag}</span> : <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400" title="This row predates server-allocated tags - edit it and type a tag to print a sticker"><AlertTriangle className="h-3 w-3" /> no tag</span>}
                         {copies > 0 && <span className="text-primary">queued ×{copies}</span>}
                         {printedAt && !copies && <span title={printedAt}>printed {formatDate(printedAt.slice(0, 10))}</span>}
                       </div>
                     </div>
-                    <Button size="sm" variant="outline" loading={busyId === id} disabled={!canTag || busyId !== null || bulkBusy} title={canTag ? (copies > 0 ? "Add another copy" : "Add - or drag onto a specific slot") : "This asset has no tag and you can't edit it to assign one"} onClick={() => queueAsset(a)}>
+                    <Button size="sm" variant="outline" disabled={!tag} title={tag ? (copies > 0 ? "Add another copy" : "Add - or drag onto a specific slot") : "This asset has no tag to print"} onClick={() => queueAsset(a)}>
                       Add
                     </Button>
                   </div>
@@ -766,7 +780,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
               })}
             </div>
             {filtered.length > 1 && (
-              <Button className="mt-2 w-full" size="sm" variant="outline" loading={bulkBusy} disabled={busyId !== null} onClick={() => bulkAdd(filtered.filter((a) => !queueCounts.get(idOf(a.path)) && (a.asset_tag || justAssigned.get(idOf(a.path)) || a.access?.can?.includes("update"))))}>
+              <Button className="mt-2 w-full" size="sm" variant="outline" onClick={() => bulkAdd(filtered.filter((a) => !queueCounts.get(idOf(a.path)) && a.asset_tag))}>
                 Add all {filtered.length} filtered
               </Button>
             )}
@@ -971,7 +985,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetId, tagSetting
       {/* Hover magnifier: labels are squint-sized at 75% - show a readable copy near the cursor. */}
       {hover && !menu && labels.get(hover.id) && (
         <div className="pointer-events-none fixed z-[60] rounded-md border bg-white p-2 shadow-lg" style={{ left: hover.x, top: hover.y, zoom: 2.2 }}>
-          <div style={{ width: `${fmt.w}mm`, height: `${fmt.h}mm`, display: "flex", alignItems: "center", overflow: "hidden", color: "#000", fontFamily: "Arial, Helvetica, sans-serif" }}>
+          <div style={{ width: `${fmt.w}mm`, height: `${fmt.h}mm`, display: "flex", alignItems: "center", padding: `${(fmt.h * 0.04).toFixed(2)}mm`, overflow: "hidden", color: "#000", fontFamily: "Arial, Helvetica, sans-serif" }}>
             <Label data={labels.get(hover.id)!} org={org.name} show={show} footer={footerText} logo={org.logo} f={fmt} codeType={codeType} />
           </div>
         </div>

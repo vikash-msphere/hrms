@@ -8,6 +8,7 @@ import type { BenefitCategory, BenefitEnrollment, BenefitPlan, Dependent, Depend
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { useKpiFocus } from "@/lib/kpiFocus";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field } from "@/components/common/Field";
@@ -17,7 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -36,7 +37,12 @@ const DEP_EMPTY = { name: "", relationship: "spouse" as DependentRelationship, d
 export default function Benefits({ me }: { me: Me }) {
   const { rows: plans, state, error, reload: reloadPlans } = useCollection<BenefitPlan>("benefit-plans");
   const { rows: enrollments, reload: reloadEnr } = useCollection<BenefitEnrollment>("benefit-enrollments");
-  const { rows: dependents, reload: reloadDeps } = useCollection<Dependent>("dependents");
+  // This page is strictly self-service, and server list scoping can hand an HR viewer EVERYONE's dependents -
+  // so ask for the caller's own, server-side. One person's rows instead of a page of the org's.
+  const { rows: dependents, reload: reloadDeps } = useCollection<Dependent>("dependents", {
+    enabled: !!me.employee_id,
+    params: me.employee_id ? { employee: `employees/${me.employee_id}` } : {},
+  });
   const { toast } = useToast();
   const confirm = useConfirm();
   const { org } = useOrg();
@@ -63,6 +69,27 @@ export default function Benefits({ me }: { me: Me }) {
   // Answer-first: what am I enrolled in and what does it cost me per month?
   const enrolled = useMemo(() => plans.filter((p) => myEnrollment(idOf(p.path))?.status === "enrolled"), [plans, myEnrollment]);
   const monthlyCost = enrolled.reduce((s, p) => s + (p.cost_period === "year" ? p.employee_cost / 12 : p.employee_cost), 0);
+  // A plan you have neither taken nor waived is an open decision - the one thing on this page that needs doing.
+  const isUndecided = (p: BenefitPlan) => !myEnrollment(idOf(p.path));
+  const undecided = useMemo(() => plans.filter(isUndecided), [plans, myEnrollment]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Dependents you have added but not attached to any plan you are enrolled in: added, yet not covered.
+  const coveredDepIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const e of enrollments) {
+      if (!e.employee || idOf(e.employee) !== me.employee_id || e.status !== "enrolled") continue;
+      for (const d of e.dependents ?? []) s.add(idOf(d));
+    }
+    return s;
+  }, [enrollments, me.employee_id]);
+  const uncoveredDeps = myDeps.filter((d) => !coveredDepIds.has(idOf(d.path)));
+  const kf = useKpiFocus<BenefitPlan, "all" | "enrolled" | "paid" | "undecided" | "waived">({
+    all: { label: "plans", match: () => true },
+    enrolled: { label: "plans you are enrolled in", match: (p) => myEnrollment(idOf(p.path))?.status === "enrolled" },
+    paid: { label: "plans you pay for", match: (p) => myEnrollment(idOf(p.path))?.status === "enrolled" && p.employee_cost > 0 },
+    undecided: { label: "plans you have not decided on", match: isUndecided },
+    waived: { label: "plans you waived", match: (p) => myEnrollment(idOf(p.path))?.status === "waived" },
+  });
+  const shownPlans = kf.apply(plans);
 
   async function saveDependent(body: { name: string; relationship: DependentRelationship; date_of_birth: string | null }, existing: Dependent | null) {
     try {
@@ -101,15 +128,22 @@ export default function Benefits({ me }: { me: Me }) {
         {plans.length > 0 && (
           <SummaryStrip
             items={[
-              { label: "Enrolled plans", value: enrolled.length, icon: HeartPulse, tone: enrolled.length ? "default" : "muted", hint: enrolled.length ? undefined : "nothing elected yet" },
-              { label: "Your cost", value: monthlyCost > 0 ? `${money(Math.round(monthlyCost))}/mo` : "Free", tone: monthlyCost > 0 ? "default" : "success", hint: "across enrolled plans" },
-              { label: "Dependents", value: myDeps.length, icon: Users, tone: myDeps.length ? "default" : "muted" },
+              { label: "Enrolled plans", value: enrolled.length, icon: HeartPulse, tone: enrolled.length ? "default" : "muted", hint: enrolled.length ? "show only these" : "nothing elected yet", ...kf.kpi("enrolled") },
+              ...(undecided.length
+                ? [{ label: "Not decided", value: undecided.length, icon: HeartPulse, tone: "warning" as const, hint: "enrol or waive these", ...kf.kpi("undecided") }]
+                : []),
+              { label: "Your cost", value: monthlyCost > 0 ? `${money(Math.round(monthlyCost))}/mo` : "Free", tone: monthlyCost > 0 ? "default" : "success", hint: "enrolled plans", ...kf.kpi("paid") },
+              {
+                label: "Dependents", value: myDeps.length, icon: Users, tone: myDeps.length ? "default" : "muted",
+                hint: uncoveredDeps.length ? `${uncoveredDeps.length} not covered` : myDeps.length ? "all covered" : "none added",
+                onClick: () => document.getElementById("benefit-dependents")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+              },
             ]}
           />
         )}
 
         {/* Dependents */}
-        <div className="mb-6">
+        <div id="benefit-dependents" className="mb-6 scroll-mt-24">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="flex items-center gap-2 text-sm font-semibold"><Users className="h-4 w-4 text-muted-foreground" /> Your dependents</h2>
             <AccessAction collection="dependents" create label="Add dependent">
@@ -136,7 +170,13 @@ export default function Benefits({ me }: { me: Me }) {
           <EmptyState icon={HeartPulse} title="No plans available" description="Benefit plans will appear here once HR adds them." />
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {plans.map((p) => {
+            {shownPlans.length === 0 && (
+              <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground md:col-span-2 xl:col-span-3">
+                No {kf.activeLabel}.{" "}
+                <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show all plans</button>
+              </p>
+            )}
+            {shownPlans.map((p) => {
               const enr = myEnrollment(idOf(p.path));
               return (
                 <AccessItem key={p.path} collection="benefit-plans" objectPath={p.path} can={p.access?.can} why={p.access?.why} label="Benefit">
@@ -200,8 +240,9 @@ function DependentDialog({ dependent, onClose, onSave }: {
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
+      <DialogContent scrollBody onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
         <DialogHeader><DialogTitle>{dependent ? "Edit dependent" : "Add dependent"}</DialogTitle></DialogHeader>
+        <DialogBody>
         <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus /></Field>
         <Field label="Relationship">
           <Select value={form.relationship} onValueChange={(v) => setForm({ ...form, relationship: v as DependentRelationship })}>
@@ -212,6 +253,7 @@ function DependentDialog({ dependent, onClose, onSave }: {
         <Field label="Date of birth (optional)" error={dobFuture ? "Date of birth can't be in the future." : undefined}>
           <Input type="date" value={form.date_of_birth} onChange={(e) => setForm({ ...form, date_of_birth: e.target.value })} />
         </Field>
+        </DialogBody>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={doSave} loading={busy} disabled={!valid}>{dependent ? "Save" : "Add dependent"}</Button>

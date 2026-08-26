@@ -48,9 +48,9 @@ export function ActionList({ actions, onChange, meta, triggerType, inArm }: { ac
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{i + 1}. {LABEL[a.kind]}</span>
             <div className="flex gap-0.5">
-              <Button type="button" variant="ghost" size="icon" onClick={() => move(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></Button>
-              <Button type="button" variant="ghost" size="icon" onClick={() => move(i, 1)} disabled={i === actions.length - 1}><ChevronDown className="h-4 w-4" /></Button>
-              <Button type="button" variant="ghost" size="icon" onClick={() => del(i)}><Trash2 className="h-4 w-4" /></Button>
+              <Button type="button" variant="ghost" size="icon" aria-label="Move this action earlier" onClick={() => move(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></Button>
+              <Button type="button" variant="ghost" size="icon" aria-label="Move this action later" onClick={() => move(i, 1)} disabled={i === actions.length - 1}><ChevronDown className="h-4 w-4" /></Button>
+              <Button type="button" variant="ghost" size="icon" aria-label="Remove this action" onClick={() => del(i)}><Trash2 className="h-4 w-4" /></Button>
             </div>
           </div>
           <ActionEditor action={a} onChange={(x) => set(i, x)} meta={meta} triggerType={triggerType} vars={variablesFor(meta, triggerType, capturesBefore(actions, i), inArm)} />
@@ -79,7 +79,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
     case "notify":
       return (
         <div className="space-y-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm text-muted-foreground">To</span>
             <Select value={a.recipient.of} onValueChange={(of) => onChange({ ...a, recipient: { of: of as never } })}>
               <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
@@ -123,7 +123,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
     case "wait":
       return (
         <div className="space-y-2">
-          <div className="flex items-center gap-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-muted-foreground">Wait</span>
             <Input type="number" className="h-9 w-20" value={a.delayDays ?? 0} onChange={(e) => onChange({ ...a, delayDays: Number(e.target.value) })} /> <span>days</span>
             <Input type="number" className="h-9 w-20" value={a.delayHours ?? 0} onChange={(e) => onChange({ ...a, delayHours: Number(e.target.value) })} /> <span>hours, then:</span>
@@ -145,7 +145,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
     case "email":
       return (
         <div className="space-y-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm text-muted-foreground">To</span>
             <Select value={a.to.of} onValueChange={(of) => onChange({ ...a, to: of === "address" ? { of: "address", address: "" } : { of: of as never } })}>
               <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
@@ -166,16 +166,16 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
                 const setAtt = (next: typeof att) => onChange({ ...a, attachments: (a.attachments ?? []).map((x, j) => (j === i ? next : x)) });
                 return (
                   <div key={i} className="space-y-1.5 rounded-md border p-2">
-                    <div className="flex items-center gap-1.5">
+                    <div className="editor-row gap-1.5">
                       <Select value={isBank ? "bankFile" : "document"} onValueChange={(t) => setAtt(t === "bankFile" ? { bankFile: { run: "{{subject}}", bank: "" }, filename: att.filename } : { document: "{{subject}}", filename: att.filename })}>
                         <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
                         <SelectContent><SelectItem value="document">Stored document</SelectItem><SelectItem value="bankFile">Payroll bank file</SelectItem></SelectContent>
                       </Select>
-                      <Input className="h-9 flex-1" value={att.filename ?? ""} onChange={(e) => setAtt({ ...att, filename: e.target.value || undefined })} placeholder="filename (optional)" />
-                      <Button type="button" variant="ghost" size="icon" onClick={() => onChange({ ...a, attachments: (a.attachments ?? []).filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4" /></Button>
+                      <Input className="editor-row-main h-9" value={att.filename ?? ""} onChange={(e) => setAtt({ ...att, filename: e.target.value || undefined })} placeholder="filename (optional)" />
+                      <Button type="button" variant="ghost" size="icon" aria-label="Remove this attachment" onClick={() => onChange({ ...a, attachments: (a.attachments ?? []).filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4" /></Button>
                     </div>
                     {isBank ? (
-                      <div className="flex items-center gap-1.5">
+                      <div className="editor-row gap-1.5">
                         <TemplatedInput value={att.bankFile.run} onChange={(run) => setAtt({ bankFile: { ...att.bankFile, run }, filename: att.filename })} vars={vars} placeholder="run, e.g. {{subject}}" />
                         <Input className="h-9 w-40" value={att.bankFile.bank} onChange={(e) => setAtt({ bankFile: { ...att.bankFile, bank: e.target.value }, filename: att.filename })} placeholder="bank format slug" />
                       </div>
@@ -233,10 +233,12 @@ function ApiCallEditor({ action, onChange, meta, vars }: { action: Extract<Actio
     <Field label="Fields">
       <div className="space-y-1.5">
         {rows.map((r, i) => (
+          // A 160px key field beside a value field and a delete button is the whole width of a phone-sized
+          // dialog, so the key field narrows there and the pair still reads as one row.
           <div key={i} className="flex items-center gap-1.5">
-            <Input className="h-9 w-40" value={r.key} onChange={(e) => setRows(rows.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))} placeholder="field" />
+            <Input className="h-9 w-28 sm:w-40" value={r.key} onChange={(e) => setRows(rows.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))} placeholder="field" />
             <TemplatedInput value={r.value} onChange={(v) => setRows(rows.map((x, j) => (j === i ? { ...x, value: v } : x)))} vars={vars} placeholder="value" />
-            <Button type="button" variant="ghost" size="icon" onClick={() => setRows(rows.filter((_, j) => j !== i))}><Trash2 className="h-4 w-4" /></Button>
+            <Button type="button" variant="ghost" size="icon" aria-label="Remove this field" onClick={() => setRows(rows.filter((_, j) => j !== i))}><Trash2 className="h-4 w-4" /></Button>
           </div>
         ))}
         <Button type="button" variant="outline" size="sm" onClick={() => setRows([...rows, { key: "", value: "" }])}><Plus className="mr-1 h-4 w-4" /> Add field</Button>
@@ -312,14 +314,16 @@ function RecordCall({ action, onChange, resources, vars, bodyForm }: { action: E
   return (
     <>
       <Field label="Which record"><TemplatedInput value={record} onChange={setRecord} vars={vars} placeholder="{{subject}}" /></Field>
-      <div className="flex items-center gap-2">
-        <span className="text-sm text-muted-foreground">Record type</span>
+      {/* Two 160-190px selects behind a label do not fit a phone on one line, so the row wraps and each
+          select takes the width it is given below `sm`. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="w-full text-sm text-muted-foreground sm:w-auto">Record type</span>
         <Select value={resourceName} onValueChange={setResourceName}>
-          <SelectTrigger className="h-9 w-48"><SelectValue placeholder="pick to list actions" /></SelectTrigger>
+          <SelectTrigger className="h-9 w-full sm:w-48"><SelectValue placeholder="pick to list actions" /></SelectTrigger>
           <SelectContent>{resources.map((r) => <SelectItem key={r.name} value={r.name}>{r.label}</SelectItem>)}</SelectContent>
         </Select>
         <Select value={verb} onValueChange={setVerb}>
-          <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="h-9 w-full sm:w-40"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="update">Update</SelectItem>
             <SelectItem value="delete">Delete</SelectItem>
@@ -343,8 +347,11 @@ function WaitForEditor({ action, onChange, meta, triggerType }: { action: Extrac
         const isEvent = "event" in arm;
         return (
           <Card key={i} className="border-dashed p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
+            <div className="mb-2 flex items-start justify-between gap-2">
+              {/* "On event" + which event + how to match is 124 + 224 + 160px of stated width. It has to
+                  stack on a phone, and the branch's delete button stays pinned at the top right of the
+                  block rather than centring itself against a three-line stack. */}
+              <div className="editor-row min-w-0 flex-1">
                 <Select value={isEvent ? "event" : "timer"} onValueChange={(t) => setArm(i, t === "event" ? { event: "", then: arm.then } : { timer: { days: 7 }, then: arm.then })}>
                   <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
                   <SelectContent><SelectItem value="event">⚡ On event</SelectItem><SelectItem value="timer">⏲ After timer</SelectItem></SelectContent>
@@ -367,7 +374,7 @@ function WaitForEditor({ action, onChange, meta, triggerType }: { action: Extrac
                   </div>
                 )}
               </div>
-              <Button type="button" variant="ghost" size="icon" onClick={() => delArm(i)} disabled={action.on.length <= 1}><Trash2 className="h-4 w-4" /></Button>
+              <Button type="button" variant="ghost" size="icon" aria-label="Remove this branch" onClick={() => delArm(i)} disabled={action.on.length <= 1}><Trash2 className="h-4 w-4" /></Button>
             </div>
             <div className="ml-3 border-l pl-3">
               <ActionList actions={arm.then} onChange={(then) => setArm(i, { ...arm, then } as WaitArm)} meta={meta} triggerType={isEvent ? (arm as { event: string }).event || triggerType : triggerType} inArm />

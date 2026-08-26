@@ -57,10 +57,10 @@ type AlwaysPresent = {
   cron_run: "path" | "cron" | "status";
   department: "display_name" | "managers";
   dependent: "name" | "relationship";
-  employee: "first_name" | "last_name" | "work_email" | "epf_enrolled";
+  employee: "first_name" | "last_name" | "work_email" | "epf_enrolled" | "eps_excluded";
   event: "title" | "start_time" | "end_time" | "all_day" | "count_as_work" | "requires_clock_in" | "attendees";
   expense: "amount" | "tax_amount" | "reimbursable" | "recurring";
-  "expense-budget": "period_type" | "period_key" | "amount";
+  "expense-budget": "period_type" | "period_key" | "amount" | "recurring";
   "expense-category": "display_name" | "requires_receipt";
   goal: "title" | "weight" | "progress" | "status";
   holiday: "display_name" | "date" | "kind";

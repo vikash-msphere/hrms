@@ -3,7 +3,11 @@
 // "Submit manager review - share the written review with the employee" does. Generic verbs cover the many
 // collections sharing approve/reject/upload/…; per-collection overrides refine where the same token means
 // something specific. Fallback: camelCase -> spaced words, no description.
-type VerbInfo = { label: string; description?: string };
+// `caution` is for the rare verb whose grant is WIDER than its name suggests - where the honest description of
+// what you are handing over does not fit in the one-liner, and a reader picking it out of a list of twenty
+// otherwise-ordinary methods would have no way to know. It is surfaced next to the verb rather than buried in a
+// tooltip, because the whole point is that it should be read before the grant is made.
+type VerbInfo = { label: string; description?: string; caution?: string };
 
 const GENERIC: Record<string, VerbInfo> = {
   approve: { label: "Approve", description: "Move a pending request to approved." },
@@ -85,6 +89,13 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
     upvote: { label: "Upvote" }, downvote: { label: "Remove upvote" },
   },
   referrals: { award: { label: "Award bonus", description: "Create the referral bonus for the next payroll." } },
+  assets: {
+    verify: { label: "Check into stock", description: "Scan an asset's tag to count it in - what makes \"in stock\" a fact rather than a claim." },
+    acknowledge: { label: "Confirm receipt", description: "The holder scanning the tag on the thing they were handed (their own assets only)." },
+    printTag: { label: "Print tags", description: "Print stickers - and see the tag secret printed inside the QR." },
+    reissueTag: { label: "Reissue tag", description: "Kill a lost or defaced sticker and queue a new one." },
+    batchCreate: { label: "Add many at once", description: "Add a whole delivery: a quantity of identical things, or a list of serial numbers." },
+  },
   "tax-declarations": { verify: { label: "Verify", description: "Accept the declared investment with its proof." } },
   "bank-formats": { uploadTemplate: { label: "Upload template", description: "Replace the bank file template." } },
   operations: { run: { label: "Run", description: "Execute the maintenance job." } },
@@ -106,7 +117,16 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
   transitions: { appendTask: { label: "Add task", description: "Append a checklist task to the running process." } },
   "transition-tasks": { upload: { label: "Upload document", description: "Attach the document a task asks for." } },
   "access-rules": {
-    preview: { label: "Preview access", description: "Ask the engine what a person can do (view-as)." },
+    preview: {
+      label: "Preview access",
+      description: "Ask the engine what a person can do (view-as).",
+      // "View as" swaps the whole PRINCIPAL, so the holder reads the app with the subject's grant, list scopes
+      // and field redaction - that is what makes the simulation honest, and it is also what makes this verb far
+      // wider than "preview". The server refuses a super subject to a non-super holder (lib/viewAs.ts rail 2),
+      // but full containment is not computable over pattern grants, so any OTHER role is reachable: hold this
+      // and you can read payroll through a payroll admin. Keep it with the people who already see everything.
+      caution: "Grants read access to anything any non-super role can see, by simulating that person. Treat it as an access-admin capability, not an ordinary method.",
+    },
     requestAccess: { label: "Request access", description: "Let people ask access admins for a missing grant (grant to Everyone to enable the flow)." },
     approve: { label: "Approve permission changes", description: "Apply a pending grant or removal queued by four-eyes approval. Nobody can approve their own request." },
     reject: { label: "Reject permission changes", description: "Turn down a pending grant or removal queued by four-eyes approval." },

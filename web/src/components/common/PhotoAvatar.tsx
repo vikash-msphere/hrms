@@ -2,16 +2,19 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Camera, Upload } from "lucide-react";
 import { api } from "@/api";
 import { requestPhoto, subscribePhoto, invalidatePhoto } from "@/lib/photoCache";
-import { cn, colorFromString, initials } from "@/lib/utils";
+import { colorFromString, initials } from "@/lib/utils";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { FormError } from "@/components/common/FormError";
+import { useConfirm } from "@/components/common/confirm";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { AccessAction } from "@/components/access/AccessAction";
 
 const VP = 256; // crop viewport (px)
 const OUT = 512; // exported square (px)
+const MAX_BYTES = 10 * 1024 * 1024; // what a phone camera produces, with room to spare
 
 /** Profile avatar that shows the employee's photo (fetched as a blob) and, when editable,
  *  lets the owner/HR/super_admin upload (with crop + zoom) or remove it. */
@@ -37,10 +40,15 @@ export function PhotoAvatar({
   onOpenChange?: (open: boolean) => void;
 }) {
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [openLocal, setOpenLocal] = useState(false);
   const open = openProp ?? openLocal;
   const setOpen = onOpenChange ?? setOpenLocal;
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  // True once a NEW image has been chosen in this session - the only state worth protecting on close, since
+  // the crop of an already-saved photo can be redone in a second.
+  const [picked, setPicked] = useState(false);
   // The photo bytes come from the shared session cache, which batches every avatar mounted in the same tick
   // into one `employees:batchGetPhotos` request (no per-avatar fetch). `src` is a data URI or null.
   const src = useSyncExternalStore(
@@ -71,15 +79,37 @@ export function PhotoAvatar({
 
   function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    e.target.value = ""; // so re-picking the same file after an error still fires a change
     if (!file) return;
+    // Caught here rather than at the upload: the crop step re-encodes to a 512px JPEG, so a rejected giant
+    // would otherwise only fail after someone had finished positioning it.
+    if (!file.type.startsWith("image/")) {
+      setErr("That's not an image. Pick a JPEG, PNG or HEIC file.");
+      return;
+    }
+    if (file.size > MAX_BYTES) {
+      setErr(`That image is ${(file.size / 1024 / 1024).toFixed(1)}MB. Pick one under ${MAX_BYTES / 1024 / 1024}MB.`);
+      return;
+    }
+    setErr(null);
     const reader = new FileReader();
     reader.onload = () => {
       setImgSrc(reader.result as string);
+      setPicked(true);
       setZoom(1);
       setOff({ x: 0, y: 0 });
       setNat(null);
     };
+    reader.onerror = () => setErr("Couldn't read that file.");
     reader.readAsDataURL(file);
+  }
+
+  // Closing after picking an image discards it, so ask - the same interception the form dialogs use, applied
+  // to the one piece of work in here that can't be redone in a click.
+  async function requestClose(next: boolean) {
+    if (next) return;
+    if (picked && !(await confirm({ title: "Discard this photo?", description: "The image you picked hasn't been saved yet.", destructive: true, confirmLabel: "Discard", cancelLabel: "Keep editing" }))) return;
+    setOpen(false);
   }
 
   function onPointerDown(e: React.PointerEvent) {
@@ -96,6 +126,7 @@ export function PhotoAvatar({
     setNat(null);
     setZoom(1);
     setOff({ x: 0, y: 0 });
+    setPicked(false);
   }
 
   // Init on open (whether via the hover overlay or the controlled prop): reset the crop and preload
@@ -106,12 +137,15 @@ export function PhotoAvatar({
     setOff({ x: 0, y: 0 });
     setNat(null);
     setImgSrc(src);
+    setPicked(false);
+    setErr(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   async function save() {
     if (!nat || !imgRef.current) return;
     setSaving(true);
+    setErr(null);
     try {
       const canvas = document.createElement("canvas");
       canvas.width = OUT;
@@ -131,14 +165,16 @@ export function PhotoAvatar({
       invalidatePhoto(employeeId); // drop the stale cached photo + refetch
       onChanged?.();
     } catch (e) {
-      toast({ title: "Couldn't upload", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setSaving(false);
     }
   }
 
   async function remove() {
+    if (!(await confirm({ title: "Remove this photo?", description: "Their avatar falls back to initials everywhere it appears. The image can't be recovered.", destructive: true, confirmLabel: "Remove" }))) return;
     setSaving(true);
+    setErr(null);
     try {
       await api(`/employees/${employeeId}:clearPhoto`, { method: "POST" });
       toast({ title: "Photo removed", variant: "success" });
@@ -147,7 +183,7 @@ export function PhotoAvatar({
       reset();
       onChanged?.();
     } catch (e) {
-      toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -180,11 +216,14 @@ export function PhotoAvatar({
         )}
       </div>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={requestClose}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Profile photo</DialogTitle>
+            <DialogDescription>Shown wherever {name} appears - the directory, approvals, the org chart. Saved as a 512px square.</DialogDescription>
           </DialogHeader>
+
+          <FormError error={err} />
 
           {!imgSrc ? (
             <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed py-10 text-sm text-muted-foreground hover:bg-muted/40">
@@ -224,17 +263,22 @@ export function PhotoAvatar({
           )}
 
           <DialogFooter className="sm:justify-between">
+            {/* order-last on a phone: the footer is a reversed column there, so being first in the markup
+                would put "Remove photo" at the bottom edge - under the thumb, below Cancel. */}
             {photo ? (
-              <AccessAction collection="employees" objectPath={`employees/${employeeId}`} verb="clearPhoto" label="Remove photo">
-                <Button variant="ghost" className="text-destructive hover:text-destructive" onClick={remove} loading={saving}>
-                  Remove photo
-                </Button>
-              </AccessAction>
+              <span className="order-last sm:order-none">
+                <AccessAction collection="employees" objectPath={`employees/${employeeId}`} verb="clearPhoto" label="Remove photo">
+                  <Button variant="ghost" className="w-full text-destructive hover:text-destructive sm:w-auto" onClick={remove} loading={saving}>
+                    Remove photo
+                  </Button>
+                </AccessAction>
+              </span>
             ) : (
-              <span />
+              <span className="order-last sm:order-none" />
             )}
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            {/* Reversed to match DialogFooter's own stacking: primary above, Cancel at the bottom edge. */}
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
+              <Button variant="outline" onClick={() => requestClose(false)}>Cancel</Button>
               {imgSrc && <Button onClick={save} loading={saving} disabled={!nat}>Save photo</Button>}
             </div>
           </DialogFooter>

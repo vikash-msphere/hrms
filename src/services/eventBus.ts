@@ -3,12 +3,13 @@
 // which runs any matching data-defined rules. BEST-EFFORT, exactly like notify(): an event or automation
 // failure must NEVER break the action that triggered it (an approval still succeeds if logging fails) - so the
 // whole thing is wrapped and swallowed. This is what lets cross-module workflows be data instead of inline code.
-import { allocFlatCode } from "./codeAlloc";
+import { allocFlatCode, allocFlatCodes } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { DomainEvent } from "../domain/events";
-import { dispatchAutomations } from "./automationEngine";
+import { anyAutomationInterest, dispatchAutomations } from "./automationEngine";
+import { insertBatches, runBatch } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
 
 export type EmitOptions = {
@@ -60,6 +61,58 @@ export async function emitEvent(deps: Deps, actor: AppUser | null, type: string,
     await dispatchAutomations(deps, event, eventId, opts.depth ?? 0);
   } catch (e) {
     console.error("[emitEvent] automation dispatch failed (non-fatal)", e);
+  } finally {
+    if (isRoot) deps.trace = undefined;
+  }
+}
+
+/**
+ * Emit MANY events of one type in a single act (twenty assets added out of one box), as one write.
+ *
+ * Same contract as emitEvent - append the log rows, then hand each event to the engine - shaped for the
+ * subrequest budget instead of for one event: the codes are allocated from one read, the rows land in one
+ * batch, and the engine is asked ONCE whether anything is listening at all. An org with no rule and no waiting
+ * workflow for the type therefore pays two reads for a hundred events rather than three hundred; when
+ * something IS listening, each event is dispatched individually exactly as a single emit would be, because a
+ * rule that fires per asset must still fire per asset.
+ *
+ * The whole run shares one correlation id: it was one act, and the trace should say so.
+ */
+export async function emitEvents(deps: Deps, actor: AppUser | null, type: string, list: EmitOptions[]): Promise<void> {
+  if (!list.length) return;
+  const isRoot = !deps.trace;
+  const correlationId = deps.trace ?? genId();
+  if (isRoot) deps.trace = correlationId;
+  const actorId = actor && actor.uuid !== "system" ? actor.uuid : null;
+  const occurredAt = deps.clock.now();
+  const events: { event: DomainEvent; id: string | null }[] = list.map((opts) => ({
+    id: genId(), // minted here, not read back: a batched insert returns no rows to take ids from
+    event: { type, subject: opts.subject ?? null, actorId, employeeId: opts.employeeId ?? null, payload: opts.payload ?? {}, occurredAt },
+  }));
+  try {
+    const codes = await allocFlatCodes(deps, schema.eventLog, events.length);
+    const values = events.map((e, i) => ({
+      uuid: e.id!,
+      code: codes[i]!,
+      type,
+      subject: e.event.subject,
+      actorId,
+      employeeId: e.event.employeeId,
+      payloadJson: JSON.stringify(e.event.payload),
+      correlationId,
+      occurredAt,
+    }));
+    await runBatch(deps.db, insertBatches(values, (rows) => deps.db.insert(schema.eventLog).values(rows)));
+  } catch (e) {
+    console.error("[emitEvents] event_log insert failed (non-fatal)", e);
+    for (const ev of events) ev.id = null; // the rows are not there, so no run may claim to point at one
+  }
+  try {
+    if (await anyAutomationInterest(deps, type)) {
+      for (const { event, id } of events) await dispatchAutomations(deps, event, id, list[0]?.depth ?? 0);
+    }
+  } catch (e) {
+    console.error("[emitEvents] automation dispatch failed (non-fatal)", e);
   } finally {
     if (isRoot) deps.trace = undefined;
   }

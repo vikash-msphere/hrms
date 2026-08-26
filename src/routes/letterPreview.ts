@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../env";
+import { jsonBody } from "../http/jsonRequest";
 import { assembleLetterContext } from "../services/letterData";
 import { resolveLetter, type LetterTemplate } from "../domain/letters";
 import { renderLetterPdf } from "../lib/letterPdf";
@@ -27,7 +28,7 @@ const bodySchema = z
   .strict();
 
 export const letterPreview = new Hono<AppEnv>().post("/", async (c) => {
-  const parsed = bodySchema.safeParse(await c.req.json().catch(() => ({})));
+  const parsed = bodySchema.safeParse(await jsonBody(c));
   if (!parsed.success) throw invalidArgument("body must be { employee, template }");
   const { employee, template, input } = parsed.data;
   const employeeId = idFromPath(employee);

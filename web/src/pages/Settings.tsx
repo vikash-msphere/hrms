@@ -1,10 +1,10 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+// lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
+import { lazyPage as lazy } from "@/lib/lazyPage";
 import { navigate } from "@/router";
 import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Type, Image as ImageIcon } from "lucide-react";
 import { get, patch, create, remove, list } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
-import { BoardConfigPanel } from "@/settings/BoardConfigPanel";
-import { NotificationPrefsPanel } from "@/components/notifications/NotificationPrefsPanel";
 import { hasCapability } from "@/lib/perm";
 import { APP_NAME } from "@/lib/brand";
 import type { OrgSettings } from "@/lib/org";
@@ -18,40 +18,53 @@ import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Me, AtsConfig, AtsStage } from "@/types";
+import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Me, AtsConfig, AtsStage, Automation } from "@/types";
 import { DEFAULT_ATS_CONFIG } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { EmptyState } from "@/components/common/EmptyState";
+import { PanelSkeleton, RowsSkeleton } from "@/components/common/Skeletons";
 import { UnsavedScope, useUnsaved, useUnsavedTracker } from "@/components/common/UnsavedChanges";
-import { Field } from "@/components/common/Field";
-import { KudosLevelsTab } from "@/components/common/KudosLevelsTab";
-import { RolesPanel } from "@/components/common/RolesPanel";
-import { RolesManagePanel } from "@/components/common/RolesManagePanel";
-import { ApiKeysPanel } from "@/components/common/ApiKeysPanel";
-import { PermissionsPanel } from "@/components/common/PermissionsPanel";
+import { Field, FieldRow } from "@/components/common/Field";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { AccessAction } from "@/components/access/AccessAction";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
-import PayComponents from "@/pages/PayComponents";
-import PayGradesAdmin from "@/pages/PayGradesAdmin";
-import SalaryStructuresAdmin from "@/pages/SalaryStructuresAdmin";
-// Lazy: pulls in the xlsx parser only when the Bank formats tab is opened (keeps it out of the main bundle).
+// ---- Panels: every one of them lazy ------------------------------------------------------------------------
+//
+// Nobody opens fifty settings panels. They open one. Importing them statically made Settings a single 320 kB
+// chunk - four times the next-largest page - so opening "Employee IDs" downloaded the payslip designer, the
+// board config editor, the permissions matrix and every catalog admin with it. Three of them were already lazy
+// on exactly this reasoning (the xlsx parser, the letter editor, the payslip editor); the argument was never
+// specific to those three.
+//
+// `renderSettingsPanel` wraps the whole switch in ONE Suspense, so a panel becoming lazy needs no change at any
+// call site - and the settings hub itself (cards, search, the command palette) reads metadata from
+// settings/registry.ts, which stays a static import precisely so it costs nothing.
+const PayComponents = lazy(() => import("@/pages/PayComponents"));
+const PayGradesAdmin = lazy(() => import("@/pages/PayGradesAdmin"));
+const SalaryStructuresAdmin = lazy(() => import("@/pages/SalaryStructuresAdmin"));
 const BankFormats = lazy(() => import("@/pages/BankFormats"));
-// Lazy: the letter-template editor (block editor + preview) is only loaded when its tab is opened.
 const LettersTab = lazy(() => import("@/pages/LettersTab"));
-// Lazy: the payslip-design editor (block editor + PDF preview), same reasoning as the letter editor.
 const PayslipDesignTab = lazy(() => import("@/pages/PayslipDesignTab"));
-import LeaveTypes from "@/pages/LeaveTypes";
-import ReviewCycles from "@/pages/ReviewCycles";
-import { PerformanceFramework } from "@/components/common/PerformanceFramework";
-import { TransitionTemplatesEditor } from "@/components/common/TransitionTemplatesEditor";
-import BenefitPlansAdmin from "@/pages/BenefitPlansAdmin";
-import ShiftsAdmin from "@/pages/ShiftsAdmin";
-import ProjectsAdmin from "@/pages/ProjectsAdmin";
-import Departments from "@/pages/Departments";
-import ReimbursementCategories from "@/pages/ReimbursementCategories";
-import ExpenseCategories from "@/pages/ExpenseCategories";
-import Operations from "@/pages/Operations";
+const LeaveTypes = lazy(() => import("@/pages/LeaveTypes"));
+const ReviewCycles = lazy(() => import("@/pages/ReviewCycles"));
+const BenefitPlansAdmin = lazy(() => import("@/pages/BenefitPlansAdmin"));
+const ShiftsAdmin = lazy(() => import("@/pages/ShiftsAdmin"));
+const ProjectsAdmin = lazy(() => import("@/pages/ProjectsAdmin"));
+const Departments = lazy(() => import("@/pages/Departments"));
+const ReimbursementCategories = lazy(() => import("@/pages/ReimbursementCategories"));
+const ExpenseCategories = lazy(() => import("@/pages/ExpenseCategories"));
+const AssetCategories = lazy(() => import("@/pages/AssetCategories"));
+const Operations = lazy(() => import("@/pages/Operations"));
+// Named exports, so the module has to be re-shaped into the `{ default }` lazy() expects.
+const BoardConfigPanel = lazy(() => import("@/settings/BoardConfigPanel").then((m) => ({ default: m.BoardConfigPanel })));
+const NotificationPrefsPanel = lazy(() => import("@/components/notifications/NotificationPrefsPanel").then((m) => ({ default: m.NotificationPrefsPanel })));
+const KudosLevelsTab = lazy(() => import("@/components/common/KudosLevelsTab").then((m) => ({ default: m.KudosLevelsTab })));
+const RolesPanel = lazy(() => import("@/components/common/RolesPanel").then((m) => ({ default: m.RolesPanel })));
+const RolesManagePanel = lazy(() => import("@/components/common/RolesManagePanel").then((m) => ({ default: m.RolesManagePanel })));
+const ApiKeysPanel = lazy(() => import("@/components/common/ApiKeysPanel").then((m) => ({ default: m.ApiKeysPanel })));
+const PermissionsPanel = lazy(() => import("@/components/common/PermissionsPanel").then((m) => ({ default: m.PermissionsPanel })));
+const PerformanceFramework = lazy(() => import("@/components/common/PerformanceFramework").then((m) => ({ default: m.PerformanceFramework })));
+const TransitionTemplatesEditor = lazy(() => import("@/components/common/TransitionTemplatesEditor").then((m) => ({ default: m.TransitionTemplatesEditor })));
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -59,13 +72,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CONFIGURABLE_QUICK_ACTIONS, normalizeQuickMenu, type QuickMenuGroup } from "@/lib/quickActions";
 import { shortcutCatalog, DEFAULT_DASHBOARD_SHORTCUTS } from "@/lib/dashboardShortcuts";
-import { SHEET_FORMATS, DEFAULT_CATEGORY_CODES, DEFAULT_TAG_SETTINGS, allFormats, resolveTagConfig, formatTag, type AssetTagSettings, type SheetFormat } from "@/lib/assetTags";
+import { SHEET_FORMATS, FALLBACK_TAG_CODE, DEFAULT_TAG_SETTINGS, allFormats, resolveTagConfig, formatTag, type AssetTagSettings, type AssetCustodySettings, type SheetFormat } from "@/lib/assetTags";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ShieldAlert } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
+import { getSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 const DEFAULT_FIELDS: EmployeeFieldDef[] = [
@@ -115,7 +130,7 @@ function NotificationsTab({ toast }: { toast: Toast }) {
   const [events, setEvents] = useState<Record<string, EventCfg>>({});
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: { events?: Record<string, EventCfg> } }>("settings/notifications")
+    getSetting<{ events?: Record<string, EventCfg> }>("notifications")
       .then((s) => setEvents(s.value?.events ?? {}))
       .catch(() => {})
       .finally(() => setReady(true));
@@ -137,7 +152,7 @@ function NotificationsTab({ toast }: { toast: Toast }) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
     } finally { setSaving(false); }
   }
-  if (!ready) return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
+  if (!ready) return <Card><CardContent className="pt-6"><RowsSkeleton rows={7} /></CardContent></Card>;
   return (
     <Card>
       <CardHeader>
@@ -216,14 +231,18 @@ function SettingsRedirect({ entry }: { entry: SettingsEntry }) {
 
 // ----- Hub: search-first browse surface + greenfield setup checklist -----
 
-// Setup essentials a fresh org must configure before the app is genuinely usable. Probes are cheap:
-// collections ride the client cache; identity comes from the org context that is already loaded app-wide.
+// Setup essentials a fresh org must configure before the app is genuinely usable. Each probe asks one
+// question - "is there anything here at all" - so it asks for ONE ROW, not the page of up to a hundred a
+// default read would bring. Four one-row reads (in the page's own batch) instead of four collection pages, on
+// a checklist that is only ever shown to an org that hasn't finished setting up. Identity comes from the org
+// context that is already loaded app-wide.
+const PROBE = { max: 1 } as const;
 function useEssentials(me: Me) {
   const { org } = useOrg();
-  const depts = useCollection<{ path: string }>("departments");
-  const leaveTypes = useCollection<{ path: string }>("leave-types");
-  const payComponents = useCollection<{ path: string }>("pay-components");
-  const templates = useCollection<{ path: string }>("letter-templates");
+  const depts = useCollection<{ path: string }>("departments", PROBE);
+  const leaveTypes = useCollection<{ path: string }>("leave-types", PROBE);
+  const payComponents = useCollection<{ path: string }>("pay-components", PROBE);
+  const templates = useCollection<{ path: string }>("letter-templates", PROBE);
   const ready = [depts, leaveTypes, payComponents, templates].every((c) => c.state !== "loading");
   const items = [
     { key: "identity", label: "Set your company name & logo", done: !!org.logo || !!org.address || (!!org.name && org.name !== APP_NAME) },
@@ -287,7 +306,9 @@ function SettingsHub({ me }: { me: Me }) {
 
 function SettingsCardGrid({ entries }: { entries: SettingsEntry[] }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+    // Three across from `lg`: the section cards are short, and a laptop showed two columns of them with a
+    // third of the row empty and the list running twice as long as it needed to.
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {entries.map((e) => {
         const Icon = e.icon;
         return (
@@ -342,7 +363,10 @@ function SettingsPanel({ me, entry, toast, openId }: { me: Me; entry: SettingsEn
   return (
     <div className="lg:grid lg:grid-cols-[230px_minmax(0,1fr)] lg:gap-10">
       <aside className="hidden lg:block">
-        <nav className="sticky top-4 max-h-[calc(100vh-2rem)] space-y-5 overflow-y-auto pb-4 pr-1">
+        {/* Offset by the app bar's own 3.5rem: `top-4` pinned this column behind it, so its first few groups
+            were unreachable once the page scrolled. The height budget follows the same offset, and is `dvh`
+            so a mobile browser's collapsing chrome does not leave the last entry under the fold. */}
+        <nav className="sticky top-[4.5rem] max-h-[calc(100dvh-6rem)] space-y-5 overflow-y-auto pb-4 pr-1">
           <button
             type="button"
             onClick={() => navigate("settings")}
@@ -352,7 +376,7 @@ function SettingsPanel({ me, entry, toast, openId }: { me: Me; entry: SettingsEn
           </button>
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search settings…" className="h-8 rounded-md pl-8 text-sm" />
+            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search settings…" className="h-8 rounded-md pl-8 text-sm" />
           </div>
           {matches
             ? matches.length === 0
@@ -393,9 +417,20 @@ function SettingsPanel({ me, entry, toast, openId }: { me: Me; entry: SettingsEn
   );
 }
 
-const panelLoading = <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
+const panelLoading = <PanelSkeleton />;
 
+/**
+ * One panel, by registry key. Every panel is lazy (see the import block), so the whole switch sits behind a
+ * SINGLE Suspense boundary here rather than each case carrying its own - that is what let the remaining panels
+ * become lazy without touching this function's four call sites (the panel page, the inline `?setting=` Sheet,
+ * and the two deep-link entries).
+ */
 export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivElement | null, openId?: string, objectPath?: string, onClose?: () => void) {
+  const panel = pickSettingsPanel(key, me, toast, slot, openId, objectPath, onClose);
+  return panel === null ? null : <Suspense fallback={panelLoading}>{panel}</Suspense>;
+}
+
+function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivElement | null, openId?: string, objectPath?: string, onClose?: () => void) {
   switch (key) {
     // Object-scoped (per instance): opened inline from the object's own page, with its path.
     case "board-config": return objectPath ? <BoardConfigPanel objectPath={objectPath} onClose={onClose} /> : null;
@@ -406,7 +441,7 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
     case "banks-currency": return <OrgBanksPanel toast={toast} />;
     case "defaults": return <DefaultsTab toast={toast} />;
     case "employee-ids": return <EmployeeIdsTab toast={toast} />;
-    case "asset-tags": return <AssetTagsTab toast={toast} />;
+    case "asset-tags": return <AssetTagsTab toast={toast} openId={openId} />;
     case "departments": return <Departments embedded title="Departments" />;
     case "employee-fields": return <FieldsTab toast={toast} />;
     case "dashboard": return <DashboardTab toast={toast} />;
@@ -422,10 +457,10 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
     case "pay-grades": return <PayGradesAdmin embedded openId={openId} />;
     case "salary-structures": return <SalaryStructuresAdmin embedded openId={openId} />;
     case "payroll-policy": return <PayrollPolicyTab toast={toast} />;
-    case "payslip-design": return <Suspense fallback={panelLoading}><PayslipDesignTab toast={toast} /></Suspense>;
+    case "payslip-design": return <PayslipDesignTab toast={toast} />;
     case "reimbursements": return <ReimbursementsPanel toast={toast} openId={openId} />;
     case "expenses": return <ExpensesPanel toast={toast} openId={openId} />;
-    case "bank-formats": return <Suspense fallback={panelLoading}><BankFormats toast={toast} /></Suspense>;
+    case "bank-formats": return <BankFormats toast={toast} />;
     case "projects": return <ProjectsAdmin openId={openId} />;
     // Hiring & growth
     case "recruiting": return <AtsTab toast={toast} />;
@@ -434,7 +469,7 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
     case "onboarding-templates": return <TransitionTemplatesEditor />;
     case "benefit-plans": return <BenefitPlansAdmin openId={openId} />;
     // Comms & support
-    case "letters": return <Suspense fallback={panelLoading}><LettersTab toast={toast} /></Suspense>;
+    case "letters": return <LettersTab toast={toast} />;
     case "letter-defaults": return <OrgLetterDefaultsPanel toast={toast} />;
     case "esign": return <EsignTab toast={toast} />;
     case "notifications": return <NotificationsTab toast={toast} />;
@@ -487,7 +522,7 @@ function EsignTab({ toast }: { toast: Toast }) {
   const [providers, setProviders] = useState<ProviderMeta[]>([]);
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: Partial<EsignCfg> }>("settings/esign").then((s) => { if (s.value) setCfg((p) => ({ ...p, ...s.value, providers: s.value!.providers ?? {} })); }).catch(() => {}).finally(() => setReady(true));
+    getSetting<Partial<EsignCfg>>("esign").then((s) => { if (s.value) setCfg((p) => ({ ...p, ...s.value, providers: s.value!.providers ?? {} })); }).catch(() => {}).finally(() => setReady(true));
     get<{ providers: ProviderMeta[] }>("esign-providers").then((r) => setProviders(r.providers ?? [])).catch(() => {});
   }, []);
   const save = async () => { try { await patch("settings/esign", { value: cfg }); markSaved(); toast({ title: "E-signature settings saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
@@ -541,15 +576,15 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   // go stale - shared signal with the pay-components / salary-structures panels.
   const { canReapply, staleCount, skippedCount, reapplying, reapply: doReapply, promptReapply } = useSplitStaleness();
   const [ot, setOt] = useState({ enabled: false, multiplier: 2, hours_per_month: 200, rate_per_hour: 0 });
-  const [pt, setPt] = useState<{ slabs: { up_to: number | null; amount: number }[] }>({ slabs: [{ up_to: 25000, amount: 0 }, { up_to: null, amount: 200 }] });
+  const [pt, setPt] = useState<{ slabs: { up_to: number | null; amount: number }[]; annual_cap: number | null }>({ slabs: [{ up_to: 25000, amount: 0 }, { up_to: null, amount: 200 }], annual_cap: 2500 });
   const [ready, setReady] = useState(false);
   useEffect(() => {
     Promise.allSettled([
-      get<{ value?: Partial<typeof ctc> }>("settings/ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
-      get<{ value?: Partial<typeof ot> }>("settings/overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
-      get<{ value?: { slabs?: { up_to: number | null; amount: number }[] } }>("settings/professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs }); }),
-      get<{ value?: Partial<typeof gratuity> }>("settings/gratuity").then((s) => { if (s.value) setGratuity((p) => ({ ...p, ...s.value })); }),
-      get<{ value?: Partial<typeof perq> }>("settings/loan-perquisite").then((s) => { if (s.value) setPerq((p) => ({ ...p, ...s.value })); }),
+      getSetting<Partial<typeof ctc>>("ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
+      getSetting<Partial<typeof ot>>("overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
+      getSetting<{ slabs?: { up_to: number | null; amount: number }[]; annual_cap?: number | null }>("professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs, annual_cap: s.value.annual_cap ?? null }); }),
+      getSetting<Partial<typeof gratuity>>("gratuity").then((s) => { if (s.value) setGratuity((p) => ({ ...p, ...s.value })); }),
+      getSetting<Partial<typeof perq>>("loan-perquisite").then((s) => { if (s.value) setPerq((p) => ({ ...p, ...s.value })); }),
     ]).then(() => setReady(true));
   }, []);
   // Save the provisions, then offer to re-derive basic + Special Allowance for every current comp row under
@@ -568,7 +603,8 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const saveOt = async () => { try { await patch("settings/overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); markOtSaved(); toast({ title: "Overtime policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const savePt = async () => {
     const slabs = pt.slabs.map((s, i) => ({ up_to: i === pt.slabs.length - 1 ? null : Number(s.up_to) || 0, amount: Number(s.amount) || 0 }));
-    try { await patch("settings/professional-tax", { value: { slabs } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
+    const annual_cap = pt.annual_cap == null || !Number.isFinite(pt.annual_cap) ? null : Math.max(0, Number(pt.annual_cap));
+    try { await patch("settings/professional-tax", { value: { slabs, annual_cap } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
   };
   const saveGratuity = async () => { try { await patch("settings/gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const savePerq = async () => { try { await patch("settings/loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
@@ -577,7 +613,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const { markSaved: markCtcSaved } = useUnsaved(ctc, ready, saveCtc);
   const { markSaved: markOtSaved } = useUnsaved(ot, ready, saveOt);
   const { markSaved: markPtSaved } = useUnsaved(pt, ready, savePt);
-  const setSlab = (i: number, patchSlab: Partial<{ up_to: number | null; amount: number }>) => setPt((p) => ({ slabs: p.slabs.map((s, j) => (j === i ? { ...s, ...patchSlab } : s)) }));
+  const setSlab = (i: number, patchSlab: Partial<{ up_to: number | null; amount: number }>) => setPt((p) => ({ ...p, slabs: p.slabs.map((s, j) => (j === i ? { ...s, ...patchSlab } : s)) }));
 
   return (
     <Tabs defaultValue="ctc">
@@ -648,20 +684,27 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
             <div className="space-y-2">
               {pt.slabs.map((s, i) => {
                 const last = i === pt.slabs.length - 1;
+                // "Up to [amount] → deduct [amount] [x]" is ~400px of stated width plus prose, so on a
+                // phone the row wraps after the arrow rather than running off the card.
                 return (
-                  <div key={i} className="flex items-center gap-2">
+                  <div key={i} className="flex flex-wrap items-center gap-2">
                     <span className="text-sm text-muted-foreground">Up to</span>
                     {last ? <span className="w-32 text-sm font-medium">and above</span>
                       : <Input type="number" className="w-32" value={s.up_to ?? ""} onChange={(e) => setSlab(i, { up_to: Number(e.target.value) })} />}
                     <span className="text-sm text-muted-foreground">→ deduct</span>
                     <Input type="number" className="w-32" value={s.amount} onChange={(e) => setSlab(i, { amount: Number(e.target.value) })} />
-                    {!last && pt.slabs.length > 1 && <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setPt((p) => ({ slabs: p.slabs.filter((_, j) => j !== i) }))}><Trash2 className="h-4 w-4" /></Button>}
+                    {!last && pt.slabs.length > 1 && <Button size="icon" variant="ghost" aria-label="Remove this slab" className="h-8 w-8" onClick={() => setPt((p) => ({ ...p, slabs: p.slabs.filter((_, j) => j !== i) }))}><Trash2 className="h-4 w-4" /></Button>}
                   </div>
                 );
               })}
             </div>
+            <div className="sm:max-w-xs">
+              <Field label="Annual cap" hint="Article 276(2) caps professional tax at ₹2,500 a financial year. Payroll stops charging once the year's collection reaches it. Blank for no cap.">
+                <Input type="number" step="100" value={pt.annual_cap ?? ""} onChange={(e) => setPt((p) => ({ ...p, annual_cap: e.target.value === "" ? null : Number(e.target.value) }))} />
+              </Field>
+            </div>
             <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => setPt((p) => ({ slabs: [...p.slabs.slice(0, -1), { up_to: 0, amount: 0 }, p.slabs[p.slabs.length - 1]!] }))}><Plus className="h-4 w-4" /> Add slab</Button>
+              <Button size="sm" variant="outline" onClick={() => setPt((p) => ({ ...p, slabs: [...p.slabs.slice(0, -1), { up_to: 0, amount: 0 }, p.slabs[p.slabs.length - 1]!] }))}><Plus className="h-4 w-4" /> Add slab</Button>
               <Button size="sm" onClick={savePt}><Save className="h-4 w-4" /> Save</Button>
             </div>
           </CardContent>
@@ -710,7 +753,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
   const [tiers, setTiers] = useState<JoinTier[]>([]);
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: { award_trigger?: string; default_bonus_amount?: number; join_tiers?: JoinTier[] } }>("settings/referrals")
+    getSetting<{ award_trigger?: string; default_bonus_amount?: number; join_tiers?: JoinTier[] }>("referrals")
       .then((s) => {
         if (s.value?.award_trigger === "joining" || s.value?.award_trigger === "probation") setTrigger(s.value.award_trigger);
         if (typeof s.value?.default_bonus_amount === "number") setAmount(String(s.value.default_bonus_amount));
@@ -753,8 +796,10 @@ function ReferralsTab({ toast }: { toast: Toast }) {
         <div className="space-y-2">
           <p className="text-sm font-medium">Join-speed tiers <span className="font-normal text-muted-foreground">(optional)</span></p>
           <p className="text-xs text-muted-foreground">Vary the bonus by how fast the candidate joins after the offer (offer date &rarr; join date). Leave empty to always use the default. An explicit amount on a referral always wins.</p>
+          {/* "Joins within [n] days → [amount] [x]" - same shape as the PT slab row above, same reason
+              it has to be allowed to break on a phone. */}
           {tiers.map((t, i) => (
-            <div key={i} className="flex items-center gap-2">
+            <div key={i} className="flex flex-wrap items-center gap-2">
               <span className="text-sm text-muted-foreground">Joins within</span>
               <Input type="number" min={0} className="w-24" value={t.max_days ?? ""} placeholder="any" onChange={(e) => setTier(i, { max_days: e.target.value === "" ? null : Number(e.target.value) })} />
               <span className="text-sm text-muted-foreground">days &rarr;</span>
@@ -776,7 +821,7 @@ function AtsTab({ toast }: { toast: Toast }) {
   const [cfg, setCfg] = useState<AtsConfig>(DEFAULT_ATS_CONFIG);
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: Partial<AtsConfig> }>("settings/ats")
+    getSetting<Partial<AtsConfig>>("ats")
       .then((s) => { if (s.value && (s.value.stages?.length || s.value.sources?.length)) setCfg({ ...DEFAULT_ATS_CONFIG, ...s.value }); })
       .catch(() => {})
       .finally(() => setReady(true));
@@ -798,7 +843,16 @@ function AtsTab({ toast }: { toast: Toast }) {
     if (!stages.some((s) => s.kind === "hired")) { toast({ variant: "destructive", title: "Add a Hired stage", description: "One stage must have kind Hired (the success terminal)." }); return; }
     setSaving(true);
     try {
-      await patch("settings/ats", { value: { stages, sources: cfg.sources.filter(Boolean), rejection_reasons: cfg.rejection_reasons.filter(Boolean), scorecard_criteria: cfg.scorecard_criteria.filter((c) => c.label.trim()) } });
+      await patch("settings/ats", { value: {
+        stages,
+        sources: cfg.sources.filter(Boolean),
+        rejection_reasons: cfg.rejection_reasons.filter(Boolean),
+        scorecard_criteria: cfg.scorecard_criteria.filter((c) => c.label.trim()),
+        blind_scorecards: cfg.blind_scorecards,
+        offer_validity_days: cfg.offer_validity_days,
+        join_notice_days: cfg.join_notice_days,
+        offer_band_point: cfg.offer_band_point,
+      } });
       markSaved();
       toast({ title: "Recruiting settings saved" });
     } catch (e) {
@@ -815,6 +869,7 @@ function AtsTab({ toast }: { toast: Toast }) {
         <Tabs defaultValue="pipeline">
           <TabsList variant="segmented">
             <TabsTrigger value="pipeline">Pipeline</TabsTrigger>
+            <TabsTrigger value="offers">Offers & automation</TabsTrigger>
             <TabsTrigger value="sources">Sources & reasons</TabsTrigger>
             <TabsTrigger value="scorecards">Scorecards</TabsTrigger>
           </TabsList>
@@ -824,8 +879,8 @@ function AtsTab({ toast }: { toast: Toast }) {
             <p className="text-xs text-muted-foreground">The ordered columns of the hiring board. Mark exactly one stage as <b>Hired</b> (reaching it marks the candidate hired).</p>
             <div className="space-y-2">
               {cfg.stages.map((s, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <Input className="flex-1" value={s.label} onChange={(e) => setStage(i, { label: e.target.value })} placeholder="Stage name" />
+                <div key={i} className="editor-row">
+                  <Input className="editor-row-main" value={s.label} onChange={(e) => setStage(i, { label: e.target.value })} placeholder="Stage name" />
                   <Select value={s.kind} onValueChange={(v) => setStage(i, { kind: v as AtsStage["kind"] })}>
                     <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -842,6 +897,36 @@ function AtsTab({ toast }: { toast: Toast }) {
             <Button variant="outline" size="sm" onClick={addStage}><Plus className="h-4 w-4" /> Add stage</Button>
           </TabsContent>
 
+          {/* What a stage move does, and the numbers it does it with. The rules themselves live in Workflows;
+              this is where the figures they fill in are set, and where the pipeline explains itself. */}
+          <TabsContent value="offers" className="space-y-4">
+            <FieldRow>
+              <Field label="Offer validity" hint="Days an offer stands before it expires.">
+                <Input type="number" min={1} value={cfg.offer_validity_days} onChange={(e) => setCfg((c) => ({ ...c, offer_validity_days: Math.max(1, Number(e.target.value) || 1) }))} />
+              </Field>
+              <Field label="Notice period assumed" hint="Days from drafting to the proposed start date.">
+                <Input type="number" min={0} value={cfg.join_notice_days} onChange={(e) => setCfg((c) => ({ ...c, join_notice_days: Math.max(0, Number(e.target.value) || 0) }))} />
+              </Field>
+            </FieldRow>
+            <Field
+              label="Figure to propose"
+              hint={cfg.offer_band_point === "none"
+                ? "A drafted offer is left blank for whoever approves it to price."
+                : "Taken from the requisition's pay band. A requisition with no band leaves the figure blank."}
+            >
+              <Select value={cfg.offer_band_point} onValueChange={(v) => setCfg((c) => ({ ...c, offer_band_point: v as AtsConfig["offer_band_point"] }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="mid">Band midpoint</SelectItem>
+                  <SelectItem value="min">Band minimum</SelectItem>
+                  <SelectItem value="max">Band maximum</SelectItem>
+                  <SelectItem value="none">Leave it blank</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <StageAutomationPreview stages={cfg.stages} />
+          </TabsContent>
+
           <TabsContent value="sources" className="space-y-4">
             <Field label="Candidate sources" hint="One per line.">
               <Textarea rows={4} value={cfg.sources.join("\n")} onChange={(e) => setCfg((c) => ({ ...c, sources: e.target.value.split("\n").map((x) => x.trim()).filter(Boolean) }))} />
@@ -851,10 +936,21 @@ function AtsTab({ toast }: { toast: Toast }) {
             </Field>
           </TabsContent>
 
-          <TabsContent value="scorecards">
+          <TabsContent value="scorecards" className="space-y-4">
             <Field label="Interview scorecard criteria" hint="One per line. Each becomes a 1-5 rating on interview scorecards.">
               <Textarea rows={4} value={cfg.scorecard_criteria.map((c) => c.label).join("\n")} onChange={(e) => setCfg((c) => ({ ...c, scorecard_criteria: e.target.value.split("\n").filter((x) => x.trim()).map((label) => ({ key: stageSlug(label), label: label.trim() })) }))} />
             </Field>
+            <label className="flex items-start gap-2 rounded-lg border p-3">
+              <Checkbox checked={cfg.blind_scorecards} onCheckedChange={(v) => setCfg((c) => ({ ...c, blind_scorecards: v === true }))} className="mt-0.5" />
+              <span>
+                <span className="text-sm font-medium">Hide other verdicts until a panelist files their own</span>
+                <span className="block text-xs text-muted-foreground">
+                  {cfg.blind_scorecards
+                    ? "An interviewer sees the panel's other scorecards only after filing theirs, so four independent reads stay four reads."
+                    : "Everyone sees the panel's scorecards as soon as they open the form - which is how the second interviewer ends up scoring the first one's opinion."}
+                </span>
+              </span>
+            </label>
           </TabsContent>
         </Tabs>
 
@@ -864,11 +960,70 @@ function AtsTab({ toast }: { toast: Toast }) {
   );
 }
 
+// What moving a card actually sets off, read from the org's OWN rules rather than described from the seeds: a
+// pipeline that runs itself is only trustworthy if you can see what it will do. Each stage lists the enabled
+// rules that fire on it, and every row opens that rule in the Workflows builder - which is where it is changed
+// or switched off. A stage with nothing on it says so, because that is the useful thing to know.
+function StageAutomationPreview({ stages }: { stages: AtsStage[] }) {
+  const { rows: automations, state } = useCollection<Automation>("automations");
+  // A rule belongs to a stage when it triggers on a stage change AND its condition names that stage (by key) or
+  // its kind. Conditions are predicate trees, so this walks for a comparison rather than assuming a shape.
+  const namesStage = (cond: unknown, stage: AtsStage): boolean => {
+    if (!cond || typeof cond !== "object") return false;
+    const c = cond as { field?: string; value?: unknown; all?: unknown[]; any?: unknown[]; not?: unknown };
+    if (Array.isArray(c.all) || Array.isArray(c.any)) return [...(c.all ?? []), ...(c.any ?? [])].some((x) => namesStage(x, stage));
+    if (c.not) return namesStage(c.not, stage);
+    if (c.field === "stage") return c.value === stage.key;
+    if (c.field === "stageKind") return c.value === stage.kind;
+    return false;
+  };
+  const byStage = useMemo(() => {
+    const live = automations.filter((a) => a.enabled !== false && !a.disabled);
+    return stages.map((s) => ({
+      stage: s,
+      rules: live.filter((a) => a.trigger_type === "application.stageChanged" && namesStage(a.condition, s)),
+    }));
+  }, [automations, stages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium">What happens at each stage</p>
+        <Button variant="ghost" size="sm" className="h-7" onClick={() => navigate("workflows")}>Edit in Workflows</Button>
+      </div>
+      {state === "loading" ? (
+        <p className="text-xs text-muted-foreground">Reading your rules…</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {byStage.map(({ stage, rules }) => (
+            <li key={stage.key} className="text-xs">
+              <span className="font-medium">{stage.label}</span>
+              {rules.length === 0 ? (
+                <span className="text-muted-foreground"> - moving a card here only moves the card.</span>
+              ) : (
+                <ul className="ml-3 mt-0.5 space-y-0.5">
+                  {rules.map((r) => (
+                    <li key={r.path}>
+                      <button type="button" className="text-left text-primary hover:underline" onClick={() => navigate(`workflows/${idOf(r.path)}`)} title={r.description}>
+                        {r.name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function AttendanceTab({ toast }: { toast: Toast }) {
   const [cfg, setCfg] = useState<AttendanceSchedule>(DEFAULT_SCHEDULE);
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    get<{ value?: Partial<AttendanceSchedule> }>("settings/attendance")
+    getSetting<Partial<AttendanceSchedule>>("attendance")
       .then((s) => { if (s.value && Object.keys(s.value).length) setCfg({ ...DEFAULT_SCHEDULE, ...s.value }); })
       .catch(() => {})
       .finally(() => setReady(true));
@@ -922,6 +1077,14 @@ function AttendanceTab({ toast }: { toast: Toast }) {
                 ))}
               </div>
             </Field>
+            <Field label="Week starts on" hint="First column of every month grid (attendance, leave calendar).">
+              <Select value={String(cfg.week_start ?? 0)} onValueChange={(v) => setCfg((c) => ({ ...c, week_start: Number(v) }))}>
+                <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {WEEKDAYS.map((d, i) => <SelectItem key={d} value={String(i)}>{d}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
             <Field label="Grace exceptions" hint="On a listed date lateness/early departure is forgiven for everyone (bad weather, transit strike). Leave extra minutes blank to waive entirely, or add minutes on top of the daily grace.">
               <div className="space-y-2">
                 {(cfg.grace_exceptions ?? []).map((ex, idx) => (
@@ -929,12 +1092,32 @@ function AttendanceTab({ toast }: { toast: Toast }) {
                     <Input type="date" className="w-40" value={ex.date} onChange={(e) => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).map((x, i) => i === idx ? { ...x, date: e.target.value } : x) }))} />
                     <Input className="flex-1 min-w-[10rem]" placeholder="Reason (optional)" value={ex.reason ?? ""} onChange={(e) => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).map((x, i) => i === idx ? { ...x, reason: e.target.value } : x) }))} />
                     <Input type="number" min={0} className="w-32" placeholder="Waive all" value={ex.extra_grace_minutes ?? ""} onChange={(e) => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).map((x, i) => i === idx ? { ...x, extra_grace_minutes: e.target.value === "" ? undefined : Number(e.target.value) } : x) }))} />
-                    <Button type="button" variant="ghost" size="icon" onClick={() => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).filter((_, i) => i !== idx) }))}><Trash2 className="h-4 w-4" /></Button>
+                    <Button type="button" variant="ghost" size="icon" aria-label="Remove this exception" onClick={() => setCfg((c) => ({ ...c, grace_exceptions: (c.grace_exceptions ?? []).filter((_, i) => i !== idx) }))}><Trash2 className="h-4 w-4" /></Button>
                   </div>
                 ))}
                 <Button type="button" variant="outline" size="sm" onClick={() => setCfg((c) => ({ ...c, grace_exceptions: [...(c.grace_exceptions ?? []), { date: "" }] }))}><Plus className="h-4 w-4" /> Add date</Button>
               </div>
             </Field>
+
+            {/* Display-only: whether the Attendance page shows an employee how far through a full day they are.
+                Some workplaces want the readout; others read the same bar as a clock-watching target. */}
+            <div className="space-y-3 rounded-lg border p-3">
+              <p className="text-sm font-medium">What employees see on the clock card</p>
+              <label className="flex items-start gap-2 text-sm">
+                <Checkbox className="mt-0.5" checked={cfg.show_day_progress !== false} onCheckedChange={(v) => setCfg((c) => ({ ...c, show_day_progress: !!v }))} />
+                <span>
+                  Progress toward a full day
+                  <span className="block text-xs text-muted-foreground">The bar from 0 to the full-day minutes, the break summary, and the "no shift expected" note on holidays and days off. Punch times, today's total and the history are unaffected.</span>
+                </span>
+              </label>
+              <label className={cn("flex items-start gap-2 text-sm", cfg.show_day_progress === false && "opacity-50")}>
+                <Checkbox className="mt-0.5" disabled={cfg.show_day_progress === false} checked={cfg.show_finish_projection !== false} onCheckedChange={(v) => setCfg((c) => ({ ...c, show_finish_projection: !!v }))} />
+                <span>
+                  Projected finish time
+                  <span className="block text-xs text-muted-foreground">The "Full day at ~6:12 PM" / "2h to a full day" line on that bar.</span>
+                </span>
+              </label>
+            </div>
           </TabsContent>
 
           <TabsContent value="pay" className="space-y-4">
@@ -953,8 +1136,17 @@ function AttendanceTab({ toast }: { toast: Toast }) {
               </label>
               <p className="mt-1 text-xs text-muted-foreground">When a payroll run is built, each unexcused absent working day (no punch, not on approved leave or holiday) is deducted from net pay.</p>
               {cfg.lop_enabled && (
-                <div className="mt-3 sm:max-w-xs">
-                  <Field label="Per-day rate basis" hint="Divisor for monthly base pay.">
+                <FieldRow className="mt-3">
+                  <Field label="Wage docked" hint="Which monthly wage an absent day comes out of.">
+                    <Select value={cfg.lop_wage_basis ?? "gross"} onValueChange={(v) => setCfg((c) => ({ ...c, lop_wage_basis: v as "gross" | "basic" }))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="gross">Monthly gross (basic + allowances)</SelectItem>
+                        <SelectItem value="basic">Basic only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <Field label="Per-day rate basis" hint="Divisor for that monthly wage.">
                     <Select value={cfg.lop_basis ?? "working_days"} onValueChange={(v) => setCfg((c) => ({ ...c, lop_basis: v as "working_days" | "days_30" }))}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
@@ -963,7 +1155,10 @@ function AttendanceTab({ toast }: { toast: Toast }) {
                       </SelectContent>
                     </Select>
                   </Field>
-                </div>
+                </FieldRow>
+              )}
+              {cfg.lop_enabled && (cfg.lop_wage_basis ?? "gross") === "basic" && (
+                <p className="mt-2 text-xs text-muted-foreground">An absent day then costs only the basic slice of the day's pay - the allowances stacked on it keep paying. Pick this only where those allowances are contractually unconditional.</p>
               )}
             </div>
 
@@ -992,7 +1187,7 @@ function ReimbursementsPanel({ toast, openId }: { toast: Toast; openId?: string 
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { payout_mode?: string } }>("settings/reimbursements")
+    getSetting<{ payout_mode?: string }>("reimbursements")
       .then((s) => { if (s.value?.payout_mode === "separate") setMode("separate"); })
       .catch(() => {});
   }, []);
@@ -1020,7 +1215,7 @@ function ReimbursementsPanel({ toast, openId }: { toast: Toast; openId?: string 
 
       <TabsContent value="payout">
         <Card>
-          <CardContent className="space-y-3 pt-6">
+          <CardContent className="space-y-3 pt-4 sm:pt-6">
             <p className="text-sm text-muted-foreground">How approved reimbursement claims are paid out.</p>
             <div className="flex items-center gap-2">
               <Button variant={mode === "payroll" ? "default" : "outline"} onClick={() => save("payroll")} disabled={saving}>Through payroll</Button>
@@ -1052,7 +1247,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { auto_approve_threshold?: number; recurring_default_state?: string; budget_alert_thresholds?: number[] } }>("settings/expenses")
+    getSetting<{ auto_approve_threshold?: number; recurring_default_state?: string; budget_alert_thresholds?: number[] }>("expenses")
       .then((s) => {
         const v = s.value ?? {};
         if (typeof v.auto_approve_threshold === "number" && v.auto_approve_threshold > 0) setAutoApprove(String(v.auto_approve_threshold));
@@ -1093,7 +1288,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
 
       <TabsContent value="rules">
         <Card>
-          <CardContent className="space-y-4 pt-6">
+          <CardContent className="space-y-4 pt-4 sm:pt-6">
             <Field label="Auto-approve threshold" hint="Expenses at or below this amount skip approval on submit. 0 (blank) disables auto-approval.">
               <Input type="number" min={0} step="1" value={autoApprove} onChange={(e) => setAutoApprove(e.target.value)} placeholder="e.g. 5000" className="max-w-48" />
             </Field>
@@ -1135,7 +1330,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
   const { rows: departments } = useCollection<Department>("departments");
 
   useEffect(() => {
-    get<{ value?: { categories?: TicketCategory[] } }>("settings/ticket-categories")
+    getSetting<{ categories?: TicketCategory[] }>("ticket-categories")
       .then((s) => setCats(s.value?.categories ?? []))
       .catch(() => {})
       .finally(() => setReady(true));
@@ -1184,11 +1379,15 @@ function TicketsTab({ toast }: { toast: Toast }) {
         <div className="space-y-2">
           {cats.map((c, i) => (
             <div key={i} className="space-y-3 rounded-lg border p-3">
-              <div className="grid grid-cols-[1fr_1fr_1fr_auto] items-end gap-3">
-                <Field label="Category">
+              {/* Three fields plus a remove button: side by side there is room for a name and two pickers on
+                  a laptop, and about 100px each on a phone. Stacked below `sm`, with the remove button pulled
+                  up onto the first row so it stays next to the name it removes. */}
+              <div className="grid grid-cols-[1fr_auto] items-end gap-3 sm:grid-cols-[1fr_1fr_1fr_auto]">
+                <Field label="Category" className="min-w-0">
                   <Input value={c.name} placeholder="e.g. IT support" onChange={(e) => update(i, { name: e.target.value })} />
                 </Field>
-                <Field label="Auto-assign to">
+                <Button variant="ghost" size="icon" onClick={() => remove(i)} aria-label="Remove" className="sm:hidden"><Trash2 className="h-4 w-4" /></Button>
+                <Field label="Auto-assign to" className="col-span-2 min-w-0 sm:col-span-1">
                   <Select value={c.assignee ?? "none"} onValueChange={(v) => update(i, { assignee: v === "none" ? null : v })}>
                     <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
@@ -1197,7 +1396,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field label="Servicing department">
+                <Field label="Servicing department" className="col-span-2 min-w-0 sm:col-span-1">
                   <Select value={c.department ?? "none"} onValueChange={(v) => update(i, { department: v === "none" ? null : v })}>
                     <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
@@ -1206,7 +1405,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
                     </SelectContent>
                   </Select>
                 </Field>
-                <Button variant="ghost" size="icon" onClick={() => remove(i)} aria-label="Remove"><Trash2 className="h-4 w-4" /></Button>
+                <Button variant="ghost" size="icon" onClick={() => remove(i)} aria-label="Remove" className="hidden sm:inline-flex"><Trash2 className="h-4 w-4" /></Button>
               </div>
               <Field label="Members" hint="Can see every ticket in this category. The assignee is always included.">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1278,6 +1477,7 @@ function TicketChecklistsTab({ toast }: { toast: Toast }) {
 // One predefined checklist: name + items (one per line), with its own access-control icon (read grant =
 // who can see/use it). Saves via PATCH only when edited; deletes the whole checklist.
 function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist; reload: () => void; toast: Toast }) {
+  const confirm = useConfirm();
   const original = (checklist.items ?? []).join("\n");
   const [name, setName] = useState(checklist.display_name);
   const [items, setItems] = useState(original);
@@ -1298,6 +1498,13 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
     }
   }
   async function del() {
+    const ok = await confirm({
+      title: "Delete this checklist?",
+      description: `"${checklist.display_name}" stops being offered on new tickets in its category. Tickets that already carry it keep their copy.`,
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await remove(checklist.path, checklist.etag);
@@ -1334,7 +1541,7 @@ function useOrgBlob(toast: Toast) {
   const [blob, setBlob] = useState<Partial<OrgSettings> | null>(null);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
-    get<{ value?: Partial<OrgSettings> }>("settings/organization")
+    getSetting<Partial<OrgSettings>>("organization")
       .then((s) => setBlob(s.value ?? {}))
       .catch(() => setBlob({}));
   }, []);
@@ -1420,11 +1627,13 @@ function QuickActionsTab({ toast }: { toast: Toast }) {
     const Icon = a.icon;
     const inGroup = !!opts.gid;
     return (
-      <div key={id} className="flex items-center gap-3 rounded-md border px-3 py-2">
+      <div key={id} className="flex items-center gap-2 rounded-md border px-3 py-2 sm:gap-3">
         <Icon className={cn("h-4 w-4 shrink-0", inGroup ? "text-foreground" : "text-muted-foreground")} />
-        <span className={cn("flex-1 truncate text-sm", !inGroup && "text-muted-foreground")}>{a.label}</span>
+        <span className={cn("min-w-0 flex-1 truncate text-sm", !inGroup && "text-muted-foreground")}>{a.label}</span>
+        {/* Narrower on a phone: this control plus the label plus the two reorder buttons is the whole
+            328px content column at w-40, which leaves the action's name no room at all. */}
         <Select value={opts.gid ?? "off"} onValueChange={(v) => assign(id, v)}>
-          <SelectTrigger className="h-8 w-40 text-xs"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="h-8 w-32 text-xs sm:w-40"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="off">Not in the menu</SelectItem>
             {groupOptions.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
@@ -1523,7 +1732,9 @@ function BrandImageField({
     r.readAsDataURL(f);
   }
   return (
-    <div className="flex items-center gap-4">
+    // A 160px preview beside "Choose logo" and Remove is wider than a phone's content column, so the pair
+    // wraps and the controls take a line under the preview.
+    <div className="flex flex-wrap items-center gap-4">
       <div
         className={cn(
           "flex h-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border",
@@ -1537,8 +1748,8 @@ function BrandImageField({
           <Icon className={cn("h-6 w-6", dark ? "text-slate-500" : "text-muted-foreground")} />
         )}
       </div>
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2">
+      <div className="min-w-0 flex-1 basis-48 space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent">
             {value ? "Replace" : choose}
             <input type="file" accept={accept} className="hidden" onChange={onFile} />
@@ -1624,7 +1835,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
         </TabsList>
         <TabsContent value="logos">
           <Card>
-            <CardContent className="space-y-6 pt-6">
+            <CardContent className="space-y-6 pt-4 sm:pt-6">
               <div className="space-y-3">
                 <p className="text-sm font-medium">Square mark</p>
                 <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -1649,7 +1860,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                   />
                 </div>
               </div>
-              <div className="space-y-3 border-t pt-6">
+              <div className="space-y-3 border-t pt-4 sm:pt-6">
                 <div>
                   <p className="text-sm font-medium">Wordmark</p>
                   <p className="text-xs text-muted-foreground">Wide artwork carrying the name. Set one and it spans the sidebar in place of the square mark and the name text; the collapsed rail keeps using the square mark.</p>
@@ -1678,7 +1889,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                   />
                 </div>
               </div>
-              <div className="space-y-3 border-t pt-6">
+              <div className="space-y-3 border-t pt-4 sm:pt-6">
                 <p className="text-sm font-medium">Elsewhere</p>
                 <BrandImageField
                   value={favicon}
@@ -1707,7 +1918,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
         </TabsContent>
         <TabsContent value="name">
           <Card>
-            <CardContent className="space-y-6 pt-6">
+            <CardContent className="space-y-6 pt-4 sm:pt-6">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Organization name" hint="Shown across the app and on payslips.">
                   <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Acme Corp" />
@@ -1721,17 +1932,17 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
               </Field>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 sm:items-start">
                 <Field label="Font">
-                  <select className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={nameFont} onChange={(e) => setNameFont(e.target.value)}>
+                  <select className="h-9 w-full min-w-0 rounded-md border bg-background px-2 text-sm coarse:min-h-10" value={nameFont} onChange={(e) => setNameFont(e.target.value)}>
                     {NAME_FONTS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
                   </select>
                 </Field>
                 <Field label="Weight">
-                  <select className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={nameWeight} onChange={(e) => setNameWeight(e.target.value)}>
+                  <select className="h-9 w-full min-w-0 rounded-md border bg-background px-2 text-sm coarse:min-h-10" value={nameWeight} onChange={(e) => setNameWeight(e.target.value)}>
                     {NAME_WEIGHTS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
                   </select>
                 </Field>
                 <Field label="Size">
-                  <select className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={nameSize} onChange={(e) => setNameSize(e.target.value)}>
+                  <select className="h-9 w-full min-w-0 rounded-md border bg-background px-2 text-sm coarse:min-h-10" value={nameSize} onChange={(e) => setNameSize(e.target.value)}>
                     {NAME_SIZES.map((sz) => <option key={sz.value} value={sz.value}>{sz.label}</option>)}
                   </select>
                 </Field>
@@ -1751,7 +1962,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
         </TabsContent>
         <TabsContent value="details">
           <Card>
-            <CardContent className="space-y-6 pt-6">
+            <CardContent className="space-y-6 pt-4 sm:pt-6">
               <Field label="Address" hint="Printed in the payslip header. One line per row.">
                 <Textarea rows={3} value={address} onChange={(e) => setAddress(e.target.value)} placeholder={"Street address\nArea or landmark\nCity, State PIN"} className="sm:max-w-md" />
               </Field>
@@ -1816,7 +2027,7 @@ function OrgBanksPanel({ toast }: { toast: Toast }) {
   return (
     <div>
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="pt-4 sm:pt-6">
           <div className="grid gap-6 sm:grid-cols-2">
             <div className="space-y-4">
               <Field label="Allowed currencies" hint="Comma-separated ISO codes.">
@@ -1824,7 +2035,7 @@ function OrgBanksPanel({ toast }: { toast: Toast }) {
               </Field>
               <Field label="Default currency" hint="Default selection, and used for untagged amounts.">
                 <select
-                  className="h-9 w-40 rounded-md border bg-background px-2 text-sm"
+                  className="h-9 w-40 min-w-0 max-w-full rounded-md border bg-background px-2 text-sm coarse:min-h-10"
                   value={allowedList.includes(defaultCurrency) ? defaultCurrency : (allowedList[0] ?? "")}
                   onChange={(e) => setDefaultCurrency(e.target.value)}
                 >
@@ -1928,7 +2139,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
 
         <TabsContent value="signatory">
           <Card>
-            <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
+            <CardContent className="grid gap-4 pt-4 sm:grid-cols-2 sm:pt-6">
               <Field label="Signatory name" hint="Signs generated letters.">
                 <Input value={letter.signatory_name ?? ""} onChange={(e) => setLetterField("signatory_name", e.target.value)} placeholder="Full name of the signatory" />
               </Field>
@@ -1969,7 +2180,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
 
         <TabsContent value="hr">
           <Card>
-            <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
+            <CardContent className="grid gap-4 pt-4 sm:grid-cols-2 sm:pt-6">
               <Field label="HR contact name">
                 <Input value={letter.hr_name ?? ""} onChange={(e) => setLetterField("hr_name", e.target.value)} placeholder="e.g. HR Department" />
               </Field>
@@ -1977,7 +2188,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
                 <Input value={letter.hr_email ?? ""} onChange={(e) => setLetterField("hr_email", e.target.value)} placeholder="hr@example.com" />
               </Field>
               <Field label="HR contact phone">
-                <Input value={letter.hr_phone ?? ""} onChange={(e) => setLetterField("hr_phone", e.target.value)} placeholder="Optional" />
+                <Input type="tel" inputMode="tel" value={letter.hr_phone ?? ""} onChange={(e) => setLetterField("hr_phone", e.target.value)} placeholder="Optional" />
               </Field>
             </CardContent>
           </Card>
@@ -1985,7 +2196,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
 
         <TabsContent value="terms">
           <Card>
-            <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
+            <CardContent className="grid gap-4 pt-4 sm:grid-cols-2 sm:pt-6">
               <Field label="Working hours" hint="Shown in the offer letter.">
                 <Input value={letter.working_hours ?? ""} onChange={(e) => setLetterField("working_hours", e.target.value)} placeholder="e.g. 10:00 AM to 7:00 PM" />
               </Field>
@@ -1994,7 +2205,7 @@ function OrgLetterDefaultsPanel({ toast }: { toast: Toast }) {
               </Field>
               <Field label="Work mode">
                 <select
-                  className="h-9 w-40 rounded-md border bg-background px-2 text-sm"
+                  className="h-9 w-40 min-w-0 max-w-full rounded-md border bg-background px-2 text-sm coarse:min-h-10"
                   value={letter.work_mode ?? ""}
                   onChange={(e) => setLetterField("work_mode", e.target.value)}
                 >
@@ -2034,7 +2245,7 @@ function DashboardTab({ toast }: { toast: Toast }) {
   const [openCats, setOpenCats] = useState<Set<KpiCategory>>(new Set());
   const toggleCat = (cat: KpiCategory) => setOpenCats((s) => { const n = new Set(s); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
   useEffect(() => {
-    get<{ value?: DashboardConfig }>("settings/dashboard").then((s) => setCfg(s.value ?? {})).catch(() => {}).finally(() => setReady(true));
+    getSetting<DashboardConfig>("dashboard").then((s) => setCfg(s.value ?? {})).catch(() => {}).finally(() => setReady(true));
     list<{ name: string }>("roles").then((r) => setRoles(r.results ?? [])).catch(() => setRoles([]));
   }, []);
   const setAud = (section: DashSection, key: string, aud: Audience) =>
@@ -2066,8 +2277,8 @@ function DashboardTab({ toast }: { toast: Toast }) {
     <div className="space-y-2">
       <div className="divide-y rounded-lg border">
         {defs.map((d) => (
-          <div key={d.key} className="flex items-center gap-3 px-3 py-2">
-            <span className="w-48 shrink-0 text-sm font-medium">{d.label}</span>
+          <div key={d.key} className="flex flex-col gap-1.5 px-3 py-2 sm:flex-row sm:items-center sm:gap-3">
+            <span className="text-sm font-medium sm:w-48 sm:shrink-0">{d.label}</span>
             <AudienceCell value={cfg[sec]?.[d.key]} roles={roles} employees={employees} defaultLabel={emptyLabel} onChange={(a) => setAud(sec, d.key, a)} />
           </div>
         ))}
@@ -2108,8 +2319,10 @@ function DashboardTab({ toast }: { toast: Toast }) {
                 {defs.map((d) => {
                   const Icon = KPI_ICONS[d.key];
                   return (
-                    <div key={d.key} className="flex items-center gap-3 px-3 py-2">
-                      <span className="flex w-48 shrink-0 items-center gap-2 text-sm font-medium">
+                    // The 192px label column plus an audience control is more than a phone has; below `sm`
+                    // the control takes the line under the name it belongs to.
+                    <div key={d.key} className="flex flex-col gap-1.5 px-3 py-2 sm:flex-row sm:items-center sm:gap-3">
+                      <span className="flex items-center gap-2 text-sm font-medium sm:w-48 sm:shrink-0">
                         {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
                         {d.label}
                       </span>
@@ -2166,9 +2379,9 @@ function DashboardTab({ toast }: { toast: Toast }) {
             })}
           </div>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Select value="" onValueChange={(v) => setShortcuts([...chosen, v])}>
-            <SelectTrigger className="h-8 w-72 text-xs"><SelectValue placeholder="Add a shortcut..." /></SelectTrigger>
+            <SelectTrigger className="h-8 w-full text-xs sm:w-72"><SelectValue placeholder="Add a shortcut..." /></SelectTrigger>
             <SelectContent>
               {available.map((s) => <SelectItem key={s.id} value={s.id}>{s.kind === "action" ? `${s.detail}: ${s.label}` : s.label}</SelectItem>)}
             </SelectContent>
@@ -2274,7 +2487,7 @@ function AudienceCell({ value, roles, employees, defaultLabel = "Everyone", onCh
         </div>
         <div className="p-2">
           <p className="mb-1.5 px-1 text-xs font-medium text-muted-foreground">Specific people</p>
-          <Input className="mb-1.5 h-8" placeholder="Search people…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Input type="search" className="mb-1.5 h-8" placeholder="Search people…" value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="max-h-48 space-y-0.5 overflow-y-auto">
             {filtered.map((e) => {
               const id = idOf(e.path);
@@ -2298,24 +2511,42 @@ function AudienceCell({ value, roles, employees, defaultLabel = "Everyone", onCh
 function DefaultsTab({ toast }: { toast: Toast }) {
   const [probation, setProbation] = useState("3");
   const [maxOptional, setMaxOptional] = useState("2");
+  const [pickBy, setPickBy] = useState("");
+  const [reminderDays, setReminderDays] = useState("7");
+  const [feedEnabled, setFeedEnabled] = useState(false);
+  const [compOff, setCompOff] = useState(false);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     Promise.allSettled([
-      get<{ value?: { default_months?: number } }>("settings/probation")
+      getSetting<{ default_months?: number }>("probation")
         .then((s) => typeof s.value?.default_months === "number" && setProbation(String(s.value.default_months))),
-      get<{ value?: { max_optional?: number } }>("settings/holidays")
-        .then((s) => typeof s.value?.max_optional === "number" && setMaxOptional(String(s.value.max_optional))),
+      getSetting<{ max_optional?: number; pick_by?: string; pick_reminder_days?: number; feed_enabled?: boolean; comp_off_on_holiday_work?: boolean }>("holidays")
+        .then((s) => {
+          if (typeof s.value?.max_optional === "number") setMaxOptional(String(s.value.max_optional));
+          if (s.value?.pick_by) setPickBy(s.value.pick_by.slice(0, 10));
+          if (typeof s.value?.pick_reminder_days === "number") setReminderDays(String(s.value.pick_reminder_days));
+          setFeedEnabled(!!s.value?.feed_enabled);
+          setCompOff(!!s.value?.comp_off_on_holiday_work);
+        }),
     ]).then(() => setReady(true));
   }, []);
 
-  const { markSaved } = useUnsaved({ probation, maxOptional }, ready, save);
+  const { markSaved } = useUnsaved({ probation, maxOptional, pickBy, reminderDays, feedEnabled, compOff }, ready, save);
   async function save() {
     setSaving(true);
     try {
       await patch("settings/probation", { value: { default_months: Number(probation) } });
-      await patch("settings/holidays", { value: { max_optional: Number(maxOptional) } });
+      await patch("settings/holidays", {
+        value: {
+          max_optional: Number(maxOptional),
+          pick_by: pickBy || null,
+          pick_reminder_days: Number(reminderDays) || 0,
+          feed_enabled: feedEnabled,
+          comp_off_on_holiday_work: compOff,
+        },
+      });
       markSaved();
       toast({ title: "Policies saved", variant: "success" });
     } catch (e) {
@@ -2327,7 +2558,7 @@ function DefaultsTab({ toast }: { toast: Toast }) {
 
   return (
     <Card>
-      <CardContent className="space-y-4 pt-6">
+      <CardContent className="space-y-4 pt-4 sm:pt-6">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Default probation period (months)" hint="Used to default an employee's probation end from their start date.">
             <Input type="number" min={0} value={probation} onChange={(e) => setProbation(e.target.value)} />
@@ -2335,7 +2566,37 @@ function DefaultsTab({ toast }: { toast: Toast }) {
           <Field label="Max optional holidays per employee" hint="How many optional holidays each employee may pick.">
             <Input type="number" min={0} value={maxOptional} onChange={(e) => setMaxOptional(e.target.value)} />
           </Field>
+          <Field label="Optional picks close on" hint="Deadline shown on the holiday page. Blank = no deadline.">
+            <Input type="date" value={pickBy} onChange={(e) => setPickBy(e.target.value)} />
+          </Field>
+          <Field label="Remind this many days before" hint="Anyone with picks still unused gets one nudge then, and another on the day.">
+            <Input type="number" min={0} value={reminderDays} onChange={(e) => setReminderDays(e.target.value)} disabled={!pickBy} />
+          </Field>
         </div>
+        {/* A subscribable feed is served OUTSIDE the session (a calendar client has none), so it is opt-in. */}
+        <label className="flex items-start gap-2 rounded-lg border p-3 text-sm">
+          <Checkbox checked={feedEnabled} onCheckedChange={(v) => setFeedEnabled(v === true)} className="mt-0.5" />
+          <span>
+            <span className="font-medium">Let employees subscribe to their holidays</span>
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              Adds a personal, unguessable calendar URL (Google Calendar / Outlook) to each employee's holiday
+              page, kept in sync with their days off and picks. The URL needs no sign-in, so anyone it is shared
+              with can read that person's holiday list - nothing else.
+            </span>
+          </span>
+        </label>
+        {/* The overtime lane covers the same ground for orgs that pay for it, so this is a choice, not a default. */}
+        <label className="flex items-start gap-2 rounded-lg border p-3 text-sm">
+          <Checkbox checked={compOff} onCheckedChange={(v) => setCompOff(v === true)} className="mt-0.5" />
+          <span>
+            <span className="font-medium">Credit comp-off when someone works a holiday</span>
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              The nightly job adds a day (or half a day, by the attendance thresholds) of "Compensatory Off"
+              leave to anyone whose punches show they worked a holiday that applied to them. Needs a leave type
+              named Compensatory Off.
+            </span>
+          </span>
+        </label>
         <Button onClick={save} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save defaults</Button>
       </CardContent>
     </Card>
@@ -2361,7 +2622,7 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
   const set = (p: Partial<NumCfg>) => setCfg((c) => ({ ...c, ...p }));
 
   useEffect(() => {
-    get<{ value?: Partial<NumCfg> }>("settings/employee-number")
+    getSetting<Partial<NumCfg>>("employee-number")
       .then((s) => s.value && setCfg({ ...DEFAULT_NUM_CFG, ...s.value }))
       .catch(() => {})
       .finally(() => setReady(true));
@@ -2383,7 +2644,7 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
 
   return (
     <Card>
-      <CardContent className="space-y-4 pt-6">
+      <CardContent className="space-y-4 pt-4 sm:pt-6">
         <p className="text-sm text-muted-foreground">
           New employees are auto-assigned an ID in this format (each is overridable on the employee's profile). The running number continues from the highest ID on file, so editing the format only changes future IDs.
         </p>
@@ -2434,10 +2695,11 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
 }
 
 // Asset tag printing (settings/asset-tags): the org-wide tag pattern (prefix/separator/digits), the
-// category -> code map generated tags use, the sticker-sheet formats offered in the printer (presets +
-// org-specific custom grids) and the default QR/label content. Device-specific state (printer offsets,
-// used-slot map) deliberately stays on each device - only policy lives here.
-function AssetTagsTab({ toast }: { toast: Toast }) {
+// sticker-sheet formats offered in the printer (presets + org-specific custom grids) and the default QR/label
+// content. The code in the middle of a tag comes from the asset's category, so it is edited in the Categories
+// tab (asset-categories), not here. Device-specific state (printer offsets, used-slot map) deliberately stays
+// on each device - only policy lives here.
+function AssetTagsTab({ toast, openId }: { toast: Toast; openId?: string }) {
   const { org } = useOrg();
   const [cfg, setCfg] = useState<AssetTagSettings>({});
   const [loaded, setLoaded] = useState(false);
@@ -2445,7 +2707,7 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
   const set = (p: Partial<AssetTagSettings>) => setCfg((c) => ({ ...c, ...p }));
 
   useEffect(() => {
-    get<{ value?: AssetTagSettings }>("settings/asset-tags")
+    getSetting<AssetTagSettings>("asset-tags")
       .then((s) => s.value && setCfg(s.value))
       .catch(() => {})
       .finally(() => setLoaded(true));
@@ -2458,7 +2720,7 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
       const digits = cfg.digits != null ? Number(cfg.digits) : undefined;
       // Blank-id custom format rows are editing scaffolding; a saved row's label falls back to its id.
       const customs = (cfg.custom_formats ?? []).filter((f) => f.id.trim()).map((f) => ({ ...f, id: f.id.trim(), label: f.label.trim() || f.id.trim() }));
-      await patch("settings/asset-tags", { value: { ...cfg, digits, category_codes: cleanCodes(cfg.category_codes), custom_formats: customs.length ? customs : undefined } });
+      await patch("settings/asset-tags", { value: { ...cfg, digits, custom_formats: customs.length ? customs : undefined } });
       markSaved();
       toast({ title: "Asset tag settings saved", variant: "success" });
     } catch (e) {
@@ -2468,25 +2730,23 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
     }
   }
 
-  // Drop blank rows from the codes editor before saving (they're editing scaffolding, not config).
-  const cleanCodes = (codes?: Record<string, string>) => {
-    const entries = Object.entries(codes ?? {}).filter(([k, v]) => k.trim() && v.trim());
-    return entries.length ? Object.fromEntries(entries.map(([k, v]) => [k.trim(), v.trim().toUpperCase()])) : undefined;
-  };
-
-  const resolved = resolveTagConfig(org.name, { ...cfg, category_codes: cleanCodes(cfg.category_codes) });
-  const codeRows = Object.entries(cfg.category_codes ?? {});
+  const resolved = resolveTagConfig(org.name, cfg);
   const customs = cfg.custom_formats ?? [];
   const label = { ...DEFAULT_TAG_SETTINGS.label, ...(cfg.label ?? {}) };
   const setCustom = (i: number, p: Partial<SheetFormat>) => set({ custom_formats: customs.map((f, j) => (j === i ? { ...f, ...p } : f)) });
+  // Custody rides in the same blob; an absent block means "all defaults", which are the enforcing ones.
+  const custody = cfg.custody ?? {};
+  const setCustody = (p: Partial<AssetCustodySettings>) => set({ custody: { ...custody, ...p } });
 
-  if (!loaded) return <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>;
+  if (!loaded) return <PanelSkeleton />;
   return (
     <div className="space-y-4">
       <Tabs defaultValue="pattern">
         <TabsList variant="segmented">
           <TabsTrigger value="pattern">Tag pattern</TabsTrigger>
+          <TabsTrigger value="categories">Categories</TabsTrigger>
           <TabsTrigger value="sheets">Sticker sheets & label</TabsTrigger>
+          <TabsTrigger value="custody">Custody</TabsTrigger>
           <TabsTrigger value="found">Found-it page</TabsTrigger>
         </TabsList>
 
@@ -2495,7 +2755,7 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
             <CardHeader><CardTitle className="text-base">Tag pattern</CardTitle></CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Assets without a tag get one generated in this pattern when queued for printing (the tag is saved onto the asset). Existing tags are never rewritten.
+                Every asset is tagged in this pattern the moment it is added, with the code coming from its category and the number running per code. Tags already issued are never rewritten.
               </p>
               <div className="grid gap-4 sm:grid-cols-3">
                 <Field label="Prefix" hint={`Blank = your org initials (${resolveTagConfig(org.name).prefix}).`}>
@@ -2510,30 +2770,19 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
               </div>
               <div className="rounded-lg border bg-muted/40 p-3 text-sm">
                 <span className="text-muted-foreground">Preview: </span>
-                <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 1)}</span>
+                <span className="font-mono font-medium">{formatTag(resolved, "LAP", 1)}</span>
                 <span className="mx-2 text-muted-foreground">→</span>
-                <span className="font-mono font-medium">{formatTag(resolved, "Laptop", 2)}</span>
+                <span className="font-mono font-medium">{formatTag(resolved, "LAP", 2)}</span>
                 <span className="mx-2 text-muted-foreground">→</span>
-                <span className="font-mono font-medium">{formatTag(resolved, "Monitor", 1)}</span>
-              </div>
-              <div>
-                <div className="mb-1 text-sm font-medium">Category codes</div>
-                <p className="mb-2 text-xs text-muted-foreground">
-                  The short code the tag uses per category. Unlisted categories fall back to their first three letters. Built-ins: {Object.entries(DEFAULT_CATEGORY_CODES).map(([k, v]) => `${k} → ${v}`).join(", ")}.
-                </p>
-                <div className="space-y-2">
-                  {codeRows.map(([cat, code], i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <Input className="flex-1" value={cat} placeholder="Category, e.g. Tablet" onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [e.target.value, v] : [k, v]))) })} />
-                      <Input className="w-28 font-mono uppercase" value={code} placeholder="TAB" maxLength={6} onChange={(e) => set({ category_codes: Object.fromEntries(codeRows.map(([k, v], j) => (j === i ? [k, e.target.value] : [k, v]))) })} />
-                      <Button variant="ghost" size="sm" aria-label="Remove code" onClick={() => set({ category_codes: Object.fromEntries(codeRows.filter((_, j) => j !== i)) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
-                    </div>
-                  ))}
-                  <Button variant="outline" size="sm" onClick={() => set({ category_codes: { ...(cfg.category_codes ?? {}), "": "" } })}><Plus className="h-4 w-4" /> Add code</Button>
-                </div>
+                <span className="font-mono font-medium">{formatTag(resolved, "MON", 1)}</span>
+                <p className="mt-1 text-xs text-muted-foreground">LAP and MON are category codes; an uncategorised asset uses {FALLBACK_TAG_CODE}.</p>
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="categories">
+          <AssetCategories embedded openId={openId} />
         </TabsContent>
 
         <TabsContent value="sheets">
@@ -2588,9 +2837,9 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
                 <div className="space-y-3">
                   {customs.map((f, i) => (
                     <div key={i} className="rounded-md border p-3">
-                      <div className="mb-2 flex items-center gap-2">
-                        <Input className="w-32 font-mono" value={f.id} placeholder="id" onChange={(e) => setCustom(i, { id: e.target.value })} />
-                        <Input className="flex-1" value={f.label} placeholder="Shown in the format picker" onChange={(e) => setCustom(i, { label: e.target.value })} />
+                      <div className="editor-row mb-2">
+                        <Input className="w-24 font-mono sm:w-32" value={f.id} placeholder="id" onChange={(e) => setCustom(i, { id: e.target.value })} />
+                        <Input className="editor-row-main" value={f.label} placeholder="Shown in the format picker" onChange={(e) => setCustom(i, { label: e.target.value })} />
                         <Button variant="ghost" size="sm" aria-label="Remove format" onClick={() => set({ custom_formats: customs.filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4 text-destructive" /></Button>
                       </div>
                       <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
@@ -2643,6 +2892,40 @@ function AssetTagsTab({ toast }: { toast: Toast }) {
             </CardContent>
           </Card>
         </TabsContent>
+
+        <TabsContent value="custody">
+          <Card>
+            <CardHeader><CardTitle className="text-base">Custody by scan</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                With these on, an asset's whereabouts are only ever recorded by someone scanning its printed tag: a new or returned
+                item waits in <span className="font-medium">Awaiting check-in</span> until an admin scans it into stock, and an
+                assigned one waits in <span className="font-medium">Awaiting holder</span> until the person it was given to scans it.
+                Turn them off and assignment is recorded on trust, as a plain form edit.
+              </p>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox checked={custody.stock_scan_required !== false} onCheckedChange={(v) => setCustody({ stock_scan_required: v === true })} />
+                Require a scan to count an asset into stock
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox checked={custody.ack_required !== false} onCheckedChange={(v) => setCustody({ ack_required: v === true })} />
+                Require the holder to confirm what they were given
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox checked={custody.manual_ack_allowed === true} onCheckedChange={(v) => setCustody({ manual_ack_allowed: v === true })} />
+                Let holders confirm without scanning (for destroyed stickers) - recorded as an unscanned confirmation
+              </label>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Chase after (days)" hint="How long an unconfirmed hand-over waits before the holder - then their manager - is nudged.">
+                  <Input type="number" min={1} max={90} value={custody.ack_reminder_days ?? 3} onChange={(e) => setCustody({ ack_reminder_days: Number(e.target.value) })} />
+                </Field>
+                <Field label="Goes stale after (days)" hint="Time since the last sighting before an asset is flagged for a stocktake.">
+                  <Input type="number" min={7} max={3650} value={custody.verify_stale_days ?? 180} onChange={(e) => setCustody({ verify_stale_days: Number(e.target.value) })} />
+                </Field>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
       </Tabs>
 
       {/* One blob, one Save: it persists every tab, not just the visible one. */}
@@ -2668,7 +2951,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
 
   useEffect(() => {
     Promise.allSettled([
-      get<{ value?: Record<string, unknown> }>("settings/leave_caps")
+      getSetting<Record<string, unknown>>("leave_caps")
         .then((s) => {
           const v = s.value ?? {};
           if (v.carry_forward_excess === "forfeit") setExcess("forfeit");
@@ -2677,11 +2960,11 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
           if (v.encashment_mode === "cumulative") setEncMode("cumulative");
           if (typeof v.encashment_cumulative_cap_days === "number") setEncCap(String(v.encashment_cumulative_cap_days));
         }),
-      get<{ value?: { rate_basis?: string; per_day_divisor?: number } }>("settings/leave_encashment")
+      getSetting<{ rate_basis?: string; per_day_divisor?: number }>("leave_encashment")
         .then((s) => { if (s.value?.rate_basis === "gross") setEncRateBasis("gross"); if (typeof s.value?.per_day_divisor === "number") setEncDivisor(String(s.value.per_day_divisor)); }),
-      get<{ value?: { rounding?: string } }>("settings/leave_accrual")
+      getSetting<{ rounding?: string }>("leave_accrual")
         .then((s) => { const r = s.value?.rounding; if (r === "none" || r === "half" || r === "day") setRounding(r); }),
-      get<{ value?: { allow_backdated?: boolean } }>("settings/leave-requests")
+      getSetting<{ allow_backdated?: boolean }>("leave-requests")
         .then((s) => { if (typeof s.value?.allow_backdated === "boolean") setAllowBackdated(s.value.allow_backdated); }),
     ]).then(() => setReady(true));
   }, []);
@@ -2817,7 +3100,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { fields?: EmployeeFieldDef[] } }>("settings/employee_fields")
+    getSetting<{ fields?: EmployeeFieldDef[] }>("employee_fields")
       .then((s) => setFields(s.value?.fields?.length ? s.value.fields : DEFAULT_FIELDS))
       .catch(() => setFields(DEFAULT_FIELDS))
       .finally(() => setLoaded(true));
@@ -2872,16 +3155,32 @@ function FieldsTab({ toast }: { toast: Toast }) {
             </div>
             <div className="divide-y rounded-lg border">
               {fields.map((f, i) => (
-                <div key={i} className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-3 p-2">
+                // The five fixed columns add up to ~304px before the label input gets any width at all, which
+                // on a phone means the row simply does not fit. Below `sm` the row becomes a small stacked
+                // block: the label with its remove button, then the two flags as real labelled checkboxes
+                // (the column headers they belonged to are hidden at this width, so unlabelled boxes would be
+                // a guess), then the document setting. The grid returns unchanged from `sm` up.
+                <div
+                  key={i}
+                  className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-2 p-2 sm:grid-cols-[1fr_auto_auto_auto_auto]"
+                >
                   <Input value={f.label} placeholder="e.g. Passport number" onChange={(e) => update(i, { label: e.target.value })} />
-                  <div className="flex w-20 justify-center">
+                  <Button variant="ghost" size="icon" className="h-8 w-8 sm:hidden" onClick={() => remove(i)} aria-label="Remove field">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                  {/* One checkbox per flag either way - only the caption comes and goes. Below `sm` the
+                      column headers are hidden, so the flag has to name itself. */}
+                  <label className="col-span-2 flex items-center gap-2 text-sm sm:col-span-1 sm:w-20 sm:justify-center">
                     <Checkbox checked={f.mandatory} onCheckedChange={(v) => update(i, { mandatory: v === true })} />
-                  </div>
-                  <div className="flex w-20 justify-center">
+                    <span className="sm:hidden">Required</span>
+                  </label>
+                  <label className="col-span-2 flex items-center gap-2 text-sm sm:col-span-1 sm:w-20 sm:justify-center">
                     <Checkbox checked={f.sensitive} onCheckedChange={(v) => update(i, { sensitive: v === true })} />
-                  </div>
+                    <span className="sm:hidden">Sensitive</span>
+                  </label>
                   <select
-                    className="h-9 w-28 rounded-md border bg-background px-2 text-sm"
+                    className="col-span-2 h-9 min-w-0 rounded-md border bg-background px-2 text-sm coarse:min-h-10 sm:col-span-1 sm:w-28"
+                    aria-label="Document requirement"
                     value={f.document ?? "none"}
                     onChange={(e) => update(i, { document: e.target.value as EmployeeFieldDef["document"] })}
                   >
@@ -2889,7 +3188,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
                     <option value="allowed">Allowed</option>
                     <option value="required">Required</option>
                   </select>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => remove(i)}>
+                  <Button variant="ghost" size="icon" className="hidden h-8 w-8 sm:inline-flex" onClick={() => remove(i)} aria-label="Remove field">
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
@@ -2898,10 +3197,10 @@ function FieldsTab({ toast }: { toast: Toast }) {
             </div>
           </div>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" onClick={add}><Plus className="h-4 w-4" /> Add field</Button>
           <Button onClick={save} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save fields</Button>
-          <Badge variant="muted" className="ml-auto">Applies to all employees</Badge>
+          <Badge variant="muted" className="sm:ml-auto">Applies to all employees</Badge>
         </div>
       </CardContent>
     </Card>

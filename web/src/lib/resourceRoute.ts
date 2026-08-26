@@ -12,7 +12,9 @@ const DEEP_OPEN: Record<string, string> = {
   "compliance-events": "compliance", "background-checks": "background-checks",
   "notice-periods": "notice-periods", announcements: "announcements", events: "events",
   "tax-declarations": "tax-declarations", holidays: "holidays",
+  automations: "workflows", // the rule's builder, opened on the Rules tab
   cards: "boards", // a kanban card → the Boards page selects its board + opens the task dialog
+  stocktakes: "stocktakes", // one count, read in place on its own page route
 };
 
 // Collection -> the nav page that shows it (record not auto-opened). Covers the navigable collections; the
@@ -26,6 +28,9 @@ const PAGE_OF: Record<string, string> = {
   "pay-periods": "pay-periods", bonuses: "payroll-runs", notifications: "notifications",
   "overtime-requests": "overtime",
   "remote-work-requests": "remote-work",
+  // An asset request has no list page of its own: the requester sees theirs on their profile's Assets tab, and
+  // everyone else meets it as a decision, so the inbox is where a link to one belongs.
+  "asset-requests": "approvals",
   "attendance-regularizations": "attendance", attendance: "attendance",
   loans: "loans", "time-entries": "timesheets", projects: "timesheets",
   "tax-declarations": "tax-declarations",
@@ -33,6 +38,7 @@ const PAGE_OF: Record<string, string> = {
   reviews: "reviews", "review-feedback": "reviews", "check-ins": "check-ins",
   announcements: "announcements", suggestions: "suggestions", events: "events",
   assets: "assets", tickets: "tickets",
+  stocktakes: "stocktakes",
   "compliance-events": "compliance", "compliance-rules": "compliance",
   "background-checks": "background-checks",
   transitions: "transitions", "transition-tasks": "transitions", "notice-periods": "notice-periods",
@@ -52,6 +58,7 @@ const SETTINGS_PANEL: Record<string, string> = {
   "pay-components": "pay-components", "pay-grades": "pay-grades", "salary-structures": "salary-structures",
   projects: "projects", "benefit-plans": "benefit-plans", "reimbursement-categories": "reimbursements",
   "letter-templates": "letters", "expense-categories": "expenses", "ticket-checklists": "ticket-checklists",
+  "asset-categories": "asset-tags",
 };
 
 // The hash route to reach a record from the activity feed / approvals inbox: the record inside its Settings

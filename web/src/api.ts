@@ -1,12 +1,16 @@
 // Single API client. /v1 base, Access cookie, CSRF header, RFC 9457 error parsing.
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
 import { getViewAs, stopViewAs } from "@/lib/viewAsStore";
+import { problemText } from "@/lib/problemText";
 
+// `message` is the HUMAN sentence for this failure, translated once here from the problem details (see
+// lib/problemText). Every toast, pinned form error and stray `(e as Error).message` in the app therefore reads
+// like something a person wrote; the literal server text stays available on `.problem.detail`.
 export class ApiError extends Error {
   status: number;
   problem: Problem | null;
   constructor(message: string, status: number, problem: Problem | null) {
-    super(message);
+    super(problemText(status, problem, message));
     this.name = "ApiError";
     this.status = status;
     this.problem = problem;
@@ -19,6 +23,9 @@ export type Problem = {
   status?: number;
   detail?: string;
   instance?: string;
+  /** Which request fields were rejected, on a body validation failure. Routed onto the fields by
+   *  `lib/formError.ts#fieldErrors`, so a form shows each message where it belongs. */
+  fields?: { field: string; message: string }[];
 };
 
 // A 401 means the session lapsed. /auth/login is the one door for every mode: under Cloudflare Access it
@@ -96,13 +103,35 @@ function bailOnBrokenSimulation(status: number, problem: Problem | null): void {
   if (status === 403 && getViewAs() && problem?.detail?.startsWith("view as:")) stopViewAs();
 }
 
+// A fetch REJECTS (rather than resolving with a bad status) when the request never reached a server at all:
+// no signal, aeroplane mode, DNS gone, the worker unreachable. The browser's own message for that is
+// "Failed to fetch", and it was being surfaced verbatim - as the entire explanation - in the panel a page
+// shows when its data will not load. On a phone this is the single most likely failure there is, so it gets
+// named properly and carries `status: 0`, which is how callers can tell "the network" from "the server said
+// no" without string-matching.
+function networkError(): ApiError {
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  return new ApiError(
+    offline
+      ? "You're offline. This will work again as soon as you have a connection."
+      : "Couldn't reach the server. Check your connection and try again.",
+    0,
+    null,
+  );
+}
+
 export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   guardReadOnly(path, init);
-  const res = await fetch(`/v1${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...viewAsHeader(path, init), ...(init.headers ?? {}) },
-    credentials: "include",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/v1${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...viewAsHeader(path, init), ...(init.headers ?? {}) },
+      credentials: "include",
+    });
+  } catch {
+    throw networkError();
+  }
   if (res.status === 401) handle401();
   if (!res.ok) {
     // Only user ACTIONS get the request-access offer: background reads legitimately 403 while the UI is
@@ -166,10 +195,24 @@ export type ListResponse<T> = { results: T[]; next_page_token?: string };
  *  coalescer, so all reads fired in the same tick collapse into one /v1/batch:run request. */
 export function list<T>(
   collection: string,
-  opts: { max?: number; showDeleted?: boolean; q?: string; pageToken?: string } = {}
+  opts: { max?: number; showDeleted?: boolean; deletedOnly?: boolean; q?: string; pageToken?: string; params?: Record<string, string> } = {}
 ): Promise<ListResponse<T>> {
-  const params = new URLSearchParams({ max_page_size: String(opts.max ?? 200) });
-  if (opts.showDeleted) params.set("show_deleted", "true");
+  // 100 is what the server actually grants (http/pagination.ts clampPageSize caps there), so asking for more
+  // just made every caller's stated page size a fiction. Truncation is reported through `next_page_token`
+  // either way; the two numbers should agree so nobody sizes a view against a page they will never get.
+  const params = new URLSearchParams({ max_page_size: String(Math.min(opts.max ?? 100, 100)) });
+  // Three states, two params (`show_deleted` stays a boolean, as AEP requires): `deleted_only` is what lets a
+  // "Deleted" view be its own fetch. Including the live rows and
+  // filtering them off in the client would spend the page budget on rows nobody asked for - and on a list
+  // longer than one page it would show an EMPTY trash while deleted rows sat past the cursor.
+  if (opts.deletedOnly) params.set("deleted_only", "true");
+  else if (opts.showDeleted) params.set("show_deleted", "true");
+  // Collection-specific list filters the server understands (e.g. leave-requests' `leave_type`, tickets'
+  // `state`/`department`). Sorted so the same filter set always produces the same URL - and so the coalescer
+  // and the store's cache key agree on it.
+  for (const [k, v] of Object.entries(opts.params ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+    if (v) params.set(k, v);
+  }
   // Server-side text filter (FTS-backed). Present only when the page offers a search box, so an ordinary
   // list request is byte-identical to before and keeps sharing its cache entry.
   if (opts.q) params.set("q", opts.q);
@@ -193,6 +236,15 @@ export async function listAll<T>(collection: string): Promise<T[]> {
 
 export function get<T>(path: string): Promise<T> {
   return coalescedGet<T>(path);
+}
+
+export type ChangesResponse = { now: number; collections?: string[]; unknown_window?: boolean };
+
+/** Which collections have been written to since `since` (epoch ms). One indexed read that lets the store keep
+ *  its stored copies instead of revalidating them - see lib/resourceStore.ts#syncChanges. Rides the coalescer
+ *  like every other GET, so it joins the page's first batch rather than adding a round trip. */
+export function changesSince(since: number): Promise<ChangesResponse> {
+  return coalescedGet<ChangesResponse>(`changes?since=${Math.floor(since)}`);
 }
 
 /** Execute several GET reads in ONE request via /v1/batch:run. `paths` are full sub-request paths, e.g.
@@ -264,12 +316,17 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
   // the same message the other writes get rather than letting a download 403 opaquely.
   guardReadOnly(`/${path}`, { method: "POST" });
   const qs = opts.params ? `?${new URLSearchParams(opts.params).toString()}` : "";
-  const res = await fetch(`/v1/${path}:${opts.verb ?? "download"}${qs}`, {
-    method: "POST",
-    headers: { "X-Requested-By": "hrms-spa", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
-    credentials: "include",
-    ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/v1/${path}:${opts.verb ?? "download"}${qs}`, {
+      method: "POST",
+      headers: { "X-Requested-By": "hrms-spa", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+      credentials: "include",
+      ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
+    });
+  } catch {
+    throw networkError(); // a download is the request most likely to be attempted on a bad connection
+  }
   if (res.status === 401) handle401();
   if (!res.ok) {
     const problem = (await res.json().catch(() => null)) as Problem | null;
@@ -277,6 +334,12 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
     throw new ApiError(problem?.detail ?? problem?.title ?? res.statusText, res.status, problem);
   }
   return res.blob();
+}
+
+/** Fetch a binary custom method and hand back the bytes themselves - for a renderer that reads the file
+ *  (pdf.js) rather than handing it to the browser's own viewer, so no object URL is minted or leaked. */
+export function blobOf(path: string, opts: BinaryOpts = {}): Promise<Blob> {
+  return postBinary(path, opts);
 }
 
 /** Fetch a binary custom method for INLINE viewing and return an object URL (feed it to an iframe).

@@ -10,9 +10,11 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
+import { errorChainText } from "../src/lib/errors";
 import { app } from "../src/index";
 import { deleteRun } from "../src/services/payroll";
-import { createLeaveRequest } from "../src/services/leaveRequests";
+import { createLeaveRequest, listLeaveRequests } from "../src/services/leaveRequests";
+import type { ListScope } from "../src/domain/access";
 
 // Integration + service tests that lock in the production-readiness fixes: money release-on-delete, the
 // conditional (no-overdraw) leave reserve, and a REAL HTTP request through the mounted app -> auth -> authz ->
@@ -115,6 +117,41 @@ describe("leave reserve cannot overdraw the balance", () => {
   });
 });
 
+describe("leave request list filters by leave type", () => {
+  it("returns only the asked-for type, and narrows within the caller's scope rather than widening it", async () => {
+    const mine = await seedEmployee();
+    const other = await seedEmployee();
+    const actor = await seedUser(mine, "employee");
+    const annualId = genId();
+    const sickId = genId();
+    await deps.db.insert(schema.leaveTypes).values([
+      { uuid: annualId, code: `lt-${genId().slice(0, 4)}`, name: "Annual", paid: true, availableDuringProbation: true },
+      { uuid: sickId, code: `lt-${genId().slice(0, 4)}`, name: "Sick", paid: true, availableDuringProbation: true },
+    ]);
+    for (const employeeId of [mine, other]) {
+      await deps.db.insert(schema.leaveBalances).values([
+        { uuid: genId(), employeeId, leaveTypeId: annualId, balanceDays: 5 },
+        { uuid: genId(), employeeId, leaveTypeId: sickId, balanceDays: 5 },
+      ]);
+      await createLeaveRequest(deps, actor, { employee: `employees/${employeeId}`, leave_type: `leave-types/${annualId}`, start_date: "2099-06-01", end_date: "2099-06-01" });
+      await createLeaveRequest(deps, actor, { employee: `employees/${employeeId}`, leave_type: `leave-types/${sickId}`, start_date: "2099-06-03", end_date: "2099-06-03" });
+    }
+
+    const all: ListScope = { breadth: "all", deptCode: null, ownerId: mine, seeRestricted: true };
+    const annualOnly = await listLeaveRequests(deps, all, 100, undefined, undefined, undefined, `leave-types/${annualId}`);
+    expect(annualOnly.items.length).toBe(2);
+    expect(annualOnly.items.every((r) => r.leaveTypeId === annualId)).toBe(true);
+
+    // The filter composes with the caller's scope: own-scope + a type returns only that caller's rows of it.
+    const own: ListScope = { breadth: "own", deptCode: null, ownerId: mine, seeRestricted: false };
+    const mineAnnual = await listLeaveRequests(deps, own, 100, undefined, undefined, undefined, `leave-types/${annualId}`);
+    expect(mineAnnual.items.map((r) => r.employeeId)).toEqual([mine]);
+
+    // No filter -> everything in scope, so the filter can only ever narrow.
+    expect((await listLeaveRequests(deps, all, 100)).items.length).toBe(4);
+  });
+});
+
 describe("HTTP integration: auth + middleware chain + wire-id edge", () => {
   it("serves a real /v1/users/me under dev auth and encodes the employee ref as a wire-id token", async () => {
     const emp = await seedEmployee({ code: "04-777", firstName: "Ada", lastName: "Lovelace" });
@@ -139,15 +176,53 @@ describe("HTTP integration: auth + middleware chain + wire-id edge", () => {
     expect(token).not.toBe(emp);
     expect(token.length).toBeGreaterThan(emp.length);
   });
+
+  it("refuses an oversized body from Content-Length, before any handler reads it", async () => {
+    // Fourteen routes buffer a whole request body with `arrayBuffer()`; three of them capped it, and even those
+    // asserted on `bytes.byteLength` - after the payload was already committed to isolate memory, which the
+    // docstore's AES pass then copies again. So the cap reported the DoS rather than preventing it. The gate is
+    // now one middleware over /v1, checked from the declared length, so no upload route can forget it.
+    const emp = await seedEmployee({ code: "04-778" });
+    const devUser = await seedUser(emp, "super_admin");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = devUser.email;
+    (b as Record<string, unknown>).ALLOW_DEV_AUTH = "true";
+
+    const res = await app.request(
+      "/v1/personal-documents/anything:upload",
+      {
+        method: "POST",
+        headers: { "X-Requested-By": "hrms-spa", "content-length": String(64 * 1024 * 1024) },
+        body: "x", // never read: the middleware answers from the header
+      },
+      b as unknown as Record<string, unknown>,
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json() as { title: string }).title).toMatch(/invalid argument/i);
+
+    // A body inside the cap is not touched by this middleware (it goes on to the ordinary auth/authz answer,
+    // whatever that is for this path - what matters is that it is NOT the size refusal).
+    const ok = await app.request(
+      "/v1/users/me",
+      { headers: { "X-Requested-By": "hrms-spa", "content-length": "1024" } },
+      b as unknown as Record<string, unknown>,
+    );
+    expect(ok.status).toBe(200);
+  });
 });
 
 describe("codeAlloc backstop: `code` is UNIQUE per table", () => {
   it("rejects a second row that reuses an existing code (a lost alloc race fails safe, not silently duplicated)", async () => {
     await deps.db.insert(schema.employees).values({ uuid: genId(), code: "04-dup", firstName: "A", lastName: "B", workEmail: `${genId()}@t.example`, status: "active" });
     // Same code, different row -> the UNIQUE index must reject it (errorHandler maps this to a retryable 409).
-    await expect(
-      deps.db.insert(schema.employees).values({ uuid: genId(), code: "04-dup", firstName: "C", lastName: "D", workEmail: `${genId()}@t.example`, status: "active" }),
-    ).rejects.toThrow(/UNIQUE constraint failed/i);
+    // Assert through errorChainText, not the thrown error's own message: drizzle reports a failed statement
+    // as a DrizzleQueryError reading only "Failed query: <sql>" and hangs the real D1 text off `cause`. That
+    // is exactly the lookup production does, so this fails if the 409 mapping ever stops reaching the driver.
+    const err = await deps.db
+      .insert(schema.employees)
+      .values({ uuid: genId(), code: "04-dup", firstName: "C", lastName: "D", workEmail: `${genId()}@t.example`, status: "active" })
+      .then(() => null, (e: unknown) => e);
+    expect(err).not.toBeNull();
+    expect(errorChainText(err)).toMatch(/UNIQUE constraint failed:[^:]*\.code\b/i);
   });
 });
 

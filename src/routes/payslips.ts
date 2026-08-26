@@ -1,5 +1,6 @@
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
+import { contentDisposition } from "../http/contentDisposition";
 import { listPayslips, downloadPayslip, previewPayslip } from "../services/payslips";
 import { toPayslipResource } from "../http/serialize";
 
@@ -23,7 +24,7 @@ export const payslips = collectionRoutes({
     preview: {
       raw: async (c, id) => {
         const { bytes, fileName } = await previewPayslip(c.get("deps"), c.get("user"), id);
-        return c.body(bytes, 200, { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${fileName}"` });
+        return c.body(bytes, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
       },
     },
     download: {

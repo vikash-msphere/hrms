@@ -1,17 +1,22 @@
 import * as React from "react";
 import { KeyRound } from "lucide-react";
-import { create, remove } from "@/api";
+import { create, invoke, remove } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
 import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, groupOf, COLLECTION_GROUPS, accessTone } from "./permMatrix";
-import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { roleLabel } from "@/lib/roles";
+import { CellOption } from "./CellOption";
+import { AccessAction } from "./AccessAction";
+import { ruleSentence } from "./ruleLogic";
 import { FineRulesEditor } from "./FineRulesEditor";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
 
 // View + modify ALL of one subject's (a role or a user) collection-wide permissions in one place. Each row is
 // a collection; the dropdown sets the subject's org-scope level (none/read/write/admin/deny) via the same
@@ -23,14 +28,19 @@ export function SubjectPermissionsDialog({
   subjectKind,
   subject,
   label,
+  viaRole,
 }: {
   open: boolean;
   onClose: () => void;
   subjectKind: "role" | "user";
   subject: string; // role name, or users/<id>
   label: string;
+  /** The user's role, for a user subject. Every row then says what the role already gives, so these rows read
+   *  as the exceptions they are: "none" on a user who inherits write from their role is not no access. */
+  viaRole?: string;
 }) {
   const { toast } = useToast();
+  const confirm = useConfirm();
   const canWrite = usePermission("access-rules.write");
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const [busy, setBusy] = React.useState(false);
@@ -52,18 +62,9 @@ export function SubjectPermissionsDialog({
   const mine = rules.filter((r) => r.subject_kind === subjectKind && r.subject === subject);
   const collections = collectionsForRules(mine);
   const [filter, setFilter] = React.useState("");
-  // Group the rows by module (curated order, "Other" last for live-rule extras), then filter by label.
-  const grouped = React.useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    const shown = q ? collections.filter((c) => labelOf(c).toLowerCase().includes(q) || c.includes(q)) : collections;
-    const order = [...COLLECTION_GROUPS.map((g) => g.label), "Other"];
-    const byGroup = new Map<string, string[]>();
-    for (const c of shown) {
-      const g = groupOf(c);
-      byGroup.set(g, [...(byGroup.get(g) ?? []), c]);
-    }
-    return order.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)!] as const);
-  }, [collections, filter]);
+  // Sixty rows of which four say anything is a haystack. This hides the "none" rows, so the answer to "what
+  // does this role actually have?" is the whole list rather than something to scroll for.
+  const [onlyGranted, setOnlyGranted] = React.useState(false);
   const isGlobal = mine.some((r) => (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
 
   const cellRules = (collection: string) => mine.filter((r) => !r.verb && ruleMatchesTarget(r, { collection }));
@@ -74,7 +75,87 @@ export function SubjectPermissionsDialog({
     return rs.find((r) => r.effect === "allow")?.level ?? "none";
   };
 
+  // What the user's ROLE gives on a collection, for the inherited-level note beside each row. A user with no
+  // rule of their own is not without access - they have whatever the role has, and saying "none" without that
+  // context is how a per-user exception gets added to undo something that was never there.
+  const roleRules = viaRole ? rules.filter((r) => r.subject_kind === "role" && r.subject === viaRole) : [];
+  const roleGlobal = roleRules.some((r) => (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
+  const roleValueOf = (collection: string): string => {
+    if (!viaRole) return "none";
+    if (roleGlobal) return "admin";
+    const rs = roleRules.filter((r) => !r.verb && ruleMatchesTarget(r, { collection }));
+    if (rs.some((r) => r.effect === "deny")) return "deny";
+    return rs.find((r) => r.effect === "allow")?.level ?? "none";
+  };
+
+  // Group the rows by module (curated order, "Other" last for live-rule extras), then filter by label.
+  const grouped = React.useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    let shown = q ? collections.filter((c) => labelOf(c).toLowerCase().includes(q) || c.includes(q)) : collections;
+    if (onlyGranted && !isGlobal) shown = shown.filter((c) => valueOf(c) !== "none");
+    const order = [...COLLECTION_GROUPS.map((g) => g.label), "Other"];
+    const byGroup = new Map<string, string[]>();
+    for (const c of shown) {
+      const g = groupOf(c);
+      byGroup.set(g, [...(byGroup.get(g) ?? []), c]);
+    }
+    return order.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)!] as const);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collections, filter, onlyGranted, isGlobal, rules]);
+
+  // The whole subject in one line, above the list: what they hold, before anybody scrolls for it.
+  const tally = collections.reduce<Record<string, number>>((acc, c) => {
+    const v = valueOf(c);
+    if (v !== "none") acc[v] = (acc[v] ?? 0) + 1;
+    return acc;
+  }, {});
+  const summary = isGlobal
+    ? "Admin on everything (an org-wide rule)."
+    : Object.keys(tally).length === 0
+      ? subjectKind === "user"
+        ? "No per-user rules. Everything this person can do comes from their role."
+        : "No access anywhere. This role grants nothing until something is set below."
+      : ["admin", "write", "read", "deny"]
+          .filter((l) => tally[l])
+          .map((l) => `${tally[l]} ${l === "deny" ? "denied" : l}`)
+          .join(" · ");
+
+  // Everything this subject has waiting on a second approver. Four-eyes queues a grant as `pending` and a
+  // removal as `pending_delete`, and until now that queue was visible only on the permissions matrix and the
+  // per-object key icon - so somebody editing this dialog could re-add a grant that was already queued, or
+  // read a row as "no access" when its removal had simply not been approved yet.
+  const pending = mine.filter((r) => r.status === "pending" || r.status === "pending_delete");
+
+  async function decide(r: AccessRule, decision: "approve" | "reject") {
+    setBusy(true);
+    try {
+      await invoke("access-rules", decision, undefined, { rule: r.path });
+      toast({ title: decision === "approve" ? "Change approved" : "Change rejected", variant: "success" });
+      await reload();
+    } catch (e) {
+      toast({ variant: "destructive", title: `Could not ${decision}`, description: String((e as Error).message) });
+      setBusy(false);
+    }
+  }
+
   async function setCell(collection: string, value: string) {
+    // Two directions of this dropdown are worth stopping for: taking access away (people lose a page they were
+    // using, and nothing tells them why) and handing out admin (the widest thing this dialog can do). Ordinary
+    // read/write adjustments pass straight through - a confirm on every cell of a permission matrix is the
+    // fastest way to teach someone to dismiss confirms without reading them.
+    const from = valueOf(collection);
+    const removing = (value === "none" || value === "deny") && from !== "none";
+    if (removing || value === "admin") {
+      const ok = await confirm({
+        title: value === "admin" ? `Give ${label} admin on ${labelOf(collection)}?` : `Take away ${label}'s access to ${labelOf(collection)}?`,
+        description: value === "admin"
+          ? "Admin covers every action on that collection, including the destructive ones."
+          : `They currently have ${from}. ${value === "deny" ? "A deny also overrides access they get from any role." : "Access they get from a role stays; this only removes what was granted here."}`,
+        confirmLabel: value === "admin" ? "Give admin" : "Remove access",
+        destructive: removing,
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       for (const r of cellRules(collection)) await remove(r.path, r.etag); // edit = delete + create
@@ -92,7 +173,9 @@ export function SubjectPermissionsDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col overflow-y-auto">
+      {/* The 85vh ceiling starts at `sm`: on a phone the shared bottom-sheet height (which yields to the
+          on-screen keyboard) has to win - see ui/dialog.tsx. */}
+      <DialogContent className="flex max-w-3xl flex-col overflow-y-auto sm:max-h-[85vh] lg:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="h-5 w-5 text-amber-600 dark:text-amber-400" /> Permissions · {label}
@@ -101,6 +184,34 @@ export function SubjectPermissionsDialog({
             {subjectKind === "user" ? "Per-user access (exceptions layered on the user's role)." : "Access for this role."} A deny always wins.
           </DialogDescription>
         </DialogHeader>
+        {pending.length > 0 && (
+          <div className="space-y-1.5 rounded-md border border-amber-300 bg-amber-50/60 p-2.5 dark:border-amber-800 dark:bg-amber-950/30">
+            <p className="text-xs font-medium">
+              {pending.length} change{pending.length === 1 ? "" : "s"} waiting for a second approver. A queued grant does nothing yet; a queued removal is still in force.
+            </p>
+            {pending.map((r) => (
+              <div key={r.path} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="min-w-0">
+                  <Badge variant="secondary" className="mr-2 text-amber-700 dark:text-amber-400">{r.status === "pending" ? "new grant" : "removal"}</Badge>
+                  {ruleSentence(r, label)}
+                </span>
+                {canWrite && (
+                  // Deciding is its own grantable method, so each button carries its verb: an org can hand out
+                  // "approve permission changes" without handing out the write that queues them.
+                  <span className="flex gap-1">
+                    <AccessAction verb="approve" collection="access-rules" label="Approve permission changes">
+                      <Button size="sm" variant="outline" className="h-7" disabled={busy} onClick={() => void decide(r, "approve")}>Approve</Button>
+                    </AccessAction>
+                    <AccessAction verb="reject" collection="access-rules" label="Reject permission changes">
+                      <Button size="sm" variant="ghost" className="h-7 text-destructive" disabled={busy} onClick={() => void decide(r, "reject")}>Reject</Button>
+                    </AccessAction>
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         <Tabs defaultValue="coarse">
           <TabsList>
             <TabsTrigger value="coarse">By collection</TabsTrigger>
@@ -110,17 +221,40 @@ export function SubjectPermissionsDialog({
           {/* Coarse: collection-wide level per collection, grouped by module + filterable - the flat list
               outgrew scanning once the catalog covered every collection. */}
           <TabsContent value="coarse">
+            {/* What this subject holds, in one line - the question the dialog is opened to answer, previously
+                answerable only by reading sixty dropdowns. */}
+            <p className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              <span className="font-medium">{summary}</span>
+              {viaRole && subjectKind === "user" && (
+                <span className="text-muted-foreground">Role: {roleLabel(viaRole)}. Anything set here is an exception on top of it.</span>
+              )}
+            </p>
             <p className="mb-2 text-xs text-muted-foreground">Collection-wide access. Finer scope (own/department, fields, custom methods, single objects) is on the "All rules" tab and the in-context manage-access icons.</p>
-            <Input className="mb-2 h-8" placeholder="Filter collections…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-            <div className="max-h-[55vh] space-y-1 overflow-y-auto">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Input className="h-8 min-w-[10rem] flex-1" placeholder="Filter collections…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+              <Button type="button" variant={onlyGranted ? "default" : "outline"} size="sm" className="h-8" onClick={() => setOnlyGranted((s) => !s)} aria-pressed={onlyGranted}>
+                Only what's set
+              </Button>
+            </div>
+            <div className="max-h-[55dvh] space-y-1 overflow-y-auto">
               {grouped.map(([group, cols]) => (
                 <React.Fragment key={group}>
                   <p className="sticky top-0 z-10 bg-background px-2 pb-0.5 pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</p>
                   {cols.map((c) => {
                     const v = valueOf(c);
+                    const inherited = subjectKind === "user" ? roleValueOf(c) : "none";
                     return (
                       <div key={c} className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-accent/40">
-                        <span className="text-sm font-medium">{labelOf(c)}</span>
+                        <span className="min-w-0 text-sm font-medium">
+                          {labelOf(c)}
+                          {/* The inherited level, so a "none" row is never mistaken for no access. */}
+                          {inherited !== "none" && (
+                            <span className="ml-2 text-xs font-normal text-muted-foreground">
+                              role gives <span className={accessTone(inherited).text}>{inherited}</span>
+                              {v !== "none" && v !== inherited ? " · overridden here" : ""}
+                            </span>
+                          )}
+                        </span>
                         {isGlobal || !canWrite ? (
                           <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"} className={v === "deny" || v === "none" ? undefined : accessTone(v).text}>{v}</Badge>
                         ) : (
@@ -139,7 +273,11 @@ export function SubjectPermissionsDialog({
                   })}
                 </React.Fragment>
               ))}
-              {grouped.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No collection matches "{filter}".</p>}
+              {grouped.length === 0 && (
+                <p className="px-2 py-3 text-sm text-muted-foreground">
+                  {onlyGranted && !filter.trim() ? "Nothing is set here yet." : `No collection matches "${filter}".`}
+                </p>
+              )}
             </div>
           </TabsContent>
 
@@ -150,17 +288,5 @@ export function SubjectPermissionsDialog({
         </Tabs>
       </DialogContent>
     </Dialog>
-  );
-}
-
-// One level option: coloured dot + coloured label. Radix clones the selected item's children into the trigger,
-// so this styles the closed control too.
-function CellOption({ value }: { value: string }) {
-  const tone = accessTone(value);
-  return (
-    <span className={cn("inline-flex items-center gap-2 whitespace-nowrap font-medium", tone.text)}>
-      <span className={cn("h-2 w-2 shrink-0 rounded-full", tone.dot)} />
-      {value}
-    </span>
   );
 }

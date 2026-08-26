@@ -8,10 +8,11 @@ import type { Deps } from "../deps";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { loadTaxConfig, fyWindow, finalizedTotals, settlementTotals, verifiedDeductions, readDeclarations, tdsComponent } from "./taxProjection";
-import { computeAnnualTax, allowedDeductions } from "../domain/incomeTax";
+import { computeAnnualTax, allowedDeductions, assertSupportedRegime } from "../domain/incomeTax";
 import { renderLetterPdf, type LetterContent, type LetterBlock } from "../lib/letterPdf";
 import { money as fmtMoney, formatLongDate } from "../lib/pdfPrimitives";
 import { decimalsFor, type CurrencyDecimals } from "../domain/currency";
+import { refPayComponents } from "../lib/refData";
 
 const r0 = (n: number) => Math.round(n);
 
@@ -31,15 +32,21 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
   // Figures render in the org currency's precision (whole rupees for INR by default).
   const money = (n: number) => fmtMoney(n, decimalsFor(org.default_currency, org.currency_decimals));
   const cfg = await loadTaxConfig(deps);
-  const components = await deps.db.select().from(schema.payComponents);
+  const components = await refPayComponents(deps);
   const regime = tdsComponent(components)?.regime ?? "new";
+  // Same gate the withholding path applies: a certificate computed under an unimplemented regime would state a
+  // liability the exemptions it ignores would have reduced.
+  assertSupportedRegime(regime);
   const regimeCfg = cfg.regimes[regime] ?? cfg.regimes.new!;
   const fy = fyForLabel(financialYear);
 
   const totals = (await finalizedTotals(deps, fy, undefined, employeeId)).get(employeeId) ?? { gross: 0, taxableGross: 0, tax: 0, months: 0 };
   const decl = await readDeclarations(deps, emp.taxDetailsEnc);
-  const prior = decl.priorEmployerIncome ?? 0;
-  const priorTds = decl.priorEmployerTds ?? 0;
+  const prior = Math.max(0, decl.priorEmployerIncome ?? 0);
+  // Bounded by the prior income it was withheld from, the same ceiling the withholding projection applies
+  // (assembleProjection): tax deducted cannot exceed the pay it came out of, and an unbounded figure here would
+  // put a credit on the certificate that the payslips never gave.
+  const priorTds = Math.min(Math.max(0, decl.priorEmployerTds ?? 0), prior);
   // A leaver's full-and-final settlement is salary income paid outside any payroll run - final-month salary,
   // leave encashment, bonuses, arrears - and it withholds its own TDS. Without it the certificate would omit the
   // year's largest single payment and under-report the tax deducted on it.

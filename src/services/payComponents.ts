@@ -9,7 +9,7 @@ import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 export type PayComponentInput = {
   display_name?: string;
   kind?: "earning" | "deduction" | "employer_contribution"; // same set the column stores (db/schema.ts)
-  method?: "fixed" | "percent_base" | "rate_qty" | "income_tax" | "epf" | "esi" | "pt" | "edli" | "pf_admin";
+  method?: "fixed" | "percent_base" | "income_tax" | "epf" | "esi" | "pt" | "edli" | "pf_admin";
   rate?: number | null;
   cap?: number | null;
   regime?: string | null;

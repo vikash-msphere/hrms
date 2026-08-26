@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
 import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
 import { get } from "@/api";
@@ -15,6 +15,8 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import confettiUrl from "./confetti.svg";
+import { getSetting } from "@/lib/settingsStore";
+import { useMedia } from "@/hooks/useMedia";
 
 type TipPerson = { id: string; name: string; photo?: string };
 
@@ -76,8 +78,15 @@ const DAY_MS = 86400000;
 // weight-based off this, so bars still line up). Working days are weight 1.
 const WEEKEND_W = 0.5;
 // Width of the employee-name column (px). Shared by the grid template AND the day-area overlay offset so the
-// bars always start exactly where the day columns do.
+// bars always start exactly where the day columns do. Phones get the narrow one: the name column is dead
+// weight beside 14 days on a 360px screen, and it stays pinned there anyway.
 const NAME_COL = 202;
+const NAME_COL_SM = 152;
+// Minimum width of ONE working-day column (px); weekend/holiday columns take WEEKEND_W of it. The grid is a
+// horizontal scroller either way, so a phone spends that scroll on cells a finger can actually hit rather
+// than on squeezing the fortnight into the viewport.
+const DAY_MIN = 42;
+const DAY_MIN_SM = 64;
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // Per-day attendance dot. on_leave/holiday render as a pill / shaded column instead, so they get no dot.
@@ -173,7 +182,7 @@ function ConfettiBg() {
   );
 }
 
-export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, celebrations, events = [], schedule = DEFAULT_SCHEDULE, hiddenMarkers = [], refreshKey = 0 }: {
+export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, celebrations, events = [], schedule = DEFAULT_SCHEDULE, hiddenMarkers = [], refreshKey = 0, onCollapse }: {
   me: Me;
   employees: Employee[];
   leaves: LeaveRequest[];
@@ -184,8 +193,12 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   schedule?: AttendanceSchedule; // org work schedule; drives non-working shading + per-day attendance status
   hiddenMarkers?: string[]; // marker categories the viewer's role may not see (from the dashboard role config)
   refreshKey?: number; // bump to force an attendance re-fetch (e.g. after the dashboard clock in/out)
+  onCollapse?: () => void; // when the host can fold the widget away, the header draws the fold control
 }) {
   const workDays = schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5];
+  // Phone layout fork: narrower name column, wider day cells (see NAME_COL_SM / DAY_MIN_SM).
+  const isPhone = useMedia("(max-width: 767px)");
+  const nameCol = isPhone ? NAME_COL_SM : NAME_COL;
   // Working-hours window (org tz) so a timed event lands at its time-of-day INSIDE its column instead of
   // spanning the whole day: shift_start -> 0.0, shift_end -> 1.0 of the column, clamped. (A 2pm lunch in a
   // 9-6 day -> ~0.56, just right of centre.)
@@ -216,7 +229,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   const [allowBackdated, setAllowBackdated] = useState(true);
   useEffect(() => {
     let live = true;
-    get<{ value?: { allow_backdated?: boolean } }>("settings/leave-requests")
+    getSetting<{ allow_backdated?: boolean }>("leave-requests")
       .then((r) => { if (live && typeof r.value?.allow_backdated === "boolean") setAllowBackdated(r.value.allow_backdated); })
       .catch(() => {});
     return () => { live = false; };
@@ -301,7 +314,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     const t = new Date();
     const nowMs = t.getTime();
     const todayYmd = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate())).toISOString().slice(0, 10);
-    const holSet = new Set(holidays.filter((h) => !h.disabled).map((h) => h.date.slice(0, 10)));
+    const holSet = new Set(holidays.filter((h) => !h.disabled && h.applies !== false).map((h) => h.date.slice(0, 10)));
     const byEmp = new Map<string, AttendanceSession[]>();
     for (const s of sessions) {
       if (!s.employee) continue;
@@ -472,6 +485,13 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return live.sort((a, b) => Number(idOf(b.path) === me.employee_id) - Number(idOf(a.path) === me.employee_id));
   }, [employees, me.employee_id]);
 
+  // Pending leaves that land inside the visible window - the count on the header's "Pending leave" toggle, so
+  // the chip says how much it is hiding before you press it.
+  const pendingInView = useMemo(
+    () => rows.reduce((n, e) => n + toSegs(pendingByEmp.get(idOf(e.path)) ?? []).length, 0),
+    [rows, pendingByEmp, startMs],
+  );
+
   // Per-day team load: who's away (approved leave or at an event) on each visible day. Drives the "N away"
   // chip under each header date - the at-a-glance crunch-day signal - and its who-is-it tooltip.
   const awayByCol = useMemo(() => {
@@ -540,7 +560,10 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return ((whole + frac) / totalWeight) * 100;
   };
 
-  const gridCols = { gridTemplateColumns: `${NAME_COL}px ${dayWeight.map((w) => `${w}fr`).join(" ")}` } as const;
+  const gridCols = { gridTemplateColumns: `${nameCol}px ${dayWeight.map((w) => `${w}fr`).join(" ")}` } as const;
+  // Scroll width = the name column + every day column at its minimum. Weight-driven, so a week full of
+  // holidays (half-width columns) narrows the scroller instead of stretching the working days.
+  const gridMin = { minWidth: nameCol + Math.ceil(totalWeight * (isPhone ? DAY_MIN_SM : DAY_MIN)) } as const;
   const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
   const rangeLabel = `${fmt(cols[0])} – ${fmt(cols[DAYS - 1])}`;
 
@@ -627,6 +650,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
         ) : (
           <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full" style={{ backgroundColor: ONE_LEAVE_COLOR }} /> Leave</span>
         )}
+        <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-5 rounded-full border border-dashed border-muted-foreground" /> Leave awaiting approval</span>
         <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-violet-200 dark:bg-violet-900" /> Holiday</span>
         <span className="flex items-center gap-1.5"><span className="inline-block h-4 w-3 rounded-[2px] bg-brand-neutral-200 dark:bg-brand-neutral-700" /> Weekend</span>
       </div>
@@ -650,45 +674,83 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   return (
     <TooltipProvider delayDuration={150}>
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div className="flex items-baseline gap-2">
+      {/* Below `sm` the title takes its own line and the controls take theirs - the control cluster is
+          ~250px of buttons that cannot wrap away, so sharing a line with it would squeeze the title into a
+          mid-phrase break. The single row returns from `sm` up, where both fit. The controls line itself
+          never wraps: pending toggle, legend and the week nav stay one row, bought with tighter padding and
+          gaps below `sm` (the header's own too). The toggle is the one flexible item - if a screen is still
+          too narrow for all three, its label truncates rather than the row breaking apart.
+          Where the widget folds, the whole header is the fold target - anything interactive inside it
+          (buttons, tooltip triggers, the access affordance) opts out via the `closest` guard. */}
+      <CardHeader
+        className={cn("flex-col items-start gap-2 space-y-0 px-3 pb-2 pt-3 sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:p-6", onCollapse && "cursor-pointer")}
+        onClick={onCollapse ? (ev) => { if (!(ev.target as HTMLElement).closest("button,a,[role='button'],input,select")) onCollapse(); } : undefined}
+      >
+        <div className="flex w-full min-w-0 items-baseline gap-2 sm:w-auto">
           <CardTitle className="text-base">
             <AccessAction collection="timeline" label="Team timeline">
-              <span className="flex items-center gap-2"><CalendarRange className="h-4 w-4 text-primary" /> Team timeline</span>
+              <span className="flex items-center gap-2"><CalendarRange className="h-4 w-4 shrink-0 text-primary" /> <span className="whitespace-nowrap">Team timeline</span></span>
             </AccessAction>
           </CardTitle>
           <span className="hidden text-xs text-muted-foreground lg:inline">· click a half-day or drag to request leave</span>
+          {/* Fold control (phones): the host mounts the widget on open, so folding it away also stops paying
+              for its attendance fan-out. Sits on the title line, opposite the title, where the header's own
+              control cluster can't push it off. */}
+          {onCollapse && (
+            <Button variant="ghost" size="icon" className="relative -top-1 -my-1 ml-auto h-7 w-7 shrink-0 self-center text-muted-foreground" onClick={onCollapse} aria-label="Hide team timeline" title="Hide team timeline">
+              <ChevronUp className="h-4 w-4" />
+            </Button>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant={showPending ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 gap-1.5 text-xs text-muted-foreground"
-            onClick={() => setShowPending((v) => !v)}
-            aria-pressed={showPending}
-          >
-            <Clock className="h-3.5 w-3.5" /> Pending
-          </Button>
+        <div className="flex w-full flex-nowrap items-center gap-1.5 sm:w-auto sm:gap-2">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" aria-label="Legend"><Info className="h-4 w-4" /></Button>
+              <Button
+                variant={showPending ? "secondary" : "outline"}
+                size="sm"
+                className={cn("h-7 min-w-0 gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-2", showPending ? "text-foreground" : "text-muted-foreground")}
+                onClick={() => setShowPending((v) => !v)}
+                aria-pressed={showPending}
+                aria-label="Awaiting approval"
+              >
+                {/* Swatch, not an icon: the same dashed pill the toggle draws on the rows. The swatch and the
+                    count are fixed; only the label gives way, so the narrowest screens lose letters instead of
+                    the row's alignment. */}
+                <span className={cn("inline-block h-2.5 w-4 shrink-0 rounded-full border border-dashed border-current", !showPending && "opacity-50")} />
+                <span className="truncate">Awaiting approval</span>
+                {pendingInView > 0 && <span className="shrink-0 rounded-full bg-foreground/10 px-1 font-semibold tabular-nums">{pendingInView}</span>}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{showPending ? "Hide" : "Show"} leave requests awaiting approval</TooltipContent>
+          </Tooltip>
+          {/* tapToOpen: this button IS the legend - it has no other action, so without it the key to every
+              colour on the timeline was hover-only, i.e. absent on the device the timeline is hardest to read on. */}
+          <Tooltip tapToOpen>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground" aria-label="Legend"><Info className="h-4 w-4" /></Button>
             </TooltipTrigger>
             <TooltipContent className="rounded-lg border bg-popover text-popover-foreground shadow-lg">{legendCard}</TooltipContent>
           </Tooltip>
           <span className="hidden text-sm text-muted-foreground sm:inline">{rangeLabel}</span>
-          <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setPage((p) => p - 1)} aria-label="Previous"><ChevronLeft className="h-4 w-4" /></Button>
-          <Button variant="outline" size="sm" className="h-7" onClick={() => setPage(0)} disabled={page === 0}>Today</Button>
-          <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setPage((p) => p + 1)} aria-label="Next"><ChevronRight className="h-4 w-4" /></Button>
+          {/* Previous / Today / Next is ONE control in three parts and stays together. `ml-auto` parks the
+              group at the trailing edge of the controls line, where the thumb is. */}
+          <div className="ml-auto flex shrink-0 items-center gap-1 sm:ml-0 sm:gap-2">
+            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setPage((p) => p - 1)} aria-label="Previous"><ChevronLeft className="h-4 w-4" /></Button>
+            <Button variant="outline" size="sm" className="h-7 px-2 sm:px-3" onClick={() => setPage(0)} disabled={page === 0}>Today</Button>
+            <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setPage((p) => p + 1)} aria-label="Next"><ChevronRight className="h-4 w-4" /></Button>
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="px-0">
+      <CardContent className="px-0 sm:px-0">
         {/* Vertical cap so a big team doesn't let the timeline swallow the page: ~7 rows visible, the rest
             scroll within the card while the day header stays pinned (sticky needs the opaque bg-card). */}
-        <div className="max-h-[560px] overflow-x-auto overflow-y-auto border-y">
-          <div className="min-w-[700px]">
+        <div className="scroll-shadow-x max-h-[560px] overflow-x-auto overflow-y-auto border-y [--scroll-ground:hsl(var(--card))]">
+          <div style={gridMin}>
             {/* Day headers */}
             <div className="sticky top-0 z-20 grid border-b bg-card" style={gridCols}>
-              <div className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {/* The name column is pinned to the left edge of the scroller (both here and on every row), so
+                  scrolling out to the far day never leaves a wall of anonymous cells. */}
+              <div className="sticky left-0 z-30 flex items-center gap-1.5 border-r bg-card px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Team
                 {rows.length > 0 && <span className="rounded-full bg-muted px-1.5 py-px font-semibold normal-case tabular-nums">{rows.length}</span>}
               </div>
@@ -737,7 +799,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
               <div
                 aria-hidden
                 className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-red-400/40 dark:bg-red-400/30"
-                style={{ left: `calc(${NAME_COL}px + (100% - ${NAME_COL}px) * ${pctAt(todayCol + nowFrac) / 100})` }}
+                style={{ left: `calc(${nameCol}px + (100% - ${nameCol}px) * ${pctAt(todayCol + nowFrac) / 100})` }}
               >
                 {/* Self-explaining marker: the current org-local time, floated at the top of the line. */}
                 <span className="absolute left-0 top-0.5 -translate-x-1/2 whitespace-nowrap rounded bg-card/90 px-1 text-[9px] font-medium leading-3 tabular-nums text-red-400">
@@ -778,10 +840,15 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
               const markerAt = (col: number, dx = 0) => ({ left: `${pctAt(col + 0.5)}%`, transform: `translateX(calc(-50% + ${dx}px))` });
               return (
                 <div key={e.path} className={cn("group relative grid border-b transition-colors last:border-0 hover:bg-accent/40", idx % 2 === 1 && "bg-muted/25")} style={gridCols}>
-                  <div className="relative flex items-center gap-2 overflow-hidden py-2 pl-3 pr-2">
+                  {/* Pinned name cell. It has to paint its own stripe + hover tint: `sticky` needs an opaque
+                      background, which hides the row's own. z-[15] clears the attendance dots (z-10) and the
+                      now-line (z-[5]) that would otherwise scroll across it. */}
+                  <div className="sticky left-0 z-[15] flex items-center gap-2 overflow-hidden border-r bg-card py-2 pl-3 pr-2">
+                    {idx % 2 === 1 && <span className="pointer-events-none absolute inset-0 bg-muted/25" />}
+                    <span className="pointer-events-none absolute inset-0 transition-colors group-hover:bg-accent/40" />
                     {hasCeleb && <ConfettiBg />}
                     <span className="relative z-[1] shrink-0">
-                      <PhotoAvatar employeeId={person.id} name={person.name} photo={person.photo} className="h-10 w-10 text-sm" />
+                      <PhotoAvatar employeeId={person.id} name={person.name} photo={person.photo} className={cn("text-sm", isPhone ? "h-9 w-9" : "h-10 w-10")} />
                     </span>
                     <span className="relative z-[1] min-w-0">
                       <span className="block truncate text-sm font-medium">{person.name}</span>
@@ -842,7 +909,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
                   })}
                   {/* Day-area overlay (absolute, starting after the name column): pills + markers placed by % so
                       a half day renders as a half-width pill. */}
-                  <div className="pointer-events-none absolute inset-y-0" style={{ left: NAME_COL, right: 0 }}>
+                  <div className="pointer-events-none absolute inset-y-0" style={{ left: nameCol, right: 0 }}>
                     {/* Event bands ride a slim ribbon at the top of the row so they don't collide with the
                         centered leave pill / attendance dot. Distinct from leave: outlined, with the event color. */}
                     {showCat("events") && eventSegs.map(({ ev, lu, ru }, k) => (

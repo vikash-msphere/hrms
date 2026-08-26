@@ -8,7 +8,7 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { moveDepartment } from "./codeCascade";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
@@ -28,17 +28,8 @@ const managerIdsJson = (managers?: string[] | null) =>
 // key and the owner column. `all`-breadth callers get no filter (unchanged); a narrower grant is enforced.
 export async function listDepartments(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const where = applyScope(scope, schema.departments.code, schema.departments.code);
-  const all = visibleByDelete(await deps.db.select().from(schema.departments).where(where), showDeleted).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+  const all = visibleByDelete(await deps.db.select().from(schema.departments).where(where), showDeleted);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
 }
 
 // A department is a node in the hierarchy, so its code IS its position in the tree: the create allocates one

@@ -9,11 +9,13 @@ import { and, eq } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { notifyMany, activeEmployeeIds } from "./notifications";
+import { notifyMany, activeEmployeeIds, audienceEmployeeIds } from "./notifications";
+import { emailAnnouncement } from "./announcements";
+import type * as schema from "../db/schema";
 import { emitEvent } from "./eventBus";
 import { notFound } from "../lib/errors";
 import { assertNotLocked } from "./lockGuard";
-import { postedTitle } from "../domain/board";
+import { boardPostLink, postedTitle } from "../domain/board";
 import { notifyMentions } from "./mentions";
 
 type Table = any;
@@ -85,16 +87,27 @@ export async function setPublished(
   if (!claimed.length) return row;
   const out = claimed[0]!;
   await audit(deps, actor, `${singular}.${published ? "publish" : "unpublish"}`, collection, id, undefined, out);
-  // Publishing an announcement broadcasts an in-app notification to every active employee (except the author).
+  // Publishing an announcement broadcasts an in-app notification to its audience (except the author): the whole
+  // company, the one department the post is aimed at, or - for a post whose author asked for no notification -
+  // nobody, which leaves it on the board for whoever goes looking.
   if (collection === "announcements" && published) {
     const author = (row as { authorEmployeeId?: string | null }).authorEmployeeId ?? null;
-    const recipients = (await activeEmployeeIds(deps)).filter((eid) => eid !== author);
+    const scope = (row as { audienceScope?: string | null }).audienceScope ?? "everyone";
+    const deptId = (row as { audienceDepartmentId?: string | null }).audienceDepartmentId ?? null;
+    const audience = scope === "none" ? []
+      : scope === "department" && deptId ? await audienceEmployeeIds(deps, { kind: "department", department: deptId })
+      : await activeEmployeeIds(deps);
+    const recipients = audience.filter((eid) => eid !== author);
     // The bell names what actually landed: a published poll is a poll, not "a new announcement".
-    await notifyMany(deps, recipients, { type: "announcement.published", title: postedTitle((row as { kind?: string }).kind ?? "announcement"), body: (row as { title?: string }).title ?? undefined, link: "announcements" });
+    if (recipients.length)
+      await notifyMany(deps, recipients, { type: "announcement.published", title: postedTitle((row as { kind?: string }).kind ?? "announcement"), body: (row as { title?: string }).title ?? undefined, link: boardPostLink(id), subject: `announcements/${id}` });
     await emitEvent(deps, actor, "announcement.published", { subject: `announcements/${id}`, payload: { title: (row as { title?: string }).title ?? null } });
     // The post's @mentions have been silent while it was a draft (edits to a draft notify nobody); going live
     // is when the people it names hear about it.
-    await notifyMentions(deps, actor, { announcementId: id, body: (row as { body?: string | null }).body ?? null, title: (row as { title?: string }).title ?? "" });
+    await notifyMentions(deps, actor, { subject: `announcements/${id}`, link: boardPostLink(id), type: "announcement.mention", body: (row as { body?: string | null }).body ?? null, title: (row as { title?: string }).title ?? "" });
+    // And, when the author asked for it, the same post as email to the same audience - once, guarded by
+    // `emailed_at`, so a Publish racing the scheduler's tick still sends one copy.
+    await emailAnnouncement(deps, out as typeof schema.announcements.$inferSelect);
   }
   return out;
 }

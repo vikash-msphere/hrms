@@ -4,6 +4,7 @@ import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
+import { eq } from "drizzle-orm";
 import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import type { ListScope } from "../src/domain/access";
@@ -48,6 +49,16 @@ const editors: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeR
 const everyone: ListScope = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: false };
 const notificationCount = async () => (await deps.db.select().from(schema.notifications)).length;
 
+// A draft whose scheduled time has ARRIVED. A schedule can only ever be set in the future (backdating one
+// would move the post around the board - see announcementFeedOrder.test.ts), so the way to have an overdue
+// draft is the way it happens in life: schedule it ahead, then let the clock pass it.
+async function dueDraft(actor: AppUser, title: string) {
+  const row = await createAnnouncement(deps, actor, { kind: "announcement", title, body: "x", published: false, publish_time: new Date(Date.now() + 60_000).toISOString() });
+  const publishTime = new Date(Date.now() - 60_000);
+  await deps.db.update(schema.announcements).set({ publishTime }).where(eq(schema.announcements.uuid, row.uuid));
+  return { ...row, publishTime };
+}
+
 describe("board drafts", () => {
   it("keeps a draft off the board and out of the bell until it is published", async () => {
     const actor = await seedActor();
@@ -79,7 +90,7 @@ describe("scheduled publishing", () => {
   it("publishes a draft whose time has come, and leaves a future one alone", async () => {
     const actor = await seedActor();
     await seedActor();
-    const due = await createAnnouncement(deps, actor, { kind: "announcement", title: "Due", body: "x", published: false, publish_time: new Date(Date.now() - 60_000).toISOString() });
+    const due = await dueDraft(actor, "Due");
     const later = await createAnnouncement(deps, actor, { kind: "announcement", title: "Later", body: "y", published: false, publish_time: new Date(Date.now() + 3_600_000).toISOString() });
     const undated = await createAnnouncement(deps, actor, { kind: "announcement", title: "Undated", body: "z", published: false });
 
@@ -97,7 +108,7 @@ describe("scheduled publishing", () => {
   it("announces a published draft exactly once, however many ticks run", async () => {
     const actor = await seedActor();
     await seedActor();
-    await createAnnouncement(deps, actor, { kind: "announcement", title: "Due", body: "x", published: false, publish_time: new Date(Date.now() - 60_000).toISOString() });
+    await dueDraft(actor, "Due");
 
     expect(await publishDueAnnouncements(deps)).toBe(1);
     const after = await notificationCount();

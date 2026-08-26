@@ -47,6 +47,15 @@ breaking the rule fails `npm run verify` rather than waiting for review.
 - **Register a new collection everywhere it must appear**: `domain/collections.ts`, `lib/authzResolve.ts`
   (`TABLES`), `middleware/encodeWireIds.ts` (`ENCODABLE`), grants and policy defaults, the search registry
   if it is searchable, and the web access affordances (`test/webAccessCoverage.test.ts`).
+- **Build web UI for a finger as well as a cursor**: no control under 44px on a coarse pointer, no
+  hover-only affordance, 16px form text on a phone, and nothing docked to the bottom of a phone screen
+  without clearing the bottom nav and the on-screen keyboard. See `docs/06-responsive-ui.md` for the
+  variants (`coarse:`, `standalone:`, `short:`) and the shared pieces.
+- **Nothing is wider than the viewport except a box that declares itself a scroller.** A phone gives ~328px
+  of content column: add up the widths a row states before writing it, let a control row wrap
+  (`.editor-row`), and give a `flex-1` wrapper `min-w-0` so the `truncate` inside it can fire. Anything
+  deliberately wider needs its own `overflow-x-auto` and a `scroll-shadow-x` to say so. `html` clips
+  horizontal overflow as a backstop, which means content past the edge is unreachable, not just off screen.
 - **Run `npm run verify`** before calling anything done. It is `api:lint` at `--fail-severity=warn`, then
   `typecheck` (including the web project), then the full test suite.
 

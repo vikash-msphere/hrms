@@ -7,9 +7,12 @@ import { navigate } from "@/router";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings, SettingsButton } from "@/components/common/SettingsButton";
 import { EmptyState } from "@/components/common/EmptyState";
+import { CardsSkeleton } from "@/components/common/Skeletons";
+import { DataState } from "@/components/common/DataState";
 import { AccessAction } from "@/components/access/AccessAction";
 import { NotificationRow } from "@/components/notifications/NotificationRow";
 import { NotificationLead } from "@/components/notifications/NotificationLead";
+import { PushEnrollBanner } from "@/components/notifications/PushEnrollBanner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import type { Me, Notification } from "@/types";
@@ -124,7 +127,7 @@ function SnoozedRow({ n }: { n: Notification }) {
 // grouped by recency, with same-actor bursts collapsed. A Snoozed view (lazily loaded) lists sleeping rows by
 // wake time. Per-row menus mark/snooze/dismiss; the header clears everything and opens self-service preferences.
 export default function Notifications({ me }: { me: Me }) {
-  const { notifications, unread, markAllRead, snoozed, snoozedLoaded, loadSnoozed, snoozedCount } = useNotifications();
+  const { notifications, unread, markAllRead, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, state, reload } = useNotifications();
 
   const [mode, setMode] = useState<Mode>("all");
   const [cat, setCat] = useState("all");
@@ -191,7 +194,19 @@ export default function Notifications({ me }: { me: Me }) {
           </div>
         }
       />
-      {notifications.length === 0 && !isSnoozed ? (
+      {/* Above the empty-state branch on purpose: someone with no notifications yet is exactly who benefits
+          most from enrolling, and they would never see a prompt rendered only alongside a populated list. */}
+      <PushEnrollBanner />
+      {/* An empty feed and an unarrived one are different things, and this page said the first while the
+          second was true - "You're all caught up" is a claim, and it was being made before anything had been
+          read. The feed's own load state now decides. */}
+      {state === "loading" && notifications.length === 0 ? (
+        <CardsSkeleton count={5} />
+      ) : state === "error" && notifications.length === 0 ? (
+        // A failed feed read looked exactly like an empty one, so the page told the reader they were up to
+        // date when it had not managed to ask.
+        <DataState state="error" error={null} onRetry={reload}><div /></DataState>
+      ) : notifications.length === 0 && !isSnoozed ? (
         <EmptyState illustration="inbox" icon={Bell} title="No notifications" description="You're all caught up. New activity will show up here." />
       ) : (
         <>
@@ -225,7 +240,9 @@ export default function Notifications({ me }: { me: Me }) {
           </div>
           {isSnoozed ? (
             !snoozedLoaded ? (
-              <EmptyState icon={Clock} title="Loading…" description="Fetching your snoozed notifications." />
+              // A wait is not an empty state: an EmptyState here drew a dashed box, a "nothing to see"
+              // illustration and a sentence, for something that was on its way.
+              <CardsSkeleton count={3} />
             ) : snoozedRows.length === 0 ? (
               <EmptyState
                 icon={Clock}
@@ -235,7 +252,7 @@ export default function Notifications({ me }: { me: Me }) {
               />
             ) : (
               <Card>
-                <CardContent className="divide-y p-0">
+                <CardContent className="divide-y p-0 sm:p-0">
                   {snoozedRows.map((n) => <SnoozedRow key={n.path} n={n} />)}
                 </CardContent>
               </Card>
@@ -253,7 +270,7 @@ export default function Notifications({ me }: { me: Me }) {
                 <div key={g.label}>
                   <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.label}</h2>
                   <Card>
-                    <CardContent className="divide-y p-0">
+                    <CardContent className="divide-y p-0 sm:p-0">
                       {g.groups.map((grp) => (
                         <GroupBlock key={grp.key + (grp.items[0]?.path ?? "")} group={grp} bucket={g.label} />
                       ))}
@@ -275,7 +292,8 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
     <button
       onClick={onClick}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+        // coarse:min-h-9 - a 26px pill is a miss on touch, and these are how the list gets filtered.
+        "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium transition-colors coarse:min-h-9 coarse:px-3.5",
         active ? "border-primary bg-primary/10 text-primary" : "bg-card text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
     >

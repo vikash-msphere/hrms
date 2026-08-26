@@ -67,10 +67,12 @@ export const APPROVAL_CAPS = [
   "reimbursements.approve",
   "overtime-requests.approve",
   "remote-work-requests.approve",
+  "asset-requests.approve",
   "attendance-regularizations.approve",
   "leave-encashments.approve",
   "loans.approve",
   "time-entries.approve",
+  "expenses.approve",
   "expenses.approve",
   "tax-verifications.read", // prior-employer tax declarations to verify (super by default; HR/payroll via ACL)
 ];
@@ -96,6 +98,7 @@ export const NAV: NavGroup[] = [
         tabs: [
           { key: "employees", label: "Directory", collection: "employees" },
           { key: "org-chart", label: "Org Chart", perm: "employees.read" },
+          { key: "team-analytics", label: "Analytics", perm: "employees.read" },
           { key: "transitions", label: "Onboarding", perm: "transitions.read", collection: "transitions" },
           { key: "notice-periods", label: "Offboarding", perm: "notice-periods.read", collection: "notice-periods" },
           { key: "background-checks", label: "Background Checks", perm: "background-checks.read", collection: "background-checks" },
@@ -194,7 +197,17 @@ export const NAV: NavGroup[] = [
         ],
       },
       { key: "compliance", label: "Compliance", icon: FileCheck, perm: "compliance-events.read" },
-      { key: "assets", label: "Assets", icon: Laptop, perm: "assets.read" },
+      // The inventory and the counts of it are one workspace: you walk the office from the inventory and read
+      // the result on Stocktakes, and the counts tab is private-by-default so it only appears once granted.
+      {
+        key: "assets",
+        label: "Assets",
+        icon: Laptop,
+        tabs: [
+          { key: "assets", label: "Inventory", collection: "assets" },
+          { key: "stocktakes", label: "Stocktakes", collection: "stocktakes" },
+        ],
+      },
     ],
   },
   {
@@ -215,6 +228,42 @@ export function navItem(key: string): NavItem | undefined {
 // The workspace item a route key belongs to (matches any of its tabs), or undefined for standalone pages.
 export function workspaceForKey(key: string): NavItem | undefined {
   return ALL_ITEMS.find((i) => i.tabs?.some((t) => t.key === key));
+}
+
+// Route keys that render another page's component and therefore borrow its gate: the Settings deep links
+// (a settings panel reached by its old top-level URL) and the pages reached from chrome rather than the
+// sidebar (the top bar's Support entry, the bell). A key absent from both the nav and this map is an
+// identity surface open to every signed-in user (dashboard, profile).
+const ALIAS_GATE: Record<string, { perm?: string; anyPerm?: string[] }> = {
+  departments: { perm: "settings.write" },
+  "leave-types": { perm: "settings.write" },
+  "pay-components": { perm: "settings.write" },
+  users: { perm: "settings.write" },
+  operations: { perm: "settings.write" },
+  "pay-periods": { perm: "payroll-runs.read" }, // merged into Payroll Runs, which is where it renders
+  kudos: { perm: "announcements.read" }, // the board, opened on its kudos filter
+  tickets: { perm: "tickets.read" },
+};
+
+// What a ROUTE requires, so a page is never rendered to someone the nav hides it from. Deep-linking (or
+// typing) the URL of a page you have no access to must not hand you the page: the nav gate and the route
+// gate are the same answer, computed here once for the sidebar, the command palette, the g-chords and the
+// router. `undefined` means the route is ungated.
+export function pageGate(key: string): { perm?: string; anyPerm?: string[] } | undefined {
+  for (const item of ALL_ITEMS) {
+    const tab = item.tabs?.find((t) => t.key === key);
+    if (tab) return { perm: navPerm(tab) };
+    if (item.key === key) return item.anyPerm ? { anyPerm: item.anyPerm } : { perm: navPerm(item) };
+  }
+  return ALIAS_GATE[key];
+}
+
+/** Whether `has` (a capability test) admits this route. Ungated routes are open to every signed-in user. */
+export function pageVisible(key: string, has: (perm: string) => boolean): boolean {
+  const gate = pageGate(key);
+  if (!gate) return true;
+  if (gate.anyPerm) return gate.anyPerm.some(has);
+  return !gate.perm || has(gate.perm);
 }
 
 // Every page key reachable from a nav item: the item itself plus each of its workspace tabs. Used to roll a

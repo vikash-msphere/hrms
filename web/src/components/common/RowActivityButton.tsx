@@ -25,7 +25,7 @@ export function RowActivityButton({ resource, label = "Activity", size = "icon" 
         </Button>
       )}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
+        <DialogContent>
           <DialogHeader><DialogTitle>Activity</DialogTitle></DialogHeader>
           {open && <ActivityFeed resource={resource} />}
         </DialogContent>

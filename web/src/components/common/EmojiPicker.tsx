@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { EmojiMartData } from "@emoji-mart/data";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
+import { TilesSkeleton } from "@/components/common/Skeletons";
 
 // A self-contained emoji picker: a hand-picked quick row on top, a search box, and the full unicode set
 // grouped by category. The dataset (@emoji-mart/data, ~1900 emoji) is lazy-loaded the first time any picker
@@ -80,10 +81,11 @@ export function EmojiPicker({
             </button>
           ))}
         </div>
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search emoji" className="mb-2 h-8" autoFocus />
+        <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search emoji" className="mb-2 h-8" autoFocus />
         <div className="max-h-56 overflow-y-auto">
           {!data ? (
-            <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
+            // The emoji set is a ~1MB import; a grid of tiles keeps the popover the height it will be.
+            <TilesSkeleton count={32} className="grid-cols-8 gap-0.5 sm:grid-cols-8" />
           ) : matches ? (
             matches.length ? (
               <div className="grid grid-cols-8 gap-0.5">

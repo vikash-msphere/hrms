@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import type { HTMLAttributes } from "react";
 import { Building, X, ChevronDown, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { NAV, itemVisible, itemPageKeys } from "@/nav";
 import { hasCapability } from "@/lib/perm";
@@ -9,6 +10,7 @@ import { AccessTarget } from "@/components/access/AccessTarget";
 import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx, CELEBRATION_WEEK_DAYS } from "@/lib/org";
 import { useMedia } from "@/hooks/useMedia";
 import { useTheme } from "@/lib/theme";
+import { lockPageScroll } from "@/lib/scrollLock";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Me } from "@/types";
 
@@ -185,33 +187,112 @@ export function Sidebar({
   const rail = docked && (railPref || autoNarrow);
   const toggleRail = () => setRailPref((v) => { const next = !v; saveRail(me.email, next); return next; });
 
+  // --- drawer behaviour (below md only) ---------------------------------------------------------------------
+  // Open, the drawer is a modal surface and has to behave like one: Escape closes it, the page behind it does
+  // not scroll, and nothing outside it is reachable. Closed, it is still in the DOM off-canvas, so it must be
+  // taken out of the tab order too - otherwise tabbing off the top bar walks invisibly through forty nav links.
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const drawerOpen = mobileOpen && !docked;
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onNavigate();
+    };
+    document.addEventListener("keydown", onKey);
+    const unlock = lockPageScroll();
+    // Move focus into the panel so a screen reader and a keyboard both land where the drawer opened.
+    drawerRef.current?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      unlock();
+    };
+  }, [drawerOpen, onNavigate]);
+
+  // Swipe left to dismiss. Touch-only, horizontal-only, and it defers to a vertical gesture (the nav list
+  // scrolls), so scrolling the menu never closes it by accident.
+  const touch = useRef<{ x: number; y: number; axis: "" | "x" | "y" } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touch.current = { x: t.clientX, y: t.clientY, axis: "" };
+  };
+  const onTouchMove = (e: React.TouchEvent) => {
+    const s = touch.current;
+    if (!s) return;
+    const dx = e.touches[0].clientX - s.x;
+    const dy = e.touches[0].clientY - s.y;
+    if (!s.axis && Math.abs(dx) + Math.abs(dy) > 12) s.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    if (s.axis === "x" && dx < -56) {
+      touch.current = null;
+      onNavigate();
+    }
+  };
+  const onTouchEnd = () => {
+    touch.current = null;
+  };
+
+  // `inert` removes a subtree from focus, hit-testing and the a11y tree in one attribute - exactly what an
+  // off-canvas drawer needs. React 18's DOM typings predate it, so it is applied as an untyped attribute
+  // (React still forwards it, and browsers without support just see an unknown attribute).
+  const inertWhenClosed = (!mobileOpen && !docked ? { inert: "" } : {}) as HTMLAttributes<HTMLElement>;
+
   return (
     <>
-      {/* Mobile overlay */}
+      {/* Scrim behind the mobile drawer. `inert` when closed so it cannot swallow taps meant for the page. */}
       <div
         className={cn(
           "fixed inset-0 z-40 bg-foreground/40 backdrop-blur-sm transition-opacity md:hidden",
           mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
         )}
+        aria-hidden
         onClick={onNavigate}
       />
       <aside
+        ref={drawerRef}
+        // Modal-drawer semantics apply only while it IS a drawer; docked, it is plain page furniture and
+        // announcing a dialog would be a lie. `inert` (closed, undocked) is what removes the off-canvas links
+        // from the tab order and the accessibility tree in one attribute.
+        role={drawerOpen ? "dialog" : undefined}
+        aria-modal={drawerOpen ? true : undefined}
+        aria-label={drawerOpen ? "Navigation" : undefined}
+        tabIndex={drawerOpen ? -1 : undefined}
+        {...inertWhenClosed}
+        onTouchStart={drawerOpen ? onTouchStart : undefined}
+        onTouchMove={drawerOpen ? onTouchMove : undefined}
+        onTouchEnd={drawerOpen ? onTouchEnd : undefined}
         className={cn(
           // Mobile: a fixed off-canvas drawer. Desktop: sticky to the viewport at full height (md:sticky +
           // md:h-screen) so it never stretches with tall page content; the nav inside scrolls on its own.
           // Collapsed to a w-16 icon rail when `rail` is set (see above); full w-64 otherwise.
-          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar transition-[transform,width] md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0",
+          // standalone:pt-safe-t: installed as a PWA there is no browser chrome, so the drawer's own top
+          // edge is what the status bar/notch overlaps.
+          // `pl-safe-l` is the landscape notch: the drawer is fixed to the left edge on a phone, so it is
+          // exactly what the notch covers. From `md` it is sticky inside the shell, which pads itself.
+          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-sidebar-border bg-sidebar pl-safe-l transition-[transform,width] standalone:pt-safe-t md:sticky md:top-0 md:h-screen md:shrink-0 md:translate-x-0 md:pl-0",
           rail ? "w-16" : "w-64",
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         )}
       >
         <div className={cn("flex items-center", rail ? "justify-center pt-1" : "justify-between")}>
           <Brand collapsed={rail} />
-          <button className="shrink-0 px-4 text-sidebar-foreground md:hidden" onClick={onNavigate}>
+          {/* Finger-sized close, and labelled: an unlabelled X is the most common unnamed control in a drawer. */}
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="mr-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sidebar-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground md:hidden"
+            onClick={onNavigate}
+          >
             <X className="h-5 w-5" />
           </button>
         </div>
-        <nav className={cn("flex-1 space-y-3 overflow-y-auto pb-3 pt-1", rail ? "px-2" : "px-3")}>
+        {/* overscroll-contain: scrolling to the end of the nav list must not start scrolling the page behind
+            the open drawer. The safe-area padding keeps the last item above the home indicator. */}
+        <nav
+          className={cn(
+            "flex-1 space-y-3 overflow-y-auto overscroll-contain pt-1",
+            "pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
+            rail ? "px-2" : "px-3",
+          )}
+        >
           {rail ? (
             // Icon rail: labels + group headers collapse to icons; the label (and unread count) live in a
             // hover tooltip, and unread badges shrink to a corner dot. Groups are split by a thin divider.

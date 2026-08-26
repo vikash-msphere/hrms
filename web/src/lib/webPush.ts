@@ -2,7 +2,7 @@
 // deployment; the SPA half is gated on VITE_VAPID_PUBLIC_KEY being baked into the build. Subscriptions are
 // stored server-side in the caller's own preferences row (key "push_subscriptions"), so the worker can reach
 // this user's browsers when a notification lands while no tab is open.
-import { get, patch } from "@/api";
+import { readPref, writePref } from "@/lib/prefs";
 
 const VAPID_PUBLIC = import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined;
 const PREF_KEY = "push_subscriptions";
@@ -32,12 +32,8 @@ function urlBase64ToUint8Array(base64: string): Uint8Array {
 }
 
 async function readServerSubs(): Promise<StoredSub[]> {
-  try {
-    const r = await get<{ value?: { subs?: StoredSub[] } }>(`preferences/${PREF_KEY}`);
-    return Array.isArray(r?.value?.subs) ? r.value.subs : [];
-  } catch {
-    return []; // 404: nothing registered yet
-  }
+  const v = await readPref<{ subs?: StoredSub[] }>(PREF_KEY);
+  return Array.isArray(v?.subs) ? v.subs : []; // absent: nothing registered yet
 }
 
 /** Ask permission, subscribe this browser, and register the subscription server-side. Throws with a
@@ -56,7 +52,7 @@ export async function enablePush(): Promise<void> {
   const json = sub.toJSON() as StoredSub;
   const others = (await readServerSubs()).filter((s) => s.endpoint !== json.endpoint);
   // Newest device last; cap total so one user can't accumulate unbounded dead endpoints.
-  await patch(`preferences/${PREF_KEY}`, { value: { subs: [...others, json].slice(-MAX_DEVICES) } });
+  await writePref(PREF_KEY, { subs: [...others, json].slice(-MAX_DEVICES) });
 }
 
 /** Unsubscribe this browser and drop it from the server-side registry. */
@@ -67,6 +63,6 @@ export async function disablePush(): Promise<void> {
   if (sub) await sub.unsubscribe();
   if (endpoint) {
     const others = (await readServerSubs()).filter((s) => s.endpoint !== endpoint);
-    await patch(`preferences/${PREF_KEY}`, { value: { subs: others } });
+    await writePref(PREF_KEY, { subs: others });
   }
 }

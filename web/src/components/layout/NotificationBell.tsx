@@ -3,6 +3,7 @@ import { Bell, BellRing, CheckCheck, Clock, Inbox } from "lucide-react";
 import { useNotifications, sortNotifications, priorityMeta, actionLabel, timeAgo } from "@/lib/notifications";
 import { NotificationLead } from "@/components/notifications/NotificationLead";
 import { NotificationRowMenu } from "@/components/notifications/NotificationRowMenu";
+import { PushEnrollButton } from "@/components/notifications/PushEnrollButton";
 import { navigate } from "@/router";
 import { cn } from "@/lib/utils";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -98,13 +99,18 @@ export function NotificationBell() {
               Snoozed{snoozedCount > 0 && <span className="ml-1 text-muted-foreground">{snoozedCount}</span>}
             </button>
           </div>
-          {unread > 0 && (
-            <AccessAction collection="notifications" verb="markAllRead" label="Mark all read">
-              <button onClick={() => void markAllRead()} className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
-                <CheckCheck className="h-3.5 w-3.5" /> Mark all read
-              </button>
-            </AccessAction>
-          )}
+          <div className="flex shrink-0 items-center gap-1.5">
+            {unread > 0 && (
+              <AccessAction collection="notifications" verb="markAllRead" label="Mark all read">
+                <button onClick={() => void markAllRead()} className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
+                  <CheckCheck className="h-3.5 w-3.5" /> Mark all read
+                </button>
+              </AccessAction>
+            )}
+            {/* Enrol this browser for push. Self-hiding unless it is the one thing left to do, so the header
+                stays a filter row in the common case. */}
+            <PushEnrollButton />
+          </div>
         </div>
 
         {recent.length === 0 ? (

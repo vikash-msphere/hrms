@@ -3,7 +3,7 @@
 // Owner-embedded code on the submitter (like reimbursements), so a manager's dept breadth sees their reports'
 // expenses and finance (all breadth) sees everything. `departmentId` is cost-centre attribution, not the scope key.
 import { allocOwnedCode } from "./codeAlloc";
-import { eq, and, lte } from "drizzle-orm";
+import { eq, and, lte, lt, gte, ne } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
@@ -36,6 +36,7 @@ export type ExpenseInput = {
   recurring?: boolean;
   recurrence_rule?: RecurrenceRule | null;
   next_occurrence_on?: string | null; // YYYY-MM-DD
+  paused?: boolean; // recurring templates only: hold generation without ending the schedule
 };
 export type ExpensePayInput = { payment_method?: "bank" | "card" | "cash" | "upi" | "cheque" | null; payment_ref?: string | null };
 
@@ -53,14 +54,28 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const dayDate = (s?: string | null) => { const ms = dayMs(s); return Number.isNaN(ms) ? null : new Date(ms); };
 
-export async function listExpenses(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, departmentId?: string, q?: string) {
+// List filters, all server-side so they reach past the page cap. `department`/`category` arrive as decoded
+// refs ("departments/<id>"); `from`/`to` are inclusive-exclusive day bounds on the incurred date, which is
+// what makes "the expenses inside this budget period" answerable without downloading the ledger.
+export type ExpenseListFilters = { state?: string; department?: string; category?: string; vendor?: string; from?: string; to?: string; q?: string };
+
+export async function listExpenses(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, filters: ExpenseListFilters = {}) {
   const conds = [applyScope(scope, schema.expenses.code, schema.expenses.employeeId)];
   // Server-side text filter (FTS). Narrows the scope above; it can never widen it.
-  const textMatch = await searchFilter(deps, "expenses", q, schema.expenses.uuid);
+  const textMatch = await searchFilter(deps, "expenses", filters.q, schema.expenses.uuid);
   if (textMatch) conds.push(textMatch);
-  if (stateFilter) conds.push(eq(schema.expenses.state, stateFilter as typeof schema.expenses.$inferSelect.state));
-  if (departmentId) conds.push(eq(schema.expenses.departmentId, departmentId));
-  return keysetPage(deps, schema.expenses, "expenses", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  if (filters.state) conds.push(eq(schema.expenses.state, filters.state as typeof schema.expenses.$inferSelect.state));
+  const deptId = idFromPath(filters.department);
+  if (deptId) conds.push(eq(schema.expenses.departmentId, deptId));
+  const catId = idFromPath(filters.category);
+  if (catId) conds.push(eq(schema.expenses.categoryId, catId));
+  const vendorId = idFromPath(filters.vendor);
+  if (vendorId) conds.push(eq(schema.expenses.vendorId, vendorId));
+  const from = dayDate(filters.from);
+  if (from) conds.push(gte(schema.expenses.incurredOn, from));
+  const to = dayDate(filters.to);
+  if (to) conds.push(lt(schema.expenses.incurredOn, to));
+  return keysetPage(deps, schema.expenses, "expenses", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 export async function getExpense(deps: Deps, _actor: AppUser, id: string) {
@@ -145,10 +160,31 @@ export async function updateExpense(deps: Deps, actor: AppUser, id: string, patc
   if (has("invoice_number")) set.invoiceNumber = patch.invoice_number ?? null;
   if (has("payment_method")) set.paymentMethod = patch.payment_method ?? null;
   if (has("reimbursable")) set.reimbursable = !!patch.reimbursable;
+  // Cadence is editable on a template (change rent from monthly to quarterly without rebuilding the schedule);
+  // on a non-template it is meaningless and ignored, as is flipping `recurring` itself.
+  if (has("recurrence_rule") && row.isRecurring) {
+    const rule = patch.recurrence_rule;
+    if (rule !== "monthly" && rule !== "quarterly" && rule !== "yearly") {
+      throw invalidArgument("recurrence_rule must be monthly, quarterly, or yearly for a recurring expense");
+    }
+    set.recurrenceRule = rule;
+  }
   if (has("next_occurrence_on") && row.isRecurring) {
     const d = dayDate(patch.next_occurrence_on);
     if (!d) throw invalidArgument("next_occurrence_on cannot be cleared on a recurring expense");
     set.nextOccurrenceOn = d;
+  }
+  // Pause / resume a schedule. Resuming rolls the due date forward to the next FUTURE occurrence: a template
+  // paused for three months would otherwise file three back-dated expenses the moment it came back.
+  if (has("paused") && row.isRecurring) {
+    const paused = !!patch.paused;
+    set.paused = paused;
+    if (!paused && row.paused && row.recurrenceRule && !has("next_occurrence_on")) {
+      let next = row.nextOccurrenceOn ? new Date(row.nextOccurrenceOn) : null;
+      const today = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+      while (next && next < today) next = advanceRecurrence(next, row.recurrenceRule as RecurrenceRule);
+      if (next) set.nextOccurrenceOn = next;
+    }
   }
   const updated = (await deps.db.update(schema.expenses).set(set).where(eq(schema.expenses.uuid, id)).returning())[0]!;
   await audit(deps, actor, "expense.update", "expenses", id, diffMeta(row, updated, set), updated);
@@ -210,18 +246,21 @@ export async function approveExpense(deps: Deps, actor: AppUser, id: string) {
   return (await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, id)).limit(1))[0]!;
 }
 
-export async function rejectExpense(deps: Deps, actor: AppUser, id: string) {
+// A rejection carries its reason: the submitter is told WHY (in the notification and on the record), so the
+// next attempt can fix the thing that was wrong instead of guessing.
+export async function rejectExpense(deps: Deps, actor: AppUser, id: string, note?: string | null) {
   const row = await getExpense(deps, actor, id);
   if (row.state !== "SUBMITTED") throw failedPrecondition("only submitted expenses can be rejected");
+  const reason = (note ?? "").trim() || null;
   const [updated] = await deps.db
     .update(schema.expenses)
-    .set({ state: "REJECTED", decidedBy: actor.uuid, updatedAt: new Date() })
+    .set({ state: "REJECTED", decidedBy: actor.uuid, decisionNote: reason, updatedAt: new Date() })
     .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, "SUBMITTED")))
     .returning();
   if (!updated) throw failedPrecondition("only submitted expenses can be rejected");
   await audit(deps, actor, "expense.reject", "expenses", id);
-  await notify(deps, { recipient: row.employeeId, type: "expense.rejected", title: "Expense rejected", body: "Your expense was rejected.", link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
-  await emitEvent(deps, actor, "expense.rejected", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount } });
+  await notify(deps, { recipient: row.employeeId, type: "expense.rejected", title: "Expense rejected", body: reason ? `Your expense was rejected: ${reason}` : "Your expense was rejected.", link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
+  await emitEvent(deps, actor, "expense.rejected", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount, note: reason } });
   return updated;
 }
 
@@ -264,10 +303,18 @@ export async function payExpense(deps: Deps, actor: AppUser, id: string, input: 
 // Best-effort per template (a failure on one never aborts the batch). Returns the count generated.
 export async function generateRecurringExpenses(deps: Deps, now: Date = new Date()): Promise<number> {
   const defaultState = ((await expenseSettings(deps)).recurring_default_state === "DRAFT") ? "DRAFT" : "SUBMITTED";
+  // A stopped or paused schedule must stop: a CANCELLED template is done for good (:cancel is how the UI ends
+  // a schedule) and a `paused` one is on hold, so neither generates. Without this a template kept filing
+  // expenses forever, whatever the UI said.
   const templates = await deps.db
     .select()
     .from(schema.expenses)
-    .where(and(eq(schema.expenses.isRecurring, true), lte(schema.expenses.nextOccurrenceOn, now)));
+    .where(and(
+      eq(schema.expenses.isRecurring, true),
+      lte(schema.expenses.nextOccurrenceOn, now),
+      ne(schema.expenses.state, "CANCELLED"),
+      eq(schema.expenses.paused, false),
+    ));
   let generated = 0;
   for (const t of templates) {
     if (!t.nextOccurrenceOn || !t.recurrenceRule) continue;

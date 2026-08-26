@@ -37,13 +37,6 @@ function validatePayslip(value: unknown) {
   }
 }
 
-function validateTagCategoryCodes(codes: unknown) {
-  if (!isObj(codes)) throw invalidArgument("asset-tags.category_codes must be an object mapping category to a short code");
-  for (const [cat, code] of Object.entries(codes)) {
-    if (typeof code !== "string" || !code.trim() || code.trim().length > 6) throw invalidArgument(`asset-tags.category_codes.${cat} must be a 1-6 character code`);
-  }
-}
-
 // The public lost-and-found page: enabling it exposes org name + tag + contact to anyone with the sticker's
 // URL, so keep its shape strict.
 function validateTagFoundPage(fp: unknown) {
@@ -68,12 +61,12 @@ function validateTagCustomFormats(formats: unknown) {
   }
 }
 
-// Asset tag printing config. Guarded lightly: a malformed category_codes map or digits value would make
-// every generated tag wrong (and PATCHed onto real assets), so reject the shapes the printer can't use.
+// Asset tag printing config. Guarded lightly: a malformed digits value would make every allocated tag wrong
+// (and stamped onto real assets), so reject the shapes the allocator and printer can't use. The code inside a
+// tag comes from the asset's category row (asset-categories), not from here.
 function validateAssetTags(value: unknown) {
   if (!isObj(value)) return;
   if (value.digits != null && !isIntIn(value.digits, 1, 6)) throw invalidArgument("asset-tags.digits must be an integer in [1, 6]");
-  if (value.category_codes != null) validateTagCategoryCodes(value.category_codes);
   if (value.code_type != null && value.code_type !== "qr" && value.code_type !== "code128") throw invalidArgument('asset-tags.code_type must be "qr" or "code128"');
   if (isObj(value.label)) {
     const footer = value.label.footer;
@@ -81,6 +74,19 @@ function validateAssetTags(value: unknown) {
   }
   if (value.found_page != null) validateTagFoundPage(value.found_page);
   if (value.custom_formats != null) validateTagCustomFormats(value.custom_formats);
+  if (value.custody != null) validateTagCustody(value.custody);
+}
+
+// Custody enforcement: whether a scan is required to count an asset into stock / to confirm receipt, and how
+// long an unconfirmed asset waits before the nightly tick starts chasing it. A garbage window here would
+// either spam every holder daily or silence the chase-up entirely, so the numbers are bounded.
+function validateTagCustody(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("asset-tags.custody must be an object");
+  for (const k of ["stock_scan_required", "ack_required", "manual_ack_allowed"] as const) {
+    if (value[k] != null && typeof value[k] !== "boolean") throw invalidArgument(`asset-tags.custody.${k} must be a boolean`);
+  }
+  if (value.ack_reminder_days != null && !isIntIn(value.ack_reminder_days, 1, 90)) throw invalidArgument("asset-tags.custody.ack_reminder_days must be an integer in [1, 90]");
+  if (value.verify_stale_days != null && !isIntIn(value.verify_stale_days, 7, 3650)) throw invalidArgument("asset-tags.custody.verify_stale_days must be an integer in [7, 3650]");
 }
 
 // Per-currency display/payout precision: a { [ISO code]: decimals } map. Each entry must be an integer in

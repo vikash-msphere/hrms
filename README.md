@@ -36,7 +36,7 @@ profile.
 
 **Company** - org and personal documents with acknowledgement/e-signature, operational expenses with
 vendors, categories, budgets and recurring runs, compliance calendar with recurrence rules, asset tracking
-with printable QR/Code128 tags and a stocktake scanner.
+with printable QR/Code128 tags and resumable stocktakes (scan-to-sight, missing list frozen on close).
 
 **Admin** - workflow engine (event bus + data-driven automation rules, scheduled and recurring triggers,
 in-app and email actions), activity/audit log, and Settings covering every configurable surface.
@@ -58,6 +58,7 @@ push; PWA install; CSV/Excel export; saved table views; API keys for machine cal
 │  ├─ 03-add-a-resource.md   how to add a collection (write a spec, mount it)
 │  ├─ 04-testing.md       the suite, what each family gates, how to run it
 │  ├─ 05-add-esign-provider.md   the e-sign driver contract
+│  ├─ 06-responsive-ui.md  what changes at each breakpoint, and the touch rules UI must meet
 │  ├─ authz.md            authorization end to end (engine, grants, scope, BOLA)
 │  ├─ access-ui.md        how the web app surfaces and edits access, and what keeps it covered
 │  ├─ architecture-decisions.md   the "why" behind the stack and its boundaries

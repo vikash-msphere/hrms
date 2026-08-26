@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { CalendarCheck, Plus, Check, Copy, Pencil, Trash2, RotateCcw, ShieldX, AlertCircle, Repeat, ChevronLeft, ChevronRight, CalendarRange } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { CalendarCheck, Plus, Check, Copy, Link2, Pencil, Trash2, RotateCcw, ShieldX, AlertCircle, Repeat, ChevronLeft, ChevronRight, CalendarRange } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
@@ -8,15 +8,23 @@ import { formatDate, idOf } from "@/lib/utils";
 import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { Chart, ChartCard } from "@/components/common/Chart";
+import { topSlices } from "@/lib/chartTheme";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { ProofField, fileProof } from "@/components/common/ProofField";
+import { useConfirm } from "@/components/common/confirm";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
+import { setRouteRecord, recordUrl } from "@/router";
+import { nextDueDates } from "@/lib/complianceRecurrence";
+import { useKpiFocus } from "@/lib/kpiFocus";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
@@ -25,7 +33,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -40,7 +47,7 @@ const FREQS = [
 ];
 const freqLabel = (f: string) => FREQS.find((x) => x.value === f)?.label ?? f;
 const NONE = "__none__";
-const EMPTY = { title: "", category: "", frequency: "monthly", due_date: "", period_label: "", status: "pending", filed_date: "", reference: "", assignee: NONE, notes: "" };
+const EMPTY = { title: "", category: "", frequency: "monthly", due_date: "", period_label: "", status: "pending", filed_date: "", reference: "", assignee: NONE, notes: "", document: "" };
 const EMPTY_RULE = { title: "", category: "", frequency: "monthly", due_day: "15", anchor_month: "4", assignee: NONE, notes: "", active: true };
 
 function advance(dateStr: string, freq: string): string {
@@ -67,7 +74,6 @@ function scheduleLabel(r: ComplianceRule): string {
 }
 
 export default function Compliance({ me, openId }: { me: Me; openId?: string }) {
-  void me;
   const [view, setView] = useState<"calendar" | "month" | "recurring">("calendar");
   const { rows, state, error, reload } = useCollection<ComplianceEvent>("compliance-events", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
@@ -87,53 +93,125 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
   const [ruleOpen, setRuleOpen] = useState(false);
   const [editingRule, setEditingRule] = useState<ComplianceRule | null>(null);
   const [ruleForm, setRuleForm] = useState(EMPTY_RULE);
-  const [busy, setBusy] = useState(false);
+  // The challan/receipt staged for upload on save (the linked one lives in `form.document`).
+  const [proof, setProof] = useState<File | null>(null);
+  const confirm = useConfirm();
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
   }, [employees]);
 
+  // "Mine" and "due this week" are the two questions a filer actually opens this page with, so they are
+  // metrics rather than something to reconstruct out of the due-date column.
+  const isMine = (c: ComplianceEvent) => !!me.employee_id && !!c.assignee && idOf(c.assignee) === me.employee_id;
+  const isDueSoon = (c: ComplianceEvent) => {
+    if (c.status !== "pending" || c.overdue) return false;
+    const days = (Date.parse(`${c.due_date.slice(0, 10)}T00:00:00`) - Date.now()) / 86400000;
+    return days <= 7;
+  };
   const stats = useMemo(() => {
     const live = rows.filter((c) => !c.delete_time);
     return {
       overdue: live.filter((c) => c.overdue).length,
       pending: live.filter((c) => c.status === "pending" && !c.overdue).length,
       filed: live.filter((c) => c.status === "filed").length,
+      dueSoon: live.filter(isDueSoon).length,
+      mine: live.filter((c) => isMine(c) && c.status === "pending").length,
+      unassigned: live.filter((c) => c.status === "pending" && !c.assignee).length,
+    };
+  }, [rows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The load ahead. Six months rather than twelve: a filing calendar is planned a quarter or two out, and a
+  // year of mostly-empty columns squeezes the months that matter into nothing.
+  const complianceCharts = useMemo(() => {
+    const live = rows.filter((c) => !c.delete_time && c.due_date);
+    const now = new Date();
+    const keys = Array.from({ length: 6 }, (_, i) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + i, 1)).toISOString().slice(0, 7));
+    const inMonth = (c: ComplianceEvent, k: string) => c.due_date.slice(0, 7) === k;
+    return {
+      total: live.length,
+      months: {
+        labels: keys.map((k) => new Date(`${k}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "short", timeZone: "UTC" })),
+        filed: keys.map((k) => live.filter((c) => inMonth(c, k) && c.status === "filed").length),
+        pending: keys.map((k) => live.filter((c) => inMonth(c, k) && c.status !== "filed" && c.status !== "waived").length),
+      },
+      categories: topSlices(live.filter((c) => c.status !== "filed" && c.status !== "waived"), (c) => c.category || "Uncategorised", () => 1, 7),
     };
   }, [rows]);
 
+  const kf = useKpiFocus<ComplianceEvent, "overdue" | "upcoming" | "filed" | "dueSoon" | "mine" | "unassigned">({
+    overdue: { label: "overdue filings", match: (c) => !!c.overdue },
+    upcoming: { label: "upcoming filings", match: (c) => c.status === "pending" && !c.overdue },
+    filed: { label: "filed items", match: (c) => c.status === "filed" },
+    dueSoon: { label: "filings due this week", match: isDueSoon },
+    mine: { label: "filings assigned to you", match: (c) => isMine(c) && c.status === "pending" },
+    unassigned: { label: "unassigned filings", match: (c) => c.status === "pending" && !c.assignee },
+  });
+  const shownEvents = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Occurrence (event) handlers ──
-  function openCreate() { setEditing(null); setForm({ ...EMPTY, due_date: todayStr() }); setOpen(true); }
+  function openCreate(dueDate = todayStr()) { setEditing(null); setForm({ ...EMPTY, due_date: dueDate }); setProof(null); setOpen(true); }
   function openEdit(c: ComplianceEvent) {
     setEditing(c);
     setForm({
       title: c.title, category: c.category ?? "", frequency: c.frequency, due_date: c.due_date,
       period_label: c.period_label ?? "", status: c.status, filed_date: c.filed_date ?? "",
       reference: c.reference ?? "", assignee: c.assignee ? `employees/${idOf(c.assignee)}` : NONE, notes: c.notes ?? "",
+      document: c.document ?? "",
     });
+    setProof(null);
     setOpen(true);
+    // Put the open item in the hash so a due date can be pasted to whoever has to file it. `useDeepOpen`
+    // above was already reading this - nothing wrote it.
+    setRouteRecord(idOf(c.path));
   }
-  function eventBody() {
+  function closeEvent() { setOpen(false); setRouteRecord(null); }
+  function copyLink(c: ComplianceEvent) {
+    navigator.clipboard.writeText(recordUrl("compliance", idOf(c.path))).then(
+      () => toast({ title: "Link copied", description: "Anyone who can see this item can open it." }),
+      () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
+    );
+  }
+  function eventBody(document: string | null) {
     return {
       title: form.title.trim(), category: form.category.trim() || null, frequency: form.frequency,
       due_date: form.due_date, period_label: form.period_label.trim() || null, status: form.status,
       filed_date: form.status === "filed" ? form.filed_date || null : null,
       reference: form.reference.trim() || null, assignee: form.assignee === NONE ? null : form.assignee, notes: form.notes.trim() || null,
+      document,
     };
   }
+  // Throws to fail: the dialog keeps the form and shows the message inside it.
   async function submit() {
-    setBusy(true);
-    try {
-      if (editing) { await patch("compliance-events/" + idOf(editing.path), eventBody(), editing.etag); toast({ title: "Compliance item updated", variant: "success" }); }
-      else { await create("compliance-events", eventBody()); toast({ title: "Compliance item added", variant: "success" }); }
-      setOpen(false); reload();
-    } catch (e) { toast({ title: "Couldn't save item", description: (e as Error).message, variant: "destructive" }); }
-    finally { setBusy(false); }
+    // The challan goes onto the document shelf first; the filing then links it. Uploading before the write
+    // means a failed save leaves a stray document, which is the harmless direction - the alternative loses the
+    // receipt someone just attached.
+    const document = proof
+      ? await fileProof({ file: proof, title: `${form.title.trim()}${form.period_label.trim() ? ` - ${form.period_label.trim()}` : ""} (proof)` })
+      : form.document || null;
+    if (editing) { await patch("compliance-events/" + idOf(editing.path), eventBody(document), editing.etag); toast({ title: "Compliance item updated", variant: "success" }); }
+    else { await create("compliance-events", eventBody(document)); toast({ title: "Compliance item added", variant: "success" }); }
+    setProof(null);
+    setRouteRecord(null);
+    reload();
   }
   async function markFiled(c: ComplianceEvent) {
     try { await patch("compliance-events/" + idOf(c.path), { status: "filed" }, c.etag); toast({ title: "Marked filed", description: c.title, variant: "success" }); reload(); }
     catch (e) { toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" }); }
+  }
+  // Dragging an item onto another day in the month view: the same field the dialog edits, one gesture. Asked
+  // first, because a due date is a deadline somebody else may be working to.
+  async function moveDue(c: ComplianceEvent, dueDate: string) {
+    if (c.due_date.slice(0, 10) === dueDate) return;
+    const ok = await confirm({
+      title: "Move this deadline?",
+      description: `"${c.title}" moves from ${formatDate(c.due_date)} to ${formatDate(dueDate)}.`,
+      confirmLabel: "Move it",
+    });
+    if (!ok) return;
+    try { await patch("compliance-events/" + idOf(c.path), { due_date: dueDate }, c.etag); toast({ title: "Due date moved", description: formatDate(dueDate), variant: "success" }); reload(); }
+    catch (e) { toast({ title: "Couldn't move it", description: (e as Error).message, variant: "destructive" }); }
   }
   async function duplicateNext(c: ComplianceEvent) {
     try {
@@ -157,14 +235,43 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     };
   }
   async function submitRule() {
-    setBusy(true);
-    try {
-      if (editingRule) { await patch("compliance-rules/" + idOf(editingRule.path), ruleBody(), editingRule.etag); toast({ title: "Rule updated", description: "Upcoming occurrences refreshed.", variant: "success" }); }
-      else { await create("compliance-rules", ruleBody()); toast({ title: "Recurring rule added", description: "Occurrences generated for the next 12 months.", variant: "success" }); }
-      setRuleOpen(false); reloadRules(); reload();
-    } catch (e) { toast({ title: "Couldn't save rule", description: (e as Error).message, variant: "destructive" }); }
-    finally { setBusy(false); }
+    if (editingRule) { await patch("compliance-rules/" + idOf(editingRule.path), ruleBody(), editingRule.etag); toast({ title: "Rule updated", description: "Upcoming occurrences refreshed.", variant: "success" }); }
+    else { await create("compliance-rules", ruleBody()); toast({ title: "Recurring rule added", description: "Occurrences generated for the next 12 months.", variant: "success" }); }
+    reloadRules();
+    reload();
   }
+
+  // ── what the two forms are about to do ──
+  // A statutory due date is only meaningful as a distance from today: "15 Sep" says nothing, "in 3 days" is
+  // the difference between filing and a penalty.
+  const dueHint = (() => {
+    if (!form.due_date) return undefined;
+    const days = Math.round((Date.parse(`${form.due_date}T00:00:00`) - Date.parse(`${todayStr()}T00:00:00`)) / 86400000);
+    if (Number.isNaN(days)) return undefined;
+    if (form.status !== "pending") return undefined;
+    if (days < 0) return `${-days} ${-days === 1 ? "day" : "days"} overdue.`;
+    if (days === 0) return "Due today.";
+    return `Due in ${days} ${days === 1 ? "day" : "days"}.`;
+  })();
+  // The same obligation filed twice for the same period is two filings to reconcile. Warn, never block.
+  const eventClash = useMemo(() => {
+    const t = form.title.trim().toLowerCase();
+    if (!t || !form.due_date) return null;
+    return rows.find((c) => !c.delete_time && c.path !== editing?.path && c.title.trim().toLowerCase() === t && c.due_date.slice(0, 10) === form.due_date) ?? null;
+  }, [rows, form.title, form.due_date, editing?.path]);
+  const eventCanSubmit = !!form.title.trim() && !!form.due_date;
+  const eventWhyNot = !form.title.trim() ? "Name the obligation." : "Give it a due date.";
+
+  const dueDayNum = Number(ruleForm.due_day);
+  const dueDayBad = ruleForm.due_day === "" || !Number.isFinite(dueDayNum) || dueDayNum < 1 || dueDayNum > 31;
+  const ruleCanSubmit = !!ruleForm.title.trim() && !dueDayBad;
+  const ruleWhyNot = !ruleForm.title.trim() ? "Name the obligation." : "The due day must be between 1 and 31.";
+  // What this schedule actually produces. A rule is written once and then generates filings for a year, so it
+  // has to show its next few dates before it is saved - "quarterly, day 15, from April" is not readable.
+  const rulePreview = useMemo(
+    () => (dueDayBad ? [] : nextDueDates({ frequency: ruleForm.frequency as "monthly" | "quarterly" | "annual", dueDay: dueDayNum, anchorMonth: Number(ruleForm.anchor_month) || 1 }, 3)),
+    [ruleForm.frequency, dueDayNum, ruleForm.anchor_month, dueDayBad],
+  );
 
   const eventColumns: Column<ComplianceEvent>[] = [
     {
@@ -231,7 +338,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
 
   const addBtn = view === "recurring"
     ? (ruleWritable && <AccessAction collection="compliance-rules" create><Button onClick={openCreateRule}><Plus className="h-4 w-4" /> Add rule</Button></AccessAction>)
-    : (writable && <AccessAction collection="compliance-events" create><Button onClick={openCreate}><Plus className="h-4 w-4" /> Add item</Button></AccessAction>);
+    : (writable && <AccessAction collection="compliance-events" create><Button onClick={() => openCreate()}><Plus className="h-4 w-4" /> Add item</Button></AccessAction>);
 
   return (
     <div>
@@ -252,24 +359,66 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
 
       {view === "calendar" ? (
         <>
+          {/* A filing calendar is read forward: what is coming, and how much of it. The table sorts by date
+              and still cannot show that March carries four times February's load - which is the thing that
+              decides whether next month needs help. */}
+          {state === "ready" && complianceCharts.total > 2 && (
+            <div className="mb-4 grid gap-4 lg:grid-cols-2">
+              <ChartCard title="Filings ahead" description="What falls due in each of the next six months.">
+                <Chart
+                  type="bar"
+                  height={180}
+                  labels={complianceCharts.months.labels}
+                  datasets={[
+                    { name: "Filed", values: complianceCharts.months.filed },
+                    { name: "Still to file", values: complianceCharts.months.pending },
+                  ]}
+                  stacked
+                  format={(v) => `${v} filing${v === 1 ? "" : "s"}`}
+                  ariaLabel="Compliance filings due in each of the next six months, filed and outstanding"
+                />
+              </ChartCard>
+              <ChartCard title="By obligation" description="Which authority the outstanding work belongs to.">
+                <Chart
+                  type="donut"
+                  height={180}
+                  labels={complianceCharts.categories.labels}
+                  datasets={[{ name: "Filings", values: complianceCharts.categories.values }]}
+                  ariaLabel="Outstanding compliance filings by category"
+                  emptyText="Nothing outstanding."
+                />
+              </ChartCard>
+            </div>
+          )}
+
+          {/* Every metric narrows the table, so the strip sits directly on top of it - under the charts. */}
           <SummaryStrip
             items={[
-              { label: "Overdue", value: stats.overdue, tone: stats.overdue > 0 ? "destructive" : "muted" },
-              { label: "Upcoming", value: stats.pending, tone: stats.pending > 0 ? "warning" : "muted" },
-              { label: "Filed", value: stats.filed, tone: stats.filed > 0 ? "success" : "muted" },
+              { label: "Overdue", value: stats.overdue, tone: stats.overdue > 0 ? "destructive" : "muted", hint: stats.overdue ? "past due, unfiled" : "nothing late", ...kf.kpi("overdue") },
+              { label: "Due this week", value: stats.dueSoon, tone: stats.dueSoon > 0 ? "warning" : "muted", hint: stats.dueSoon ? "next 7 days" : "nothing this week", ...kf.kpi("dueSoon") },
+              ...(me.employee_id ? [{ label: "Assigned to you", value: stats.mine, tone: (stats.mine > 0 ? "primary" : "muted") as "primary" | "muted", hint: stats.mine ? "yours to file" : "nothing on you", ...kf.kpi("mine") }] : []),
+              { label: "Unassigned", value: stats.unassigned, tone: stats.unassigned > 0 ? "warning" : "muted", hint: stats.unassigned ? "nobody owns these" : "all owned", ...kf.kpi("unassigned") },
+              { label: "Upcoming", value: stats.pending, tone: stats.pending > 0 ? "warning" : "muted", hint: "not filed yet", ...kf.kpi("upcoming") },
+              { label: "Filed", value: stats.filed, tone: stats.filed > 0 ? "success" : "muted", hint: "done this window", ...kf.kpi("filed") },
             ]}
           />
+
           <DataState state={state} error={error} onRetry={reload}>
             {rows.length === 0 ? (
               <EmptyState icon={CalendarCheck} title="No compliance items" description="Add statutory due dates, or set up recurring rules to auto-generate them." action={addBtn} />
             ) : (
-              <DataTable columns={eventColumns} tableId="compliance-events" rows={rows} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle="No items match" accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
+              <DataTable columns={eventColumns} tableId="compliance-events" rows={shownEvents} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No items match"} accessCollection="compliance-events" accessTargetOf={(c) => ({ objectPath: c.path, label: c.title, can: c.access?.can })} />
             )}
           </DataState>
         </>
       ) : view === "month" ? (
         <DataState state={state} error={error} onRetry={reload}>
-          <MonthView events={rows} onOpen={(c) => (writable ? openEdit(c) : undefined)} />
+          <MonthView
+            events={rows}
+            onOpen={(c) => (writable ? openEdit(c) : undefined)}
+            onAdd={writable ? (day) => openCreate(day) : undefined}
+            onMove={writable ? moveDue : undefined}
+          />
         </DataState>
       ) : (
         <DataState state={ruleState} error={ruleError} onRetry={reloadRules}>
@@ -282,11 +431,40 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
       )}
 
       {/* Occurrence dialog */}
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.title.trim() && form.due_date) submit(); }}>
-          <DialogHeader><DialogTitle>{editing ? "Edit compliance item" : "Add compliance item"}</DialogTitle></DialogHeader>
+      <WriteDialog
+        open={open}
+        onClose={closeEvent}
+        title={editing ? "Edit compliance item" : "Add compliance item"}
+        description="One filing with a deadline. Marking it filed is what clears it from the overdue count - the reference is what proves it."
+        collection="compliance-events"
+        objectPath={editing?.path}
+        guardLabel="compliance item"
+        // The staged receipt is part of what a discard would throw away.
+        form={{ ...form, proof: proof ? `${proof.name}:${proof.size}` : null }}
+        // Only a fresh item gets a draft: a restored draft on an edit would silently overwrite the record's
+        // own values (see WriteDialog).
+        draftKey={editing ? undefined : "compliance-event"}
+        applyDraft={editing ? undefined : (d) => setForm({ ...EMPTY, ...d, proof: undefined } as typeof form)}
+        onStartOver={editing ? undefined : () => setForm({ ...EMPTY, due_date: todayStr() })}
+        submitLabel={editing ? "Save changes" : "Add item"}
+        canSubmit={eventCanSubmit}
+        whyNot={eventWhyNot}
+        onSubmit={submit}
+        footerStart={editing && (
+          <Button type="button" variant="ghost" size="sm" onClick={() => copyLink(editing)}>
+            <Link2 className="h-4 w-4" /> Copy link
+          </Button>
+        )}
+      >
           <Field label="Obligation"><Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. PF (EPF) contribution" autoFocus /></Field>
-          <div className="grid gap-4 sm:grid-cols-2">
+          {eventClash && (
+            <p className="-mt-1 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+              <AlertCircle className="mr-1 inline h-3.5 w-3.5" />
+              "{eventClash.title}" is already on the calendar for {formatDate(eventClash.due_date)}
+              {eventClash.status === "filed" ? " and is filed" : eventClash.rule ? " from a recurring rule" : ""} - filing the same period twice is two challans to reconcile.
+            </p>
+          )}
+          <FieldRow>
             <Field label="Authority / area" hint="EPFO, Income Tax, GST, ESIC, PT…"><Input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. EPFO" /></Field>
             <Field label="Frequency">
               <Select value={form.frequency} onValueChange={(v) => setForm({ ...form, frequency: v })}>
@@ -294,38 +472,85 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
                 <SelectContent>{FREQS.map((f) => <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-            <Field label="Due date"><Input type="date" value={form.due_date} onChange={(e) => setForm({ ...form, due_date: e.target.value })} /></Field>
+            <Field label="Due date" hint={dueHint}><Input type="date" value={form.due_date} onChange={(e) => setForm({ ...form, due_date: e.target.value })} /></Field>
             <Field label="Period covered" hint="e.g. Jun 2026, Q1 FY26-27"><Input value={form.period_label} onChange={(e) => setForm({ ...form, period_label: e.target.value })} placeholder="Optional" /></Field>
             <Field label="Status">
-              <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })}>
+              {/* Moving to Filed seeds today's date rather than leaving the reader to type the date they are
+                  filing on - and switching back to Pending drops it, so a pending item can't carry one. */}
+              <Select
+                value={form.status}
+                onValueChange={(v) => setForm({ ...form, status: v, filed_date: v === "filed" ? (form.filed_date || todayStr()) : "" })}
+              >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent><SelectItem value="pending">Pending</SelectItem><SelectItem value="filed">Filed</SelectItem><SelectItem value="waived">Waived / N/A</SelectItem></SelectContent>
               </Select>
             </Field>
-            {form.status === "filed" && <Field label="Filed on" hint="Defaults to today if blank."><Input type="date" value={form.filed_date} onChange={(e) => setForm({ ...form, filed_date: e.target.value })} /></Field>}
-            <Field label="Reference" hint="Challan / acknowledgement no."><Input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} placeholder="Optional" /></Field>
-            <Field label="Owner">
+            {form.status === "filed" && (
+              <Field
+                label="Filed on"
+                hint={form.filed_date && form.due_date && form.filed_date > form.due_date ? "After the due date - filed late." : "Defaults to today if blank."}
+              >
+                <Input type="date" value={form.filed_date} onChange={(e) => setForm({ ...form, filed_date: e.target.value })} />
+              </Field>
+            )}
+            <Field
+              label="Reference"
+              hint="Challan / acknowledgement no."
+              error={form.status === "filed" && !form.reference.trim() && !form.document && !proof ? "Filed with neither a reference nor a receipt - nothing proves it later." : undefined}
+            >
+              <Input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} placeholder={form.status === "filed" ? "Challan no." : "Optional"} />
+            </Field>
+            <Field label="Owner" hint="Who chases this filing.">
               <Select value={form.assignee} onValueChange={(v) => setForm({ ...form, assignee: v })}>
                 <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
                 <SelectContent><SelectItem value={NONE}>Unassigned</SelectItem>{employees.filter((e) => !e.disabled).map((e) => <SelectItem key={e.path} value={`employees/${idOf(e.path)}`}>{e.first_name} {e.last_name}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-          </div>
+          </FieldRow>
+          {/* The receipt itself. A reference number is a claim; this is the thing an auditor asks for. */}
+          <ProofField
+            label="Proof of filing"
+            collection="org-documents"
+            hint="The challan, receipt or acknowledgement, filed on the company document shelf."
+            documentPath={form.document || null}
+            fileName={`${form.title.trim() || "compliance"}${form.period_label.trim() ? ` - ${form.period_label.trim()}` : ""}.pdf`}
+            file={proof}
+            onFile={setProof}
+            onUnlink={() => setForm({ ...form, document: "" })}
+            dropHint="PDF or image of the challan / acknowledgement."
+          />
           <Field label="Notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional" /></Field>
+          {editing?.rule && (
+            <p className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              <Repeat className="mr-1 inline h-3.5 w-3.5" />
+              Generated by a recurring rule. Editing this occurrence changes only this one - change the rule to change the ones ahead.
+            </p>
+          )}
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.title.trim() || !form.due_date}>{editing ? "Save changes" : "Add item"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </WriteDialog>
 
       {/* Recurring rule dialog */}
-      <Dialog open={ruleOpen} onOpenChange={setRuleOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && ruleForm.title.trim() && ruleForm.due_day) submitRule(); }}>
-          <DialogHeader><DialogTitle>{editingRule ? "Edit recurring rule" : "Add recurring rule"}</DialogTitle></DialogHeader>
+      <WriteDialog
+        open={ruleOpen}
+        onClose={() => setRuleOpen(false)}
+        title={editingRule ? "Edit recurring rule" : "Add recurring rule"}
+        description={editingRule
+          ? "Saving tops up the next 12 months of occurrences. Already-generated dates are never rewritten or removed."
+          : "Saving generates the next 12 months of occurrences, and a daily job rolls that window forward."}
+        collection="compliance-rules"
+        objectPath={editingRule?.path}
+        guardLabel="recurring rule"
+        form={ruleForm}
+        draftKey={editingRule ? undefined : "compliance-rule"}
+        applyDraft={editingRule ? undefined : (d) => setRuleForm({ ...EMPTY_RULE, ...d })}
+        onStartOver={editingRule ? undefined : () => setRuleForm(EMPTY_RULE)}
+        submitLabel={editingRule ? "Save changes" : "Add rule"}
+        canSubmit={ruleCanSubmit}
+        whyNot={ruleWhyNot}
+        onSubmit={submitRule}
+      >
           <Field label="Obligation"><Input value={ruleForm.title} onChange={(e) => setRuleForm({ ...ruleForm, title: e.target.value })} placeholder="e.g. PF (EPF) contribution" autoFocus /></Field>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <FieldRow>
             <Field label="Authority / area"><Input value={ruleForm.category} onChange={(e) => setRuleForm({ ...ruleForm, category: e.target.value })} placeholder="e.g. EPFO" /></Field>
             <Field label="Frequency">
               <Select value={ruleForm.frequency} onValueChange={(v) => setRuleForm({ ...ruleForm, frequency: v })}>
@@ -333,7 +558,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
                 <SelectContent><SelectItem value="monthly">Monthly</SelectItem><SelectItem value="quarterly">Quarterly</SelectItem><SelectItem value="annual">Annual</SelectItem></SelectContent>
               </Select>
             </Field>
-            <Field label="Due day" hint="Day of month (clamped to month length)." error={ruleForm.due_day !== "" && (Number(ruleForm.due_day) < 1 || Number(ruleForm.due_day) > 31) ? "Day must be 1-31." : undefined}><Input type="number" min={1} max={31} value={ruleForm.due_day} onChange={(e) => setRuleForm({ ...ruleForm, due_day: e.target.value })} /></Field>
+            <Field label="Due day" hint="Day of month; a short month clamps to its last day." error={ruleForm.due_day !== "" && dueDayBad ? "Day must be 1-31." : undefined}><Input type="number" min={1} max={31} value={ruleForm.due_day} onChange={(e) => setRuleForm({ ...ruleForm, due_day: e.target.value })} /></Field>
             {ruleForm.frequency !== "monthly" && (
               <Field label={ruleForm.frequency === "quarterly" ? "Cycle start month" : "Month"} hint={ruleForm.frequency === "quarterly" ? "Then every 3 months." : undefined}>
                 <Select value={ruleForm.anchor_month} onValueChange={(v) => setRuleForm({ ...ruleForm, anchor_month: v })}>
@@ -342,25 +567,36 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
                 </Select>
               </Field>
             )}
-            <Field label="Owner">
+            <Field label="Owner" hint="Inherited by every occurrence this rule generates.">
               <Select value={ruleForm.assignee} onValueChange={(v) => setRuleForm({ ...ruleForm, assignee: v })}>
                 <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
                 <SelectContent><SelectItem value={NONE}>Unassigned</SelectItem>{employees.filter((e) => !e.disabled).map((e) => <SelectItem key={e.path} value={`employees/${idOf(e.path)}`}>{e.first_name} {e.last_name}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-          </div>
+          </FieldRow>
+          {/* The schedule read back as dates, so a wrong anchor month is caught here rather than in April. */}
+          {rulePreview.length > 0 && (
+            <p className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              <Repeat className="mr-1 inline h-3.5 w-3.5" />
+              {ruleForm.active ? "Next filings: " : "Would generate: "}
+              <span className="font-medium text-foreground">{rulePreview.map((d) => formatDate(d)).join(" · ")}</span>
+              {ruleForm.frequency === "monthly" ? ", then every month." : ruleForm.frequency === "quarterly" ? ", then every 3 months." : ", then yearly."}
+            </p>
+          )}
           <Field label="Notes"><Textarea rows={2} value={ruleForm.notes} onChange={(e) => setRuleForm({ ...ruleForm, notes: e.target.value })} placeholder="Optional" /></Field>
-          <label className={cn("flex items-center gap-2 rounded-lg border p-3", !ruleForm.active && "opacity-70")}>
-            <Checkbox checked={ruleForm.active} onCheckedChange={(v) => setRuleForm({ ...ruleForm, active: v === true })} />
-            <span className="text-sm">Active <span className="text-muted-foreground">- generate upcoming occurrences automatically</span></span>
+          <label className={cn("flex items-start gap-2 rounded-lg border p-3", !ruleForm.active && "opacity-70")}>
+            <Checkbox checked={ruleForm.active} onCheckedChange={(v) => setRuleForm({ ...ruleForm, active: v === true })} className="mt-0.5" />
+            <span>
+              <span className="text-sm font-medium">Active</span>
+              <span className="block text-xs text-muted-foreground">
+                {ruleForm.active
+                  ? "Occurrences keep being generated ahead of time."
+                  : "Paused - nothing new is generated. Occurrences already on the calendar stay there."}
+              </span>
+            </span>
           </label>
           {editingRule && <ActivitySection resource={editingRule.path} className="border-t pt-3" />}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRuleOpen(false)}>Cancel</Button>
-            <Button onClick={submitRule} loading={busy} disabled={!ruleForm.title.trim() || !ruleForm.due_day || Number(ruleForm.due_day) < 1 || Number(ruleForm.due_day) > 31}>{editingRule ? "Save changes" : "Add rule"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </WriteDialog>
     </div>
   );
 }
@@ -371,10 +607,21 @@ const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMo
 // Colour a due date by its filing status: filed=green, waived=slate, overdue=red, pending=amber.
 const statusColor = (c: ComplianceEvent) => (c.status === "filed" ? "#10b981" : c.status === "waived" ? "#94a3b8" : c.overdue ? "#ef4444" : "#f59e0b");
 
-// Month-grid view of compliance items, placed on their due dates and coloured by status. Clicking an item
-// opens its editor (when writable). A 42-cell (6-week) grid starting on the Sunday on/before the 1st.
-function MonthView({ events, onOpen }: { events: ComplianceEvent[]; onOpen: (c: ComplianceEvent) => void }) {
+// Month-grid view of compliance items, placed on their due dates and coloured by status. A 42-cell (6-week)
+// grid starting on the Sunday on/before the 1st.
+//
+// The grid is where deadlines are actually read, so it is also where they are set: clicking an empty day opens
+// a new item already dated to it, and dragging an item onto another day moves its due date (after asking). It
+// used to be a picture of the calendar that could only open what somebody had already typed elsewhere.
+function MonthView({ events, onOpen, onAdd, onMove }: {
+  events: ComplianceEvent[];
+  onOpen: (c: ComplianceEvent) => void;
+  onAdd?: (day: string) => void;
+  onMove?: (c: ComplianceEvent, day: string) => void;
+}) {
   const [cursor, setCursor] = useState(() => monthStart(new Date()));
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  const dragging = useRef<ComplianceEvent | null>(null);
   const byDay = useMemo(() => {
     const m = new Map<string, ComplianceEvent[]>();
     for (const c of events) {
@@ -393,8 +640,11 @@ function MonthView({ events, onOpen }: { events: ComplianceEvent[]; onOpen: (c: 
   const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
   return (
     <Card>
-      <CardContent className="p-0">
-        <div className="flex items-center gap-2 border-b p-3">
+      <CardContent className="p-0 sm:p-0">
+        {/* Month stepper + "Today" + the month name, with a status legend pushed to the far end. The
+            legend is already `hidden … sm:flex`, but the stepper group itself still needs room to break
+            on the narrowest screens rather than pushing the calendar sideways. */}
+        <div className="flex flex-wrap items-center gap-2 border-b p-3">
           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor((c) => new Date(Date.UTC(c.getUTCFullYear(), c.getUTCMonth() - 1, 1)))} aria-label="Previous month"><ChevronLeft className="h-4 w-4" /></Button>
           <Button variant="outline" size="sm" className="h-8" onClick={() => setCursor(monthStart(new Date()))}>Today</Button>
           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCursor((c) => new Date(Date.UTC(c.getUTCFullYear(), c.getUTCMonth() + 1, 1)))} aria-label="Next month"><ChevronRight className="h-4 w-4" /></Button>
@@ -416,11 +666,50 @@ function MonthView({ events, onOpen }: { events: ComplianceEvent[]; onOpen: (c: 
             const isToday = ymd === today;
             const items = byDay.get(ymd) ?? [];
             return (
-              <div key={i} className={cn("min-h-[96px] border-b border-r p-1.5 align-top last:border-r-0", i % 7 === 6 && "border-r-0", !inMonth && "bg-muted/20")}>
-                <span className={cn("flex h-6 w-6 items-center justify-center rounded-full text-sm tabular-nums", isToday && "bg-primary font-semibold text-primary-foreground", !inMonth && "text-muted-foreground/50")}>{d.getUTCDate()}</span>
+              <div
+                key={i}
+                onDragOver={onMove ? (e) => { if (dragging.current) { e.preventDefault(); setDragOver(ymd); } } : undefined}
+                onDragLeave={onMove ? () => setDragOver((c) => (c === ymd ? null : c)) : undefined}
+                onDrop={onMove ? (e) => {
+                  e.preventDefault();
+                  setDragOver(null);
+                  const c = dragging.current;
+                  dragging.current = null;
+                  if (c) onMove(c, ymd);
+                } : undefined}
+                className={cn(
+                  "group relative min-h-[96px] border-b border-r p-1.5 align-top last:border-r-0",
+                  i % 7 === 6 && "border-r-0",
+                  !inMonth && "bg-muted/20",
+                  dragOver === ymd && "bg-primary/10 ring-1 ring-inset ring-primary",
+                )}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={cn("flex h-6 w-6 items-center justify-center rounded-full text-sm tabular-nums", isToday && "bg-primary font-semibold text-primary-foreground", !inMonth && "text-muted-foreground/50")}>{d.getUTCDate()}</span>
+                  {onAdd && (
+                    <button
+                      type="button"
+                      onClick={() => onAdd(ymd)}
+                      title={`Add a filing due ${ymd}`}
+                      aria-label={`Add a filing due ${ymd}`}
+                      className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 coarse:flex coarse:h-8 coarse:w-8 coarse:items-center coarse:justify-center coarse:p-0"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
                 <div className="mt-1 space-y-1">
                   {items.slice(0, 3).map((c) => (
-                    <button key={c.path} type="button" onClick={() => onOpen(c)} title={`${c.title}${c.category ? ` · ${c.category}` : ""}`} className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-[11px] hover:bg-accent">
+                    <button
+                      key={c.path}
+                      type="button"
+                      draggable={!!onMove}
+                      onDragStart={onMove ? () => { dragging.current = c; } : undefined}
+                      onDragEnd={onMove ? () => { dragging.current = null; setDragOver(null); } : undefined}
+                      onClick={() => onOpen(c)}
+                      title={`${c.title}${c.category ? ` · ${c.category}` : ""}${onMove ? " - drag to another day to move the deadline" : ""}`}
+                      className={cn("flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-[11px] hover:bg-accent", onMove && "cursor-grab active:cursor-grabbing")}
+                    >
                       <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: statusColor(c) }} />
                       <span className="truncate">{c.title}</span>
                     </button>

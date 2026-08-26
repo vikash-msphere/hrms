@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { MessagesSquare, Plus, Trash2, Check, X, CalendarDays, CalendarPlus, CalendarClock, ChevronRight, ArrowDownToLine, ListPlus, ListTodo, History, Repeat, Search, SquareKanban } from "lucide-react";
-import { create, patch, remove } from "@/api";
+import { MessagesSquare, Plus, Trash2, Check, X, CalendarDays, CalendarPlus, CalendarClock, ChevronRight, ArrowDownToLine, ListPlus, ListTodo, History, Repeat, Search, SquareKanban, Lock, Sparkles } from "lucide-react";
+import { create, patch, remove, list } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import type { Board, CheckIn, CheckInActionItem, Employee, Me } from "@/types";
+import type { Board, CheckIn, CheckInActionItem, Employee, Goal, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { useKpiFocus } from "@/lib/kpiFocus";
 import { PersonAvatar } from "@/components/common/PersonAvatar";
-import { Field } from "@/components/common/Field";
+import { MakeTaskDialog } from "@/components/common/MakeTaskDialog";
+import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +22,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -30,6 +32,14 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 const plusDays = (iso: string, n: number) => {
   const d = new Date(`${iso}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+// One step along a cadence, mirroring the cron that creates the next 1:1: weeks in days, monthly by calendar
+// month, both stepping from the previous date so the weekday or day-of-month sticks.
+const stepCadence = (iso: string, cadence: string) => {
+  if (cadence !== "monthly") return plusDays(iso, cadence === "weekly" ? 7 : 14);
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() + 1);
   return d.toISOString().slice(0, 10);
 };
 // "Today" / "Tomorrow" / "In n days" for the near future, where a calendar date makes you do the math yourself.
@@ -92,18 +102,27 @@ export default function CheckIns({ me }: { me: Me }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, empName]);
 
+  // Clicking a metric narrows the 1:1s below to the ones it counted: the meetings carrying unfinished items,
+  // what is still ahead, or the people who have gone too long without one.
+  const overdueIds = useMemo(() => new Set(people.filter((p) => p.overdue).map((p) => p.id)), [people]);
+  const kf = useKpiFocus<CheckIn, "open" | "upcoming" | "overdue">({
+    open: { label: "1:1s with open action items", match: (c) => (c.action_items ?? []).some((i) => !i.done) },
+    upcoming: { label: "scheduled 1:1s", match: (c) => (c.meeting_date ?? "") >= todayStr() },
+    overdue: { label: "1:1s with people you are overdue with", match: (c) => overdueIds.has(idOf(otherRef(c) ?? "")) },
+  });
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return rows.filter(
+    return kf.apply(rows.filter(
       (c) =>
         (!personFilter || idOf(otherRef(c) ?? "") === personFilter) &&
         (!q ||
           (c.notes ?? "").toLowerCase().includes(q) ||
           (c.action_items ?? []).some((i) => i.text.toLowerCase().includes(q)) ||
           otherParty(c).toLowerCase().includes(q))
-    );
+    ));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, personFilter, query]);
+  }, [rows, personFilter, query, kf.focus]);
 
   // Meeting-date framing: scheduled 1:1s (today onward, soonest first) ahead of past ones (newest first).
   const { upcoming, past } = useMemo(() => {
@@ -116,7 +135,14 @@ export default function CheckIns({ me }: { me: Me }) {
   // While searching, a hidden match reads as "no result" - so search disables the past cutoff.
   const pastShown = showAllPast || query.trim() ? past : past.slice(0, PAST_PREVIEW);
 
-  const openItems = useMemo(() => visible.reduce((s, c) => s + (c.action_items ?? []).filter((i) => !i.done).length, 0), [visible]);
+  // Strip figures count every 1:1 the caller can see, so they hold still while a metric narrows the list.
+  const totalOpenItems = useMemo(() => rows.reduce((s, c) => s + (c.action_items ?? []).filter((i) => !i.done).length, 0), [rows]);
+  const scheduled = useMemo(() => {
+    const today = todayStr();
+    return rows.filter((c) => (c.meeting_date ?? "") >= today).sort((a, b) => (a.meeting_date ?? "").localeCompare(b.meeting_date ?? ""));
+  }, [rows]);
+  const nextMeeting = scheduled[0];
+  const scheduledCount = scheduled.length;
 
   // Open action items stranded in past 1:1s, per person - what an upcoming 1:1 can pull forward.
   const openByPerson = useMemo(() => {
@@ -169,6 +195,17 @@ export default function CheckIns({ me }: { me: Me }) {
     try { await patch(`check-ins/${idOf(c.path)}`, { notes }, c.etag); reload(); toast({ title: "Notes saved", variant: "success" }); }
     catch (e) { toast({ title: "Couldn't save notes", description: (e as Error).message, variant: "destructive" }); }
   }
+  // The server decides which side's column a private note lands in, from who is asking - there is no "side"
+  // to send, which is what stops a third party writing over somebody's note.
+  async function savePrivate(c: CheckIn, note: string) {
+    try { await patch(`check-ins/${idOf(c.path)}`, { private_note: note }, c.etag); reload(); toast({ title: "Private note saved", description: "Only you can read it.", variant: "success" }); }
+    catch (e) { toast({ title: "Couldn't save your note", description: (e as Error).message, variant: "destructive" }); }
+  }
+  // No etag: the pulse is one tap on a five-button row, and a stale If-Match would fail a harmless correction.
+  async function setPulse(c: CheckIn, pulse: number | null) {
+    try { await patch(`check-ins/${idOf(c.path)}`, { pulse }); reload(); }
+    catch (e) { toast({ title: "Couldn't record that", description: (e as Error).message, variant: "destructive" }); reload(); }
+  }
   // Action items save the moment they change (no etag: quick successive toggles would race the
   // store's async refresh and trip the If-Match check for no user benefit on this tiny list).
   async function saveItems(c: CheckIn, items: CheckInActionItem[]) {
@@ -199,7 +236,11 @@ export default function CheckIns({ me }: { me: Me }) {
       onBringForward={() => bringForward(c)}
       onReschedule={(date) => reschedule(c, date)}
       onSetCadence={(cadence) => setCadence(c, cadence)}
+      mine={idOf(c.employee ?? "") === me.employee_id || idOf(c.counterpart ?? "") === me.employee_id}
+      isSubject={idOf(c.employee ?? "") === me.employee_id}
       onSaveNotes={(notes) => saveNotes(c, notes)}
+      onSavePrivate={(note) => savePrivate(c, note)}
+      onSetPulse={(pulse) => setPulse(c, pulse)}
       onSaveItems={(items) => saveItems(c, items)}
       onMakeTask={(text) => setMakeTask({ text, from: c })}
       onDelete={() => del(c)}
@@ -226,14 +267,18 @@ export default function CheckIns({ me }: { me: Me }) {
             <SummaryStrip
               className="mb-0"
               items={[
-                { label: "Open action items", value: openItems, icon: ListTodo, tone: openItems > 0 ? "warning" : "muted" },
+                { label: "Open action items", value: totalOpenItems, icon: ListTodo, tone: totalOpenItems > 0 ? "warning" : "muted", hint: totalOpenItems ? "show those 1:1s" : "nothing outstanding", ...kf.kpi("open") },
                 {
                   label: "Next 1:1",
-                  value: upcoming[0]?.meeting_date ? formatDate(upcoming[0].meeting_date) : "-",
+                  value: nextMeeting?.meeting_date ? formatDate(nextMeeting.meeting_date) : "-",
                   icon: CalendarDays,
-                  hint: upcoming[0] ? `with ${otherParty(upcoming[0]) || "your manager"}` : "Nothing scheduled",
+                  hint: nextMeeting ? `with ${otherParty(nextMeeting) || "your manager"}` : "Nothing scheduled",
+                  ...(scheduledCount ? kf.kpi("upcoming") : {}),
                 },
-                { label: "Logged 1:1s", value: visible.length, icon: History },
+                ...(overdueIds.size
+                  ? [{ label: "Overdue people", value: overdueIds.size, icon: History, tone: "warning" as const, hint: "none in a month", ...kf.kpi("overdue") }]
+                  : []),
+                { label: "Logged 1:1s", value: rows.length, icon: History, hint: kf.focus ? "show all" : "1:1s on record", onClick: () => kf.setFocus(null), active: kf.focus === null },
               ]}
             />
 
@@ -252,11 +297,15 @@ export default function CheckIns({ me }: { me: Me }) {
                 ))}
               <div className="relative ml-auto w-full sm:w-64">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search notes and action items…" className="h-8 pl-8" />
+                <Input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search notes and action items…" className="h-8 pl-8" />
               </div>
             </div>
 
-            {visible.length === 0 && <p className="text-sm text-muted-foreground">No 1:1s match.</p>}
+            {visible.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                {kf.activeLabel ? <>No {kf.activeLabel}. <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show all 1:1s</button></> : "No 1:1s match."}
+              </p>
+            )}
             {upcoming.length > 0 && (
               <section className="space-y-3">
                 <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground"><CalendarDays className="h-3.5 w-3.5" /> Upcoming</h2>
@@ -283,11 +332,9 @@ export default function CheckIns({ me }: { me: Me }) {
       {makeTask && (
         <MakeTaskDialog
           text={makeTask.text}
-          withName={otherParty(makeTask.from) || "your counterpart"}
-          meetingDate={makeTask.from.meeting_date}
+          source={`From a 1:1 with ${otherParty(makeTask.from) || "your counterpart"}${makeTask.from.meeting_date ? ` on ${formatDate(makeTask.from.meeting_date)}` : ""}.`}
           onClose={() => setMakeTask(null)}
-          onCreated={() => { setMakeTask(null); toast({ title: "Task created on the board", variant: "success" }); }}
-          toastErr={(m) => toast({ title: "Couldn't create the task", description: m, variant: "destructive" })}
+          onCreated={() => toast({ title: "Task created on the board", variant: "success" })}
         />
       )}
       {creating && (
@@ -295,6 +342,8 @@ export default function CheckIns({ me }: { me: Me }) {
           me={me}
           employees={employees}
           initial={creating}
+          existing={rows}
+          nameOf={empName}
           onClose={() => setCreating(null)}
           onCreated={async () => {
             const src = creating.source;
@@ -305,7 +354,6 @@ export default function CheckIns({ me }: { me: Me }) {
             reload();
             toast({ title: carried > 0 ? `1:1 logged · ${carried} item${carried === 1 ? "" : "s"} carried forward` : "1:1 logged", variant: "success" });
           }}
-          toastErr={(m) => toast({ title: "Couldn't log the 1:1", description: m, variant: "destructive" })}
         />
       )}
     </div>
@@ -330,16 +378,24 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
 
 const NOTES_TEMPLATE = "Wins:\n\nBlockers:\n\nGrowth:\n\nFeedback:\n";
 const CADENCE_LABEL: Record<string, string> = { weekly: "Weekly", biweekly: "Every 2 weeks", monthly: "Monthly" };
+// What each pulse number means, so "3" isn't left to interpretation on either side of the table.
+const PULSE_LABEL: Record<number, string> = { 1: "Rough", 2: "Off", 3: "Fine", 4: "Good", 5: "Great" };
 
-function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, onBringForward, onReschedule, onSetCadence, onSaveNotes, onSaveItems, onMakeTask, onDelete, onScheduleNext }: {
+function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, isSubject, onBringForward, onReschedule, onSetCadence, onSaveNotes, onSavePrivate, onSetPulse, onSaveItems, onMakeTask, onDelete, onScheduleNext }: {
   checkIn: CheckIn;
   withName: string;
   startCollapsed?: boolean;
   carryCount: number;
+  /** The caller is one of the two people in this 1:1 - the only ones with a private note of their own. */
+  mine: boolean;
+  /** The caller is the employee this 1:1 is about: the pulse is theirs to set. */
+  isSubject: boolean;
   onBringForward: () => void;
   onReschedule: (date: string) => void;
   onSetCadence: (cadence: CheckIn["cadence"] | null) => void;
   onSaveNotes: (notes: string) => Promise<void>;
+  onSavePrivate: (note: string) => Promise<void>;
+  onSetPulse: (pulse: number | null) => Promise<void>;
   onSaveItems: (items: CheckInActionItem[]) => Promise<void>;
   onMakeTask: (text: string) => void;
   onDelete: () => void;
@@ -356,9 +412,23 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, onBring
   const [reschedOpen, setReschedOpen] = useState(false);
   const [reschedDate, setReschedDate] = useState(c.meeting_date ?? "");
 
+  // The private note starts folded: it is not part of what the meeting was, and an open box invites the wrong
+  // half of the conversation into the shared one.
+  const [privateOpen, setPrivateOpen] = useState(false);
+  const [priv, setPriv] = useState(c.private_note ?? "");
+  const [privBusy, setPrivBusy] = useState(false);
+  const [pulseBusy, setPulseBusy] = useState(false);
+
   useEffect(() => { setNotes(c.notes ?? ""); }, [c.notes]);
+  useEffect(() => { setPriv(c.private_note ?? ""); }, [c.private_note]);
   useEffect(() => { setItems(c.action_items ?? []); }, [c.action_items]);
   const notesDirty = notes !== (c.notes ?? "");
+  const privDirty = priv !== (c.private_note ?? "");
+  async function savePrivate() {
+    if (!privDirty || privBusy) return;
+    setPrivBusy(true);
+    try { await onSavePrivate(priv); } finally { setPrivBusy(false); }
+  }
   const openCount = items.filter((it) => !it.done).length;
   const rel = c.meeting_date ? relativeDay(c.meeting_date) : null;
 
@@ -498,6 +568,77 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, onBring
           )}
         </div>
 
+        {/* The half that isn't shared. A 1:1 where every word is read by both people is a 1:1 where the honest
+            half goes in a private notebook - so it lives here instead, served only to whoever wrote it. */}
+        {mine && (
+          <div>
+            <button
+              type="button"
+              onClick={() => setPrivateOpen((o) => !o)}
+              className="mb-1 flex w-full items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
+            >
+              <Lock className="h-3 w-3" /> Private note
+              {!privateOpen && c.private_note ? <span className="font-normal normal-case">· written</span> : null}
+              {c.other_has_private_note && <span className="ml-auto font-normal normal-case">{withName} has one too</span>}
+            </button>
+            {privateOpen && (
+              <>
+                <Textarea
+                  rows={2}
+                  value={priv}
+                  onChange={(e) => setPriv(e.target.value)}
+                  placeholder="Only you can read this."
+                  onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && privDirty && !privBusy) { e.preventDefault(); void savePrivate(); } }}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Yours alone: {withName}, HR and anyone reading down the chain get nothing. They can see that a note exists.
+                </p>
+                {privDirty && (
+                  <div className="mt-2 flex items-center justify-end gap-2">
+                    <span className="text-xs text-muted-foreground">⌘↵ to save</span>
+                    <Button size="sm" loading={privBusy} onClick={savePrivate}><Check className="h-3.5 w-3.5" /> Save note</Button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* The pulse: one number, the employee's own. A manager rating their report's mood would be a much
+            worse feature, so only the employee sees the buttons - everyone else sees the answer. */}
+        {(isSubject || c.pulse != null) && (
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {isSubject ? "How did it go?" : "How they rated it"}
+            </p>
+            {isSubject ? (
+              <div className="flex items-center gap-1.5">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    disabled={pulseBusy}
+                    onClick={() => void onSetPulse(c.pulse === n ? null : n)}
+                    aria-label={`${n} out of 5`}
+                    title={PULSE_LABEL[n]}
+                    className={cn(
+                      "h-8 w-8 rounded-full border text-sm tabular-nums transition-colors disabled:opacity-50",
+                      c.pulse === n ? "border-primary bg-primary font-semibold text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  >
+                    {n}
+                  </button>
+                ))}
+                <span className="ml-1 text-xs text-muted-foreground">{c.pulse ? PULSE_LABEL[c.pulse] : "Only you can set this."}</span>
+              </div>
+            ) : (
+              <p className="text-sm">
+                <span className="font-medium tabular-nums">{c.pulse}/5</span> <span className="text-muted-foreground">· {PULSE_LABEL[c.pulse!]}</span>
+              </p>
+            )}
+          </div>
+        )}
+
         <div>
           <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Action items</p>
           {canEdit && carryCount > 0 && (
@@ -539,112 +680,155 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, onBring
   );
 }
 
-// Promote a 1:1 action item to a board card. Boards load only when this dialog opens (lazy, like every
-// secondary read). One-way: the card links back to the 1:1 in its description; the item stays on the 1:1.
-function MakeTaskDialog({ text, withName, meetingDate, onClose, onCreated, toastErr }: {
-  text: string;
-  withName: string;
-  meetingDate?: string;
-  onClose: () => void;
-  onCreated: () => void;
-  toastErr: (msg: string) => void;
-}) {
-  const { rows: boards, state } = useCollection<Board>("boards");
-  const [board, setBoard] = useState("");
-  const [title, setTitle] = useState(text);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => { if (!board && boards[0]) setBoard(boards[0].path); }, [boards, board]);
 
-  async function make() {
-    if (!board || !title.trim()) return;
-    setBusy(true);
-    try {
-      await create("cards", {
-        board,
-        title: title.trim(),
-        description: `From a 1:1 with ${withName}${meetingDate ? ` on ${formatDate(meetingDate)}` : ""}.`,
-      });
-      onCreated();
-    } catch (e) {
-      toastErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (!busy) make(); }}>
-        <DialogHeader><DialogTitle>Make a board task</DialogTitle></DialogHeader>
-        <Field label="Title"><Input value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
-        <Field label="Board">
-          <Combobox
-            value={board}
-            onValueChange={setBoard}
-            placeholder={state === "loading" ? "Loading boards…" : "Pick a board"}
-            searchPlaceholder="Search boards…"
-            options={boards.map((b) => ({ value: b.path, label: b.name }))}
-          />
-        </Field>
-        {boards.length === 0 && state === "ready" && <p className="text-xs text-muted-foreground">No boards you can add to yet.</p>}
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={make} loading={busy} disabled={!board || !title.trim()}>Create task</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function NewDialog({ me, employees, initial, onClose, onCreated, toastErr }: {
+function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreated }: {
   me: Me;
   employees: Employee[];
   initial: { counterpart?: string; date?: string; action_items?: CheckInActionItem[] };
+  /** Every 1:1 the caller can see - what the duplicate warning and the cadence echo read from. */
+  existing: CheckIn[];
+  nameOf: (ref?: string) => string;
   onClose: () => void;
   onCreated: () => void;
-  toastErr: (msg: string) => void;
 }) {
-  const [counterpart, setCounterpart] = useState(initial.counterpart ?? "");
-  const [date, setDate] = useState(initial.date ?? todayStr());
-  const [cadence, setCadence] = useState<string>("none");
-  const [notes, setNotes] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({
+    counterpart: initial.counterpart ?? "",
+    date: initial.date ?? todayStr(),
+    cadence: "none",
+    notes: "",
+  });
+  const carried = initial.action_items?.length ?? 0;
+  const [building, setBuilding] = useState(false);
 
-  async function start() {
-    setBusy(true);
+  /**
+   * An agenda made of what is actually happening, rather than four headings and a blank page.
+   *
+   * Three sources, all of them things the pair would have had to look up anyway: the other person's open goals
+   * (with where each one stands), the items left unfinished from their last 1:1, and how long it has been. The
+   * goals are read on demand - opening this form must not cost a goals request, and most 1:1s are logged with
+   * notes typed afterwards rather than an agenda prepared before.
+   */
+  async function buildAgenda() {
+    if (building) return;
+    setBuilding(true);
     try {
-      await create("check-ins", {
-        counterpart: counterpart || undefined,
-        meeting_date: date || undefined,
-        notes: notes.trim() || undefined,
-        action_items: initial.action_items?.length ? initial.action_items : undefined,
-        cadence: cadence === "none" ? undefined : (cadence as CheckIn["cadence"]),
-      });
-      onCreated();
-    } catch (e) {
-      toastErr((e as Error).message);
+      const other = form.counterpart ? idOf(form.counterpart) : undefined;
+      const lines: string[] = [];
+      if (other) {
+        // Only the subject's own goals, and only the live ones. A closed goal is not this week's business.
+        const goals = (await list<Goal>("goals", { max: 100, params: { employee: `employees/${other}` } }).catch(() => null))?.results ?? [];
+        const open = goals
+          .filter((g) => !g.delete_time && (g.status === "in_progress" || g.status === "not_started"))
+          .sort((a, b) => (a.due_date ?? "9999").localeCompare(b.due_date ?? "9999"));
+        if (open.length) {
+          lines.push("Goals:");
+          for (const g of open.slice(0, 6)) {
+            const where = g.target_value != null ? `${g.current_value ?? 0} of ${g.target_value}${g.unit ? ` ${g.unit}` : ""}` : `${g.progress ?? 0}%`;
+            lines.push(`- ${g.title} (${where}${g.due_date ? `, due ${formatDate(g.due_date)}` : ""})`);
+          }
+          lines.push("");
+        }
+      }
+      // What was left open last time, from the pair's most recent meeting with anything unfinished.
+      const last = existing
+        .filter((c) => {
+          const o = idOf(c.employee ?? "") === me.employee_id ? c.counterpart : c.employee;
+          return !!other && !!o && idOf(o) === other && (c.action_items ?? []).some((i) => !i.done);
+        })
+        .sort((a, b) => (b.meeting_date ?? "").localeCompare(a.meeting_date ?? ""))[0];
+      const stillOpen = (last?.action_items ?? []).filter((i) => !i.done);
+      if (stillOpen.length) {
+        lines.push(`Still open from ${last?.meeting_date ? formatDate(last.meeting_date) : "last time"}:`);
+        for (const i of stillOpen.slice(0, 8)) lines.push(`- ${i.text}`);
+        lines.push("");
+      }
+      lines.push("Wins:", "", "Blockers:", "", "Anything else:", "");
+      setForm((f) => ({ ...f, notes: lines.join("\n") }));
     } finally {
-      setBusy(false);
+      setBuilding(false);
     }
   }
 
+  async function start() {
+    await create("check-ins", {
+      counterpart: form.counterpart || undefined,
+      meeting_date: form.date || undefined,
+      notes: form.notes.trim() || undefined,
+      action_items: initial.action_items?.length ? initial.action_items : undefined,
+      cadence: form.cadence === "none" ? undefined : (form.cadence as CheckIn["cadence"]),
+    });
+    onCreated();
+  }
+
+  // Already on the calendar with this person on this date. Warned, never blocked: two 1:1s in a day is odd but
+  // not wrong, and a double-booking is usually a forgotten one rather than a mistake.
+  const clash = form.date && form.counterpart
+    ? existing.find((c) => {
+        // The other party seen from the caller's side, the same way the page reads it.
+        const other = idOf(c.employee ?? "") === me.employee_id ? c.counterpart : c.employee;
+        return c.meeting_date === form.date && !!other && idOf(other) === idOf(form.counterpart);
+      })
+    : undefined;
+  // The next few dates a cadence will produce, before it is saved - a repeat you can't see is a repeat nobody
+  // trusts. Steps the way the cron does (weeks by days, monthly by calendar month, from the previous date), so
+  // the dates shown here are the dates that will exist.
+  const nextDates = form.cadence === "none" || !form.date
+    ? []
+    : [1, 2, 3].reduce<string[]>((acc) => [...acc, stepCadence(acc[acc.length - 1] ?? form.date, form.cadence)], []);
+  const rel = form.date ? relativeDay(form.date) : null;
+  const withName = form.counterpart ? nameOf(form.counterpart) : "your manager";
+
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (!busy) start(); }}>
-        <DialogHeader><DialogTitle>New 1:1</DialogTitle></DialogHeader>
+    <WriteDialog
+      open
+      onClose={onClose}
+      title="New 1:1"
+      description={`Shared with ${withName}: you can both read and edit the notes and action items.`}
+      collection="check-ins"
+      guardLabel="1:1"
+      form={form}
+      // Only the blank composer keeps a draft: "schedule next" seeds the person, the date and the items it is
+      // carrying, and a restored draft would silently overwrite all three.
+      draftKey={initial.counterpart || initial.date || carried ? undefined : "checkin:new"}
+      applyDraft={(d) => setForm(d)}
+      onStartOver={() => setForm({ counterpart: "", date: todayStr(), cadence: "none", notes: "" })}
+      submitLabel={form.date > todayStr() ? "Schedule 1:1" : "Log 1:1"}
+      canSubmit={!!form.date}
+      whyNot="Pick the meeting date."
+      onSubmit={start}
+      submitAccess={(b) => <AccessAction collection="check-ins" create label="New 1:1">{b}</AccessAction>}
+    >
         <Field label="With" hint="Defaults to your manager if left blank.">
           <Combobox
-            value={counterpart}
-            onValueChange={setCounterpart}
+            value={form.counterpart}
+            onValueChange={(v) => setForm({ ...form, counterpart: v })}
             placeholder="Your manager"
             searchPlaceholder="Search people…"
             options={employees.filter((e) => idOf(e.path) !== me.employee_id).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
           />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Meeting date"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <FieldRow>
+          <Field label="Meeting date" hint={rel ?? undefined}>
+            <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+            {/* The three dates anyone actually picks, without opening the calendar. */}
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {[{ label: "Today", value: todayStr() }, { label: "Tomorrow", value: plusDays(todayStr(), 1) }, { label: "Next week", value: plusDays(todayStr(), 7) }].map((o) => (
+                <button
+                  key={o.label}
+                  type="button"
+                  onClick={() => setForm({ ...form, date: o.value })}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                    form.date === o.value ? "border-primary text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </Field>
           <Field label="Repeats" hint="The next one is scheduled automatically after each meeting.">
-            <Select value={cadence} onValueChange={setCadence}>
+            <Select value={form.cadence} onValueChange={(v) => setForm({ ...form, cadence: v })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">Doesn't repeat</SelectItem>
@@ -653,20 +837,44 @@ function NewDialog({ me, employees, initial, onClose, onCreated, toastErr }: {
                 <SelectItem value="monthly">Monthly</SelectItem>
               </SelectContent>
             </Select>
+            {nextDates.length > 0 && (
+              <p className="mt-1.5 text-xs tabular-nums text-muted-foreground">
+                Then {nextDates.map((d) => formatDate(d)).join(" · ")}
+              </p>
+            )}
           </Field>
-        </div>
-        <Field label="Notes (optional)"><Textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Agenda or talking points." /></Field>
-        {(initial.action_items?.length ?? 0) > 0 && (
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <ArrowDownToLine className="h-3.5 w-3.5 shrink-0" />
-            Carries {initial.action_items!.length} open action item{initial.action_items!.length === 1 ? "" : "s"} forward from the last 1:1.
+        </FieldRow>
+        {clash && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            You already have a 1:1 with {withName} on {formatDate(form.date)}
+            {(clash.action_items ?? []).some((i) => !i.done) ? ", with open action items on it" : ""}.
           </p>
         )}
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={start} loading={busy}>Log 1:1</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <Field
+          label="Notes (optional)"
+          field="notes"
+          action={!form.notes && (
+            <span className="flex items-center gap-1">
+              {/* An agenda built from what is actually going on beats a blank box and beats four fixed
+                  headings: their open goals, what was left unfinished last time, when you last met. The goals
+                  are fetched only when this is pressed - a 1:1 form must not cost a goals read to open. */}
+              <Button type="button" variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground" loading={building} onClick={() => void buildAgenda()}>
+                <Sparkles className="h-3.5 w-3.5" /> Build agenda
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground" onClick={() => setForm({ ...form, notes: NOTES_TEMPLATE })}>
+                <ListPlus className="h-3.5 w-3.5" /> Talking points
+              </Button>
+            </span>
+          )}
+        >
+          <Textarea rows={form.notes ? 8 : 3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Agenda or talking points." />
+        </Field>
+        {carried > 0 && (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ArrowDownToLine className="h-3.5 w-3.5 shrink-0" />
+            Carries {carried} open action item{carried === 1 ? "" : "s"} forward from the last 1:1, and closes {carried === 1 ? "it" : "them"} there.
+          </p>
+        )}
+    </WriteDialog>
   );
 }

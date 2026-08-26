@@ -1,7 +1,7 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listCompensation, getCompensation, reviseCompensation, type CompensationInput } from "../services/compensation";
+import { listCompensation, getCompensation, reviseCompensation, decorateCompensation, type CompensationInput } from "../services/compensation";
 import { toCompensationResource } from "../http/serialize";
 
 // Effective-dated base pay. POST is a salary revision/increment (closes the current row, opens a new one), so
@@ -28,6 +28,9 @@ export const compensation = collectionRoutes<CompensationInput, typeof schema.co
   createSchema: reviseSchema,
   serialize: toCompensationResource,
   softDelete: false,
+  // Prices the current row's CTC build-up and hides the grade/band from a self-service reader - see
+  // decorateCompensation. On the factory's shared decorate hook, so the item read and the list agree.
+  decorate: decorateCompensation,
   // Both reads carry the row's pay grade (withGrades), and the create is the revision itself.
   overrides: {
     get: (deps, _actor, id) => getCompensation(deps, id),

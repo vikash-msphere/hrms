@@ -38,7 +38,32 @@ const MAX_EVENT_DEPTH = 5;
 // events at depth 0, so without this a rule whose apiCall re-triggers its own trigger would loop forever as
 // super. The counter lives on the shared Deps (reused by apiCall re-dispatch), so it accumulates across the
 // whole synchronous fan-out and fails closed once exhausted.
+//
+// The unit it bounds is ONE ORIGINATING ACTION - a request, or one cron subtask. That distinction matters
+// because the scheduled handler builds a single Deps for the whole nightly tick, so an unreset counter made
+// this a budget for the entire NIGHT: past the fiftieth event, every later per-employee emission (probation,
+// anniversary, document expiry, asset custody) and every subtask after the one that exhausted it were dropped.
+// `withDispatchBudget` below is what re-arms it per subtask.
 const MAX_TOTAL_DISPATCHES = 50;
+
+/**
+ * Run `fn` with a FRESH dispatch budget, and report how many events the budget refused.
+ *
+ * Callers that own an originating action rather than a request (the cron subtasks) wrap themselves in this, so
+ * each gets the full allowance and a rule loop inside one subtask cannot starve the next. The drop count comes
+ * back so the caller can put it on the cron_runs row - the old behaviour logged a console.warn and left the
+ * tick stamped `done`, which is how a night of skipped automations stayed green in the Operations UI.
+ */
+export async function withDispatchBudget<T>(deps: Deps, fn: () => Promise<T>): Promise<{ result: T; dropped: number }> {
+  const prev = deps.automationBudget;
+  const budget = { n: 0, dropped: 0 };
+  deps.automationBudget = budget;
+  try {
+    return { result: await fn(), dropped: budget.dropped };
+  } finally {
+    deps.automationBudget = prev;
+  }
+}
 
 type AutomationRow = typeof schema.automations.$inferSelect;
 
@@ -412,11 +437,31 @@ async function recordRun(deps: Deps, automationId: string, eventId: string | nul
   }
 }
 
+/**
+ * Is ANYTHING listening for `type`? Asked once by a batched emit (eventBus.emitEvents) before it dispatches a
+ * run of events one by one.
+ *
+ * A "no" is the common case for a bulk create - most orgs have no rule on `asset.created` - and it is what
+ * turns a hundred dispatches (each of which would re-read the waiting workflows) into a single read. It is only
+ * ever a fast path: a "yes" dispatches every event individually, so a rule still fires once per event.
+ */
+export async function anyAutomationInterest(deps: Deps, type: string): Promise<boolean> {
+  if ((await loadEnabled(deps)).some((r) => r.triggerType === type)) return true;
+  const waiting = await deps.db
+    .select({ awaitedTypes: schema.workflowInstances.awaitedTypes })
+    .from(schema.workflowInstances)
+    .where(eq(schema.workflowInstances.status, "waiting"));
+  return waiting.some((w) => !w.awaitedTypes || w.awaitedTypes.split(",").includes(type));
+}
+
 // Entry point called by emitEvent: run every enabled rule that matches, then resume any waiting workflows. Never throws.
 export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventId: string | null, depth: number): Promise<void> {
   if (depth > MAX_EVENT_DEPTH) return;
-  const budget = (deps.automationBudget ??= { n: 0 });
+  const budget = (deps.automationBudget ??= { n: 0, dropped: 0 });
   if (budget.n >= MAX_TOTAL_DISPATCHES) {
+    // Counted, not just logged: withDispatchBudget hands the total back to the cron subtask so an exhausted
+    // budget lands on the cron_runs row instead of only in Workers Logs.
+    budget.dropped++;
     console.warn(`[automationEngine] dispatch budget exhausted (${MAX_TOTAL_DISPATCHES}); dropping ${event.type}`);
     return;
   }

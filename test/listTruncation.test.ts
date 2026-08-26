@@ -88,10 +88,12 @@ describe("list ?q= searches the whole collection, not just the loaded page", () 
 
   it("finds a record that sits well past the first page", async () => {
     await seedPeople(250);
-    // The needle is created LAST, so with an ascending keyset page it is nowhere near the first 100.
+    // A page is a window on the NEWEST rows, so the needle is stamped as the oldest record in the table: it is
+    // nowhere near the first 100 and only the server-side filter can reach it.
     await deps.db.insert(schema.employees).values({
       uuid: genId(), code: "04-9999", firstName: "Zoya", lastName: "Kapoor",
       workEmail: "zoya@test.example", jobTitle: "Principal Engineer", status: "active",
+      createdAt: new Date("2020-01-01T00:00:00Z"), updatedAt: new Date("2020-01-01T00:00:00Z"),
     });
 
     const firstPage = await listEmployees(deps, superScope, clampPageSize(200));

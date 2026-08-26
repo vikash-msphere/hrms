@@ -151,7 +151,7 @@ function newBlock(kind: Block["kind"]): Block {
 }
 
 const REQUIRES_SELECT = (value: string, onChange: (v: string) => void) => (
-  <select className="h-8 rounded-md border bg-background px-2 text-xs" value={value} onChange={(e) => onChange(e.target.value)}>
+  <select className="h-8 min-w-0 rounded-md border bg-background px-2 text-xs coarse:min-h-10" value={value} onChange={(e) => onChange(e.target.value)}>
     {REQUIRES.map((r) => <option key={r.v} value={r.v}>{r.l}</option>)}
   </select>
 );
@@ -368,9 +368,9 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                         <div className="mb-2 flex items-center justify-between">
                           <Badge variant="secondary">{BLOCK_KINDS.find((k) => k.kind === b.kind)?.label ?? b.kind}</Badge>
                           <div className="flex items-center gap-1">
-                            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === 0} onClick={() => moveBlock(i, -1)}><ChevronUp className="h-4 w-4" /></Button>
-                            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={i === selected.blocks.length - 1} onClick={() => moveBlock(i, 1)}><ChevronDown className="h-4 w-4" /></Button>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deleteBlock(i)}><Trash2 className="h-4 w-4" /></Button>
+                            <Button variant="ghost" size="icon" aria-label="Move this block up" className="h-7 w-7" disabled={i === 0} onClick={() => moveBlock(i, -1)}><ChevronUp className="h-4 w-4" /></Button>
+                            <Button variant="ghost" size="icon" aria-label="Move this block down" className="h-7 w-7" disabled={i === selected.blocks.length - 1} onClick={() => moveBlock(i, 1)}><ChevronDown className="h-4 w-4" /></Button>
+                            <Button variant="ghost" size="icon" aria-label="Delete this block" className="h-7 w-7 text-destructive" onClick={() => deleteBlock(i)}><Trash2 className="h-4 w-4" /></Button>
                           </div>
                         </div>
                         <div className="space-y-2">
@@ -390,14 +390,14 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                             <p className="text-xs text-muted-foreground">Recipient (2nd-party) wet-ink acceptance: a printed Name / Date / Signature line for the employee to sign by hand.</p>
                           )}
                           {b.kind === "computed" && (
-                            <select className="h-9 rounded-md border bg-background px-2 text-sm" value={b.ref ?? "ctc_annexure"} onChange={(e) => updateBlock(i, { ref: e.target.value as Block["ref"] })}>
+                            <select className="h-9 min-w-0 rounded-md border bg-background px-2 text-sm coarse:min-h-10" value={b.ref ?? "ctc_annexure"} onChange={(e) => updateBlock(i, { ref: e.target.value as Block["ref"] })}>
                               <option value="ctc_annexure">CTC annexure table</option>
                               <option value="increment_table">Increment (old → new) table</option>
                               <option value="settlement_table">Settlement (FnF) table</option>
                             </select>
                           )}
                           {b.kind === "input" && (
-                            <select className="h-9 rounded-md border bg-background px-2 text-sm" value={b.field ?? ""} onChange={(e) => updateBlock(i, { field: e.target.value })}>
+                            <select className="h-9 min-w-0 rounded-md border bg-background px-2 text-sm coarse:min-h-10" value={b.field ?? ""} onChange={(e) => updateBlock(i, { field: e.target.value })}>
                               <option value="" disabled>Select an input field…</option>
                               {(selected.inputs ?? []).filter((f) => f.type === "multiline").map((f) => <option key={f.key} value={f.key}>{f.label} ({f.key})</option>)}
                             </select>
@@ -409,7 +409,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                             <div className="space-y-2">
                               <Input value={b.label ?? ""} onChange={(e) => updateBlock(i, { label: e.target.value })} placeholder="Caption under the line (default: Signature)" />
                               <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                <input type="checkbox" checked={!!b.withDate} onChange={(e) => updateBlock(i, { withDate: e.target.checked })} /> Add a date line aligned with the signature
+                                <input type="checkbox" className="h-4 w-4 shrink-0 accent-primary" checked={!!b.withDate} onChange={(e) => updateBlock(i, { withDate: e.target.checked })} /> Add a date line aligned with the signature
                               </label>
                               <div className="flex gap-2">
                                 {([["internal", "In-app signature"], ["cashfree", "Aadhaar e-Sign"]] as const).map(([val, label]) => (
@@ -430,7 +430,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                           <div className="flex flex-wrap items-center gap-3 pt-1">
                             {b.kind === "para" && (
                               <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                <input type="checkbox" checked={!!b.bold} onChange={(e) => updateBlock(i, { bold: e.target.checked })} /> Bold
+                                <input type="checkbox" className="h-4 w-4 shrink-0 accent-primary" checked={!!b.bold} onChange={(e) => updateBlock(i, { bold: e.target.checked })} /> Bold
                               </label>
                             )}
                             {b.kind !== "pageBreak" && b.kind !== "gap" && (
@@ -463,12 +463,12 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                       <div key={i} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
                         <Input className="h-8 w-28 font-mono text-xs" value={f.key} onChange={(e) => updateInput(i, { key: e.target.value })} placeholder="key" />
                         <Input className="h-8 w-40 text-sm" value={f.label} onChange={(e) => updateInput(i, { label: e.target.value })} placeholder="Label" />
-                        <select className="h-8 rounded-md border bg-background px-2 text-xs" value={f.type ?? "text"} onChange={(e) => updateInput(i, { type: e.target.value as TemplateInput["type"] })}>
+                        <select className="h-8 min-w-0 rounded-md border bg-background px-2 text-xs coarse:min-h-10" value={f.type ?? "text"} onChange={(e) => updateInput(i, { type: e.target.value as TemplateInput["type"] })}>
                           <option value="text">Text</option>
                           <option value="multiline">Multiline</option>
                         </select>
-                        <label className="flex items-center gap-1 text-xs text-muted-foreground"><input type="checkbox" checked={!!f.required} onChange={(e) => updateInput(i, { required: e.target.checked })} /> Required</label>
-                        <Button variant="ghost" size="icon" className="ml-auto h-7 w-7 text-destructive" onClick={() => removeInput(i)}><Trash2 className="h-4 w-4" /></Button>
+                        <label className="flex items-center gap-1 text-xs text-muted-foreground"><input type="checkbox" className="h-4 w-4 shrink-0 accent-primary" checked={!!f.required} onChange={(e) => updateInput(i, { required: e.target.checked })} /> Required</label>
+                        <Button variant="ghost" size="icon" aria-label="Remove this input field" className="ml-auto h-7 w-7 text-destructive" onClick={() => removeInput(i)}><Trash2 className="h-4 w-4" /></Button>
                       </div>
                     ))}
                     <Button variant="outline" size="sm" onClick={addInput}><Plus className="h-4 w-4" /> Add input field</Button>
@@ -529,14 +529,16 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                       </AccessAction>
                       <span className="text-xs text-muted-foreground">Renders the current (unsaved) draft.</span>
                     </div>
-                    {previewUrl && <iframe title="Letter preview" src={previewUrl} className="h-[640px] w-full rounded-md border" />}
+                    {/* A fixed 640px preview is the whole of a phone screen and then some; a viewport-relative
+                        height keeps the controls above it reachable without scrolling the page first. */}
+                    {previewUrl && <iframe title="Letter preview" src={previewUrl} className="h-[60dvh] w-full rounded-md border sm:h-[640px]" />}
                   </CardContent>
                 </Card>
               </TabsContent>
             </Tabs>
           </div>
         ) : (
-          <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Select or add a letter type to edit.</CardContent></Card>
+          <Card><CardContent className="py-10 text-center text-sm text-muted-foreground sm:py-10">Select or add a letter type to edit.</CardContent></Card>
         )}
       </div>
     </div>

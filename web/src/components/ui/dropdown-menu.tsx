@@ -15,8 +15,12 @@ const DropdownMenuContent = React.forwardRef<
     <DropdownMenuPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
+      collisionPadding={12}
       className={cn(
-        "z-50 min-w-[10rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        // Bounded by what Radix measured as available, and never wider than the screen: a row-actions menu
+        // opened from the last row of a table on a phone would otherwise run off the bottom (or off the side,
+        // if an item's label is long) with its last items unreachable.
+        "z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-[10rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto overscroll-contain rounded-md border bg-popover p-1 text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
         className
       )}
       {...props}

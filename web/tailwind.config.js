@@ -4,15 +4,16 @@ import tailwindcssAnimate from "tailwindcss-animate";
 export default {
   darkMode: ["class"],
   content: ["./web/index.html", "./web/src/**/*.{ts,tsx}"],
-  // Card templates (kudos/announcements) are HR-editable HTML stored in the DB, so their Tailwind classes are
-  // NOT in the scanned source above. Safelist the recognition palette + the per-category/level decoration
-  // vocabulary the seed cards use, so the cards render reliably and HR has a predictable kit to edit within.
+  // NO COLOUR-PATTERN SAFELIST. A `{pattern}` entry over colour utilities is not the ~1k rules it reads like:
+  // Tailwind expands a safelisted colour across every opacity step too, so 7 prefixes × 14 families × 11 shades
+  // became 242 rules per family per prefix, ~48k rules and a 5.1 MB render-blocking stylesheet. Nothing needed
+  // it - the card bodies (KudosCardBody/PostCardBody) are React components the scanner already reads, rich text
+  // renders to React nodes rather than an HTML string (there is no `dangerouslySetInnerHTML` in the app, see
+  // web/src/lib/richText.tsx), and no seed or settings blob carries a Tailwind class. The one place that DOES
+  // build class names by interpolation, web/src/lib/notificationMeta.tsx, keeps them scannable itself with a
+  // literal `_KEEP` string. Any future dynamic class belongs in a literal like that, next to the code that
+  // builds it - not in a pattern here.
   safelist: [
-    // Colour palette: bg/from/via/to/text/ring/border × 14 families × shades, with dark variants.
-    {
-      pattern: /(bg|from|via|to|text|ring|border)-(slate|emerald|sky|blue|indigo|violet|fuchsia|rose|amber|yellow|orange|pink|teal|green)-(50|100|200|300|400|500|600|700|800|900|950)/,
-      variants: ["dark"],
-    },
     // Decoration utilities the kudos cards use that don't appear in scanned source (creative glow blobs, the
     // gradient wash + accent rail, the quote mark, the message hero). Explicit so the bundle includes them.
     "to-card", "bg-gradient-to-r", "blur-2xl", "blur-3xl", "rounded-2xl",
@@ -32,6 +33,30 @@ export default {
       screens: { "2xl": "1400px" },
     },
     extend: {
+      // Non-width media conditions, usable as ordinary variants (`coarse:h-11`, `standalone:pt-4`).
+      // `coarse` is "a finger, not a cursor" - the one thing a width breakpoint cannot tell you, and what
+      // decides whether a control needs a 44px target. `standalone` is the installed-PWA case, where the
+      // app paints under the status bar and has to reserve the inset itself.
+      screens: {
+        coarse: { raw: "(pointer: coarse)" },
+        fine: { raw: "(pointer: fine)" },
+        standalone: { raw: "(display-mode: standalone)" },
+        // A phone held sideways: ~390px of height for the whole app. Fixed chrome that is worth 12% of a
+        // portrait screen costs a third of this one, so some of it stands down here.
+        short: { raw: "(max-height: 480px)" },
+      },
+      spacing: {
+        // Device safe areas as spacing steps, so a bottom-docked bar can write `pb-safe` instead of an
+        // arbitrary-value class each time. Zero on every device without a notch/home indicator.
+        //
+        // The two side insets are the LANDSCAPE case: held sideways, the notch eats one edge and the home
+        // indicator the other, and a `fixed inset-x-0` bar runs straight under both. Flow content gets these
+        // from the shell (`[data-app-shell]` in index.css); anything `fixed` has to reserve them itself.
+        safe: "env(safe-area-inset-bottom)",
+        "safe-t": "env(safe-area-inset-top)",
+        "safe-l": "env(safe-area-inset-left)",
+        "safe-r": "env(safe-area-inset-right)",
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

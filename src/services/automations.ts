@@ -10,7 +10,7 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, forbidden } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
 import { validateAutomation, evalCondition, isScheduled, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
@@ -63,17 +63,8 @@ function assertMayAuthorActions(actor: AppUser, actions: Action[] | undefined): 
 }
 
 export async function listAutomations(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string) {
-  const all = (await deps.db.select().from(schema.automations)).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+  const all = await deps.db.select().from(schema.automations);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
 }
 
 // Not exported: the factory's generic get answers the item read (services/crud.ts); this is the internal

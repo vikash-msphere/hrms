@@ -44,7 +44,7 @@ function normalizeSessions(sessions: SessionInput[]): { clock_in: string; clock_
 export async function listRegularizations(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string) {
   const conds = [applyScope(scope, schema.attendanceRegularizations.code, schema.attendanceRegularizations.employeeId)];
   if (stateFilter) conds.push(eq(schema.attendanceRegularizations.state, stateFilter as typeof schema.attendanceRegularizations.$inferSelect.state));
-  return keysetPage<typeof schema.attendanceRegularizations.$inferSelect>(deps, schema.attendanceRegularizations, "attendance-regularizations", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage<typeof schema.attendanceRegularizations.$inferSelect>(deps, schema.attendanceRegularizations, "attendance-regularizations", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 
 // The read side of the collection is the factory's generic get (same select, same 404); this stays internal

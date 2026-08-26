@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Users, Plus, Mail, UserPlus, Clock, LayoutGrid, List, Network, Layers, Search } from "lucide-react";
 import { create, patch, get } from "@/api";
-import type { AttendanceSession } from "@/types";
 import { useCollection } from "@/hooks/useCollection";
+import { useClock } from "@/lib/clock";
 import { useDebounced } from "@/hooks/useDebounced";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
@@ -26,10 +26,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
-import { AccessScope } from "@/components/access/AccessScope";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { Chart, ChartCard } from "@/components/common/Chart";
+import { monthlyTotals } from "@/lib/chartTheme";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
@@ -39,6 +40,11 @@ type Form = { first_name: string; last_name: string; legal_name: string; employe
 const EMPTY: Form = { first_name: "", last_name: "", legal_name: "", employee_number: "", work_email: "", job_title: "", department: NONE, manager: NONE, start_date: "", probation_end_date: "" };
 
 type ViewMode = "table" | "grid";
+// Which summary metric the list is currently scoped to (null = the whole directory).
+// The metric strip doubles as a filter set; these are the slices it can narrow the list to.
+type Focus = null | "clockedIn" | "joined" | "joining" | "probation" | "noManager";
+// A probation review is due when the end date is inside this window (or already past it).
+const PROBATION_SOON_DAYS = 30;
 
 // "New"/"Joining" freshness from start_date alone: joined within the last 30 days, or a future
 // start already on the books. Deleted rows never badge.
@@ -51,6 +57,17 @@ function joinBadge(e: Employee): "New" | "Joining" | null {
 
 function fullName(e: Employee) {
   return `${e.first_name} ${e.last_name}`;
+}
+
+// A start date still ahead: onboarding to prepare, not a colleague you can find at a desk.
+function isJoiningSoon(e: Employee) {
+  return !e.delete_time && !!e.start_date && e.start_date > new Date().toISOString().slice(0, 10);
+}
+// Probation ending inside the window (or already past it, unconfirmed): a review somebody owes.
+function isProbationDue(e: Employee) {
+  if (e.delete_time || !e.probation_end_date) return false;
+  const days = (new Date(`${e.probation_end_date}T00:00:00`).getTime() - Date.now()) / 86400000;
+  return days <= PROBATION_SOON_DAYS;
 }
 
 /** Hover peek for a person, built entirely from the already-loaded row (no fetch). Wraps its
@@ -110,7 +127,9 @@ function PersonPeek({
           {e.start_date && <div className="flex gap-2"><dt className="w-20 shrink-0 text-muted-foreground">Started</dt><dd>{formatDate(e.start_date)}</dd></div>}
           <div className="flex gap-2">
             <dt className="w-20 shrink-0 text-muted-foreground">Email</dt>
-            <dd className="min-w-0"><CopyEmail email={e.work_email} /></dd>
+            {/* flex-1 (basis 0), not just min-w-0: as a content-sized flex item the cell would hand CopyEmail a
+                max-content width and its inner truncate would never engage, spilling a long address out of the card. */}
+            <dd className="min-w-0 flex-1" title={e.work_email}><CopyEmail email={e.work_email} /></dd>
           </div>
         </dl>
         <div className="mt-3 flex gap-2">
@@ -162,7 +181,13 @@ function EmployeeCard({ e, deptLabel, clocked }: { e: Employee; deptLabel: strin
 }
 
 export default function Directory({ me }: { me: Me }) {
-  const { rows, state, error, reload, loadMore, hasMore } = useCollection<Employee>("employees", { showDeleted: true });
+  // Deleted people are their own view, reached by picking "Deleted" in the State filter (the column offers
+  // that value whether or not any is loaded). Never mixed in by default: this list paginates, so carrying the
+  // trash always would spend part of the page - and every viewer's D1 reads - on rows nobody asked for, and
+  // on a large directory would push live colleagues off it.
+  const [stateFilter, setStateFilter] = useState("");
+  const deletedOnly = stateFilter === "Deleted";
+  const { rows, state, error, reload, loadMore, hasMore } = useCollection<Employee>("employees", { deletedOnly });
   const { rows: depts } = useCollection<Department>("departments");
   const { toast } = useToast();
   const sd = useSoftDelete("employees", "employee", reload);
@@ -173,23 +198,41 @@ export default function Directory({ me }: { me: Me }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
-  const [busy, setBusy] = useState(false);
   // Email is required + well-formed only on create (it's not edited here). Empty passes the format check so
   // the inline error fires only on a malformed entry, not a pristine field.
   const emailOk = form.work_email.trim() === "" || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.work_email.trim());
-  const canSubmit = !!form.first_name.trim() && !!form.last_name.trim() && (!!editing || (form.work_email.trim() !== "" && emailOk));
+  // Probation can't end before someone starts - the same rule the profile's employment editor enforces, applied
+  // where the dates are first entered rather than only on the record that already has them.
+  const datesOk = !form.start_date || !form.probation_end_date || form.probation_end_date >= form.start_date;
+  const canSubmit = !!form.first_name.trim() && !!form.last_name.trim() && datesOk && (!!editing || (form.work_email.trim() !== "" && emailOk));
+  // Why Save is greyed out, in the order someone fills the form in.
+  const whyNot = !form.first_name.trim() || !form.last_name.trim()
+    ? "Enter their first and last name."
+    : !editing && !form.work_email.trim()
+      ? "A work email is how they sign in."
+      : !emailOk
+        ? "That work email isn't a valid address."
+        : !datesOk
+          ? "Probation can't end before the start date."
+          : undefined;
+  // Someone with this name is already on the books. A namesake is legitimate (two Priya Sharmas happen), so
+  // this warns and never blocks - a duplicate work email, which the server rejects outright, is a hard error.
+  const namesake = useMemo(() => {
+    if (editing) return null;
+    const full = `${form.first_name.trim()} ${form.last_name.trim()}`.trim().toLowerCase();
+    if (full.length < 3) return null;
+    return rows.find((e) => !e.delete_time && `${e.first_name} ${e.last_name}`.trim().toLowerCase() === full) ?? null;
+  }, [rows, editing, form.first_name, form.last_name]);
 
-  // Live presence: employee ids with an open clock session (drives the "clocked in" dot). Best-effort.
-  const [clockedIn, setClockedIn] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    let live = true;
-    get<{ results: AttendanceSession[] }>("attendance?open=true")
-      .then((r) => live && setClockedIn(new Set((r.results ?? []).map((s) => (s.employee ? idOf(s.employee) : "")).filter(Boolean))))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, []);
+  // Live presence: employee ids with an open clock session (drives the "clocked in" dot). The shared clock
+  // (lib/clock.tsx, mounted in the shell) already reads exactly this set for the top-bar chip, so reading it
+  // from there costs nothing - fetching it here again was the same query under a different URL, which the GET
+  // coalescer can't dedupe.
+  const { openSessions } = useClock();
+  const clockedIn = useMemo(
+    () => new Set(openSessions.map((s) => (s.employee ? idOf(s.employee) : "")).filter(Boolean)),
+    [openSessions],
+  );
 
   const deptName = useMemo(() => {
     const m = new Map(depts.map((d) => [idOf(d.path), d.display_name]));
@@ -210,7 +253,7 @@ export default function Directory({ me }: { me: Me }) {
   // Two reads, deliberately: the unfiltered one above backs the stats (which must count the whole org, not
   // the current search) and is the entry every other page shares; this one is the search result set.
   const { rows: searchRows, state: searchState, hasMore: searchHasMore, loadMore: loadMoreSearch } = useCollection<Employee>("employees", {
-    showDeleted: true,
+    deletedOnly,
     q: debouncedQ,
     enabled: searching,
   });
@@ -231,13 +274,29 @@ export default function Directory({ me }: { me: Me }) {
     });
   };
 
-  // Department quick-filter chips, counted from the loaded (live) rows. Purely client-side narrowing on
-  // top of whichever row set is showing (browse or search).
+  // The summary metrics double as filters: clicking one narrows the list to the people it counts, so a
+  // number the reader wants to inspect never has to be translated into a filter by hand. Stacks with the
+  // department chips and the search box below.
+  const [focus, setFocus] = useState<Focus>(null);
+  const focusRows = useMemo(() => {
+    if (!focus) return visibleRows;
+    const live = visibleRows.filter((e) => !e.delete_time);
+    if (focus === "clockedIn") return live.filter((e) => clockedIn.has(idOf(e.path)));
+    if (focus === "joining") return live.filter(isJoiningSoon);
+    if (focus === "probation") return live.filter(isProbationDue);
+    if (focus === "noManager") return live.filter((e) => !e.manager);
+    const month = new Date().toISOString().slice(0, 7);
+    return live.filter((e) => (e.start_date ?? "").slice(0, 7) === month);
+  }, [visibleRows, focus, clockedIn]);
+
+  // Department quick-filter chips, counted from the (live) rows the chips actually narrow: whichever row set
+  // is showing (browse or search) with the picked metric already applied, and the department dimension itself
+  // left out. A count that ignored the metric above it would contradict the list below.
   const [deptChip, setDeptChip] = useState<string | null>(null);
   const deptChips = useMemo(() => {
     const counts = new Map<string, number>();
     let none = 0;
-    for (const e of rows) {
+    for (const e of focusRows) {
       if (e.delete_time) continue;
       if (e.department) counts.set(idOf(e.department), (counts.get(idOf(e.department)) ?? 0) + 1);
       else none++;
@@ -246,13 +305,18 @@ export default function Directory({ me }: { me: Me }) {
       .map(([id, n]) => ({ id, name: deptName(id) || id, n }))
       .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
     if (none > 0) chips.push({ id: NONE, name: "No department", n: none });
+    // A picked chip the narrowed set no longer has anybody in keeps its place at zero: dropping it would
+    // leave the list filtered by a chip with no way left to unpick it.
+    if (deptChip && !chips.some((c) => c.id === deptChip)) {
+      chips.push({ id: deptChip, name: deptChip === NONE ? "No department" : deptName(deptChip) || deptChip, n: 0 });
+    }
     return chips;
-  }, [rows, deptName]);
+  }, [focusRows, deptChip, deptName]);
   const chipRows = useMemo(() => {
-    if (!deptChip) return visibleRows;
-    if (deptChip === NONE) return visibleRows.filter((e) => !e.department);
-    return visibleRows.filter((e) => e.department && idOf(e.department) === deptChip);
-  }, [visibleRows, deptChip]);
+    if (!deptChip) return focusRows;
+    if (deptChip === NONE) return focusRows.filter((e) => !e.department);
+    return focusRows.filter((e) => e.department && idOf(e.department) === deptChip);
+  }, [focusRows, deptChip]);
 
   // The grid is a browsing surface: deleted people stay table-only (that's where restore/purge lives).
   const gridRows = useMemo(() => chipRows.filter((e) => !e.delete_time), [chipRows]);
@@ -275,8 +339,36 @@ export default function Directory({ me }: { me: Me }) {
       total: live.length,
       clockedIn: live.filter((e) => clockedIn.has(idOf(e.path))).length,
       joined: live.filter((e) => (e.start_date ?? "").slice(0, 7) === month).length,
+      // Who is still to arrive, whose probation review is due, and who reports to nobody: the three gaps HR
+      // otherwise finds by scrolling the table with two hidden columns switched on.
+      joining: live.filter(isJoiningSoon).length,
+      probation: live.filter(isProbationDue).length,
+      noManager: live.filter((e) => !e.manager).length,
     };
   }, [rows, clockedIn]);
+
+  // The org's distribution and its growth, over the live directory. Clicking a department bar picks the same
+  // chip the row of chips below would - the chart is a filter, not a picture beside one.
+  const orgCharts = useMemo(() => {
+    const live = rows.filter((e) => !e.delete_time);
+    const counts = new Map<string, { id: string; n: number }>();
+    for (const e of live) {
+      const id = e.department ? idOf(e.department) : NONE;
+      const entry = counts.get(id) ?? { id, n: 0 };
+      entry.n++;
+      counts.set(id, entry);
+    }
+    const sorted = [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 10);
+    return {
+      depts: {
+        labels: sorted.map((d) => (d.id === NONE ? "No department" : deptName(d.id) || d.id)),
+        values: sorted.map((d) => d.n),
+      },
+      deptIds: sorted.map((d) => d.id),
+      joiners: monthlyTotals(live.filter((e) => e.start_date).map((e) => ({ date: e.start_date!, value: 1 })), 12, new Date().toISOString().slice(0, 10)),
+    };
+  }, [rows, deptName]);
+  const setDeptFilter = (id: string | null) => setDeptChip((c) => (c === id ? null : id));
 
   function openCreate() {
     setEditing(null);
@@ -301,50 +393,43 @@ export default function Directory({ me }: { me: Me }) {
     setOpen(true);
   }
 
+  // Throws on failure: WriteDialog pins the reason in the form and keeps everything typed so far.
   async function submit() {
-    setBusy(true);
-    try {
-      const dept = form.department === NONE ? null : form.department;
-      const mgr = form.manager === NONE ? null : form.manager;
-      if (editing) {
-        await patch(
-          "employees/" + idOf(editing.path),
-          {
-            first_name: form.first_name,
-            last_name: form.last_name,
-            legal_name: form.legal_name.trim() || null,
-            employee_number: form.employee_number.trim() || undefined,
-            job_title: form.job_title || null,
-            department: dept,
-            manager: mgr,
-            start_date: form.start_date || null,
-            probation_end_date: form.probation_end_date || null,
-          },
-          editing.etag
-        );
-        toast({ title: "Employee updated", variant: "success" });
-      } else {
-        await create("employees", {
+    const dept = form.department === NONE ? null : form.department;
+    const mgr = form.manager === NONE ? null : form.manager;
+    if (editing) {
+      await patch(
+        "employees/" + idOf(editing.path),
+        {
           first_name: form.first_name,
           last_name: form.last_name,
-          legal_name: form.legal_name.trim() || undefined,
+          legal_name: form.legal_name.trim() || null,
           employee_number: form.employee_number.trim() || undefined,
-          work_email: form.work_email,
-          job_title: form.job_title || undefined,
-          department: dept || undefined,
-          manager: mgr || undefined,
-          start_date: form.start_date || undefined,
-          probation_end_date: form.probation_end_date || undefined,
-        });
-        toast({ title: "Employee added", variant: "success" });
-      }
-      setOpen(false);
-      reload();
-    } catch (e) {
-      toast({ title: "Couldn't save employee", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
+          job_title: form.job_title || null,
+          department: dept,
+          manager: mgr,
+          start_date: form.start_date || null,
+          probation_end_date: form.probation_end_date || null,
+        },
+        editing.etag
+      );
+      toast({ title: "Employee updated", variant: "success" });
+    } else {
+      await create("employees", {
+        first_name: form.first_name,
+        last_name: form.last_name,
+        legal_name: form.legal_name.trim() || undefined,
+        employee_number: form.employee_number.trim() || undefined,
+        work_email: form.work_email,
+        job_title: form.job_title || undefined,
+        department: dept || undefined,
+        manager: mgr || undefined,
+        start_date: form.start_date || undefined,
+        probation_end_date: form.probation_end_date || undefined,
+      });
+      toast({ title: "Employee added", variant: "success" });
     }
+    reload();
   }
 
   const columns: Column<Employee>[] = [
@@ -394,7 +479,9 @@ export default function Directory({ me }: { me: Me }) {
     { id: "manager", header: "Manager", defaultHidden: true, filter: "select", accessor: (e) => empName(e.manager) || "-" },
     { id: "start_date", header: "Start date", defaultHidden: true, filter: "none", accessor: (e) => e.start_date ?? "", cell: (e) => (e.start_date ? formatDate(e.start_date) : "-") },
     { id: "probation_end_date", header: "Probation ends", defaultHidden: true, filter: "none", accessor: (e) => e.probation_end_date ?? "", cell: (e) => (e.probation_end_date ? formatDate(e.probation_end_date) : "-") },
-    stateColumn<Employee>(),
+    // Fetched on demand: the column offers "Deleted" with none loaded, and must not hide the value it just
+    // went and got.
+    stateColumn<Employee>({ hideDeleted: false, filterOptions: ["Deleted"] }),
     ...metaColumns<Employee>(),
     {
       id: "actions",
@@ -411,7 +498,16 @@ export default function Directory({ me }: { me: Me }) {
   ];
 
   const gridHasMore = searching ? searchHasMore : hasMore;
-  const gridEmpty = searching && searchState === "loading" ? "Searching…" : "No employees match";
+  // An empty list under a metric filter names the scope that emptied it, so the reader isn't left guessing
+  // why the directory looks empty.
+  const emptyLabel =
+    focus === "clockedIn" ? "Nobody is clocked in right now"
+    : focus === "joined" ? "Nobody joined this month"
+    : focus === "joining" ? "Nobody has a future start date"
+    : focus === "probation" ? "No probation reviews are due"
+    : focus === "noManager" ? "Everybody has a manager"
+    : "No employees match";
+  const gridEmpty = searching && searchState === "loading" ? "Searching…" : emptyLabel;
 
   const renderGrid = (people: Employee[]) => (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
@@ -429,11 +525,73 @@ export default function Directory({ me }: { me: Me }) {
         actions={<>{writable && <AccessAction collection="employees" create><Button onClick={openCreate}><Plus className="h-4 w-4" /> Add employee</Button></AccessAction>}<PageSettings me={me} host="employees" /></>}
       />
 
+      {/* The org's shape. A directory lists people one at a time and never says how the company is
+          distributed - which department carries the headcount, and when the growth actually happened. */}
+      {state === "ready" && rows.length > 3 && (
+        <div className="mb-4 grid gap-4 lg:grid-cols-2">
+          <ChartCard title="Headcount by department" description="Everyone you can see, by the team they sit in.">
+            <Chart
+              type="bar"
+              height={Math.min(320, Math.max(160, orgCharts.depts.labels.length * 34 + 60))}
+              labels={orgCharts.depts.labels}
+              datasets={[{ name: "People", values: orgCharts.depts.values }]}
+              ariaLabel="Headcount by department"
+              onSelect={(i) => setDeptFilter(orgCharts.deptIds[i] ?? null)}
+            />
+          </ChartCard>
+          <ChartCard title="Joiners by month" description="Who started when, over the last twelve months.">
+            <Chart
+              type="bar"
+              height={200}
+              labels={orgCharts.joiners.labels}
+              datasets={[{ name: "Joiners", values: orgCharts.joiners.values }]}
+              format={(v) => `${v} joiner${v === 1 ? "" : "s"}`}
+              ariaLabel="How many people started in each of the last twelve months"
+            />
+          </ChartCard>
+        </div>
+      )}
+
+      {/* Each metric focuses the table below it, so the strip sits against the table - under the charts. */}
       <SummaryStrip
         items={[
-          { label: "Employees", value: stats.total, icon: Users },
-          { label: "Clocked in now", value: stats.clockedIn, icon: Clock, tone: stats.clockedIn > 0 ? "success" : "muted" },
-          { label: "Joined this month", value: stats.joined, icon: UserPlus, tone: stats.joined > 0 ? "primary" : "muted" },
+          { label: "Employees", value: stats.total, icon: Users, hint: "everyone you can see", onClick: () => setFocus(null), active: focus === null },
+          {
+            label: "Clocked in now",
+            value: stats.clockedIn,
+            icon: Clock,
+            tone: stats.clockedIn > 0 ? "success" : "muted",
+            hint: "on the clock now",
+            onClick: () => setFocus((f) => (f === "clockedIn" ? null : "clockedIn")),
+            active: focus === "clockedIn",
+          },
+          {
+            label: "Joined this month",
+            value: stats.joined,
+            icon: UserPlus,
+            tone: stats.joined > 0 ? "primary" : "muted",
+            hint: "new starters",
+            onClick: () => setFocus((f) => (f === "joined" ? null : "joined")),
+            active: focus === "joined",
+          },
+          ...(stats.joining
+            ? [{
+                label: "Joining soon", value: stats.joining, icon: UserPlus, tone: "primary" as const, hint: "not started yet",
+                onClick: () => setFocus((f) => (f === "joining" ? null : "joining")), active: focus === "joining",
+              }]
+            : []),
+          ...(stats.probation
+            ? [{
+                label: "Probation due", value: stats.probation, icon: Users, tone: "warning" as const, hint: `ends in ${PROBATION_SOON_DAYS}d`,
+                onClick: () => setFocus((f) => (f === "probation" ? null : "probation")), active: focus === "probation",
+              }]
+            : []),
+          ...(stats.noManager
+            ? [{
+                label: "No manager", value: stats.noManager, icon: Users, tone: "warning" as const, hint: "no approver",
+                onClick: () => setFocus((f) => (f === "noManager" ? null : "noManager")), active: focus === "noManager",
+              }]
+            : []),
         ]}
       />
 
@@ -450,11 +608,14 @@ export default function Directory({ me }: { me: Me }) {
           <>
             <div className="mb-3 flex flex-wrap items-center gap-2">
               {deptChips.length > 1 && (
-                <div className="flex flex-wrap items-center gap-1.5">
+                // A dozen departments wrapping to four rows of chips pushes the actual list off a phone
+                // screen. One scrolling row below `sm` (with an edge shadow so it reads as scrollable),
+                // wrapping as before from `sm` up where there is width to wrap into.
+                <div className="scroll-shadow-x no-scrollbar -mx-1 flex items-center gap-1.5 overflow-x-auto px-1 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0">
                   <button
                     onClick={() => setDeptChip(null)}
                     className={cn(
-                      "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                      "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium transition-colors coarse:min-h-9 coarse:px-3.5",
                       deptChip === null ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground"
                     )}
                   >
@@ -465,7 +626,7 @@ export default function Directory({ me }: { me: Me }) {
                       key={c.id}
                       onClick={() => setDeptChip(deptChip === c.id ? null : c.id)}
                       className={cn(
-                        "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                        "shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium transition-colors coarse:min-h-9 coarse:px-3.5",
                         deptChip === c.id ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground"
                       )}
                     >
@@ -504,15 +665,16 @@ export default function Directory({ me }: { me: Me }) {
                 // showing a truncated first page of the collection.
                 hasMore={searching ? searchHasMore : undefined}
                 onLoadMore={searching ? loadMoreSearch : loadMore}
-                emptyTitle={searching && searchState === "loading" ? "Searching…" : "No employees match"}
+                emptyTitle={searching && searchState === "loading" ? "Searching…" : emptyLabel}
                 accessCollection="employees"
+                onFilterChange={(colId, value) => colId === "state" && setStateFilter(value)}
                 accessTargetOf={(e) => ({ objectPath: e.path, label: `${e.first_name} ${e.last_name}`, can: e.access?.can })}
               />
             ) : (
               <div>
                 <div className="relative mb-3 max-w-sm">
                   <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input value={search} onChange={(ev) => setSearch(ev.target.value)} placeholder="Search people…" className="pl-8" />
+                  <Input type="search" value={search} onChange={(ev) => setSearch(ev.target.value)} placeholder="Search people…" className="pl-8" />
                 </div>
                 {gridRows.length === 0 ? (
                   <div className="rounded-xl border bg-card py-12 text-center text-sm text-muted-foreground">{gridEmpty}</div>
@@ -541,14 +703,30 @@ export default function Directory({ me }: { me: Me }) {
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && canSubmit) submit(); }}>
-          {/* Scope the dialog's field icons to the employee being edited (so a field rule pins to THIS
-              employee). On create there is no object yet, so ordinary fields show no icon. */}
-          <AccessScope collection="employees" objectPath={editing?.path}>
-          <DialogHeader>
-            <DialogTitle>{editing ? "Edit employee" : "Add employee"}</DialogTitle>
-          </DialogHeader>
+      {/* Scoped to the employee being edited, so a field rule pins to THIS employee. On create there is no
+          object yet, so ordinary fields show no icon. */}
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={editing ? "Edit employee" : "Add employee"}
+        description={
+          editing
+            ? "Changes apply immediately across the directory, org chart and approval routing."
+            : "Creates the record and lets them sign in with their work email. Pay, leave balances and documents are added afterwards from their profile."
+        }
+        collection="employees"
+        objectPath={editing?.path}
+        guardLabel="employee"
+        form={form}
+        draftKey={editing ? undefined : "employee-new"}
+        applyDraft={setForm}
+        onStartOver={() => setForm(EMPTY)}
+        submitLabel={editing ? "Save changes" : "Add employee"}
+        canSubmit={canSubmit}
+        whyNot={whyNot}
+        onSubmit={submit}
+        addAnother={editing ? undefined : () => setForm(EMPTY)}
+      >
           <FieldRow>
             <Field label="First name">
               <Input autoFocus value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} />
@@ -597,23 +775,25 @@ export default function Directory({ me }: { me: Me }) {
               </SelectContent>
             </Select>
           </Field>
-          <div className="grid grid-cols-2 gap-4">
+          <FieldRow>
             <Field label="Start date" hint="Drives leave accrual.">
               <Input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} />
             </Field>
-            <Field label="Probation ends" hint={editing ? "Leave blank to clear." : "Blank defaults from start date."}>
-              <Input type="date" value={form.probation_end_date} onChange={(e) => setForm({ ...form, probation_end_date: e.target.value })} />
+            <Field
+              label="Probation ends"
+              error={!datesOk ? "Probation can't end before the start date." : undefined}
+              hint={editing ? "Leave blank to clear." : "Blank defaults from start date."}
+            >
+              <Input type="date" min={form.start_date || undefined} value={form.probation_end_date} onChange={(e) => setForm({ ...form, probation_end_date: e.target.value })} />
             </Field>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!canSubmit}>
-              {editing ? "Save changes" : "Add employee"}
-            </Button>
-          </DialogFooter>
-          </AccessScope>
-        </DialogContent>
-      </Dialog>
+          </FieldRow>
+          {namesake && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              {namesake.first_name} {namesake.last_name} is already in the directory
+              {namesake.work_email ? <> ({namesake.work_email})</> : null}. Add this one only if they're a different person.
+            </p>
+          )}
+      </WriteDialog>
     </div>
   );
 }

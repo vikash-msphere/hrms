@@ -222,6 +222,19 @@ describe("leaveDays (sessions: 1=AM, 2=PM)", () => {
     // Fri..Mon = Fri + Mon = 2 working days; PM-start (Fri) + AM-end (Mon) = half each = 1.
     expect(leaveDays(ms("2026-06-05"), ms("2026-06-08"), 2, 1)).toBe(1);
   });
+  it("charges a half-day holiday as half a day", () => {
+    const half = new Set(["2026-06-02"]); // Tue, office open in the afternoon only
+    expect(leaveDays(mon, wed, 1, 2, [1, 2, 3, 4, 5], new Set(), half)).toBe(2.5);
+    // A full holiday wins over a half one, so a mis-set pair can't charge 1.5 days for a closed office.
+    expect(leaveDays(mon, wed, 1, 2, [1, 2, 3, 4, 5], new Set(["2026-06-02"]), half)).toBe(2);
+  });
+  it("shaves only what a half-day holiday boundary is worth", () => {
+    const tue = ms("2026-06-02");
+    const half = new Set(["2026-06-02"]);
+    // The one day is worth 0.5; a PM start can't take it below zero.
+    expect(leaveDays(tue, tue, 1, 2, [1, 2, 3, 4, 5], new Set(), half)).toBe(0.5);
+    expect(leaveDays(tue, tue, 2, 2, [1, 2, 3, 4, 5], new Set(), half)).toBe(0);
+  });
 });
 
 describe("roundToIncrement", () => {

@@ -32,7 +32,7 @@ export function ProfileCompleteness({ flags, onItem, variant = "self" }: { flags
   const pct = Math.round((done / items.length) * 100);
   return (
     <Card className="mt-4">
-      <CardContent className="py-4">
+      <CardContent className="py-4 sm:py-4">
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-sm font-medium">{variant === "record" ? "Record completeness" : "Complete your profile"}</p>
           <p className="text-sm text-muted-foreground">

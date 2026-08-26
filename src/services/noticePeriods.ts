@@ -43,7 +43,7 @@ export async function listNoticePeriods(deps: Deps, scope: ListScope, maxPageSiz
   const conds = [applyScope(scope, schema.noticePeriods.code, schema.noticePeriods.employeeId)];
   if (statusFilter) conds.push(eq(schema.noticePeriods.status, statusFilter as Status));
   if (!showDeleted) conds.push(isNull(schema.noticePeriods.deleteTime));
-  return keysetPage<typeof schema.noticePeriods.$inferSelect>(deps, schema.noticePeriods, "notice-periods", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage<typeof schema.noticePeriods.$inferSelect>(deps, schema.noticePeriods, "notice-periods", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 
 // The read side of the collection is the factory's generic get; this stays internal because the update needs

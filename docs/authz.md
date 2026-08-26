@@ -14,7 +14,7 @@ How access control works in this codebase, end to end. This is the **current** r
 9. [Request lifecycle and read budget](#9-request-lifecycle-and-read-budget)
 10. [Per-object rules (a user, or an object-pinned role)](#10-per-object-rules-a-user-or-an-object-pinned-role)
 11. [Body access control (fields, references, owners)](#11-body-access-control-fields-references-owners)
-12. [List scope](#12-list-scope) — [12.1 Global search](#121-global-search-get-v1search), [12.2 Why search is indexed](#122-why-search-is-indexed-not-scanned)
+12. [List scope](#12-list-scope) — [12.1 Global search](#121-global-search-get-v1search), [12.1.1 KPI counts + the approvals badge](#1211-the-other-fan-outs-kpi-counts-and-the-approvals-badge), [12.2 Why search is indexed](#122-why-search-is-indexed-not-scanned)
 13. [Client capabilities](#13-client-capabilities)
 14. [Management endpoints](#14-management-endpoints)
 15. [Fail-closed guarantees](#15-fail-closed-guarantees)
@@ -279,11 +279,12 @@ then resolves the caller and their authority:
 1. `buildCodedPath` resolves the top path id `uuid -> code` (cached in an in-isolate `Map`); `me` / `-` /
    `:verb` stay literal. The resolved object `code` is captured.
 2. `resolveRequest` builds the `Resolved`.
-3. **Per-object overlay (item paths).** If an object `code` resolved, `loadObjectRulesForRequest` fetches the
-   per-object rows narrowed by the object's ancestor codes (exact `IN`, section 10) - the caller's USER
-   exceptions AND any exact ROLE rules, in one indexed read (`subject IN (uuid, role)`, paired by
-   `subject_kind`); any are overlaid on the broad role grant via `mergeGrants`. The merged grant is also
-   stashed on `ctx.objectGrant` for the `access.can` hint (section 13). No object code -> the broad grant.
+3. **Per-object overlay (item paths).** If an object `code` resolved, `loadObjectRulesForRequest` takes the
+   per-object rows matching the object's ancestor codes (section 10) - the caller's USER exceptions AND any
+   exact ROLE rules - out of the caller's cached per-object rule set (one indexed read per caller per TTL,
+   `subject IN (uuid, role)` paired by `subject_kind`, sliced in memory afterwards); any are overlaid on the
+   broad role grant via `mergeGrants`. The merged grant is also stashed on `ctx.objectGrant` for the
+   `access.can` hint (section 13). No object code -> the broad grant.
 4. `decide(grant, resolved, { employeeCode })` - reads memory, zero queries.
 5. If allowed, `bodyDecision` additionally gates protected fields, references, and owner refs (section 11),
    using the same merged grant.
@@ -300,7 +301,7 @@ Per-request read budget:
 | broad user grant (own scope rows) | every request | 1 (usually empty) | ~0 (cached per user) |
 | manifest | every request | 1 | ~0 (cached) |
 | `uuid -> code` | item / write paths | 1 (cached `Map`) | ~0 |
-| per-object narrow (user + exact-role rows) | item paths only | 1 (tiny, index-only; usually empty) | 1 |
+| per-object rules (user + exact-role rows) | item paths, and every list's shares/denies | 1 (tiny, index-only; usually empty) | ~0 (cached per caller) |
 | the decision | every request | **0** (memory) | **0** |
 
 Nothing scales with object or rule count; the decision itself never queries. Reads are served from the
@@ -413,6 +414,35 @@ row the reader is not allowed to see, and no service to forget.
 The invariant is therefore unchanged: **a search hit is always a row the caller's list of that collection
 would have returned**, and `test/singleSource.test.ts` still holds - no decision is made outside the
 middleware.
+
+### 12.1.1 The other fan-outs: KPI counts, the people report and the approvals badge
+
+Three more routes share this shape - an envelope any authenticated caller may hit, with the real decision made
+per backing collection in the middleware and only *bound* in the service:
+
+- **`GET /v1/dashboard-summary`** aggregates KPI counts. `scopesForCollections(..., DASHBOARD_SUMMARY_COLLECTIONS)`
+  runs the same list decide/scope pair as search and hands over `ctx.summaryScopes`; a KPI whose collection the
+  caller may not list is simply absent from the response.
+- **`GET /v1/people-analytics`** is the per-person report (attendance and punctuality, leave, tasks, goals,
+  reviews, 1:1s, timesheets, recognition) over a window. Same pattern, answering per PERSON rather than per
+  collection: `scopesForCollections(..., ANALYTICS_COLLECTIONS)` sets `ctx.analyticsScopes`, the roster comes
+  from the caller's own `employees` list decision (no `employees` scope, no rows at all), and each measure is
+  bound by its own collection's list scope. A measure whose collection the caller may not list is absent from
+  `metrics` and from every row - and a **derived** measure needs every collection it leans on (absence needs
+  leave as well as attendance, or it would report somebody's approved holiday as an absence).
+- **`GET /v1/approvals-summary`** counts what is awaiting the caller's decision, per queue. Same pattern with
+  one axis changed: the decision is the **custom verb** `approve`, not a list read, because the badge counts
+  what the caller may act on. `verbScopeFor(user, collection, "approve")` (`domain/access.ts`) probes
+  `decide()` with synthetic codes exactly as `actorScope` does for reads, and returns **null** when the caller
+  holds the verb at no scope - so an ordinary employee's badge scopes nothing and queries nothing.
+  `approvalScopesFor` (`authz.ts`) sets `ctx.approvalScopes`, plus `ctx.taxVerificationsReadable` for the
+  prior-employer verification queue (a virtual capability with no table, gated by `tax-verifications.read`).
+  Per-object **shares** are deliberately not merged in: a list row's `access.can` hint is computed from the
+  role grant, so an object-level share never put a row in this badge; denies still apply.
+
+Both exist for the same reason as the FTS index below: the SPA used to compute them client-side from list
+responses, which meant reading whole collections to produce one number. The approvals badge alone cost eleven
+list requests on **every** page in the app.
 
 ### 12.2 Why search is indexed, not scanned
 
@@ -559,8 +589,8 @@ sibling doc, having no row, stays denied.
 | `src/domain/collections.ts` | the collection registry (valid grant-pattern namespaces) + drift gate |
 | `src/domain/policyValidate.ts` | write-time `validateAccessRule` / `validateManifest` (reject malformed) |
 | `src/domain/grants.ts` / `manifests.ts` | typed seed defaults + `EMPTY_GRANT` / `DEFAULT_POLICY` fallbacks |
-| `src/domain/access.ts` | `actorScope`, `scopeFor`, `ListScope`, `stateReadAllowed` |
-| `src/lib/policyLoad.ts` | load broad role grant + broad user grant + manifest (cached); `loadObjectRulesForRequest` / `loadObjectExceptionCodes` (per-object user + exact-role reads) |
+| `src/domain/access.ts` | `actorScope`, `scopeFor`, `actorVerbScope`, `verbScopeFor`, `ListScope`, `stateReadAllowed` |
+| `src/lib/policyLoad.ts` | load broad role grant + broad user grant + manifest (cached); the caller's per-object rules loaded once and sliced (`loadObjectRulesForRequest` / `loadObjectExceptionCodes` / `…For`) |
 | `src/http/accessHint.ts` | `computeCan` / `withAccess` - the per-object `access.can` UX hint (gates nothing) |
 | `src/http/collectionRoute.ts` + `src/services/crud.ts` | the ONE standard-method surface every collection is built from; shapes requests, decides no permission |
 | `src/lib/cache.ts` | in-isolate TTL cache (`cached` / `clearCache`); correctness-independent |
@@ -573,5 +603,6 @@ sibling doc, having no row, stays denied.
 | `src/domain/searchIndex.ts` | which collections global search covers, and how each mirrors its list scoping |
 | `src/db/searchDdl.ts` | generates the FTS5 index + sync triggers from that registry (appended to the migration) |
 | `src/services/globalSearch.ts` | builds the search query from `ctx.searchScopes`; binds, decides nothing |
+| `src/services/approvalsSummary.ts` | approval-queue COUNTs from `ctx.approvalScopes`; binds, decides nothing |
 | `src/db/schema.ts` | `roles` / `policy` / `access_rules` tables |
 | `scripts/seed.sql` + `scripts/genAccessRulesSeed.ts` | seeded rows; `access_rules` generated + drift-checked |

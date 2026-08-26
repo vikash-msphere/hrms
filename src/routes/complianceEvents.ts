@@ -15,6 +15,7 @@ const writeSchema = z
     status: z.enum(["pending", "filed", "waived"]).optional(),
     filed_date: z.string().nullable().optional(),
     reference: z.string().nullable().optional(),
+    document: z.string().nullable().optional(), // org-documents/<id>: the challan or receipt that proves it
     assignee: z.string().nullable().optional(),
     notes: z.string().nullable().optional(),
   })

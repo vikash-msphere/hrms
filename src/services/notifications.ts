@@ -12,8 +12,9 @@ import { getSettingValue } from "./settings";
 import { DEFAULT_NOTIFICATION_CONFIG, eventConfig, isMutedByUser, isDigestible, parseNotificationPrefs, type NotificationConfig, type NotificationPriority } from "../domain/notificationConfig";
 import { queueForDigest } from "./notificationDigest";
 import { pushToEmployee } from "./webPush";
-import { runBatch } from "../lib/dbBatch";
+import { insertBatches, runBatch } from "../lib/dbBatch";
 import { activeDelegatesFor } from "./approvalDelegations";
+import { ENCODABLE } from "../middleware/encodeWireIds";
 
 // Full name of an employee-ish row, or null. Used to denormalize the actor's display name onto a notification.
 const nameOf = (p?: { firstName?: string | null; lastName?: string | null } | null): string | null =>
@@ -21,6 +22,18 @@ const nameOf = (p?: { firstName?: string | null; lastName?: string | null } | nu
 
 // Load the org notification config (one read). The engine gates emission + resolves priority from it.
 const loadNotifConfig = (deps: Deps) => getSettingValue<NotificationConfig>(deps, "notifications", DEFAULT_NOTIFICATION_CONFIG);
+
+// A stored `link` is an INTERNAL path ("reviews/<internal-id>", "announcements/<internal-id>/view"): the JSON
+// response encoder rewrites the id on the way out, so the feed is fine. Web push does not pass through that
+// edge - it leaves as an outbound fetch - so the pushed link is encoded here, and prefixed "#/" because the
+// push service worker navigates hash routes (a bare "approvals" resolved against the origin, not the router).
+async function pushLink(deps: Deps, link?: string | null): Promise<string | undefined> {
+  const raw = link?.trim();
+  if (!raw) return undefined;
+  const m = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})((?::[a-zA-Z]+|\/[a-z][a-z-]*)?)$/.exec(raw);
+  if (!m || !ENCODABLE.has(m[1]!)) return `#/${raw.replace(/^#\/?/, "")}`;
+  return `#/${m[1]}/${await deps.idCodec.encode(m[1]!, m[2]!)}${m[3]}`;
+}
 
 // Audience for a broadcast emission. `everyone` = all active employees; `department` = direct members of a dept
 // (by uuid); `employees` = an explicit list of employee uuids; `none` = emit nothing.
@@ -92,7 +105,7 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
     await pushToEmployee(deps, recipientId, {
       title: input.title,
       body: input.body?.trim() || undefined,
-      link: input.link?.trim() || undefined,
+      link: await pushLink(deps, input.link),
     });
   } catch (e) {
     console.error("[notify] insert failed (non-fatal)", e);
@@ -103,10 +116,6 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
 // owner code in TWO reads (employee codes + existing notification codes) and writes via chunked multi-row
 // inserts, instead of the per-recipient read+read+insert that an announcement broadcast would otherwise do
 // O(employees) times in one request (a CPU/duration/subrequest DoS at scale). Best-effort: never throws.
-// Rows per multi-row insert. Cloudflare D1 caps bound parameters at 100 PER STATEMENT. Each row binds ~11
-// (the 8 set columns + the uuid/createdAt/updatedAt defaults drizzle materializes), so a chunk of 8 (~88
-// params) stays safely under the cap. (Larger chunks silently fail the WHOLE batch with "too many SQL variables".)
-const INSERT_CHUNK = 8;
 export async function notifyMany(deps: Deps, recipients: string[], input: Omit<NotifyInput, "recipient">): Promise<void> {
   const uniq = [...new Set(recipients.filter(Boolean))];
   if (!uniq.length || !input.title) return;
@@ -145,6 +154,10 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
     }
     const body = input.body?.trim() || null;
     const link = input.link?.trim() || null;
+    // The resource this is about. notify() has always stored it; the fan-out silently dropped it, so every
+    // broadcast notification - a mention, a new ticket to its servicing team - arrived with no record of what
+    // it was about, and the "New" marker the web draws from `subject` never appeared for any of them.
+    const subject = input.subject?.trim() || null;
     const actorId = input.actorId || null;
     const rows = uniq
       .filter((rid) => !mutedFor.has(rid))
@@ -155,6 +168,7 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
         title: input.title,
         body,
         link,
+        subject,
         priority,
         action,
         actorId,
@@ -162,9 +176,7 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
       }));
     // One batch = one subrequest for the whole fan-out (each chunk is a statement inside it), and the
     // broadcast lands atomically - no half-notified audience on a crash.
-    const chunks: (typeof rows)[] = [];
-    for (let i = 0; i < rows.length; i += INSERT_CHUNK) chunks.push(rows.slice(i, i + INSERT_CHUNK));
-    await runBatch(deps.db, chunks.map((c) => deps.db.insert(schema.notifications).values(c)));
+    await runBatch(deps.db, insertBatches(rows, (c) => deps.db.insert(schema.notifications).values(c)));
   } catch (e) {
     console.error("[notifyMany] broadcast failed (non-fatal)", e);
   }

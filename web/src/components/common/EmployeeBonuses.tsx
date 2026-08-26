@@ -8,8 +8,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
-import { Field } from "@/components/common/Field";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Field, FieldRow } from "@/components/common/Field";
+import { TableSkeleton } from "@/components/common/Skeletons";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 const todayYmd = () => new Date().toISOString().slice(0, 10);
@@ -26,6 +31,10 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ amount: "", kind: "", award_date: todayYmd(), reason: "" });
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "award" });
+  // Same person, same amount, same day: nearly always a re-submit rather than two genuine awards.
+  const duplicate = rows.find((r) => Number(form.amount) > 0 && Math.abs(r.amount - Number(form.amount)) < 0.01 && (r.award_date ?? "").slice(0, 10) === form.award_date);
 
   async function load() {
     try {
@@ -43,6 +52,7 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
 
   async function record() {
     setBusy(true);
+    setErr(null);
     try {
       await create("bonuses", {
         employee: "employees/" + employeeId,
@@ -56,7 +66,7 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
       setForm({ amount: "", kind: "", award_date: todayYmd(), reason: "" });
       await load();
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't record award", description: (e as Error).message });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -72,49 +82,67 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
         </CardTitle>
         {canEdit && (
           <AccessAction collection="bonuses" create label="Record bonus">
-            <Button size="sm" onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> Record bonus</Button>
+            <Button size="sm" onClick={() => { setErr(null); setOpen(true); }}><Plus className="h-4 w-4" /> Record bonus</Button>
           </AccessAction>
         )}
       </CardHeader>
       <CardContent>
         {!loaded ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+          <TableSkeleton rows={3} cols={4} />
         ) : rows.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No awards on record.{canEdit ? " Use Record bonus to add one." : ""}</p>
         ) : (
-          <table className="w-full text-sm">
+          // Stacked into labelled rows below `sm` and a table from there up. Reason is free text and the
+          // column that would otherwise force the width, so it gets the flexible remainder and wraps.
+          <div className="scroll-shadow-x -mx-1 overflow-x-auto px-1 [--scroll-ground:hsl(var(--card))]">
+          <table className="table-stack w-full text-sm sm:min-w-[24rem]">
             <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Date</th><th className="py-2 pr-3 font-medium">Type</th><th className="py-2 pr-3 font-medium">Amount</th><th className="py-2 font-medium">Reason</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.path} className="border-b last:border-0">
-                  <td className="py-1.5 pr-3 font-medium">{r.award_date}</td>
-                  <td className="py-1.5 pr-3">{r.kind ?? "Bonus"}</td>
-                  <td className="py-1.5 pr-3 tabular-nums">{money(r.amount, r.currency_code)}</td>
-                  <td className="py-1.5 text-muted-foreground">{r.reason ?? "-"}</td>
+                  <td data-label="Date" className="whitespace-nowrap py-1.5 pr-3 font-medium">{r.award_date}</td>
+                  <td data-label="Type" className="whitespace-nowrap py-1.5 pr-3">{r.kind ?? "Bonus"}</td>
+                  <td data-label="Amount" className="whitespace-nowrap py-1.5 pr-3 tabular-nums">{money(r.amount, r.currency_code)}</td>
+                  <td data-label="Reason" className="py-1.5 text-muted-foreground">{r.reason ?? "-"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.amount && Number(form.amount) > 0 && form.award_date) record(); }}>
-          <DialogHeader><DialogTitle>Record bonus / incentive</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">Record a one-off award. It's paid out through payroll.</p>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Amount"><Input type="number" min={1} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} autoFocus /></Field>
-            <Field label="Award date"><Input type="date" value={form.award_date} onChange={(e) => setForm({ ...form, award_date: e.target.value })} /></Field>
-          </div>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        {/* scrollBody so Save stays on screen: the duplicate-award warning can appear mid-form and push the
+            footer off the bottom of a phone. */}
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.amount && Number(form.amount) > 0 && form.award_date) record(); }}>
+          <AccessScope collection="bonuses">
+          <DialogHeader>
+            <DialogTitle>Record bonus / incentive</DialogTitle>
+            <DialogDescription>A one-off award, paid as a taxable earning by the next payroll run covering the award date.</DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
+          <FieldRow>
+            <Field label="Amount"><MoneyInput value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} min={1} autoFocus /></Field>
+            <Field label="Award date" hint="Decides which payroll run pays it."><Input type="date" value={form.award_date} onChange={(e) => setForm({ ...form, award_date: e.target.value })} /></Field>
+          </FieldRow>
           <Field label="Type">
             <Input list="bonus-kinds" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} placeholder="e.g. Performance Bonus" />
             <datalist id="bonus-kinds">{KINDS.map((k) => <option key={k} value={k} />)}</datalist>
           </Field>
           <Field label="Reason (optional)" hint="Cited in the letter, e.g. exceptional delivery on the Q2 launch."><Input value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
+          {duplicate && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              This employee already has a {money(duplicate.amount, duplicate.currency_code)} award dated {duplicate.award_date}. Saving records a second one.
+            </p>
+          )}
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
             <Button onClick={record} loading={busy} disabled={!form.amount || Number(form.amount) <= 0 || !form.award_date}>Save</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </Card>

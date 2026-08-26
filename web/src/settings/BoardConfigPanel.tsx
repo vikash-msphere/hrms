@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
 import type { Board, BoardColumn, BoardMode, SwimlaneMode, WipScope, Label as BoardLabel } from "@/types";
 import { Field } from "@/components/common/Field";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -25,10 +26,10 @@ export function BoardConfigPanel({ objectPath, onClose }: { objectPath: string; 
   const { rows, state } = useCollection<Board>("boards");
   const board = rows.find((b) => b.path === objectPath);
   if (!board) {
-    return (
-      <p className="py-10 text-center text-sm text-muted-foreground">
-        {state === "loading" ? "Loading…" : "This board is no longer available."}
-      </p>
+    return state === "loading" ? (
+      <PanelSkeleton />
+    ) : (
+      <p className="py-10 text-center text-sm text-muted-foreground">This board is no longer available.</p>
     );
   }
   // Key by path so edits survive the post-save refetch (same path, fresh object) but reset if the board changes.
@@ -129,7 +130,11 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
   return (
     <div className="space-y-4">
       <Tabs defaultValue="details">
-        <TabsList className="grid w-full grid-cols-4">
+        {/* No `grid grid-cols-4` here: four equal minmax(0,1fr) tracks are narrower than "Swimlanes"
+            wants once this panel is in a phone-width Sheet, and the label - which is `whitespace-nowrap` -
+            then spills out of its own track. The plain TabsList already scrolls its strip and pulls the
+            active tab into view, which is the behaviour a grid override throws away. */}
+        <TabsList>
           <TabsTrigger value="details">Details</TabsTrigger>
           <TabsTrigger value="columns">Columns</TabsTrigger>
           <TabsTrigger value="swimlanes">Swimlanes</TabsTrigger>
@@ -159,12 +164,12 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
           </div>
           {cols.map((c, i) => (
             <div key={i} className="rounded-md border p-2.5">
-              <div className="flex items-center gap-2">
-                <Input value={c.label} onChange={(e) => setCol(i, { label: e.target.value })} className="h-8 flex-1" placeholder="Column name" />
-                <Input type="number" value={c.wipLimit ?? ""} onChange={(e) => setCol(i, { wipLimit: e.target.value === "" ? null : Number(e.target.value) })} className="h-8 w-24" placeholder="WIP" />
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => moveCol(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></Button>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => moveCol(i, 1)} disabled={i === cols.length - 1}><ChevronDown className="h-4 w-4" /></Button>
-                <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive" onClick={() => removeCol(i)} disabled={cols.length === 1}><X className="h-4 w-4" /></Button>
+              <div className="editor-row">
+                <Input value={c.label} onChange={(e) => setCol(i, { label: e.target.value })} className="editor-row-main h-8" placeholder="Column name" />
+                <Input type="number" value={c.wipLimit ?? ""} onChange={(e) => setCol(i, { wipLimit: e.target.value === "" ? null : Number(e.target.value) })} className="h-8 w-20" placeholder="WIP" />
+                <Button size="icon" variant="ghost" aria-label="Move this column left" className="h-7 w-7" onClick={() => moveCol(i, -1)} disabled={i === 0}><ChevronUp className="h-4 w-4" /></Button>
+                <Button size="icon" variant="ghost" aria-label="Move this column right" className="h-7 w-7" onClick={() => moveCol(i, 1)} disabled={i === cols.length - 1}><ChevronDown className="h-4 w-4" /></Button>
+                <Button size="icon" variant="ghost" aria-label="Remove this column" className="h-7 w-7 text-destructive" onClick={() => removeCol(i)} disabled={cols.length === 1}><X className="h-4 w-4" /></Button>
               </div>
               <Input value={c.policy} onChange={(e) => setCol(i, { policy: e.target.value })} className="mt-2 h-8" placeholder="Column policy (definition of done / entry criteria)" />
               {c.wipLimit != null && (
@@ -204,7 +209,7 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
               {lanes.map((l, i) => (
                 <div key={i} className="flex items-center gap-2">
                   <Input value={l.label} onChange={(e) => setLanes((ls) => ls.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))} className="h-8" placeholder="Lane name" />
-                  <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive" onClick={() => setLanes((ls) => ls.filter((_, j) => j !== i))}><X className="h-4 w-4" /></Button>
+                  <Button size="icon" variant="ghost" aria-label="Remove this swimlane" className="h-7 w-7 text-destructive" onClick={() => setLanes((ls) => ls.filter((_, j) => j !== i))}><X className="h-4 w-4" /></Button>
                 </div>
               ))}
               <Button size="sm" variant="outline" onClick={() => setLanes((ls) => [...ls, { key: `lane_${ls.length + 1}`, label: "New lane" }])}><Plus className="h-3.5 w-3.5" /> Add lane</Button>
@@ -224,10 +229,10 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
             <Button size="sm" variant="outline" onClick={() => setLabelCat((ls) => [...ls, { key: `label_${ls.length + 1}`, label: "New label", color: "#64748b" }])}><Plus className="h-3.5 w-3.5" /> Add label</Button>
           </div>
           {labelCat.map((l, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <Input value={l.label} onChange={(e) => setLabelCat((ls) => ls.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))} className="h-8" placeholder="Label name" />
+            <div key={i} className="editor-row">
+              <Input value={l.label} onChange={(e) => setLabelCat((ls) => ls.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))} className="editor-row-main h-8" placeholder="Label name" />
               <Input type="color" value={l.color ?? "#64748b"} onChange={(e) => setLabelCat((ls) => ls.map((x, j) => (j === i ? { ...x, color: e.target.value } : x)))} className="h-8 w-14 p-1" />
-              <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive" onClick={() => setLabelCat((ls) => ls.filter((_, j) => j !== i))}><X className="h-4 w-4" /></Button>
+              <Button size="icon" variant="ghost" aria-label="Remove this label" className="h-7 w-7 text-destructive" onClick={() => setLabelCat((ls) => ls.filter((_, j) => j !== i))}><X className="h-4 w-4" /></Button>
             </div>
           ))}
         </TabsContent>

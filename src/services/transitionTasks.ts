@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { notFound, failedPrecondition } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { makeDocumentService } from "./documentService";
 import { VALID_DOC_TYPES, type DocType } from "./documentsCommon";
 
@@ -19,14 +19,15 @@ export async function listTransitionTasks(deps: Deps, scope: ListScope, maxPageS
   if (statusFilter) conds.push(eq(schema.transitionTasks.status, statusFilter as typeof schema.transitionTasks.$inferSelect.status));
   const transitionId = transition ? transition.split("/").pop()! : undefined;
   if (transitionId) conds.push(eq(schema.transitionTasks.transitionId, transitionId));
-  const all = (await deps.db.select().from(schema.transitionTasks).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .sort((a, b) => +new Date(a.dueDate ?? a.createdAt) - +new Date(b.dueDate ?? b.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+  const all = await deps.db.select().from(schema.transitionTasks).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
+  // Paged on `createdAt` (the cursor's key) and, unlike the streams, OLDEST first: a joiner's checklist is read
+  // forwards, and its first tasks are the ones due first. Due date orders the page, not the paging - sorting the
+  // whole set by `dueDate` while seeking on `createdAt` is what let a task slip between two pages.
+  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc");
+  return {
+    ...page,
+    items: page.items.sort((a, b) => +new Date(a.dueDate ?? a.createdAt) - +new Date(b.dueDate ?? b.createdAt) || a.uuid.localeCompare(b.uuid)),
+  };
 }
 
 export async function getTransitionTask(deps: Deps, _actor: AppUser, id: string) {

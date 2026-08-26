@@ -1,11 +1,11 @@
 import { allocOwnedCode } from "./codeAlloc";
 import { and, eq, isNull, inArray } from "drizzle-orm";
 import { applyScope } from "./listScope";
-import { applyStructure, splitCtc, pfWagesOf, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
+import { applyStructure, ctcLines, splitCtc, pfWagesOf, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { structureLinesById } from "./salaryStructures";
 import { monthlyRecurringGross } from "./taxProjection";
-import { getSettingValue } from "./settings";
+import { getSettingValue, orgCurrency } from "./settings";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -13,31 +13,72 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition, aborted } from "../lib/errors";
 import { notify } from "./notifications";
+import { refPayComponents, refPayPeriods } from "../lib/refData";
 
 // Effective-dated base pay. A salary revision (increment/appraisal) is a NEW row effective from a chosen date;
 // the previously-current row is closed (effective_to set). Payroll prices each period at the row effective
 // during it (period-effective), and a backdated raise's delta for already-published periods is paid as arrears.
 // There is no in-place edit of pay - history is preserved by design.
 
-// Count the pay periods this employee was ALREADY PAID (in a PUBLISHED run) whose period starts within
-// [fromMs, toMs). Drives backdated-increment arrears: only published periods are immutable + priced at the old
-// rate, so only they are owed the delta - unpublished/future periods get the new rate from period-effective
-// pricing and must NOT be counted here (that would double-pay the raise).
-async function publishedPeriodsPaid(deps: Deps, employeeId: string, fromMs: number, toMs: number): Promise<number> {
-  const myRunIds = new Set(
-    (await deps.db.select({ runId: schema.payrollRunItems.runId }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.employeeId, employeeId))).map((r) => r.runId),
-  );
-  if (!myRunIds.size) return 0;
-  const periods = new Map((await deps.db.select().from(schema.payPeriods)).map((p) => [p.uuid, p]));
-  let n = 0;
-  for (const r of await deps.db.select().from(schema.payrollRuns)) {
-    if (r.state !== "PUBLISHED" || !myRunIds.has(r.uuid)) continue;
+// One-off payments a run carries alongside the regular monthly wage. They are not part of the recurring rate a
+// raise moves, so they never count toward how much of a month was paid at the old rate.
+const ONE_OFF_EARNING_CODES = new Set(["BONUS", "ENCASH", "OT", "ARREARS", "REIMB", "ROUND"]);
+
+// How many MONTH-EQUIVALENTS of regular wage this employee was ALREADY PAID at the old rate inside
+// [fromMs, toMs). Drives backdated-increment arrears: only PUBLISHED periods are immutable and priced at the
+// old rate, so only they are owed the delta - unpublished/future periods get the new rate from period-effective
+// pricing and must NOT be counted (that would double-pay the raise).
+//
+// This is a weight, not a count. Counting whole periods over-paid the delta three ways: a mid-period joiner or
+// leaver was paid a fraction of the month but credited a full month of arrears, a month with loss of pay was
+// credited as if fully worked, and a raise effective mid-period was back-paid from the period start. Each
+// period therefore contributes:
+//   (regular wage actually paid that period / the old full monthly rate) x (the share of the period on or after
+//   the effective date)
+// The first factor comes from the run's own stored lines - the regular earnings including the negative
+// loss-of-pay line - so it reflects exactly what the payslip paid, whatever prorated or docked it.
+async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs: number, toMs: number, oldMonthlyGross: number): Promise<number> {
+  if (!(oldMonthlyGross > 0)) return 0;
+  const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.employeeId, employeeId));
+  if (!items.length) return 0;
+  const itemByRun = new Map(items.map((it) => [it.runId, it]));
+  const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
+  let months = 0;
+  // Only the runs this employee actually has an item in: every other run is skipped below anyway, so reading
+  // the whole table grew this query with the org's payroll history for nothing.
+  const runs = await deps.db.select().from(schema.payrollRuns).where(inArray(schema.payrollRuns.uuid, [...itemByRun.keys()]));
+  for (const r of runs) {
+    const it = itemByRun.get(r.uuid);
+    if (r.state !== "PUBLISHED" || !it) continue;
     const p = periods.get(r.payPeriodId);
     if (!p) continue;
     const ps = +new Date(p.periodStart);
-    if (ps >= fromMs && ps < toMs) n++;
+    const pe = +new Date(p.periodEnd);
+    if (pe < fromMs || ps >= toMs) continue; // wholly outside the backdated window
+    let regular = 0;
+    let sawEarning = false;
+    try {
+      for (const l of JSON.parse(it.linesJson) as { code?: string; kind?: string; amount?: number }[]) {
+        if (l.kind !== "earning" || ONE_OFF_EARNING_CODES.has(l.code ?? "")) continue;
+        sawEarning = true;
+        regular += l.amount ?? 0; // the loss-of-pay line is a NEGATIVE earning, so docking nets out here
+      }
+    } catch {
+      continue; // an unreadable item states nothing about what was paid; crediting a full month would over-pay
+    }
+    // An item with no earning lines at all carries no breakdown to read (a hand-written row, or one stored
+    // before lines were). Its own gross is then the only statement of what the period paid - a docked or
+    // prorated month still shows up in it, so it is a sound fallback where the lines are simply absent.
+    if (!sawEarning) regular = it.gross;
+    const paidShare = Math.max(0, Math.min(1, regular / oldMonthlyGross));
+    // The share of the period on or after the effective date: a raise effective mid-period is owed only the
+    // remainder of that period, not the whole of it.
+    const periodDays = Math.max(1, Math.round((pe - ps) / 86_400_000) + 1);
+    const coveredFrom = Math.max(ps, fromMs);
+    const coveredDays = Math.max(0, Math.round((Math.min(pe, toMs - 1) - coveredFrom) / 86_400_000) + 1);
+    months += paidShare * Math.min(1, coveredDays / periodDays);
   }
-  return n;
+  return round2(months);
 }
 export type CompensationInput = {
   employee?: string | null;
@@ -63,6 +104,35 @@ async function withGrades<T extends { payGradeId: string | null; structureId: st
     ...(r.payGradeId ? { grade: grades.get(r.payGradeId) } : {}),
     ...(r.structureId ? { structure: structs.get(r.structureId) } : {}),
   }));
+}
+
+// Self-service shaping + the CTC build-up, on the one path every compensation answer passes through (the
+// factory's `decorate`, so an item read and a list are shaped identically).
+//
+// A caller whose breadth is `own` is reading their OWN pay (My Profile). They see the CTC, its build-up and
+// their revision history - but NOT the pay grade, band or compa-ratio: where a salary sits against the ladder
+// is HR's comparative guardrail, not a fact about this employee's pay.
+//
+// The build-up comes from the domain `ctcLines`, the same pricing the CTC letter and the payroll run use, so
+// nothing re-derives the split client-side. It needs the pay-component catalog, the org's PF wage basis and
+// this row's salary structure - none of which an employee may read - so the server prices it. Only a
+// single-employee read pays for those lookups; an org-wide list would otherwise spend them per employee.
+export async function decorateCompensation(deps: Deps, _actor: AppUser, rows: any[], scope: ListScope | undefined) {
+  const self = scope?.breadth === "own"; // the middleware's verdict, bound here - nothing is decided in this file
+  const shaped = self ? rows.map((r) => ({ ...r, payGradeId: null, structureId: null, grade: undefined, structure: undefined })) : rows;
+  const current = rows.find((r) => !r.effectiveTo);
+  if (new Set(rows.map((r) => r.employeeId)).size !== 1 || !current) return shaped;
+  const emp = (await deps.db.select({ epfEnrolled: schema.employees.epfEnrolled }).from(schema.employees).where(eq(schema.employees.uuid, current.employeeId)).limit(1))[0];
+  const components = await refPayComponents(deps);
+  const pfBasis = (await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG)).pf_wage_basis ?? "basic";
+  const ctc = ctcLines(
+    current.basePay,
+    applyStructure(components, await structureLinesById(deps, current.structureId)),
+    !!emp?.epfEnrolled,
+    current.specialAllowance,
+    pfBasis,
+  );
+  return shaped.map((r, i) => (rows[i] === current ? { ...r, ctc } : r));
 }
 
 // One employee's salary history (newest first), or - unfiltered - everything the caller may see.
@@ -107,7 +177,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
   // so the figures never drift. getSettingValue merges over DEFAULT_CTC_CONFIG, so a stored ctc setting
   // predating basic_pct still resolves to a full config.
   const cfg = await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG);
-  const components = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.disabled && !c.deleteTime);
+  const components = (await refPayComponents(deps)).filter((c) => !c.disabled && !c.deleteTime);
   const effective = applyStructure(components, await structureLinesById(deps, structureId));
   const split = splitCtc(annualCtc / 12, effective, emp.epfEnrolled, cfg);
   if (!split) throw invalidArgument("annual_ctc is too low for this structure: basic + fixed components already exceed it. Raise the CTC, lower ctc.basic_pct, or trim component rates.");
@@ -142,12 +212,14 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
   // window is paid at the new rate directly - counting it here too would double-pay the raise. Only positive
   // deltas; a backdated cut isn't auto-recovered. The next run pays the stored amount as a taxable earning.
   const nowMs = +new Date();
-  const paidPeriods = current ? await publishedPeriodsPaid(deps, employeeId, from, nowMs) : 0;
   const newGross = monthlyRecurringGross(basePay, effective, specialAllowance);
   const oldGross = current
     ? monthlyRecurringGross(current.basePay, applyStructure(components, await structureLinesById(deps, current.structureId)), current.specialAllowance)
     : 0;
-  const arrears = paidPeriods > 0 ? Math.max(0, round2((newGross - oldGross) * paidPeriods)) : 0;
+  // Month-EQUIVALENTS already paid at the old rate, not a period count: a part-month or docked period owes only
+  // the delta on the wage it actually paid.
+  const paidMonths = current ? await publishedRegularMonthsPaid(deps, employeeId, from, nowMs, oldGross) : 0;
+  const arrears = paidMonths > 0 ? Math.max(0, round2((newGross - oldGross) * paidMonths)) : 0;
   // The PF-wage slice of those arrears: the rise in BASIC (plus, under the "basic_plus" wage basis, the same
   // allowances PF counts) over the same months. PF is due on arrears of basic wages while ESI is due on the whole
   // amount, so the run needs the two figures apart - deriving it later from a single lump is guesswork.
@@ -156,7 +228,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
   const oldPfWages = current
     ? pfWagesOf(current.basePay, current.specialAllowance, applyStructure(components, await structureLinesById(deps, current.structureId)), pfBasis)
     : 0;
-  const arrearsBase = paidPeriods > 0 ? Math.max(0, round2((newPfWages - oldPfWages) * paidPeriods)) : 0;
+  const arrearsBase = paidMonths > 0 ? Math.max(0, round2((newPfWages - oldPfWages) * paidMonths)) : 0;
   const row = (await deps.db
     .insert(schema.compensation)
     .values({
@@ -165,7 +237,9 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
       ctcAnnual: annualCtc,
       basePay,
       specialAllowance,
-      currency: input.currency_code?.trim() || current?.currency || "INR",
+      // The org's own currency, never a literal: the app is single-currency and payroll rejects a payable that
+      // is not in it, so a first compensation row minted as "INR" in a non-INR org blocks every run.
+      currency: input.currency_code?.trim() || current?.currency || await orgCurrency(deps),
       payGradeId: payGradeId ?? null,
       structureId: structureId ?? null,
       effectiveFrom: new Date(from),
@@ -189,7 +263,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
 type SplitPlanRow = { uuid: string; employeeId: string; basePay: number; specialAllowance: number; status: "stale" | "unchanged" | "skipped" };
 async function splitPlan(deps: Deps): Promise<SplitPlanRow[]> {
   const cfg = await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG);
-  const components = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.disabled && !c.deleteTime);
+  const components = (await refPayComponents(deps)).filter((c) => !c.disabled && !c.deleteTime);
   const rows = await deps.db.select().from(schema.compensation).where(isNull(schema.compensation.effectiveTo));
   const emps = await deps.db.select({ uuid: schema.employees.uuid, epfEnrolled: schema.employees.epfEnrolled }).from(schema.employees);
   const epfById = new Map(emps.map((e) => [e.uuid, e.epfEnrolled]));
@@ -261,13 +335,12 @@ export function markCompArrearsPaidByRun(deps: Deps, ids: string[], runId: strin
 }
 // Arrears paid by a full-and-final settlement rather than a run (arrearsPaidAt set, no run), and the release
 // a recomputed settlement uses. The build treats either marker as paid, so this takes them out of the queue.
-export async function markCompArrearsSettled(deps: Deps, ids: string[], at: Date) {
-  if (!ids.length) return;
-  await deps.db.update(schema.compensation).set({ arrearsPaidAt: at }).where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
+// Unexecuted statement, so the FnF commits it in the same atomic batch as the settlement (see reimbursements).
+export function markCompArrearsSettledStmt(deps: Deps, ids: string[], at: Date) {
+  return deps.db.update(schema.compensation).set({ arrearsPaidAt: at }).where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
 }
-export async function releaseCompArrearsSettled(deps: Deps, ids: string[]) {
-  if (!ids.length) return;
-  await deps.db.update(schema.compensation).set({ arrearsPaidAt: null }).where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
+export function releaseCompArrearsSettledStmt(deps: Deps, ids: string[]) {
+  return deps.db.update(schema.compensation).set({ arrearsPaidAt: null }).where(and(inArray(schema.compensation.uuid, ids), isNull(schema.compensation.arrearsPaidRunId)));
 }
 export function resetCompArrearsPaidByRun(deps: Deps, runId: string) {
   return deps.db.update(schema.compensation).set({ arrearsPaidRunId: null, arrearsPaidAt: null }).where(eq(schema.compensation.arrearsPaidRunId, runId));

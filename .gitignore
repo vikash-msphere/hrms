@@ -1,6 +1,9 @@
 node_modules
 web/dist
 .dev.vars
+# VAPID keypair from scripts/genVapidKeys.ts - holds the web-push PRIVATE key. Belongs in a password
+# manager and in `wrangler secret put`, never in the repo.
+.vapid.json
 .wrangler
 src/http/openapi.d.ts
 CLAUDE.md
@@ -18,6 +21,8 @@ misc/
 # scratch: wrangler resource-creation output
 cf.txt
 
-# downloaded source archive; extracted assets are committed
+# Downloaded source archive; the extracted assets are committed, so the zip itself is disposable. Keep it OUT
+# of web/public: everything under that directory is copied into web/dist verbatim and uploaded to Cloudflare,
+# which shipped 7.6 MB of publicly downloadable dead weight. Extract from somewhere else.
 web/public/assets/illustrations.zip
 .repowise/

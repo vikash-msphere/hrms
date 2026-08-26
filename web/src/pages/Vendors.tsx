@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
-import { Building2, Plus } from "lucide-react";
+import { Building2, Plus, TriangleAlert } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
-import { idOf } from "@/lib/utils";
-import type { Vendor, ExpenseCategory, Me } from "@/types";
+import { idOf, formatMoney, formatDate } from "@/lib/utils";
+import { useOrg, currencyDecimals } from "@/lib/org";
+import type { Vendor, Expense, ExpenseCategory, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -15,6 +16,10 @@ import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { Button } from "@/components/ui/button";
@@ -22,7 +27,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 const EMPTY = { name: "", contact_email: "", contact_phone: "", tax_id: "", payment_terms: "", bank_details: "", default_category: "", notes: "" };
@@ -41,15 +46,28 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Vendor | null>(null);
   const [form, setForm] = useState(EMPTY);
+  const [err, setErr] = useState<string | null>(null);
+  const [again, setAgain] = useState(false);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "vendor" });
+
+  // One vendor entered twice is one vendor's spend reported as two. Warn, never block: "Acme" and "Acme Labs"
+  // are different suppliers, and only the person typing knows which case this is.
+  const nameClash = useMemo(() => {
+    const n = form.name.trim().toLowerCase();
+    if (!n) return null;
+    return rows.find((v) => v.path !== editing?.path && !v.delete_time && (v.display_name ?? "").trim().toLowerCase() === n) ?? null;
+  }, [rows, form.name, editing?.path]);
+  const emailBad = form.contact_email.trim() !== "" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(form.contact_email.trim());
 
   const catName = useMemo(() => {
     const m = new Map(categories.map((c) => [idOf(c.path), c.display_name]));
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [categories]);
 
-  function openCreate() { setEditing(null); setForm(EMPTY); setOpen(true); }
+  function openCreate() { setEditing(null); setForm(EMPTY); setErr(null); setOpen(true); }
   function openEdit(v: Vendor) {
     setEditing(v);
+    setErr(null);
     setForm({
       name: v.display_name, contact_email: v.contact_email ?? "", contact_phone: v.contact_phone ?? "",
       tax_id: v.tax_id ?? "", payment_terms: v.payment_terms ?? "", bank_details: v.bank_details ?? "",
@@ -60,6 +78,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
 
   async function submit() {
     setBusy(true);
+    setErr(null);
     try {
       const body = {
         display_name: form.name, contact_email: form.contact_email || null, contact_phone: form.contact_phone || null,
@@ -73,10 +92,18 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
         await create("vendors", body);
         toast({ title: "Vendor created", variant: "success" });
       }
-      setOpen(false);
+      // Vendors arrive as a list off an invoice pile; payment terms usually repeat across a batch.
+      if (again && !editing) {
+        const next = { ...EMPTY, payment_terms: form.payment_terms, default_category: form.default_category };
+        setForm(next);
+        guard.markSaved(next);
+      } else {
+        guard.markSaved();
+        setOpen(false);
+      }
       reload();
     } catch (e) {
-      toast({ title: "Couldn't save vendor", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -117,14 +144,29 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
-          <DialogHeader><DialogTitle>{editing ? "Edit vendor" : "New vendor"}</DialogTitle></DialogHeader>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && !emailBad) submit(); }}>
+          <AccessScope collection="vendors" objectPath={editing?.path}>
+          <DialogHeader>
+            <DialogTitle>{editing ? "Edit vendor" : "New vendor"}</DialogTitle>
+            <DialogDescription>Everything here is a default an expense can inherit - pick this vendor on an expense and its category and terms come with it.</DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
           <div className="grid gap-4">
             <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Vendor or supplier name" autoFocus /></Field>
+            {editing && <VendorSpend vendor={editing.path} open={open} />}
+            {nameClash && (
+              <p className="-mt-1 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+                <TriangleAlert className="mr-1 inline h-3.5 w-3.5" />
+                "{nameClash.display_name}" is already on the list{nameClash.tax_id ? ` (${nameClash.tax_id})` : ""} - filing against two records splits this supplier's spend in the reports.
+              </p>
+            )}
             <FieldRow>
-              <Field label="Contact email"><Input type="email" value={form.contact_email} onChange={(e) => setForm({ ...form, contact_email: e.target.value })} /></Field>
-              <Field label="Contact phone"><Input value={form.contact_phone} onChange={(e) => setForm({ ...form, contact_phone: e.target.value })} /></Field>
+              <Field label="Contact email" error={emailBad ? "That doesn't look like an email address." : undefined}>
+                <Input type="email" value={form.contact_email} onChange={(e) => setForm({ ...form, contact_email: e.target.value })} placeholder="accounts@vendor.com" />
+              </Field>
+              <Field label="Contact phone"><Input type="tel" inputMode="tel" value={form.contact_phone} onChange={(e) => setForm({ ...form, contact_phone: e.target.value })} /></Field>
             </FieldRow>
             <FieldRow>
               <Field label="Tax ID / GSTIN"><Input value={form.tax_id} onChange={(e) => setForm({ ...form, tax_id: e.target.value })} /></Field>
@@ -142,12 +184,44 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
             <Field label="Notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
             {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
           </div>
+          {!editing && (
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox checked={again} onCheckedChange={(v) => setAgain(v === true)} />
+              Keep this open to add another
+            </label>
+          )}
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : "Create"}</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
+            <Button onClick={submit} loading={busy} disabled={!form.name.trim() || emailBad}>{editing ? "Save changes" : again ? "Create & add another" : "Create"}</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ---- what this vendor has cost --------------------------------------------------------------------------
+// The duplicate warning above can say two records share a name; only the ledger says which one is the live
+// supplier and which is the stray to retire. Read once the dialog is open, never by the page.
+function VendorSpend({ vendor, open }: { vendor: string; open: boolean }) {
+  const { org } = useOrg();
+  const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
+  const { rows, state, hasMore } = useCollection<Expense>("expenses", { params: { vendor }, enabled: open });
+  if (state !== "ready") return null;
+  // Committed spend only: a draft or a rejected invoice was never money owed to this vendor.
+  const counted = rows.filter((e) => ["SUBMITTED", "APPROVED", "PAID"].includes((e.state ?? "").toUpperCase()));
+  if (counted.length === 0) {
+    return <p className="-mt-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">Nothing has been filed against this vendor yet.</p>;
+  }
+  const total = counted.reduce((n, e) => n + (e.amount || 0), 0);
+  const latest = counted.reduce((d, e) => (e.incurred_on && e.incurred_on > d ? e.incurred_on : d), "");
+  const more = hasMore ? "+" : "";
+  return (
+    <p className="-mt-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      {money(total)}{more} across {counted.length}{more} {counted.length === 1 && !hasMore ? "expense" : "expenses"}
+      {latest ? ` · last one incurred ${formatDate(latest)}` : ""}.
+    </p>
   );
 }

@@ -27,6 +27,8 @@ export type ComplianceEventInput = {
   status?: Status;
   filed_date?: string | null;
   reference?: string | null;
+  /** `org-documents/<id>`: the challan or acknowledgement PDF that proves the filing. */
+  document?: string | null;
   assignee?: string | null;
   notes?: string | null;
 };
@@ -39,7 +41,7 @@ const parseDate = (s: string, field: string): Date => {
 
 export async function listComplianceEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const where = and(showDeleted ? undefined : isNull(schema.complianceEvents.deleteTime), applyScope(scope, schema.complianceEvents.code, schema.complianceEvents.code));
-  return keysetPage(deps, schema.complianceEvents, "compliance-events", where, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.complianceEvents, "compliance-events", where, { max: maxPageSize, pageToken });
 }
 
 export const complianceEventSpec: CrudSpec<ComplianceEventInput, typeof schema.complianceEvents> = {
@@ -63,6 +65,7 @@ export const complianceEventSpec: CrudSpec<ComplianceEventInput, typeof schema.c
       // Stamp today when created already-filed without an explicit date.
       filedDate: input.filed_date ? parseDate(input.filed_date, "filed_date") : status === "filed" ? new Date() : null,
       reference: input.reference ?? null,
+      documentId: idFromPath(input.document) ?? null,
       assigneeId: idFromPath(input.assignee) ?? null,
       notes: input.notes ?? null,
     };
@@ -75,6 +78,7 @@ export const complianceEventSpec: CrudSpec<ComplianceEventInput, typeof schema.c
     if (has(patch, "due_date") && patch.due_date) set.dueDate = parseDate(patch.due_date, "due_date");
     if (has(patch, "period_label")) set.periodLabel = patch.period_label ?? null;
     if (has(patch, "reference")) set.reference = patch.reference ?? null;
+    if (has(patch, "document")) set.documentId = idFromPath(patch.document) ?? null;
     if (has(patch, "assignee")) set.assigneeId = idFromPath(patch.assignee) ?? null;
     if (has(patch, "notes")) set.notes = patch.notes ?? null;
     if (has(patch, "status")) {

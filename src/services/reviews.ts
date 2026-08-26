@@ -27,7 +27,7 @@ export async function listReviews(deps: Deps, scope: ListScope, maxPageSize: num
   // card for a cycle that no longer exists (restoring the cycle brings them back).
   const dead = (await deps.db.select({ uuid: schema.reviewCycles.uuid }).from(schema.reviewCycles).where(isNotNull(schema.reviewCycles.deleteTime))).map((c) => c.uuid);
   if (dead.length) conds.push(notInArray(schema.reviews.cycleId, dead));
-  return keysetPage(deps, schema.reviews, "reviews", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.reviews, "reviews", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 

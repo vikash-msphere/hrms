@@ -7,6 +7,7 @@ import { audit } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { paginate } from "../http/pagination";
+import { refHolidays } from "../lib/refData";
 
 const DEFAULT_POLICY = { max_optional: 2 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -43,10 +44,18 @@ export async function createHolidaySelection(deps: Deps, actor: AppUser, holiday
   )[0];
   if (existing) return existing;
 
+  // The allowance is per CALENDAR YEAR of the holiday being picked: an all-time cap would mean nobody could
+  // pick anything in year two. Only this year's picks count against this year's allowance.
   const { max_optional } = await getSettingValue(deps, "holidays", DEFAULT_POLICY);
+  const year = new Date(h.date).getUTCFullYear();
   const mine = await deps.db.select().from(schema.holidaySelections).where(eq(schema.holidaySelections.employeeId, actor.employeeId));
-  if (mine.length >= max_optional)
-    throw failedPrecondition(`you can select at most ${max_optional} optional holiday${max_optional === 1 ? "" : "s"}`);
+  const byId = new Map((await refHolidays(deps)).map((row) => [row.uuid, row]));
+  const thisYear = mine.filter((s) => {
+    const picked = byId.get(s.holidayId);
+    return picked && new Date(picked.date).getUTCFullYear() === year;
+  });
+  if (thisYear.length >= max_optional)
+    throw failedPrecondition(`you can select at most ${max_optional} optional holiday${max_optional === 1 ? "" : "s"} in ${year}`);
   const [row] = await deps.db.insert(schema.holidaySelections).values({ code: await allocOwnedCode(deps, schema.holidaySelections, schema.holidaySelections.employeeId, actor.employeeId), employeeId: actor.employeeId, holidayId }).returning();
   await audit(deps, actor, "holiday.select", "holiday-selections", row!.uuid);
   return row!;

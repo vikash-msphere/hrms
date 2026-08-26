@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition, forbidden } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { notify } from "./notifications";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -16,15 +16,9 @@ type State = typeof schema.reviewFeedback.$inferSelect.state;
 export async function listReviewFeedback(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string) {
   const conds = [applyScope(scope, schema.reviewFeedback.code, schema.reviewFeedback.authorId)];
   if (stateFilter) conds.push(eq(schema.reviewFeedback.state, stateFilter as State));
-  const all = (await deps.db.select().from(schema.reviewFeedback).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
+  const all = await deps.db.select().from(schema.reviewFeedback).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
+  // Oldest first: 360 feedback on one review reads as a thread, in the order it was given.
+  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc");
   return { items: slice, nextPageToken };
 }
 

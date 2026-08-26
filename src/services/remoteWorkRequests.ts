@@ -2,6 +2,7 @@ import { allocOwnedCode } from "./codeAlloc";
 import { and, eq } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
+import { dateWindow } from "./dateWindow";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -28,13 +29,15 @@ export type RemoteWorkInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
-export async function listRemoteWorkRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string) {
+export async function listRemoteWorkRequests(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, q?: string, fromYmd?: string, toYmd?: string) {
   const conds = [applyScope(scope, schema.remoteWorkRequests.code, schema.remoteWorkRequests.employeeId)];
   // Server-side text filter (FTS). Narrows the scope above; it can never widen it.
   const textMatch = await searchFilter(deps, "remote-work-requests", q, schema.remoteWorkRequests.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.remoteWorkRequests.state, stateFilter as typeof schema.remoteWorkRequests.$inferSelect.state));
-  return keysetPage<typeof schema.remoteWorkRequests.$inferSelect>(deps, schema.remoteWorkRequests, "remote-work-requests", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
+  // `?from=&to=`: the window a calendar month asks for (see services/dateWindow.ts).
+  conds.push(...dateWindow(schema.remoteWorkRequests.startDate, schema.remoteWorkRequests.endDate, fromYmd, toYmd));
+  return keysetPage<typeof schema.remoteWorkRequests.$inferSelect>(deps, schema.remoteWorkRequests, "remote-work-requests", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 
 async function getRemoteWorkRequest(deps: Deps, _actor: AppUser, id: string) {

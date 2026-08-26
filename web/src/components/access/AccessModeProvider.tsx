@@ -184,7 +184,8 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
         </span>
         {/* One-time explainer, anchored above the pill so it reads as part of the same mode. */}
         {coach && on && !viewAs && (
-          <div className="fixed bottom-16 left-1/2 z-50 w-[min(24rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-amber-400/60 bg-background p-3 text-sm shadow-xl">
+          // Sits above the mode pill, which is itself lifted over the phone's bottom nav.
+          <div className="fixed bottom-[calc(8rem+env(safe-area-inset-bottom))] left-1/2 z-50 w-[min(24rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-amber-400/60 bg-background p-3 text-sm shadow-xl md:bottom-16">
             <p className="mb-1 flex items-center gap-1.5 font-semibold">
               <KeyRound className="h-4 w-4 text-amber-600" /> Access mode is on
             </p>
@@ -199,7 +200,9 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
           </div>
         )}
         {(viewAs || (enabled && available)) && (
-          <div className="fixed bottom-4 left-1/2 z-50 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2">
+          // The mode pill has to stay tappable (it is how the mode gets turned off), so on a phone it sits
+          // above the bottom nav rather than on top of it.
+          <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-1/2 z-50 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 md:bottom-4">
             <div className="flex min-w-0 items-center gap-2 whitespace-nowrap rounded-full border border-amber-400/60 bg-amber-50 py-1.5 pl-3 pr-1.5 text-sm text-amber-800 shadow-lg dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
               <KeyRound className="h-4 w-4 shrink-0" />
               {viewAs ? (

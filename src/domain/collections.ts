@@ -9,7 +9,7 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "api-keys",
   "employees", "departments", "leave-requests", "leave-types", "leave-balances", "holidays",
   "holiday-selections", "org-documents", "personal-documents", "announcements", "pay-components", "pay-grades", "salary-structures",
-  "pay-periods", "payroll-runs", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "settlements",
+  "pay-periods", "payroll-runs", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements",
   "leave-encashments", "reimbursements", "reimbursement-categories",
   // operational/company expenses: employee-owned expense (submitter-scoped) + flat vendor/category masters + finance budgets
   "expenses", "expense-categories", "vendors", "expense-budgets",

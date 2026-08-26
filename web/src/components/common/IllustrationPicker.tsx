@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { cn } from "@/lib/utils";
 import { illustrationScore, illustrationUrl, loadIllustrationIndex, type IllustrationMeta } from "@/lib/illustrations";
 import { ART_DIECUT_SM } from "@/lib/kudosArt";
+import { TilesSkeleton } from "@/components/common/Skeletons";
 
 // Browse/search the bundled unDraw set (see web/public/assets/illustrations/README.md) and pick one.
 // index.json is fetched the first time any picker opens and cached module-wide by loadIllustrationIndex, so the
@@ -154,7 +155,8 @@ export function IllustrationPicker({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>{children}</DialogTrigger>
-      <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col overflow-hidden">
+      {/* 85vh from `sm` up; a phone keeps the shared keyboard-aware sheet height (see ui/dialog.tsx). */}
+      <DialogContent className="flex max-w-3xl flex-col overflow-hidden sm:max-h-[85vh] lg:max-w-4xl">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
@@ -163,7 +165,7 @@ export function IllustrationPicker({
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search all illustrations…" className="pl-8" autoFocus />
+            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search all illustrations…" className="pl-8" autoFocus />
           </div>
           <Select value={category} onValueChange={setCategory} disabled={!!term || !index}>
             <SelectTrigger className="sm:w-56">
@@ -205,7 +207,9 @@ export function IllustrationPicker({
               </button>
             </p>
           ) : !index ? (
-            <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
+            // Same tracks as the real grid below, so the dialog does not resize under the reader when the
+            // index lands.
+            <TilesSkeleton count={12} className="grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5" tile="aspect-[4/3]" />
           ) : (
             <>
               {shownPinned.length > 0 && (

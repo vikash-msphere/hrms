@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { HeartPulse } from "lucide-react";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
@@ -88,7 +88,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
 
       <DataState state={state} error={error} onRetry={reload}>
         {sorted.length === 0 ? (
-          <EmptyState icon={HeartPulse} title="No plans" description="Add a benefit plan for employees to enrol in." action={<Button onClick={openCreate}><Plus className="h-4 w-4" /> New plan</Button>} />
+          <EmptyState icon={HeartPulse} title="No plans" description="Add a benefit plan for employees to enrol in." action={<AccessAction create label="Benefit plan"><Button onClick={openCreate}><Plus className="h-4 w-4" /> New plan</Button></AccessAction>} />
         ) : (
           <div className="space-y-2">
             {sorted.map((p) => (
@@ -103,8 +103,12 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
                   <p className="text-xs text-muted-foreground">{p.provider ?? "-"} · you {money(p.employee_cost)}{perLabel(p.cost_period)} · employer {money(p.employer_cost)}{perLabel(p.cost_period)}</p>
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(p)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => del(p)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  <AccessAction objectPath={p.path} can={p.access?.can} verb="update" label={p.name}>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(p)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>
+                  </AccessAction>
+                  <AccessAction objectPath={p.path} can={p.access?.can} verb="delete" label={p.name}>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => del(p)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  </AccessAction>
                 </div>
               </Card>
               </AccessItem>
@@ -114,8 +118,10 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
       </DataState>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) save(); }}>
+        {/* scrollBody: a dozen fields plus the activity trail, so the save action needed pinning. */}
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) save(); }}>
           <DialogHeader><DialogTitle>{editing ? "Edit plan" : "New benefit plan"}</DialogTitle></DialogHeader>
+          <DialogBody>
           <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus /></Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Category">
@@ -143,6 +149,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
             Dependents can be covered under this plan
           </label>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+          </DialogBody>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button onClick={save} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : "Create"}</Button>

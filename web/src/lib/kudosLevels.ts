@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { get } from "@/api";
+import { getSetting } from "@/lib/settingsStore";
 
 // Kudos recognition levels (tiers), HR-configurable via the `settings/kudos` blob. Each carries a point weight
 // that feeds the "most recognized" leaderboard. Mirrors src/domain/kudos.ts DEFAULT_KUDOS_CONFIG.
@@ -19,7 +20,7 @@ const valid = (l: unknown): l is KudosLevel =>
 export function useKudosLevels(refreshKey = 0): KudosLevel[] {
   const [levels, setLevels] = useState<KudosLevel[]>(DEFAULT_KUDOS_LEVELS);
   useEffect(() => {
-    get<{ value?: { levels?: KudosLevel[] } }>("settings/kudos")
+    getSetting<{ levels?: KudosLevel[] }>("kudos")
       .then((s) => {
         const ls = (s.value?.levels ?? []).filter(valid);
         if (ls.length) setLevels(ls);
@@ -44,7 +45,7 @@ export type KudosCategory = { name: string; icon?: string; art?: string[]; promp
 export function useKudosCategories(refreshKey = 0): KudosCategory[] {
   const [categories, setCategories] = useState<KudosCategory[]>([]);
   useEffect(() => {
-    get<{ value?: { categories?: KudosCategory[] } }>("settings/kudos")
+    getSetting<{ categories?: KudosCategory[] }>("kudos")
       .then((s) => setCategories((s.value?.categories ?? []).filter((c): c is KudosCategory => !!c && typeof c.name === "string" && c.name.trim().length > 0)))
       .catch(() => { /* none */ });
   }, [refreshKey]);

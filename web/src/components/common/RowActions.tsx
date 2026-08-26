@@ -36,7 +36,7 @@ export function RowActions({ actions, objectPath, can }: { actions: RowAction[];
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
+          className="h-8 w-8 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 coarse:h-9 coarse:w-9"
         >
           <MoreHorizontal className="h-4 w-4" />
           <span className="sr-only">Actions</span>

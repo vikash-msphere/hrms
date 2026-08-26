@@ -1,6 +1,9 @@
+import type { Context } from "hono";
 import { z } from "zod";
 import * as schema from "../db/schema";
+import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
+import { jsonBody } from "../http/jsonRequest";
 import {
   listOvertimeRequests, createOvertimeRequest,
   approveOvertimeRequest, rejectOvertimeRequest, cancelOvertimeRequest,
@@ -18,7 +21,7 @@ const createSchema = z
   .strict();
 
 // The approver's optional note is taken as sent, exactly as the hand-written route did.
-const noteOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c.req.json().catch(() => ({}))) as { note?: string })?.note;
+const noteOf = async (c: Context<AppEnv>) => (await jsonBody<{ note?: string }>(c)).note;
 
 // Overtime requests. The create prices the hours and a decision either queues the payout or closes the request,
 // so a filed request is cancelled rather than edited or deleted - and the table has no delete_time.

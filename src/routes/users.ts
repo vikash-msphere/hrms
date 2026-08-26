@@ -6,6 +6,7 @@ import { capabilitiesOf } from "../domain/permissions";
 import { collectionRoutes } from "../http/collectionRoute";
 import { getUser, listUsers, updateUser, type UserInput } from "../services/users";
 import { toUserResource } from "../http/serialize";
+import { getSettingValue } from "../services/settings";
 
 const updateSchema = z
   .object({
@@ -44,8 +45,22 @@ const accounts = collectionRoutes<UserInput, typeof schema.users>({
 export const users = new Hono<AppEnv>()
   .get("/me", async (c) => {
     const u = c.get("user");
-    const withCallerAccess = <T extends object>(res: T) =>
-      c.json({ ...res, caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} } });
+    // The caller's holiday-feed token (see routes/holidayFeed.ts) rides on identity rather than a custom method
+    // of its own: it is a fact about the caller, and this response is already fetched once per session. Withheld
+    // from a simulated principal - a durable subscribe URL is a credential, and "view as" is read-only.
+    const feedToken = async () => {
+      if (!u.employeeId || u.simulatedBy) return undefined;
+      const deps = c.get("deps");
+      const cfg = await getSettingValue<{ feed_enabled?: boolean }>(deps, "holidays", {});
+      if (!cfg.feed_enabled) return undefined;
+      return deps.idCodec.encode("holiday-feed", u.employeeId);
+    };
+    const withCallerAccess = async <T extends object>(res: T) =>
+      c.json({
+        ...res,
+        holiday_feed_token: await feedToken(),
+        caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} },
+      });
     // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account they
     // WOULD get on first login, so there is no users row to read. Synthesize the identity from the simulated
     // principal instead of 404ing the whole shell - it is the same information a real row would carry, and the

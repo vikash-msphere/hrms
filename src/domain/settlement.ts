@@ -4,7 +4,11 @@
 // `taxable` is the CHARGEABLE slice of an earning, defaulting to the whole amount: a reimbursement is 0, and
 // gratuity / leave encashment at exit are partly exempt (s.10(10) / s.10(10AA)). The FnF is salary income and
 // usually the year's largest single payment, so the service withholds income tax on `totalTaxableEarnings`.
-export type SettlementLine = { name: string; kind: "earning" | "deduction"; amount: number; taxable?: number };
+// `code` is the stable machine identity of a line the FnF itself produces (SALARY / ENCASH / GRATUITY / REIMB /
+// NOTICE). Callers reading a specific line back - the ESI wage base needs the final month's salary - must match
+// on it, never on the display `name`: "Salary" is also the prefix of the "Salary arrears" line the caller
+// itself contributes, and matching by label picked up the wrong one and double-counted the arrears.
+export type SettlementLine = { name: string; kind: "earning" | "deduction"; amount: number; taxable?: number; code?: string };
 
 export type SettlementFacts = {
   monthlyGross: number; // base + recurring earnings (the monthly CTC-ish figure paid)
@@ -50,7 +54,7 @@ export function computeSettlement(f: SettlementFacts): Settlement {
   const salary = f.daysInMonth > 0 ? round2((f.monthlyGross * paidDays) / f.daysInMonth) : 0;
   if (salary > 0) {
     const label = `Salary for ${round2(f.daysWorkedInMonth)} day(s)${lopDays > 0 ? ` less ${lopDays} day(s) loss of pay` : ""}`;
-    lines.push({ name: label, kind: "earning", amount: salary });
+    lines.push({ code: "SALARY", name: label, kind: "earning", amount: salary });
   }
 
   // Round the day-priced amounts ONCE from the unrounded per-day rate (days x basis / divisor); multiplying a
@@ -62,7 +66,7 @@ export function computeSettlement(f: SettlementFacts): Settlement {
   if (encash > 0) {
     // s.10(10AA): the exempt slice is the caller's (it needs service length + the statutory ceiling).
     const exempt = Math.min(encash, Math.max(0, f.encashExempt ?? 0));
-    lines.push({ name: `Leave encashment (${f.leaveDays} day(s))`, kind: "earning", amount: encash, taxable: round2(encash - exempt) });
+    lines.push({ code: "ENCASH", name: `Leave encashment (${f.leaveDays} day(s))`, kind: "earning", amount: encash, taxable: round2(encash - exempt) });
   }
 
   // Statutory gratuity (Payment of Gratuity Act): payable at exit once the qualifying service is served, exempt
@@ -70,16 +74,19 @@ export function computeSettlement(f: SettlementFacts): Settlement {
   if (f.gratuity && f.gratuity.amount > 0) {
     const amount = round2(f.gratuity.amount);
     const exempt = Math.min(amount, Math.max(0, f.gratuity.exempt));
-    lines.push({ name: "Gratuity", kind: "earning", amount, taxable: round2(amount - exempt) });
+    lines.push({ code: "GRATUITY", name: "Gratuity", kind: "earning", amount, taxable: round2(amount - exempt) });
   }
 
   // Reimbursements repay money the employee already spent: paid in full, never taxable.
-  if (f.reimbursements > 0) lines.push({ name: "Pending reimbursements", kind: "earning", amount: round2(f.reimbursements), taxable: 0 });
+  if (f.reimbursements > 0) lines.push({ code: "REIMB", name: "Pending reimbursements", kind: "earning", amount: round2(f.reimbursements), taxable: 0 });
 
   for (const l of f.extraEarnings ?? []) if (l.amount > 0) lines.push({ ...l, kind: "earning", amount: round2(l.amount) });
 
-  const notice = round2((f.noticeShortfallDays * f.basePay) / div);
-  if (notice > 0) lines.push({ name: `Notice period recovery (${f.noticeShortfallDays} day(s))`, kind: "deduction", amount: notice });
+  // Notice-period recovery: the pay the employee would have earned over the days not served, so it is priced on
+  // the same monthly GROSS the final-month salary above is - recovering only the basic slice would let someone
+  // buy out their notice at roughly half its cost.
+  const notice = round2((f.noticeShortfallDays * f.monthlyGross) / div);
+  if (notice > 0) lines.push({ code: "NOTICE", name: `Notice period recovery (${f.noticeShortfallDays} day(s))`, kind: "deduction", amount: notice });
 
   // Recoveries are NOT capped at the earnings: a leaver whose loan outstanding exceeds their dues owes the
   // company the difference, and the settlement must state that (a negative net) rather than quietly write it off.
@@ -113,19 +120,28 @@ export const DEFAULT_GRATUITY_CONFIG: GratuityConfig = {
   exemption_cap: 2_000_000,
 };
 
-// Completed years of service for gratuity: whole years, and a trailing part-year of MORE than six months counts
-// as one more (s.4(2)). Returns 0 for a non-positive span.
-export function completedYearsOfService(startMs: number, endMs: number): number {
+// Elapsed service in years, unrounded. This - not the rounded count below - is what QUALIFYING service is
+// tested against: s.4(1) requires five years actually served, while the s.4(2) rounding only sizes the payout.
+export function yearsOfService(startMs: number, endMs: number): number {
   if (!(endMs > startMs)) return 0;
-  const years = (endMs - startMs) / (365.25 * 86_400_000);
+  return (endMs - startMs) / (365.25 * 86_400_000);
+}
+
+// Completed years of service for gratuity: whole years, and a trailing part-year of MORE than six months counts
+// as one more (s.4(2)). Returns 0 for a non-positive span. This is the MULTIPLIER, never the eligibility test -
+// rounding 4 years 7 months up to 5 and then gating on it pays gratuity to someone who never qualified.
+export function completedYearsOfService(startMs: number, endMs: number): number {
+  const years = yearsOfService(startMs, endMs);
+  if (years <= 0) return 0;
   const whole = Math.floor(years);
   return whole + (years - whole > 0.5 ? 1 : 0);
 }
 
 // Gratuity payable: last-drawn wage (basic + DA) / divisor x days_per_year x completed years, and nothing at all
-// until the qualifying service is met.
-export function gratuityAmount(lastDrawnWage: number, years: number, cfg: GratuityConfig): number {
-  if (!cfg.enabled || years < cfg.min_years || !(lastDrawnWage > 0)) return 0;
+// until the qualifying service is met. `servedYears` is the RAW elapsed service the min_years gate is applied
+// to; `years` is the s.4(2)-rounded multiplier the amount is computed from.
+export function gratuityAmount(lastDrawnWage: number, years: number, cfg: GratuityConfig, servedYears = years): number {
+  if (!cfg.enabled || servedYears < cfg.min_years || !(lastDrawnWage > 0)) return 0;
   const div = cfg.divisor > 0 ? cfg.divisor : 26;
   return round2((lastDrawnWage / div) * cfg.days_per_year * years);
 }
@@ -139,8 +155,10 @@ export function gratuityExemption(amount: number, lastDrawnWage: number, years: 
 }
 
 // s.10(10AA) exemption on leave encashed AT EXIT: the least of (a) the amount received, (b) the notified ceiling
-// (₹25,00,000), (c) ten months' average salary, and (d) the cash value of at most 30 days of unused leave per
-// completed year of service. `salary` is the monthly basic (+DA) the caller prices the encashment on.
+// (₹25,00,000), (c) ten months' AVERAGE salary, and (d) the cash value of at most 30 days of unused leave per
+// completed year of service. `salary` is the monthly basic (+DA) the caller prices the encashment on;
+// `averageSalary` is the average of the last ten months, which is what limbs (c) and (d) are measured on - the
+// statute says average salary, and using the last-drawn figure after a final-year raise over-exempts.
 // Mid-employment encashment is fully taxable and never comes through here.
 export const LEAVE_ENCASHMENT_EXEMPTION_CAP = 2_500_000;
 export function leaveEncashmentExemption(
@@ -149,10 +167,12 @@ export function leaveEncashmentExemption(
   leaveDays: number,
   years: number,
   cap = LEAVE_ENCASHMENT_EXEMPTION_CAP,
+  averageSalary = salary,
 ): number {
   if (amount <= 0 || salary <= 0) return 0;
-  const tenMonths = round2(salary * 10);
+  const avg = averageSalary > 0 ? averageSalary : salary;
+  const tenMonths = round2(avg * 10);
   const cappedDays = Math.min(leaveDays, 30 * Math.max(0, years));
-  const thirtyDayValue = round2((cappedDays * salary) / 30);
+  const thirtyDayValue = round2((cappedDays * avg) / 30);
   return round2(Math.max(0, Math.min(amount, cap, tenMonths, thirtyDayValue)));
 }

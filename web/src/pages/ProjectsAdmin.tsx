@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Plus, Pencil, Trash2, FolderKanban } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { idOf } from "@/lib/utils";
+import { cn, idOf } from "@/lib/utils";
 import type { Project } from "@/types";
 import { DataState } from "@/components/common/DataState";
 import { AccessScope } from "@/components/access/AccessScope";
@@ -10,6 +10,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { Card } from "@/components/ui/card";
@@ -17,8 +18,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -33,10 +32,16 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Project | null>(null);
   const [form, setForm] = useState(EMPTY);
-  const [busy, setBusy] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
 
   const sorted = useMemo(() => [...rows].sort((a, b) => Number(a.status === "archived") - Number(b.status === "archived") || a.name.localeCompare(b.name)), [rows]);
 
+  // A project is picked by name on the timesheet and reconciled by code on an invoice, so a repeat of either
+  // makes one of those jobs guesswork. Caught here, against the loaded catalog.
+  const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  const duplicateName = !!form.name.trim() && rows.some((p) => p.path !== editing?.path && same(p.name, form.name));
+  const duplicateCode = !!form.code.trim() && rows.some((p) => p.path !== editing?.path && !!p.code && same(p.code, form.code));
+  const canSave = !!form.name.trim() && !duplicateName && !duplicateCode;
   function openCreate() { setEditing(null); setForm(EMPTY); setOpen(true); }
   function openEdit(p: Project) {
     setEditing(p);
@@ -45,14 +50,15 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
   }
   async function save() {
     const body = { name: form.name.trim(), client: form.client.trim() || null, code: form.code.trim() || null, billable: form.billable, status: form.status };
-    setBusy(true);
-    try {
-      if (editing) await patch(`projects/${idOf(editing.path)}`, body, editing.etag);
-      else await create("projects", body);
-      toast({ title: editing ? "Project updated" : "Project added", variant: "success" });
-      setOpen(false); reload();
-    } catch (e) { toast({ title: "Couldn't save the project", description: (e as Error).message, variant: "destructive" }); }
-    finally { setBusy(false); }
+    if (editing) await patch(`projects/${idOf(editing.path)}`, body, editing.etag);
+    else await create("projects", body);
+    toast({ title: editing ? "Project updated" : "Project added", variant: "success" });
+    reload();
+  }
+  // "Save & add another" keeps the client and billable flag: a run of projects is usually for one client.
+  function nextBlank() {
+    setForm({ ...EMPTY, client: form.client, billable: form.billable });
+    nameRef.current?.focus();
   }
   async function del(p: Project) {
     if (!(await confirm({ title: `Delete the "${p.name}" project?`, destructive: true, confirmLabel: "Delete" }))) return;
@@ -78,7 +84,7 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
 
       <DataState state={state} error={error} onRetry={reload}>
         {sorted.length === 0 ? (
-          <EmptyState icon={FolderKanban} title="No projects" description="Add a project for employees to log time against." action={<Button onClick={openCreate}><Plus className="h-4 w-4" /> New project</Button>} />
+          <EmptyState icon={FolderKanban} title="No projects" description="Add a project for employees to log time against." action={<AccessAction create label="Project"><Button onClick={openCreate}><Plus className="h-4 w-4" /> New project</Button></AccessAction>} />
         ) : (
           <div className="space-y-2">
             {sorted.map((p) => (
@@ -94,8 +100,12 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
                   {p.client && <p className="text-xs text-muted-foreground">{p.client}</p>}
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(p)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => del(p)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  <AccessAction objectPath={p.path} can={p.access?.can} verb="update" label={p.name}>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(p)} aria-label="Edit"><Pencil className="h-3.5 w-3.5" /></Button>
+                  </AccessAction>
+                  <AccessAction objectPath={p.path} can={p.access?.can} verb="delete" label={p.name}>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => del(p)} aria-label="Delete"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  </AccessAction>
                 </div>
               </Card>
               </AccessItem>
@@ -104,35 +114,54 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) save(); }}>
-          <DialogHeader><DialogTitle>{editing ? "Edit project" : "New project"}</DialogTitle></DialogHeader>
-          <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus /></Field>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={editing ? "Edit project" : "New project"}
+        description="Anything employees log time against on their timesheets - client work, internal work, or leave-style buckets."
+        collection="projects"
+        objectPath={editing?.path}
+        guardLabel="project"
+        form={form}
+        submitLabel={editing ? "Save changes" : "Create"}
+        canSubmit={canSave}
+        whyNot={!form.name.trim() ? "Give the project a name." : duplicateName ? "Another project already has this name." : "Another project already uses this code."}
+        onSubmit={save}
+        addAnother={editing ? undefined : nextBlank}
+      >
+          <Field label="Name" error={duplicateName ? "Another project already has this name." : undefined}>
+            <Input ref={nameRef} value={form.name} placeholder="e.g. Acme website rebuild" onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus />
+          </Field>
           <FieldRow>
-            <Field label="Client (optional)"><Input value={form.client} onChange={(e) => setForm({ ...form, client: e.target.value })} /></Field>
-            <Field label="Code (optional)"><Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="e.g. ACME-1" /></Field>
-          </FieldRow>
-          <div className="flex flex-wrap items-center gap-6">
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox checked={form.billable} onCheckedChange={(v) => setForm({ ...form, billable: v === true })} /> Billable
-            </label>
-            <Field label="Status">
-              <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as "active" | "archived" })}>
-                <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="active">Active</SelectItem>
-                  <SelectItem value="archived">Archived</SelectItem>
-                </SelectContent>
-              </Select>
+            <Field label="Client (optional)" hint="Shown beside the project on timesheets."><Input value={form.client} onChange={(e) => setForm({ ...form, client: e.target.value })} placeholder="e.g. Acme Inc" /></Field>
+            {/* Codes are compared and pasted into invoices, so they are normalised to upper case as they're typed. */}
+            <Field label="Code (optional)" error={duplicateCode ? "Another project already uses this code." : undefined}>
+              <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} placeholder="e.g. ACME-1" className="tabular-nums uppercase" />
             </Field>
-          </div>
+          </FieldRow>
+          {/* Billable drives every new entry's default, so it reads as a statement rather than a bare tickbox. */}
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 text-sm">
+            <Checkbox className="mt-0.5" checked={form.billable} onCheckedChange={(v) => setForm({ ...form, billable: v === true })} />
+            <span>
+              <span className="font-medium">Billable</span>
+              <span className="block text-xs text-muted-foreground">Time logged here counts as client-billable by default.</span>
+            </span>
+          </label>
+          <Field label="Status" hint={form.status === "archived" ? "Stays on past timesheets, but nobody can log new time against it." : "Anyone can pick this project on their timesheet."}>
+            <div className="inline-flex rounded-lg border p-0.5">
+              {(["active", "archived"] as const).map((s) => (
+                <button key={s} type="button" aria-pressed={form.status === s} onClick={() => setForm({ ...form, status: s })}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-sm font-medium capitalize transition-colors",
+                    form.status === s ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+                  )}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </Field>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={save} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : "Create"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </WriteDialog>
     </div>
     </AccessScope>
   );

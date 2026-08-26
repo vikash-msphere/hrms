@@ -34,6 +34,18 @@ components:
         status: { type: integer, minimum: 100, maximum: 599 }
         detail: { type: string }
         instance: { type: string, format: uri-reference }
+        fields:
+          type: array
+          description: >-
+            Which request fields were rejected, on a body validation failure. The names are the ones in this
+            document, so a client can show each message on the field it belongs to; the values that were sent
+            are never echoed back.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string, description: "Dotted path of the rejected field, e.g. `weight` or `sessions.0.start_time`." }
+              message: { type: string, description: "What was wrong with it." }
     operation:
       type: object
       required: [path, done, metadata]
@@ -224,6 +236,7 @@ components:
       readOnly: true
       description: Builder metadata for the no-code workflow UI, assembled live from the event and verb catalogs.
       properties:
+        path: { type: string, readOnly: true }
         events:
           type: array
           items:
@@ -251,6 +264,13 @@ components:
         recipientKinds: { type: array, items: { type: string } }
         actionKinds: { type: array, items: { type: string } }
         conditionOps: { type: array, items: { type: string } }
+      x-aep-resource:
+        singular: workflow-meta
+        plural: workflow-meta
+        singleton: true
+        patterns:
+          - 'workflow-meta'
+        type: hrms.example.com/workflow-meta
     user:
       type: object
       required: [path, create_time, update_time, etag, email]
@@ -266,6 +286,7 @@ components:
         role: { type: string, description: Role value employee/manager/hr_admin/payroll_admin/super_admin. }
         status: { type: string, description: Account status value active/disabled. }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
+        holiday_feed_token: { type: string, readOnly: true, description: "On users/me only: the caller's unguessable token for the public holiday calendar feed at /calendar/holidays/{token}. Present only when the org enabled the feed and the caller has an employee record (never for a simulated principal)." }
         caller_access:
           type: object
           readOnly: true
@@ -350,6 +371,7 @@ components:
         start_date: { type: string, format: date, description: First working day. Drives leave accrual and probation. }
         probation_end_date: { type: string, format: date, description: Last day of probation. Defaults from start_date plus the org probation period. }
         epf_enrolled: { type: boolean, description: "EPF is opt-in per employee. When false (default) the PF deduction and employer-share CTC line are skipped." }
+        eps_excluded: { type: boolean, description: "EPS (Employees' Pension Scheme) exclusion, HR-declared. True for a member whose pay already exceeded the pension wage ceiling when they first joined EPF: the whole employer PF share stays in EPF instead of 8.33% being diverted to the pension fund. Affects the statutory register and the PF challan split only." }
         photo: { type: string, readOnly: true, description: Present when the employee has a profile photo (fetch via :getPhoto). }
         signature: { type: string, readOnly: true, description: "Owner-private. Present (and fetchable via :getSignature) ONLY for the employee themselves; omitted for all other viewers." }
         profile_completeness:
@@ -679,6 +701,9 @@ components:
         display_name: { type: string }
         date: { type: string, format: date }
         kind: { type: string, description: Holiday kind value fixed/optional. }
+        location: { type: string, nullable: true, description: Work location this holiday is scoped to (matched against the employee's current position location). Absent/null = company-wide. }
+        half_day: { type: boolean, description: The office closes for half the day; leave crossing it is charged 0.5 days. }
+        applies: { type: boolean, readOnly: true, description: "For a location-scoped holiday, whether it applies to the calling employee's work location. Absent for company-wide holidays." }
         selected: { type: boolean, readOnly: true, description: Whether the calling employee has picked this optional holiday. }
         selection: { type: string, readOnly: true, description: "Resource path of the caller's selection, when selected: holiday-selections/{holiday_selection_id}" }
         disabled: { type: boolean, readOnly: true }
@@ -712,6 +737,7 @@ components:
         overdue: { type: boolean, readOnly: true, description: "Derived: pending and past its due date." }
         filed_date: { type: string, format: date }
         reference: { type: string, description: "Challan / acknowledgement number." }
+        document: { type: string, description: "Resource path: org-documents/{id} - the challan or acknowledgement PDF that proves the filing." }
         assignee: { type: string, description: "Resource path: employees/{employee_id} (who is responsible)." }
         notes: { type: string }
         rule: { type: string, readOnly: true, description: "The recurring rule that generated this occurrence (compliance-rules/{id}); absent for ad-hoc items." }
@@ -766,6 +792,7 @@ components:
         initiated_date: { type: string, format: date }
         completed_date: { type: string, format: date }
         notes: { type: string }
+        document: { type: string, description: "Resource path: personal-documents/{id} - the vendor's report, filed as the employee's own document." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: background-check
@@ -797,6 +824,29 @@ components:
           type: array
           description: "Employees marked unavailable for the event. Resource paths: employees/{employee_id}."
           items: { type: string }
+        repeat:
+          type: string
+          enum: [weekly, monthly, yearly]
+          description: >-
+            Repeats on this cadence. The nightly cron creates the next occurrence once this one has passed and
+            moves the repeat onto it, so exactly one row of a series ever carries it (the same shape recurring
+            1:1s use). Weekly keeps the weekday, monthly and yearly keep the date.
+        responses:
+          type: array
+          readOnly: true
+          description: "Who has answered, and how. Written via :respond."
+          items:
+            type: object
+            required: [response, update_time]
+            properties:
+              employee: { type: string, description: "Resource path: employees/{employee_id}." }
+              response: { type: string, enum: [going, maybe, declined] }
+              note: { type: string, description: "Optional, e.g. \"can only make the morning\"." }
+              update_time: { type: string, format: date-time }
+        going_count: { type: integer, readOnly: true }
+        maybe_count: { type: integer, readOnly: true }
+        declined_count: { type: integer, readOnly: true }
+        my_response: { type: string, enum: [going, maybe, declined], readOnly: true, description: "The caller's own answer, when they have given one." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -840,6 +890,28 @@ components:
         kind: { type: string, description: "announcement (official, write-gated), post (generic board post), poll (a post with vote options), or kudos (peer recognition about a recipient). Defaults to announcement." }
         recipient: { type: string, description: "Kudos only (kind=kudos): employees/{employee_id} being recognized (mutually exclusive with recipient_department)." }
         recipient_department: { type: string, description: "Kudos only: departments/{department_id} recognized as a whole team (mutually exclusive with recipient); fanned out as a notification to every member, no per-head leaderboard points." }
+        audience_scope:
+          type: string
+          enum: [everyone, department, none]
+          description: >-
+            Who gets NOTIFIED when the post goes live: the whole company (default), one department
+            (`audience_department`, which is then required), or nobody - a notice that only needs to be on the
+            wall. This is an AUDIENCE, not a permission: on all three settings the board stays readable by
+            anyone who can read announcements, and what changes is the fan-out plus the label on the card.
+            Settable while the post is a draft; not applicable to kudos.
+        audience_department:
+          type: string
+          description: >-
+            Resource path: departments/{department_id}. The department notified when `audience_scope` is
+            `department`, and the label the card carries so the other departments can see the post is not aimed
+            at them. Required with that scope, ignored on the others.
+        email_audience:
+          type: boolean
+          description: >-
+            Send the post to its audience as email when it goes live, on top of the in-app broadcast. Sent once -
+            a manual publish racing the scheduler cannot email twice. Rejected with `audience_scope: none`, since
+            an email is a notification. Settable while the post is a draft.
+        email_time: { type: string, format: date-time, readOnly: true, description: "When the email went out, if it did." }
         value: { type: string, description: "Kudos only: optional company value tag (e.g. Teamwork)." }
         category: { type: string, description: "Kudos only: optional HR-configurable category (settings/kudos)." }
         level: { type: string, description: "Kudos only: optional recognition level/tier (settings/kudos)." }
@@ -898,7 +970,7 @@ components:
                   votes: { type: integer }
                   voted: { type: boolean, description: "Whether the calling viewer chose this option." }
         author: { type: string, description: "Resource path: employees/{employee_id}" }
-        publish_time: { type: string, format: date-time, description: "When the post goes (or went) live. Set with published=false on create to SCHEDULE it: the 5-minute cron publishes the draft once this time passes." }
+        publish_time: { type: string, format: date-time, description: "When the post goes (or went) live, and what the board sorts and prints. Writable only on a DRAFT (published=false), and only in the future: the 5-minute cron publishes the draft once this time passes. A post going out now carries no publish_time - it is dated when it was written - and a live post's time can no longer be moved." }
         pin_time: { type: string, format: date-time, readOnly: true, description: "When the post was pinned to the top of the board (the :pin verb; :unpin clears it). Absent = not pinned. The feed shows pinned posts first, most recently pinned leading." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
@@ -1048,6 +1120,19 @@ components:
         current: { type: boolean, readOnly: true, description: True for the active salary (effective_to absent). }
         arrears_amount: { type: number, readOnly: true, description: "Retro arrears owed by this backdated revision ((new − prior base) × whole backdated months); the next payroll run pays it." }
         arrears_paid: { type: boolean, readOnly: true, description: "Whether a payroll run has paid the arrears." }
+        ctc_monthly: { type: number, readOnly: true, description: "Monthly cost to company reconstructed from the build-up below. Present on the current row when the read is for a single employee (an item read or ?employee=)." }
+        breakdown:
+          type: array
+          readOnly: true
+          description: "The CTC build-up of the current row - basic, each earning component, the Special Allowance plug, then the employer contributions - priced by the same domain function the CTC letter and the payroll run use. Present on the current row when the read is for a single employee."
+          items:
+            type: object
+            required: [name, monthly, annual]
+            properties:
+              name: { type: string }
+              monthly: { type: number }
+              annual: { type: number }
+              above_ctc: { type: boolean, description: "This contribution sits over and above the CTC figure (an employer contribution the org excludes from CTC), so it is not part of ctc_monthly." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: compensation
@@ -1112,16 +1197,23 @@ components:
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
-        asset_tag: { type: string, description: "Internal label, e.g. LAP-014." }
+        asset_tag: { type: string, description: "Human-facing tag printed on the sticker, e.g. MS-LAP-014. Allocated on create from settings/asset-tags and the category's tag_code; unique. Send one to override it; it cannot be cleared." }
         name: { type: string, description: "Display name, e.g. MacBook Pro 14." }
-        category: { type: string, description: "laptop | phone | monitor | peripheral | furniture | other." }
+        category: { type: string, description: "Resource path: asset-categories/{category_id}. Decides the tag_code the allocated asset_tag carries." }
         serial_number: { type: string }
-        status: { type: string, description: "in_stock | assigned | repair | retired." }
+        status: { type: string, description: "pending_verification | in_stock | pending_ack | assigned | repair | retired. The two pending states mean nobody has scanned the tag yet. Only :verify and :acknowledge produce the proven states: sending in_stock or assigned (on POST or PATCH alike) lands on the pending state that precedes it. repair and retired are set directly." }
         assigned_to: { type: string, description: "Resource path: employees/{employee_id} (omitted when in stock)." }
         assigned_on: { type: string, format: date, description: "Date the asset was assigned." }
         purchase_date: { type: string, format: date }
-        tag_printed_time: { type: string, format: date-time, description: "Last time a physical sticker tag was printed for this asset (set by the tag printer's mark-printed step)." }
-        last_verified_time: { type: string, format: date-time, description: "Last time the physical asset was sighted (set by a stocktake scan)." }
+        tag_printed_time: { type: string, format: date-time, readOnly: true, description: "Last time a physical sticker tag was printed for this asset (set by :printTag)." }
+        last_verified_time: { type: string, format: date-time, readOnly: true, description: "Last time the physical asset was sighted. Owned by :verify - not writable, so a sighting cannot be claimed without a scan." }
+        last_verified_by: { type: string, readOnly: true, description: "Resource path of the employee who recorded the last sighting (employees/{employee_id})." }
+        last_verified_scanned: { type: boolean, readOnly: true, description: "Whether the last sighting was proved by scanning the tag, or ticked off by hand (destroyed sticker). Absent when never sighted." }
+        last_stocktake: { type: string, readOnly: true, description: "Resource path of the inventory count that claimed the last sighting (stocktakes/{stocktake_id}), if it happened during one." }
+        acknowledged_time: { type: string, format: date-time, readOnly: true, description: "When the current holder confirmed receipt by scanning the tag (:acknowledge)." }
+        pending_since_time: { type: string, format: date-time, readOnly: true, description: "When the current pending_verification / pending_ack wait began; drives the chase-up reminders." }
+        condition: { type: string, readOnly: true, description: "Condition last reported by a scan: good | damaged | missing_parts." }
+        tag_secret: { type: string, readOnly: true, description: "Nonce printed inside the QR that makes a scan proof of possession. Served ONLY to a caller who may :printTag this asset." }
         notes: { type: string }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -1129,6 +1221,127 @@ components:
         plural: assets
         patterns: ['assets/{asset_id}']
         type: hrms.example.com/asset
+    asset_scan:
+      type: object
+      description: >-
+        Body of the two custody verbs (:verify, :acknowledge). `scan` is the raw string the camera, USB wedge
+        or deep link produced - the server matches it against the asset's tag secret, wire id or asset tag, so
+        the client never decides what counts as proof.
+      properties:
+        scan: { type: string, maxLength: 500, description: "The raw scanned payload." }
+        condition: { type: string, description: "What the scanner saw: good | damaged | missing_parts." }
+        note: { type: string, maxLength: 1000, description: "Free text; required when confirming without a scan." }
+        stocktake: { type: string, description: "Resource path: stocktakes/{stocktake_id}. File this sighting against an open count (:verify only). The count must be open, or the call fails." }
+        override: { type: boolean, description: "Confirm without a scan (destroyed sticker). Always allowed on :verify with a note; on :acknowledge only when the org sets custody.manual_ack_allowed." }
+    stocktake:
+      type: object
+      description: >-
+        One physical walk-through of the inventory. It holds no sightings of its own - those are the
+        last_verified_* stamps :verify writes on each asset - so what lives here is the frame (who is counting,
+        from when, over what scope), the scans that matched nothing, and, once :close has run, the frozen
+        result. Closing is one-way: another walk is another row.
+      required: [path, create_time, update_time, etag, status, start_time]
+      properties:
+        path: { type: string, readOnly: true }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        label: { type: string, description: "What this count is called, e.g. Q3 2026 - Bengaluru office." }
+        status: { type: string, readOnly: true, description: "open | closed. Owned by :close - a count cannot be reopened." }
+        scope:
+          type: object
+          description: "What the walk expects to sight. Both lists are optional; an empty scope counts the whole inventory. A closed count cannot be re-scoped."
+          properties:
+            statuses: { type: array, items: { type: string }, description: "Asset statuses in scope (pending_verification | in_stock | pending_ack | assigned | repair | retired)." }
+            categories: { type: array, items: { type: string }, description: "Resource paths: asset-categories/{category_id}." }
+        started_by: { type: string, readOnly: true, description: "Resource path of the employee who started the count." }
+        start_time: { type: string, format: date-time, readOnly: true, description: "When the count began. An asset sighted at or after this instant counts as sighted in it." }
+        closed_by: { type: string, readOnly: true }
+        closed_time: { type: string, format: date-time, readOnly: true }
+        found:
+          type: array
+          readOnly: true
+          description: "Scans that matched no asset (:recordFound) - the 'there is kit here nobody recorded' findings."
+          items:
+            type: object
+            properties:
+              scan_time: { type: string, format: date-time }
+              by: { type: string, description: "employees/{employee_id}" }
+              raw: { type: string, description: "The scanned payload, verbatim." }
+              note: { type: string }
+        result:
+          type: object
+          readOnly: true
+          description: >-
+            The frozen result, written by :close. Stored rather than derived: a live missing list rots as assets
+            are retired, reassigned or scanned later, so a closed count would stop being reproducible.
+          properties:
+            counts:
+              type: object
+              properties:
+                scope_total: { type: integer }
+                sighted: { type: integer }
+                scanned: { type: integer, description: "Sightings proved by a scan." }
+                unscanned: { type: integer, description: "Sightings ticked off by hand." }
+                flagged: { type: integer, description: "Sighted but reported damaged / missing parts." }
+                missing: { type: integer }
+                found: { type: integer }
+            missing:
+              type: array
+              description: "The missing assets, as they read at the moment of closing."
+              items:
+                type: object
+                properties:
+                  asset: { type: string, description: "assets/{asset_id}" }
+                  asset_tag: { type: string }
+                  name: { type: string }
+                  category: { type: string, description: "asset-categories/{category_id}" }
+                  status: { type: string }
+                  assigned_to: { type: string, description: "employees/{employee_id}" }
+                  last_verified_time: { type: string, format: date-time }
+            missing_truncated: { type: integer, description: "Missing rows beyond the snapshot cap that were not stored, so a truncated report never reads as a complete one." }
+            sighted:
+              type: array
+              description: >-
+                What the walk saw, frozen at close. Cannot be derived afterwards: an asset's last_stocktake
+                names whichever count claimed its LATEST sighting, so the next walk would take this one's
+                evidence away. Ordered weakest-proof first (hand-ticked and flagged rows), so a truncated
+                snapshot keeps the rows worth re-reading.
+              items:
+                type: object
+                properties:
+                  asset: { type: string, description: "assets/{asset_id}" }
+                  asset_tag: { type: string }
+                  name: { type: string }
+                  category: { type: string, description: "asset-categories/{category_id}" }
+                  status: { type: string, description: "The status the sighting left it in (a check-in leaves it in_stock)." }
+                  assigned_to: { type: string, description: "employees/{employee_id}" }
+                  sighted_time: { type: string, format: date-time }
+                  sighted_by: { type: string, description: "employees/{employee_id}" }
+                  scanned: { type: boolean, description: "True when a scan proved it; false when it was ticked off by hand." }
+                  condition: { type: string, description: "What the scanner reported: good | damaged | missing_parts." }
+            sighted_truncated: { type: integer, description: "Sighted rows beyond the snapshot cap that were not stored." }
+            notify_truncated: { type: integer, description: "Held assets beyond the event cap whose holder was not notified." }
+            found: { type: array, items: { type: object } }
+        notes: { type: string }
+        access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
+      x-aep-resource:
+        singular: stocktake
+        plural: stocktakes
+        patterns: ['stocktakes/{stocktake_id}']
+        type: hrms.example.com/stocktake
+    stocktake_found:
+      type: object
+      description: "Body of :recordFound - something was scanned (or seen) that the inventory does not know about. At least one of the two fields is required."
+      properties:
+        scan: { type: string, maxLength: 500, description: "The raw scanned payload, kept verbatim." }
+        note: { type: string, maxLength: 1000, description: "What was found, in words." }
+    stocktake_close:
+      type: object
+      description: "Body of :close. The result is computed server-side from the asset rows; the only input is an optional closing note."
+      properties:
+        notes: { type: string, maxLength: 2000 }
     settlement:
       type: object
       description: A full-and-final settlement (FnF) snapshot computed at exit. POST computes + stores it from the employee's data and exit inputs; the FnF letter renders the most recent one.
@@ -1281,6 +1494,42 @@ components:
         plural: remote-work-requests
         patterns: ['remote-work-requests/{remote_work_request_id}']
         type: hrms.example.com/remote-work-request
+    asset-request:
+      type: object
+      description: >-
+        An employee's request for kit ("I need a laptop"). It names a CATEGORY, not a specific machine - which
+        one they get is inventory's call. A manager (own dept) or HR approves/rejects and the owner can cancel
+        while pending; an approved request is closed by :issue, which hands over an actual asset and leaves it
+        in pending_ack until the holder scans its tag.
+      required: [path, create_time, update_time, etag, state]
+      properties:
+        path: { type: string, readOnly: true }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller." }
+        category: { type: string, description: "Resource path: asset-categories/{category_id} - what kind of thing is being asked for." }
+        justification: { type: string, description: "Why they need it (what an approver reads)." }
+        needed_by: { type: string, format: date, description: "When it stops being useful, e.g. a client visit." }
+        state: { type: string, readOnly: true, description: "State value PENDING/APPROVED/REJECTED/CANCELLED/ISSUED." }
+        decided_by: { type: string, readOnly: true }
+        decision_note: { type: string, readOnly: true }
+        issued_asset: { type: string, readOnly: true, description: "Resource path: assets/{asset_id} - what they were actually given (set by :issue)." }
+        issued_time: { type: string, format: date-time, readOnly: true }
+        access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
+      x-aep-resource:
+        singular: asset-request
+        plural: asset-requests
+        patterns: ['asset-requests/{asset_request_id}']
+        type: hrms.example.com/asset-request
+    asset_issue:
+      type: object
+      description: >-
+        The body of asset-requests :issue - the asset being handed to the requester. `asset` is mandatory (the
+        route's zod schema rejects a body without it); it is not listed in `required` because this schema is
+        also what Prism validates partial writes against - see test/requiredReadOnlyDrift.test.ts.
+      properties:
+        asset: { type: string, description: "Resource path: assets/{asset_id}. Must not be held by somebody else, and cannot be retired." }
     notice-period:
       type: object
       description: A departing employee's notice period (resignation/termination/retirement) - notice date + last working day, with a derived countdown.
@@ -1360,6 +1609,13 @@ components:
         downvotes: { type: integer, readOnly: true }
         my_vote: { type: integer, readOnly: true, description: "The caller's vote direction: -1 down, 0 none, +1 up." }
         own: { type: boolean, readOnly: true, description: "The caller submitted this suggestion (cannot vote on it); true even when anonymous." }
+        merged_into:
+          type: string
+          readOnly: true
+          description: >-
+            Resource path: suggestions/{suggestion_id}. Set when this suggestion was folded into another one via
+            :merge - its votes moved there and it is closed, but it stays readable so its submitter can follow
+            the idea.
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: suggestion
@@ -1368,7 +1624,7 @@ components:
         type: hrms.example.com/suggestion
     leave-request:
       type: object
-      required: [path, create_time, update_time, etag, days, state]
+      required: [path, create_time, update_time, etag, days, state, has_document]
       properties:
         path:
           type: string
@@ -1386,6 +1642,7 @@ components:
         days: { type: number, readOnly: true }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
         reason: { type: string }
+        has_document: { type: boolean, readOnly: true, description: "Whether a supporting file (sick note, travel document) is attached to this request." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1412,9 +1669,30 @@ components:
         title: { type: string }
         description: { type: string }
         weight: { type: integer, description: "Relative importance 0-100." }
-        progress: { type: integer, description: "Completion 0-100." }
-        status: { type: string, enum: [not_started, in_progress, completed, cancelled], description: "Lifecycle of the goal. Default not_started." }
+        progress: { type: integer, description: "Completion 0-100. Computed from the measure whenever `target_value` and `current_value` are both set - a value sent alongside them is ignored." }
+        status: { type: string, enum: [not_started, in_progress, completed, cancelled], description: "Lifecycle of the goal. Default not_started. Reaching the target completes the goal." }
         due_date: { type: string, format: date }
+        unit: { type: string, maxLength: 24, description: "What the measure counts: `customers`, `%`, `days`. Label only." }
+        baseline_value: { type: number, description: "Where the measure started. Defaults to 0 when absent; set it for goals that begin above zero (churn 8% to 4%)." }
+        target_value: { type: number, description: "Where it has to get to. A target below the baseline counts down." }
+        current_value: { type: number, description: "Where it is now. Moving this recomputes `progress`." }
+        measured: { type: boolean, readOnly: true, description: "True when `progress` is derived from the measure rather than set by hand." }
+        linked_tasks: { type: integer, readOnly: true, description: "How many board tasks are linked to this goal. Resolved once per page, so a list of goals can show its delivery rollup without the client reading the whole cards collection." }
+        delivered_tasks: { type: integer, readOnly: true, description: "How many of `linked_tasks` are delivered." }
+        task_points: { type: number, readOnly: true, description: "Total estimate points across the linked tasks (0 when they carry no size)." }
+        delivered_task_points: { type: number, readOnly: true, description: "Points among the delivered linked tasks." }
+        comments:
+          type: array
+          readOnly: true
+          description: "Comments on the goal (oldest-first), present on Get. Post via :comment."
+          items:
+            type: object
+            required: [body, create_time]
+            properties:
+              author: { type: string, description: "Resource path: employees/{employee_id}." }
+              author_email: { type: string }
+              body: { type: string }
+              create_time: { type: string, format: date-time }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1703,7 +1981,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id} - the subject." }
         kind: { type: string, enum: [onboarding, offboarding] }
-        template: { type: string, writeOnly: true, description: "Template id (from settings/transition-templates) to seed tasks from. Create only." }
+        template: { type: string, writeOnly: true, description: "Template id (from settings/transition-templates) to seed tasks from. On update it fills a process that has no tasks yet; a process that already has a checklist rejects it." }
         name: { type: string }
         anchor_date: { type: string, format: date, description: "Start date (onboarding) or last working day (offboarding); task due dates derive from it." }
         state: { type: string, readOnly: true, description: "ACTIVE, COMPLETED, or CANCELLED." }
@@ -1785,6 +2063,21 @@ components:
           type: string
           enum: [weekly, biweekly, monthly]
           description: "Recurring cadence. When set and the meeting date passes, the nightly cron creates the next 1:1 (carrying open action items) and moves the cadence onto it."
+        private_note:
+          type: string
+          description: >-
+            Your own private note on this 1:1. Served only to the person who wrote it - the other attendee, an HR
+            admin and a manager reading down the chain all get nothing. Which side a write lands on is decided by
+            who the caller is, so anyone other than the two attendees is refused.
+        other_has_private_note:
+          type: boolean
+          readOnly: true
+          description: "True when the other attendee has kept a private note. Its text is never served; that one exists is not a secret."
+        pulse:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: "How the meeting felt, 1 (bad) to 5 (great). The employee's own: the counterpart may read it, only the employee may set it."
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2059,6 +2352,37 @@ components:
         patterns:
           - 'tax-declarations/{decl_id}'
         type: hrms.example.com/tax-declaration
+    asset-category:
+      type: object
+      description: >-
+        A kind of asset (Laptop, Phone, Monitor). Reference data: an asset points at one, and the category's
+        tag_code is the middle of every asset tag allocated in it (Laptop -> LAP -> MS-LAP-014), so the
+        sequence is per category. Re-coding a category does not retag the assets already in it.
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        display_name: { type: string, description: "e.g. Laptop." }
+        tag_code: { type: string, description: "Short code printed inside the tag, e.g. LAP. Unique; defaults to the first three letters of the name." }
+        requires_serial: { type: boolean, description: "When true an asset in this category must have its serial number recorded." }
+        disabled: { type: boolean, readOnly: true }
+        locked: { type: boolean, readOnly: true }
+        locked_by: { type: string, readOnly: true }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: asset-category
+        plural: asset-categories
+        patterns:
+          - 'asset-categories/{category_id}'
+        type: hrms.example.com/asset-category
     reimbursement-category:
       type: object
       required: [path, create_time, update_time, etag]
@@ -2227,9 +2551,12 @@ components:
         reimbursement: { type: string, readOnly: true, description: "Resource path of the linked reimbursement, when bridged to payroll." }
         has_invoice: { type: boolean, readOnly: true }
         paid_time: { type: string, format: date-time, readOnly: true }
+        decision_note: { type: string, readOnly: true, description: "The reviewer's reason, set when the expense is rejected." }
         recurring: { type: boolean, description: "True for a recurring template; the schedule generates concrete expenses." }
+        paused: { type: boolean, description: "Recurring templates only: generation is on hold (the schedule survives; :cancel ends it)." }
         recurrence_rule: { type: string, description: "monthly/quarterly/yearly (recurring templates only)." }
         next_occurrence_on: { type: string, format: date, description: "Next date the template generates an expense." }
+        last_generated_time: { type: string, format: date-time, readOnly: true, description: "When the template last generated an expense." }
         template: { type: string, readOnly: true, description: "Resource path of the recurring template this expense was generated from." }
         access:
           readOnly: true
@@ -2243,7 +2570,7 @@ components:
     expense-budget:
       type: object
       description: A spend cap for a (department?, category?, period); spend is derived from approved/paid expenses.
-      required: [path, create_time, update_time, etag, spent, remaining, utilization]
+      required: [path, create_time, update_time, etag, spent, pending, remaining, utilization, alert_level]
       properties:
         path:
           type: string
@@ -2258,9 +2585,12 @@ components:
         period_type: { type: string, description: "monthly/quarterly/yearly." }
         period_key: { type: string, description: "2026 | 2026-Q1 | 2026-07." }
         amount: { type: number, description: "The budget cap." }
-        spent: { type: number, readOnly: true }
+        recurring: { type: boolean, description: "Re-open this cap for the next period automatically once this period closes (same scope, same amount)." }
+        spent: { type: number, readOnly: true, description: "Approved + paid expenses in the period (what utilization counts)." }
+        pending: { type: number, readOnly: true, description: "Submitted expenses awaiting approval; not counted in spent/utilization." }
         remaining: { type: number, readOnly: true }
         utilization: { type: number, readOnly: true, description: "spent / amount (0..>1)." }
+        alert_level: { type: integer, readOnly: true, description: "Highest budget-alert threshold already fired for this period (0 = none)." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2323,6 +2653,7 @@ components:
         employment_type: { type: string, description: full_time/part_time/contract/intern/temporary. }
         openings: { type: integer }
         description: { type: string }
+        pay_grade: { type: string, description: "Resource path: pay-grades/{pay_grade_id} - the budget for the role; its band is what an auto-drafted offer is priced from." }
         status: { type: string, description: State value draft/open/on_hold/closed/filled. }
         applicant_count: { type: integer, readOnly: true, description: Number of applications on this requisition. }
         opened_time: { type: string, format: date-time }
@@ -2383,6 +2714,7 @@ components:
         rejection_reason: { type: string }
         source: { type: string }
         referral: { type: string, description: "Resource path: referrals/{referral_id}" }
+        hired_employee: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} - who this application became, once :hire (or offers:accept) converted the candidate." }
         applied_time: { type: string, format: date-time }
         stage_changed_time: { type: string, format: date-time, readOnly: true }
         access:
@@ -2529,6 +2861,19 @@ components:
           readOnly: true
           description: Checklist items, oldest first. Present on the Get response only.
           items: { $ref: '#/components/schemas/ticket-todo' }
+        attachments:
+          type: array
+          readOnly: true
+          description: "Files attached to the ticket (metadata only; fetch the bytes with :attachment). Added via :attach, removed via :detach."
+          items:
+            type: object
+            required: [key, name, content_type, size_bytes]
+            properties:
+              key: { type: string, description: "Opaque storage key; pass it to :attachment or :detach." }
+              name: { type: string }
+              content_type: { type: string }
+              size_bytes: { type: integer }
+              create_time: { type: string, format: date-time }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2594,7 +2939,7 @@ components:
             y1: { type: number }
             x2: { type: number }
             y2: { type: number }
-        esign_url: { type: string, readOnly: true, description: "Returned only by :acknowledge for a Cashfree doc: the Aadhaar signing link to open." }
+        esign_uri: { type: string, readOnly: true, description: "Returned only by :acknowledge for a Cashfree doc: the Aadhaar signing link to open." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2649,7 +2994,7 @@ components:
         signature_name: { type: string, readOnly: true, description: "The signer's typed full name (the e-signature attestation)." }
         esign_provider: { type: string, readOnly: true, description: "E-sign driver handling this document (e.g. internal, signyu); absent when not e-signed." }
         esign_status: { type: string, readOnly: true, description: "E-sign status: sent | viewed | signed | declined | expired | failed (absent when none)." }
-        esign_url: { type: string, readOnly: true, description: "Vendor-hosted signing link the employee opens to sign (external providers only)." }
+        esign_uri: { type: string, readOnly: true, description: "Vendor-hosted signing link the employee opens to sign (external providers only)." }
         financial_year: { type: string, readOnly: true, description: "Form 16: the financial year the document covers (e.g. 2025-26)." }
         official: { type: boolean, readOnly: true, description: "Form 16: true = official TRACES copy (uploaded); false/absent = HRMS-generated. The official copy takes precedence per year." }
         display_name: { type: string }
@@ -2682,7 +3027,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         display_name: { type: string }
         kind: { type: string, description: "Component kind: earning (paid, in gross), deduction (withheld, employee side), or employer_contribution (employer's on-top cost e.g. employer PF/ESI/gratuity - cost to company, never paid to the employee or withheld from their gross)." }
-        method: { type: string, description: "Computation method fixed/percent_base/rate_qty/income_tax/epf/esi/pt/edli/pf_admin. esi + pt are engine-computed statutory deductions; edli + pf_admin are the employer's PF side-charges (EDLI + administration), priced on PF wages like epf." }
+        method: { type: string, description: "Computation method fixed/percent_base/income_tax/epf/esi/pt/edli/pf_admin. esi + pt are engine-computed statutory deductions; edli + pf_admin are the employer's PF side-charges (EDLI + administration), priced on PF wages like epf." }
         rate: { type: number, description: "Amount/percent/per-unit rate; for epf the contribution % (default 12); for esi the % of gross (employee default 0.75, employer default 3.25); for a percent_base employer_contribution like gratuity, the % of basic. Ignored for income_tax + pt (engine-computed)." }
         cap: { type: number, description: "For methods epf/edli/pf_admin: wage ceiling on PF wages (e.g. 15000). For method esi: the monthly-gross eligibility ceiling (default 21000) - no ESI above it. Omit otherwise." }
         regime: { type: string, description: "For method income_tax: the tax regime block to use (e.g. new)." }
@@ -2954,6 +3299,7 @@ components:
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
         display_name: { type: string, description: Human label for the key. }
+        description: { type: string, nullable: true, description: "What the key is for, and who to ask before revoking it. Optional." }
         owner:
           type: string
           description: "Resource path of the user this key acts as: users/{user_id}. Defaults to the caller."
@@ -2980,6 +3326,7 @@ components:
         expire_time: { type: string, format: date-time, description: When the key stops working. Omit for a key that never expires. }
         last_used_time: { type: string, format: date-time, readOnly: true, description: "Best-effort, updated at most once every 15 minutes." }
         revoke_time: { type: string, format: date-time, readOnly: true, description: Set by :revoke. A revoked key is retained so the audit trail still resolves it. }
+        delete_time: { type: string, format: date-time, readOnly: true, description: "Set by DELETE, which is a soft delete: the key stops authenticating and drops out of the list, but the row is retained so the audit trail still resolves what it did. `:restore` clears it; `?force` purges the record for good." }
         secret:
           type: string
           readOnly: true
@@ -3022,11 +3369,14 @@ security:
 paths:
   /v1/api-keys:
     get:
-      description: List method for api-key.
+      description: List method for api-key. Soft-deleted keys are omitted unless `show_deleted=true`.
       operationId: ListApiKeys
       parameters:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean }, description: Include soft-deleted keys alongside the live ones. }
+        - { in: query, name: deleted_only, schema: { type: boolean }, description: "Return the soft-deleted keys BY THEMSELVES, so a \"Deleted\" view is its own fetch rather than a filter over a page of mostly-live rows." }
+        - { in: query, name: q, schema: { type: string }, description: "Substring match over the key's name, description and public prefix, applied across the whole collection - the way to reach a key beyond the first page." }
       responses:
         '200':
           description: Successful response
@@ -3053,6 +3403,16 @@ paths:
     get:
       description: Get method for api-key.
       operationId: GetApiKey
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: >-
+        Update method for api-key. Only `display_name` and `description` may be changed: what a key can do
+        (`scope`), who it acts as (`owner`) and when it expires are fixed at mint time, so changing a key's
+        authority means minting a new one and revoking this. Any other field is rejected.
+      operationId: UpdateApiKey
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/api-key' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
         '404': { $ref: '#/components/responses/Problem' }
@@ -3105,7 +3465,7 @@ paths:
       operationId: UpdateUser
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/user' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/user' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/user' } } } }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/settings:
     get:
@@ -3139,7 +3499,7 @@ paths:
       operationId: UpdateSetting
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/setting' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/setting' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/setting' } } } }
         '400': { $ref: '#/components/responses/Problem' }
   /v1/preferences:
     get:
@@ -3173,7 +3533,7 @@ paths:
       operationId: UpdatePreference
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/preference' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/preference' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/preference' } } } }
         '400': { $ref: '#/components/responses/Problem' }
   /v1/roles:
     get:
@@ -3215,7 +3575,7 @@ paths:
       operationId: UpdateRole
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/role' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/role' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/role' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for role. Rejected for protected core roles or roles still in use (409).
@@ -3285,7 +3645,7 @@ paths:
       operationId: UpdatePolicy
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/policy' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/policy' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/policy' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/access-rules:preview:
@@ -3463,7 +3823,7 @@ paths:
       operationId: UpdateEmployee
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/employee' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/employee' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/employee' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for employee.
@@ -3593,7 +3953,7 @@ paths:
       operationId: UpdateAutomation
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/automation' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/automation' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/automation' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for automation.
@@ -3778,6 +4138,13 @@ paths:
                         requiresAadhaar: { type: boolean }
                         supportsWebhook: { type: boolean }
                         configFields: { type: array, items: { type: object, properties: { key: { type: string }, label: { type: string }, type: { type: string }, hint: { type: string }, placeholder: { type: string } } } }
+                x-aep-resource:
+                  singular: esign-provider-catalog
+                  plural: esign-provider-catalogs
+                  singleton: true
+                  patterns:
+                    - 'esign-providers'
+                  type: hrms.example.com/esign-provider-catalog
         '403': { $ref: '#/components/responses/Problem' }
   /v1/departments:
     get:
@@ -3821,7 +4188,7 @@ paths:
       operationId: UpdateDepartment
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/department' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/department' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/department' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for department.
@@ -3873,7 +4240,7 @@ paths:
       operationId: UpdateComplianceEvent
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/compliance-event' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/compliance-event' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/compliance-event' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for compliance-event.
@@ -3934,7 +4301,7 @@ paths:
       operationId: UpdateComplianceRule
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/compliance-rule' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/compliance-rule' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/compliance-rule' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for compliance-rule.
@@ -3995,7 +4362,7 @@ paths:
       operationId: UpdateBackgroundCheck
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/background-check' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/background-check' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/background-check' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for background-check.
@@ -4056,7 +4423,7 @@ paths:
       operationId: UpdateHoliday
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/holiday' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/holiday' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/holiday' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for holiday.
@@ -4108,7 +4475,7 @@ paths:
       operationId: UpdateEvent
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/event' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/event' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/event' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for event.
@@ -4118,6 +4485,28 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/events/{event_id}:respond:
+    post:
+      description: >-
+        Custom method respond: the caller's RSVP. Answering again replaces the previous answer. Only people on
+        the event's attendee list may answer; an event with no list is company-wide, so anyone who can see it
+        may.
+      operationId: ":RespondEvent"
+      parameters: [ { in: path, name: event_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [response]
+              properties:
+                response: { type: string, enum: [going, maybe, declined] }
+                note: { type: string, maxLength: 500, description: "Optional detail, e.g. \"can only make the morning\"." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/event' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/events/{event_id}:restore:
     post:
       description: "Custom method restore: undo a soft-delete."
@@ -4170,7 +4559,7 @@ paths:
       operationId: UpdateGoal
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/goal' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for goal.
@@ -4196,6 +4585,24 @@ paths:
                 progress: { type: integer, description: "0-100." }
                 status: { type: string, enum: [not_started, in_progress, completed, cancelled] }
                 note: { type: string, maxLength: 500, description: "Optional short note on what changed; recorded in the goal's activity history." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:comment:
+    post:
+      description: "Custom method comment: add a comment to the goal. Both the owner and their manager are notified, and mentions notify the people named."
+      operationId: ":CommentGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1, maxLength: 4000 }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -4251,7 +4658,7 @@ paths:
       operationId: UpdateBoard
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/board' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/board' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/board' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for board.
@@ -4340,7 +4747,7 @@ paths:
       operationId: UpdateCard
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/card' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/card' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for card.
@@ -4492,7 +4899,7 @@ paths:
       operationId: UpdateSprint
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/sprint' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/sprint' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/sprint' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for sprint.
@@ -4563,6 +4970,7 @@ paths:
         - { in: query, name: resource, schema: { type: string }, description: "Target resource path, e.g. cards/{card_id}. Omit for the org-wide feed." }
         - { in: query, name: entity, schema: { type: string }, description: "Org-wide feed only: narrow to one collection." }
         - { in: query, name: actor, schema: { type: string }, description: "Org-wide feed only: filter by actor email (substring)." }
+        - { in: query, name: api_key, schema: { type: string }, description: "Org-wide feed only: everything ONE credential did, e.g. api-keys/{api_key_id}. A key acts as its owner, so its rows are attributed to that human and are otherwise indistinguishable from what they did at a keyboard." }
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: q, schema: { type: string }, description: "Free-text filter over the action, the actor (name/email), the touched object (its name, collection and id) and the change values." }
@@ -4635,7 +5043,7 @@ paths:
       operationId: UpdateReviewCycle
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/review-cycle' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/review-cycle' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review-cycle' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for review-cycle.
@@ -4937,7 +5345,7 @@ paths:
       operationId: UpdateTransition
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/transition' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/transition' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/transition' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for transition.
@@ -5115,7 +5523,7 @@ paths:
       operationId: UpdateCheckIn
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/check-in' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/check-in' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/check-in' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for check-in.
@@ -5176,7 +5584,7 @@ paths:
       operationId: UpdateBenefitPlan
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/benefit-plan' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/benefit-plan' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/benefit-plan' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for benefit-plan.
@@ -5237,7 +5645,7 @@ paths:
       operationId: UpdateApprovalDelegation
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/approval-delegation' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/approval-delegation' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/approval-delegation' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for approval-delegation.
@@ -5288,7 +5696,7 @@ paths:
       operationId: UpdateDependent
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/dependent' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/dependent' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/dependent' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for dependent.
@@ -5350,7 +5758,7 @@ paths:
       operationId: UpdateBenefitEnrollment
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/benefit-enrollment' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/benefit-enrollment' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/benefit-enrollment' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for benefit-enrollment.
@@ -5411,7 +5819,7 @@ paths:
       operationId: UpdateShift
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/shift' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/shift' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for shift.
@@ -5475,7 +5883,7 @@ paths:
       operationId: UpdateShiftAssignment
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for shift-assignment.
@@ -5536,7 +5944,7 @@ paths:
       operationId: UpdateProject
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/project' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/project' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/project' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for project.
@@ -5601,7 +6009,7 @@ paths:
       operationId: UpdateTimeEntry
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/time-entry' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/time-entry' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/time-entry' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for time-entry.
@@ -5691,7 +6099,7 @@ paths:
       operationId: UpdateLoan
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/loan' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/loan' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/loan' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for loan.
@@ -5800,7 +6208,7 @@ paths:
       operationId: UpdateTaxDeclaration
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/tax-declaration' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/tax-declaration' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/tax-declaration' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for tax-declaration.
@@ -5879,6 +6287,10 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: show_deleted, schema: { type: boolean } }
+        - in: query
+          name: q
+          schema: { type: string }
+          description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
       responses:
         '200':
           description: Successful response
@@ -5913,7 +6325,7 @@ paths:
       operationId: UpdateAnnouncement
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/announcement' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/announcement' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/announcement' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for announcement.
@@ -5965,7 +6377,7 @@ paths:
       operationId: UpdateLeaveType
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/leave-type' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/leave-type' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-type' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for leave-type.
@@ -6017,7 +6429,7 @@ paths:
       operationId: UpdateLetterTemplate
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/letter-template' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/letter-template' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letter-template' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for letter-template.
@@ -6199,9 +6611,48 @@ paths:
     post:
       description: Add an asset to the inventory.
       operationId: CreateAsset
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/assets:batchCreate:
+    post:
+      description: "Custom method batchCreate: add a whole delivery of assets in one call - a quantity of identical untagged things (a box of adapters), a list of serial numbers, or both. Tags are allocated as one contiguous run. Bulk-created assets are never assigned and land awaiting their check-in scan, like any other new asset."
+      operationId: ":BatchCreateAssets"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name: { type: string }
+                      category: { type: string, description: "asset-categories/{id}." }
+                      serial_number: { type: string, description: "Identifies ONE device, so it cannot be combined with a quantity above 1." }
+                      purchase_date: { type: string, format: date }
+                      notes: { type: string }
+                      quantity: { type: integer, minimum: 1, maximum: 100, description: "How many identical things this line stands for (default 1). One asset row is created per thing." }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/asset' } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
@@ -6217,7 +6668,7 @@ paths:
     patch:
       description: Update an asset - including assigning it to an employee or returning it to stock.
       operationId: UpdateAsset
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/asset' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -6230,6 +6681,143 @@ paths:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/assets/{asset_id}:verify:
+    post:
+      description: "Custom method verify for asset: record that someone scanned this asset's tag and is looking at it. Counts a pending_verification asset into stock."
+      operationId: ":VerifyAsset"
+      parameters: [ { in: path, name: asset_id, required: true, schema: { type: string } } ]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/asset_scan' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/assets/{asset_id}:acknowledge:
+    post:
+      description: "Custom method acknowledge for asset: the holder scanned the tag on the thing they were handed. Only the assignee may call it."
+      operationId: ":AcknowledgeAsset"
+      parameters: [ { in: path, name: asset_id, required: true, schema: { type: string } } ]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/asset_scan' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/assets/{asset_id}:printTag:
+    post:
+      description: "Custom method printTag for asset: stamp the sticker as printed. Holding this method is also what exposes tag_secret on the resource."
+      operationId: ":PrintTagAsset"
+      parameters: [ { in: path, name: asset_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/assets/{asset_id}:reissueTag:
+    post:
+      description: "Custom method reissueTag for asset: rotate the tag secret so a lost or defaced sticker stops working, and queue the asset for reprinting."
+      operationId: ":ReissueTagAsset"
+      parameters: [ { in: path, name: asset_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset' } } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/stocktakes:
+    get:
+      description: List inventory counts (newest first). Access-scoped.
+      operationId: ListStocktakes
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/stocktake' } }
+                  next_page_token: { type: string }
+        '403': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Start a count. It opens immediately; sightings are recorded by assets :verify carrying this count.
+      operationId: CreateStocktake
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/stocktakes/{stocktake_id}:
+    parameters: [ { in: path, name: stocktake_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for stocktake.
+      operationId: GetStocktake
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Rename, re-scope or annotate an OPEN count. A closed one only takes notes - its scope decided what its missing list means.
+      operationId: UpdateStocktake
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Abandon a count (soft delete; :restore brings it back). ?force=true purges it.
+      operationId: DeleteStocktake
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/stocktakes/{stocktake_id}:restore:
+    post:
+      description: "Custom method restore for stocktake: bring back an abandoned count."
+      operationId: ":RestoreStocktake"
+      parameters: [ { in: path, name: stocktake_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/stocktakes/{stocktake_id}:recordFound:
+    post:
+      description: "Custom method recordFound for stocktake: log a scan that matched no asset - kit that is here but not in the inventory."
+      operationId: ":RecordFoundStocktake"
+      parameters: [ { in: path, name: stocktake_id, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake_found' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/stocktakes/{stocktake_id}:close:
+    post:
+      description: "Custom method close for stocktake: freeze the count - snapshot its numbers and its missing rows, and raise the chase-up events. One-way."
+      operationId: ":CloseStocktake"
+      parameters: [ { in: path, name: stocktake_id, required: true, schema: { type: string } } ]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake_close' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/stocktake' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/settlements:
     get:
       description: List full-and-final settlements, optionally for one employee. Access-scoped (HR + super).
@@ -6528,6 +7116,8 @@ paths:
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
         - { in: query, name: state, schema: { type: string } }
+        - { in: query, name: from, schema: { type: string, format: date }, description: "Window start (YYYY-MM-DD). Returns requests OVERLAPPING the window, so one crossing the edge is included." }
+        - { in: query, name: to, schema: { type: string, format: date }, description: "Window end (YYYY-MM-DD), inclusive. Pairs with `from`; either may be given alone." }
       responses:
         '200':
           description: Successful response
@@ -6584,6 +7174,85 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/remote-work-request' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-requests:
+    get:
+      description: List method for asset-request.
+      operationId: ListAssetRequests
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - in: query
+          name: q
+          schema: { type: string }
+          description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
+        - { in: query, name: state, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string }, description: "Filter to one employee's requests (resource path)." }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/asset-request' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for asset-request.
+      operationId: CreateAssetRequest
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-requests/{asset_request_id}:
+    parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for asset-request.
+      operationId: GetAssetRequest
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/asset-requests/{asset_request_id}:approve:
+    post:
+      description: "Custom method approve for asset-request."
+      operationId: ":ApproveAssetRequest"
+      parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-requests/{asset_request_id}:reject:
+    post:
+      description: "Custom method reject for asset-request."
+      operationId: ":RejectAssetRequest"
+      parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-requests/{asset_request_id}:cancel:
+    post:
+      description: "Custom method cancel for asset-request."
+      operationId: ":CancelAssetRequest"
+      parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-requests/{asset_request_id}:issue:
+    post:
+      description: "Custom method issue for asset-request: hand an asset to the requester, which closes the request. The asset takes the ordinary assignment path, so it waits in pending_ack until the holder scans its tag."
+      operationId: ":IssueAssetRequest"
+      parameters: [ { in: path, name: asset_request_id, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/asset_issue' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/notice-periods:
     get:
       description: List method for notice-period.
@@ -6627,7 +7296,7 @@ paths:
       operationId: UpdateNoticePeriod
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/notice-period' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/notice-period' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/notice-period' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for notice-period.
@@ -6681,7 +7350,7 @@ paths:
       operationId: UpdateNotification
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/notification' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/notification' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/notification' } } } }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/notifications:markAllRead:
     post:
@@ -6739,7 +7408,7 @@ paths:
       operationId: UpdateSuggestion
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for suggestion.
@@ -6777,6 +7446,28 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/suggestions/{suggestion_id}:merge:
+    post:
+      description: >-
+        Custom method merge: fold this suggestion into the one it duplicates. Its votes move to the target
+        (skipping anyone who already voted there, and the target's own submitter), it is marked merged and
+        closed, and its submitter is notified. Merging into an already-merged suggestion is refused - merge into
+        the one at the end of the chain.
+      operationId: ":MergeSuggestion"
+      parameters: [ { in: path, name: suggestion_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [into]
+              properties:
+                into: { type: string, description: "Resource path of the suggestion to merge into: suggestions/{suggestion_id}." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/suggestions/{suggestion_id}:restore:
     post:
       description: "Custom method restore for suggestion."
@@ -6797,6 +7488,11 @@ paths:
           name: q
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
+        - { in: query, name: state, schema: { type: string }, description: "Filter to one lifecycle state: PENDING/APPROVED/REJECTED/CANCELLED." }
+        - { in: query, name: leave_type, schema: { type: string }, description: "Filter to one leave type: leave-types/{leave_type_id}." }
+        - { in: query, name: employee, schema: { type: string }, description: "Filter to one person: employees/{employee_id}. Narrows the caller's own scope, never widens it." }
+        - { in: query, name: from, schema: { type: string, format: date }, description: "Window start (YYYY-MM-DD). Returns leave OVERLAPPING the window, so a request crossing the edge is included." }
+        - { in: query, name: to, schema: { type: string, format: date }, description: "Window end (YYYY-MM-DD), inclusive. Pairs with `from`; either may be given alone." }
       responses:
         '200':
           description: Successful response
@@ -6831,7 +7527,7 @@ paths:
       operationId: UpdateLeaveRequest
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/leave-request' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/leave-request' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-request' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for leave-request.
@@ -6866,6 +7562,58 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-request' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories:
+    get:
+      description: List method for asset-category.
+      operationId: ListAssetCategories
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/asset-category' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for asset-category.
+      operationId: CreateAssetCategory
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories/{category_id}:
+    parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for asset-category.
+      operationId: GetAssetCategory
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Update method for asset-category.
+      operationId: UpdateAssetCategory
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for asset-category.
+      operationId: DeleteAssetCategory
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/reimbursement-categories:
     get:
       description: List method for reimbursement-category.
@@ -6908,7 +7656,7 @@ paths:
       operationId: UpdateReimbursementCategory
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for reimbursement-category.
@@ -6960,7 +7708,7 @@ paths:
       operationId: UpdateTicketChecklist
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/ticket-checklist' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/ticket-checklist' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket-checklist' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for ticket-checklist.
@@ -7047,6 +7795,32 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/leave-requests/{leave_request_id}:download:
+    post:
+      description: "Custom method download: returns the request's supporting document bytes."
+      operationId: ":DownloadLeaveRequestDocument"
+      parameters: [ { in: path, name: leave_request_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: The file bytes., content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/leave-requests/{leave_request_id}:upload:
+    post:
+      description: "Custom method upload: stores a supporting document (sick note, travel paperwork) for the request."
+      operationId: ":UploadLeaveRequestDocument"
+      parameters:
+        - { in: path, name: leave_request_id, required: true, schema: { type: string } }
+        - { in: query, name: file_name, schema: { type: string } }
+        - { in: query, name: content_type, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/leave-request' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/reimbursements/{reimbursement_id}:download:
     post:
       description: "Custom method download: returns the claim's receipt file bytes."
@@ -7115,7 +7889,7 @@ paths:
       operationId: UpdateExpenseCategory
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for expense-category.
@@ -7167,7 +7941,7 @@ paths:
       operationId: UpdateVendor
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/vendor' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/vendor' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for vendor.
@@ -7185,6 +7959,19 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: show_deleted, schema: { type: boolean } }
+        - in: query
+          name: period
+          schema: { type: string, enum: [current, upcoming, past] }
+          description: "Where the period sits relative to today, resolved against each row's own period_type, so one read covers monthly, quarterly and yearly caps."
+        - { in: query, name: period_key, schema: { type: string }, description: "Exact period key (2026 | 2026-Q1 | 2026-07)." }
+        - { in: query, name: period_type, schema: { type: string, enum: [monthly, quarterly, yearly] } }
+        - { in: query, name: year, schema: { type: string }, description: "Every period inside a calendar year, whatever its granularity." }
+        - { in: query, name: department, schema: { type: string }, description: "departments/{department_id} (omit for every cost centre)." }
+        - { in: query, name: category, schema: { type: string }, description: "expense-categories/{category_id} (omit for every category)." }
+        - in: query
+          name: status
+          schema: { type: string, enum: [over, at_risk] }
+          description: "Derived spend status. at_risk uses settings/expenses budget_alert_thresholds, the same threshold the alert cron fires on."
       responses:
         '200':
           description: Successful response
@@ -7195,11 +7982,29 @@ paths:
                 properties:
                   results: { type: array, items: { $ref: '#/components/schemas/expense-budget' } }
                   next_page_token: { type: string }
+                  summary:
+                    type: object
+                    description: "Totals over the WHOLE filtered set, not the returned page (deleted caps excluded)."
+                    properties:
+                      count: { type: integer }
+                      amount: { type: number }
+                      spent: { type: number }
+                      pending: { type: number }
+                      over: { type: integer }
+                      at_risk: { type: integer }
+                  phase_counts:
+                    type: object
+                    description: "How many caps each `period` value would return, before that filter is applied."
+                    properties:
+                      current: { type: integer }
+                      upcoming: { type: integer }
+                      past: { type: integer }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
       description: Create method for expense-budget.
       operationId: CreateExpenseBudget
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/expense-budget' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-budget' } } } }
@@ -7218,7 +8023,7 @@ paths:
       operationId: UpdateExpenseBudget
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/expense-budget' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/expense-budget' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-budget' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for expense-budget.
@@ -7240,7 +8045,11 @@ paths:
           schema: { type: string }
           description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters."
         - { in: query, name: state, schema: { type: string } }
-        - { in: query, name: department, schema: { type: string } }
+        - { in: query, name: department, schema: { type: string }, description: "departments/{department_id} - only expenses charged to that cost centre." }
+        - { in: query, name: category, schema: { type: string }, description: "expense-categories/{category_id} - only expenses in that category." }
+        - { in: query, name: vendor, schema: { type: string }, description: "vendors/{vendor_id} - only expenses billed by that vendor." }
+        - { in: query, name: from, schema: { type: string, format: date }, description: "Only expenses incurred on or after this date." }
+        - { in: query, name: to, schema: { type: string, format: date }, description: "Only expenses incurred BEFORE this date (exclusive), so a budget period is [from, to)." }
       responses:
         '200':
           description: Successful response
@@ -7256,6 +8065,7 @@ paths:
     post:
       description: Create method for expense.
       operationId: CreateExpense
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/expense' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense' } } } }
@@ -7274,7 +8084,7 @@ paths:
       operationId: UpdateExpense
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/expense' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/expense' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense' } } } }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/expenses/{expense_id}:submit:
     post:
@@ -7296,9 +8106,17 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/expenses/{expense_id}:reject:
     post:
-      description: "Custom method reject for expense."
+      description: "Custom method reject for expense (SUBMITTED -> REJECTED; records the reviewer's reason)."
       operationId: ":RejectExpense"
       parameters: [ { in: path, name: expense_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: string, description: "Why it was rejected; sent to the submitter and kept on the record." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7397,7 +8215,7 @@ paths:
     patch:
       description: Update method for referral.
       operationId: UpdateReferral
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/referral' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/referral' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/referral' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7494,7 +8312,7 @@ paths:
     patch:
       description: Update method for job-requisition.
       operationId: UpdateJobRequisition
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/job-requisition' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/job-requisition' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/job-requisition' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7555,7 +8373,7 @@ paths:
     patch:
       description: Update method for candidate.
       operationId: UpdateCandidate
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/candidate' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/candidate' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/candidate' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7646,7 +8464,7 @@ paths:
     patch:
       description: Update method for application.
       operationId: UpdateApplication
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/application' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/application' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/application' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7668,12 +8486,21 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/application' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/applications/{application_id}:hire:
+    post:
+      description: "Custom method hire: convert the candidate into an employee (seeding compensation from a written offer's terms when there is one), mark the application hired and stamp hired_employee. Idempotent - an application already converted is returned unchanged."
+      operationId: ":HireApplication"
+      parameters: [ { in: path, name: application_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/application' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/applications/{application_id}:reject:
     post:
-      description: "Custom method reject: end the application with a rejected status and an optional reason."
+      description: "Custom method reject: end the application with a rejected status and an optional reason. Set notify_candidate to also send the candidate a reason-free note (best-effort; the rejection is filed either way)."
       operationId: ":RejectApplication"
       parameters: [ { in: path, name: application_id, required: true, schema: { type: string } } ]
-      requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { reason: { type: string } } } } } }
+      requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { reason: { type: string }, notify_candidate: { type: boolean } } } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/application' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7729,7 +8556,7 @@ paths:
     patch:
       description: Update method for interview.
       operationId: UpdateInterview
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/interview' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/interview' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/interview' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7754,6 +8581,15 @@ paths:
     post:
       description: "Custom method cancel: mark the interview cancelled."
       operationId: ":CancelInterview"
+      parameters: [ { in: path, name: interview_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/interview' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/interviews/{interview_id}:invite:
+    post:
+      description: "Custom method invite: email the candidate their slot (round, time, mode, location) with an .ics attachment. Requires a scheduled time and an email on the candidate."
+      operationId: ":InviteCandidate"
       parameters: [ { in: path, name: interview_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/interview' } } } }
@@ -7809,7 +8645,7 @@ paths:
     patch:
       description: Update method for interview-feedback.
       operationId: UpdateInterviewFeedback
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/interview-feedback' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/interview-feedback' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/interview-feedback' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7872,7 +8708,7 @@ paths:
     patch:
       description: Update method for offer (draft only).
       operationId: UpdateOffer
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/offer' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/offer' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/offer' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7927,6 +8763,15 @@ paths:
       parameters: [ { in: path, name: offer_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/offer' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/offers/{offer_id}:letter:
+    post:
+      description: "Custom method letter: render this offer as a PDF offer letter (inline; nothing is persisted). Uses the org's letter defaults for the signatory, working pattern and probation."
+      operationId: ":OfferLetter"
+      parameters: [ { in: path, name: offer_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: The rendered offer letter., content: { application/pdf: { schema: { type: string, format: binary } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/offers/{offer_id}:restore:
@@ -8151,6 +8996,52 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/tickets/{ticket_id}:attach:
+    post:
+      description: "Custom method attach: stores an attached file's bytes in object storage and records it on the ticket."
+      operationId: ":AttachTicketFile"
+      parameters:
+        - { in: path, name: ticket_id, required: true, schema: { type: string } }
+        - { in: query, name: file_name, schema: { type: string } }
+        - { in: query, name: content_type, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/tickets/{ticket_id}:detach:
+    post:
+      description: "Custom method detach: removes one attachment from the ticket, bytes included."
+      operationId: ":DetachTicketFile"
+      parameters: [ { in: path, name: ticket_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              properties:
+                key: { type: string, description: "The attachment's storage key, as returned in `attachments`." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/tickets/{ticket_id}:attachment:
+    post:
+      description: "Custom method attachment: the bytes of one attachment on this ticket."
+      operationId: ":GetTicketAttachment"
+      parameters:
+        - { in: path, name: ticket_id, required: true, schema: { type: string } }
+        - { in: query, name: key, required: true, schema: { type: string } }
+      responses:
+        '200': { description: The file bytes., content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/leave-balances:
     get:
       description: List method for leave-balance.
@@ -8221,7 +9112,7 @@ paths:
       operationId: UpdateOrgDocument
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/org-document' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/org-document' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/org-document' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for org-document.
@@ -8270,6 +9161,22 @@ paths:
       description: "Custom method acknowledge: the calling employee e-signs the document's current version. Requires a signature image on file (Profile -> Signature); the attestation name is the employee's legal name on record, not a request value."
       operationId: ":AcknowledgeOrgDocument"
       parameters: [ { in: path, name: org_document_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/org-document' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/org-documents/{org_document_id}:remindAck:
+    post:
+      description: "Custom method remindAck: nudge the people who have not acknowledged this document's current version. With `employee` it reminds that one person; without, everyone still outstanding. The daily cron sends the same reminder automatically at 3, 7 and 14 days."
+      operationId: ":RemindAckOrgDocument"
+      parameters: [ { in: path, name: org_document_id, required: true, schema: { type: string } } ]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                employee: { type: string, description: "Resource path: employees/{employee_id}. Omit to remind everyone pending." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/org-document' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -8440,7 +9347,7 @@ paths:
       operationId: UpdatePersonalDocument
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/personal-document' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/personal-document' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/personal-document' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for personal-document.
@@ -8641,7 +9548,7 @@ paths:
       operationId: UpdatePayComponent
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/pay-component' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/pay-component' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/pay-component' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for pay-component.
@@ -8693,7 +9600,7 @@ paths:
       operationId: UpdatePayGrade
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/pay-grade' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/pay-grade' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/pay-grade' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for pay-grade.
@@ -8745,7 +9652,7 @@ paths:
       operationId: UpdateSalaryStructure
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/salary-structure' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/salary-structure' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/salary-structure' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for salary-structure.
@@ -8797,7 +9704,7 @@ paths:
       operationId: UpdatePayPeriod
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/pay-period' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/pay-period' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/pay-period' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for pay-period.
@@ -8848,7 +9755,7 @@ paths:
       operationId: UpdatePayrollRun
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payroll-run' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payroll-run' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-run' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for payroll-run.
@@ -9006,7 +9913,7 @@ paths:
       operationId: UpdatePayslip
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payslip' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payslip' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payslip' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for payslip.
@@ -9076,7 +9983,7 @@ paths:
       operationId: UpdateBankAccount
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/bank-account' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/bank-account' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/bank-account' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}/identity:
@@ -9093,7 +10000,7 @@ paths:
       operationId: UpdateIdentity
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/identity' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/identity' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/identity' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}/tax:
@@ -9110,7 +10017,7 @@ paths:
       operationId: UpdateTax
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/tax' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/tax' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/tax' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}/personal-info:
@@ -9127,7 +10034,7 @@ paths:
       operationId: UpdatePersonalInfo
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/personal-info' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/personal-info' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/personal-info' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}/bio:
@@ -9135,7 +10042,7 @@ paths:
     patch:
       description: Update method for bio (the employee's public "about me"). Owner-writable; HR may also edit.
       operationId: UpdateBio
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/bio' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/bio' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/bio' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -9153,7 +10060,7 @@ paths:
     patch:
       description: Update method for notification-prefs.
       operationId: UpdateNotificationPrefs
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/notification-prefs' } } } }
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/notification-prefs' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/notification-prefs' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -9308,9 +10215,9 @@ paths:
       parameters:
         - name: q
           in: query
-          required: true
+          required: false
           schema: { type: string }
-          description: "Search text. Fewer than 2 characters returns no results."
+          description: "Search text. Absent, or fewer than 2 characters, returns no results."
       responses:
         '200':
           description: Successful response
@@ -9328,6 +10235,198 @@ paths:
                         collection: { type: string, description: "Wire collection the hit belongs to." }
                         title: { type: [string, 'null'] }
                         subtitle: { type: [string, 'null'] }
+                x-aep-resource:
+                  singular: search-result-set
+                  plural: search-result-sets
+                  singleton: true
+                  patterns:
+                    - 'search'
+                  type: hrms.example.com/search-result-set
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/changes:
+    get:
+      description: "Which collections have been written to since a given moment, so a client can keep everything it has stored instead of re-reading it. Answers from a per-collection change stamp maintained by database triggers, so it sees every write - from a service, a cron, the automation engine or hand-run SQL. A collection is named only if the caller may list it. Any age of `since` is answered (the stamps are current state, not history); without a usable reference point the answer is `unknown_window: true` and no collections are listed, and the client should revalidate normally instead of trusting what it has stored."
+      operationId: "GetChanges"
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema: { type: integer }
+          description: "Epoch milliseconds to compare against - the `now` from a previous answer. Absent, zero or not a number yields `unknown_window`; there is no maximum age."
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  now: { type: integer, description: "The server's clock at the moment of the answer. Send this as `since` next time." }
+                  collections:
+                    type: array
+                    description: "Wire collections written to in the window, filtered to those the caller may list. Absent when `unknown_window` is true."
+                    items: { type: string }
+                  unknown_window: { type: boolean, description: "True when there is no usable reference point to compare against; no collections are listed." }
+                x-aep-resource:
+                  singular: change-set
+                  plural: change-sets
+                  singleton: true
+                  patterns:
+                    - 'changes'
+                  type: hrms.example.com/change-set
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/activity-counts:
+    get:
+      description: "How many rows have appeared in each named collection since a given moment - the workspace tab bar's \"new since you last looked\" badges. A collection is included only if the caller's list decision for it allows, and the count is bound by that collection's own list scope, so it equals what the caller would have counted from the list response. Counts only; no rows are returned."
+      operationId: "GetActivityCounts"
+      parameters:
+        - name: tabs
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Comma-separated `<collection>:<sinceEpochMs>` pairs, e.g. `boards:1712000000000,goals:1712000000000`. Unknown collections and malformed pairs are ignored; at most 24 pairs are answered."
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  counts:
+                    type: object
+                    additionalProperties: { type: integer }
+                    description: "Wire collection -> number of rows created after the given moment. Absent means nothing new, or nothing the caller may list."
+                x-aep-resource:
+                  singular: activity-count-set
+                  plural: activity-count-sets
+                  singleton: true
+                  patterns:
+                    - 'activity-counts'
+                  type: hrms.example.com/activity-count-set
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/people-analytics:
+    get:
+      description: "One report row per person over a window - attendance and punctuality, leave, tasks, goals, performance, time and effort. A measure is included only if the caller's list decision for its backing collection allows (and for a derived measure, every collection it leans on), and each aggregate is bound by that collection's own list scope - so every number equals what the caller would have counted from the list response. The people are exactly the employees their own directory list would return. Measures the caller may not see are absent from `metrics` and from every row."
+      operationId: "GetPeopleAnalytics"
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: "First day of the window (YYYY-MM-DD). Defaults to the first of the current month."
+        - name: to
+          in: query
+          required: false
+          schema: { type: string, format: date }
+          description: "Last day of the window (YYYY-MM-DD; inclusive). Defaults to today. The window may not exceed 92 days."
+        - name: department
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Limit the report to one department (`departments/{id}`)."
+        - name: employee
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Report on one person only (`employees/{id}`). Narrows the roster; it never widens it - the caller's own employee visibility still decides. A single named person may be asked for over a window of up to 400 days."
+        - name: series
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: "With `employee`, also return that person's day-by-day attendance (`series`) - what a calendar heatmap draws."
+        - name: max_people
+          in: query
+          required: false
+          schema: { type: integer }
+          description: "How many people to report on (default 100; 200 max). `truncated` says whether more were in scope."
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [window, groups, metrics, people, team, truncated]
+                properties:
+                  window:
+                    type: object
+                    required: [from, to, timezone, working_days]
+                    properties:
+                      from: { type: string, format: date }
+                      to: { type: string, format: date }
+                      timezone: { type: string, description: "The org timezone the punches were read in." }
+                      working_days: { type: integer, description: "Scheduled working days in the window - the denominator behind the attendance figures." }
+                  groups:
+                    type: array
+                    description: "The dimensions the measures fall into, in display order."
+                    items:
+                      type: object
+                      required: [key, label]
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                  metrics:
+                    type: array
+                    description: "The measures this caller may see, in column order. Each carries how to read and roll it up so a client needs no table of its own."
+                    items:
+                      type: object
+                      required: [key, label, short, group, collection, unit, agg, direction, hint]
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                        short: { type: string, description: "Compact column header." }
+                        group: { type: string, description: "Which `groups` entry this belongs to." }
+                        collection: { type: string, description: "The collection whose list decision gated it." }
+                        needs:
+                          type: array
+                          description: "Further collections a derived measure required."
+                          items: { type: string }
+                        unit: { type: string, enum: [count, days, hours, minutes, percent, rating, time_of_day] }
+                        agg: { type: string, enum: [sum, avg], description: "How the measure rolls up to the team line." }
+                        direction: { type: string, enum: [higher, lower, none], description: "Which way is good." }
+                        hint: { type: string, description: "Exactly what was counted." }
+                  people:
+                    type: array
+                    items:
+                      type: object
+                      required: [employee, name, values]
+                      properties:
+                        employee: { type: string, description: "`employees/{id}`" }
+                        name: { type: string }
+                        employee_number: { type: string, nullable: true }
+                        job_title: { type: string, nullable: true }
+                        department: { type: string, nullable: true, description: "`departments/{id}`" }
+                        manager: { type: string, nullable: true, description: "`employees/{id}`" }
+                        values:
+                          type: object
+                          description: "Measure key -> number. Null means the measure has no value for this person (no present days to average an arrival over, no rated review yet)."
+                          additionalProperties: { type: number, nullable: true }
+                  team:
+                    type: object
+                    description: "The team line: each measure summed or averaged across the people who have a number for it."
+                    additionalProperties: { type: number, nullable: true }
+                  truncated: { type: boolean, description: "More people were in scope than `max_people` allowed." }
+                  series:
+                    type: array
+                    description: "Present only when one `employee` was asked for with `series=true`: their attendance day by day, oldest first. Days with no punch are absent."
+                    items:
+                      type: object
+                      required: [day, worked_minutes, late]
+                      properties:
+                        day: { type: string, format: date }
+                        worked_minutes: { type: number, description: "Minutes on closed sessions that day." }
+                        late: { type: boolean, description: "The first punch landed past the shift start plus that day's grace." }
+                x-aep-resource:
+                  singular: people-analytics
+                  plural: people-analytics-set
+                  singleton: true
+                  patterns:
+                    - 'people-analytics'
+                  type: hrms.example.com/people-analytics
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/dashboard-summary:
@@ -9357,7 +10456,40 @@ paths:
                       properties:
                         value: { type: number }
                         extra: { type: number }
+                x-aep-resource:
+                  singular: dashboard-summary
+                  plural: dashboard-summaries
+                  singleton: true
+                  patterns:
+                    - 'dashboard-summary'
+                  type: hrms.example.com/dashboard-summary
         '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/approvals-summary:
+    get:
+      description: "How many items in each approval queue are waiting for the caller's decision. A queue is included only if the caller may `approve` in it, and its COUNT is bound by that same approve scope - so every number equals what the caller would have counted from the queue itself. Rows are not returned: the pages that display queues read the collections directly."
+      operationId: "GetApprovalsSummary"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [counts, total]
+                properties:
+                  counts:
+                    type: object
+                    description: "Queue -> how many rows await this caller's decision. Keys are collection ids (leave-requests, expenses, ...) plus `tax-verifications` for the prior-employer verification queue. A queue the caller cannot approve in is absent."
+                    additionalProperties: { type: number }
+                  total: { type: number, description: "Sum of every included queue - the number the sidebar badge renders." }
+                x-aep-resource:
+                  singular: approvals-summary
+                  plural: approvals-summaries
+                  singleton: true
+                  patterns:
+                    - 'approvals-summary'
+                  type: hrms.example.com/approvals-summary
         '500': { $ref: '#/components/responses/Problem' }
   /v1/employees:batchGetPhotos:
     post:
@@ -9421,7 +10553,7 @@ paths:
       operationId: UpdateBankFormat
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/bank-format' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/bank-format' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/bank-format' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/bank-formats/{bank_format}:uploadTemplate:
@@ -9469,7 +10601,7 @@ paths:
       operationId: UpdatePayrollDebitAccount
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payroll-debit-account' } } } }
       responses:
-        '200': { description: Successful response, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/payroll-debit-account' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/payroll-debit-account' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/employees/{employee_id}:clearPhoto:

@@ -29,14 +29,22 @@ export function leaveDays(
   endSession = 2,
   workDays: readonly number[] = [1, 2, 3, 4, 5],
   holidays: ReadonlySet<string> = new Set(),
+  halfDayHolidays: ReadonlySet<string> = new Set(),
 ): number {
-  const isWork = (ms: number) => workDays.includes(new Date(ms).getUTCDay()) && !holidays.has(ymdUtc(ms));
-  let full = 0;
-  for (let d = startMs; d <= endMs; d += DAY_MS) if (isWork(d)) full++;
-  if (full === 0) return 0;
-  let days = full;
-  if (startSession === 2 && isWork(startMs)) days -= 0.5; // first day starts after lunch
-  if (endSession === 1 && isWork(endMs)) days -= 0.5; // last day ends at lunch
+  // What one calendar day is worth: a working day is 1, a holiday 0, and a half-day holiday 0.5 (the office
+  // is open for the other half, so leave across it costs half a day).
+  const valueOf = (ms: number) => {
+    const ymd = ymdUtc(ms);
+    if (!workDays.includes(new Date(ms).getUTCDay()) || holidays.has(ymd)) return 0;
+    return halfDayHolidays.has(ymd) ? 0.5 : 1;
+  };
+  let days = 0;
+  for (let d = startMs; d <= endMs; d += DAY_MS) days += valueOf(d);
+  if (days === 0) return 0;
+  // A session flag shaves at most what the boundary day is actually worth (so a PM start on a morning-only
+  // half-day holiday costs nothing, not -0.5).
+  if (startSession === 2) days -= Math.min(0.5, valueOf(startMs)); // first day starts after lunch
+  if (endSession === 1) days -= Math.min(0.5, valueOf(endMs)); // last day ends at lunch
   return Math.round(days * 2) / 2;
 }
 

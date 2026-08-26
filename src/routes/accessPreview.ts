@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
+import { jsonBody } from "../http/jsonRequest";
 import { previewAccess, type PreviewBody } from "../services/accessPreview";
 import { requestAccess } from "../services/accessRequest";
 import { decideAccessRule, ruleIdFromRef } from "../services/accessRules";
@@ -9,12 +10,12 @@ import { decideAccessRule, ruleIdFromRef } from "../services/accessRules";
 // `access-rules.requestAccess`), which are fail-closed - super by default; preview is granted to access
 // admins, requestAccess to `everyone` when an org wants the request flow.
 export const accessPreviewRoute = new Hono<AppEnv>().post("/", async (c) => {
-  const body = (await c.req.json()) as PreviewBody;
+  const body = await jsonBody<PreviewBody>(c);
   return c.json({ results: await previewAccess(c.get("deps"), body) });
 });
 
 export const accessRequestRoute = new Hono<AppEnv>().post("/", async (c) =>
-  c.json(await requestAccess(c.get("deps"), c.get("user"), await c.req.json())),
+  c.json(await requestAccess(c.get("deps"), c.get("user"), await jsonBody(c))),
 );
 
 // Four-eyes decisions on a pending permission change. Collection-level (the rule travels in the body) so
@@ -22,7 +23,7 @@ export const accessRequestRoute = new Hono<AppEnv>().post("/", async (c) =>
 // approval authority is grantable independently of the write that queues the change.
 const decideRoute = (decision: "approve" | "reject") =>
   new Hono<AppEnv>().post("/", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { rule?: unknown };
+    const body = await jsonBody<{ rule?: unknown }>(c);
     return c.json(await decideAccessRule(c.get("deps"), c.get("user"), ruleIdFromRef(body.rule), decision));
   });
 

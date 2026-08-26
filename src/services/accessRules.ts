@@ -61,6 +61,10 @@ function bustGrantCache(subjectKind: "role" | "user", subject: string): void {
   if (subjectKind === "user") clearCache(`userGrant:${subject}`);
   else if (subject === EVERYONE_ROLE) clearCachePrefix("grant:");
   else clearCache(`grant:${subject}`);
+  // Per-object rules (ACL shares/denies) are cached per CALLER, not per subject - one entry covers a user and
+  // their roles - so there is no single key to drop for them. Rule edits are rare admin actions, so the whole
+  // band goes; it refills on the next request that needs it.
+  clearCachePrefix("objRules:");
 }
 
 // Four-eyes on permission changes: opt-in per org via the `access-approval` settings blob. While it is on,

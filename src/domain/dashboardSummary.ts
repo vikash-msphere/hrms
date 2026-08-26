@@ -3,6 +3,8 @@
 // service's registry MUST stay within this list - every aggregate is gated by its collection's list decision,
 // exactly like a real GET /v1/<collection>.
 export const DASHBOARD_SUMMARY_COLLECTIONS = [
+  "employees",
+  "leave-requests",
   "tickets",
   "expenses",
   "compliance-events",

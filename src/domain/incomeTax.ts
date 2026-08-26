@@ -3,9 +3,16 @@
 //
 // Faithful to the official incometaxindia.gov.in calculator's client-side logic (decoded): for the new
 // regime the pipeline is slab tax -> rebate u/s 87A (with marginal relief) -> surcharge (with marginal
-// relief, capped at 25% in the new regime) -> 4% health & education cess. Config is DATA, keyed by regime and
-// stamped with the assessment year, so the yearly Budget change is a settings edit and an "old" regime can be
-// added later without touching this code (only `new` is implemented today).
+// relief, capped at 25% in the new regime) -> 4% health & education cess. Slab rates, the standard deduction,
+// the rebate and the surcharge bands are all DATA, stamped with the assessment year, so the yearly Budget
+// change is a settings edit.
+//
+// Only the NEW regime is implemented, and adding an "old" one is NOT a settings edit. The old regime's charge
+// depends on machinery this module does not have and this system does not collect: the s.16(iii) professional
+// tax deduction from salary income, the s.10(13A) house rent allowance exemption (which needs rent paid and a
+// metro flag per employee), leave travel concession, and its own standard-deduction figure. A regime block
+// dropped into settings would be taxed as if none of those existed, over-withholding from every employee on
+// it - so `assertSupportedRegime` refuses one instead of computing a wrong number quietly.
 
 export type Slab = { upTo: number | null; rate: number }; // rate is a percent; upTo null = the top band
 export type RegimeConfig = {
@@ -77,6 +84,23 @@ export const COMMON_SECTION_CAPS: Record<string, number> = {
 };
 
 const r0 = (n: number) => Math.round(n);
+
+// Regimes this module can actually compute. Kept as data next to the pipeline it describes, so adding old-regime
+// support means implementing the exemptions AND listing it here, in one place.
+export const SUPPORTED_REGIMES = ["new"] as const;
+
+// Throws when a configured regime is one this module cannot compute correctly (see the header). The caller
+// resolving a regime name from settings calls this before withholding anything: failing the payroll build is
+// recoverable, silently over-taxing a year of payslips is not.
+export function assertSupportedRegime(regime: string): void {
+  if (!(SUPPORTED_REGIMES as readonly string[]).includes(regime)) {
+    throw new Error(
+      `income tax regime "${regime}" is configured but not implemented: only ${SUPPORTED_REGIMES.join(", ")} is supported. ` +
+      "The old regime needs the s.16(iii), s.10(13A) and LTA exemptions, which this build does not compute - " +
+      "set the TDS pay component's regime back to \"new\" rather than withholding a figure that ignores them.",
+    );
+  }
+}
 
 export type SlabRow = { from: number; to: number | null; rate: number; amount: number };
 

@@ -14,10 +14,11 @@ import { PageSettings } from "@/components/common/SettingsButton";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
+import { CardsSkeleton } from "@/components/common/Skeletons";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { AccessItem } from "@/components/access/AccessItem";
@@ -57,9 +58,23 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   const [dropId, setDropId] = useState<string | null>(null); // hovered drop target (incl. "__root__")
   const [moveFrom, setMoveFrom] = useState<string | null>(null); // node being moved via the picker
   // Zoom + layout survive reloads (localStorage; per-device presentation, not worth a server pref).
-  const [zi, setZi] = useState(() => { const v = Number(localStorage.getItem("orgchart.zoom")); return Number.isInteger(v) && v >= 0 && v < ZOOMS.length ? v : 3; });
+  // The `?? NaN` is load-bearing: `Number(null)` is 0, and 0 is a VALID index here - the 50% zoom. So a
+  // first-time reader, who has nothing stored, passed the range check with index 0 and met the org chart at
+  // half size, every control on it half-sized with it. Found by measuring the page in a fresh browser
+  // profile, where "nothing stored yet" is the normal case rather than the rare one.
+  const [zi, setZi] = useState(() => { const raw = localStorage.getItem("orgchart.zoom"); const v = Number(raw ?? NaN); return Number.isInteger(v) && v >= 0 && v < ZOOMS.length ? v : 3; });
   useEffect(() => localStorage.setItem("orgchart.zoom", String(zi)), [zi]);
-  const [layout, setLayout] = useState<"tree" | "list">(() => (localStorage.getItem("orgchart.layout") === "list" ? "list" : "tree"));
+  // A phone opens in the outline layout. The tree is a two-dimensional canvas - a node is 12rem wide and a
+  // sibling row of six is most of a metre - so on a 360px screen the first thing a reader gets is one card
+  // and two scrollbars, while the outline says the same thing in indented rows that only ever scroll down.
+  // A stored choice still wins: the toggle is per device (localStorage), so picking the tree on a phone
+  // sticks, and this only decides the first visit. Read as a one-off rather than through `useMedia` on
+  // purpose - the layout is a preference from here on, not something a rotation should overwrite.
+  const [layout, setLayout] = useState<"tree" | "list">(() => {
+    const stored = localStorage.getItem("orgchart.layout");
+    if (stored === "list" || stored === "tree") return stored;
+    return typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches ? "list" : "tree";
+  });
   useEffect(() => localStorage.setItem("orgchart.layout", layout), [layout]);
   const [full, setFull] = useState(false);
   const [flashId, setFlashId] = useState<string | null>(null); // just-located node, briefly ringed
@@ -265,7 +280,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
       } else {
         const w = window.open("", "_blank");
         if (!w) { toast({ variant: "destructive", title: "Popup blocked", description: "Allow popups for this site to print the chart." }); return; }
-        w.document.write(`<!doctype html><title>Org chart</title><img src="${url}" style="max-width:100%" onload="setTimeout(()=>{print();close()},60)">`);
+        w.document.write(`<!doctype html><title>Org chart</title><img src="${url}" alt="Org chart" style="max-width:100%" onload="setTimeout(()=>{print();close()},60)">`);
         w.document.close();
       }
     } catch (e) {
@@ -381,7 +396,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
           </div>
         </div>
         <dl className="space-y-1.5 text-xs">
-          {e.work_email && <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Email</dt><dd className="min-w-0"><CopyEmail email={e.work_email} /></dd></div>}
+          {e.work_email && <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Email</dt><dd className="min-w-0 flex-1" title={e.work_email}><CopyEmail email={e.work_email} /></dd></div>}
           {e.department && <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Dept</dt><dd className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ backgroundColor: deptColor(e.department) }} />{deptName(e.department)}</dd></div>}
           {e.manager && empById.has(idOf(e.manager)) && (
             <div className="flex items-center gap-2"><dt className="w-14 shrink-0 text-muted-foreground">Manager</dt><dd><button type="button" className="font-medium hover:underline" onClick={() => { setPeekId(null); locate(idOf(e.manager!)); }}>{empName(e.manager)}</button></dd></div>
@@ -627,7 +642,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
 
       <DataState state={empState} error={empErr} onRetry={reloadEmp}>
         <Card className={cn(full && "fixed inset-0 z-50 overflow-auto rounded-none border-0")}>
-          <CardContent className="p-4">
+          <CardContent className="p-4 sm:p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
                 {focusId ? (
@@ -723,11 +738,11 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
             )}
 
             {loading ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">Loading…</p>
+              <CardsSkeleton count={3} />
             ) : displayRoots.length === 0 ? (
               <EmptyState icon={Network} title="Nothing to chart" description={view === "people" ? "No employees are visible to you." : "No departments defined yet."} />
             ) : layout === "tree" ? (
-              <div data-org-canvas className="overflow-x-auto pb-2">
+              <div data-org-canvas className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto pb-2">
                 <ul className="org-tree mx-auto w-max" style={{ zoom: ZOOMS[zi] }}>{displayRoots.map((id) => renderNode(id, new Set()))}</ul>
               </div>
             ) : (
@@ -740,7 +755,16 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
       {moveFrom && (
         <MovePicker
           title={view === "people" ? "Change manager" : "Change parent department"}
+          description={
+            view === "people"
+              ? "The new manager approves their requests and sees them in team views. Anyone reporting to them moves along with them."
+              : "Re-parenting moves the whole sub-tree: child departments, their people, and the access rules scoped to them."
+          }
           subjectLabel={nodes.get(moveFrom)?.label ?? ""}
+          currentLabel={(() => {
+            const p = nodes.get(moveFrom)?.parentId;
+            return p ? nodes.get(p)?.label ?? "-" : view === "people" ? "no manager" : "no parent";
+          })()}
           topLevelLabel={view === "people" ? "Top level (no manager)" : "Top level (no parent)"}
           candidates={[...nodes.values()].filter((n) => n.id !== moveFrom && !descendantsOf(moveFrom).has(n.id)).map((n) => ({ id: n.id, label: n.label, sub: n.sub }))}
           onPick={(targetId) => { const from = moveFrom; setMoveFrom(null); if (from) void applyMove(from, targetId, { confirm: false }); }}
@@ -752,9 +776,12 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
 }
 
 // A searchable picker for the new parent/manager. "Top level" clears it.
-function MovePicker({ title, subjectLabel, topLevelLabel, candidates, onPick, onClose }: {
+function MovePicker({ title, description, subjectLabel, currentLabel, topLevelLabel, candidates, onPick, onClose }: {
   title: string;
+  description: string;
   subjectLabel: string;
+  // Where the subject sits today, so the move reads as a change rather than a bare choice.
+  currentLabel: string;
   topLevelLabel: string;
   candidates: { id: string; label: string; sub: string }[];
   onPick: (targetId: string | null) => void;
@@ -765,10 +792,17 @@ function MovePicker({ title, subjectLabel, topLevelLabel, candidates, onPick, on
   const filtered = ql ? candidates.filter((c) => `${c.label} ${c.sub}`.toLowerCase().includes(ql)) : candidates;
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
-        <p className="-mt-1 text-sm text-muted-foreground">Moving <span className="font-medium text-foreground">{subjectLabel}</span>.</p>
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" autoFocus />
+      {/* Enter picks the single remaining match: typing three letters and pressing Enter is how a picker with
+          a search box is expected to behave, and it beats reaching for the mouse mid-reorg. */}
+      <DialogContent onEnterSubmit={() => { if (filtered.length === 1) onPick(filtered[0]!.id); }}>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <p className="-mt-1 flex flex-wrap items-baseline gap-1.5 text-sm text-muted-foreground">
+          Moving <span className="font-medium text-foreground">{subjectLabel}</span>, currently under <span className="font-medium text-foreground">{currentLabel}</span>.
+        </p>
+        <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" autoFocus />
         <div className="max-h-72 space-y-1 overflow-y-auto">
           <button type="button" onClick={() => onPick(null)} className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm hover:bg-accent">
             <ArrowUpToLine className="h-4 w-4 text-muted-foreground" /> {topLevelLabel}
@@ -781,6 +815,11 @@ function MovePicker({ title, subjectLabel, topLevelLabel, candidates, onPick, on
           ))}
           {filtered.length === 0 && <p className="py-4 text-center text-sm text-muted-foreground">No matches.</p>}
         </div>
+        {candidates.length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {ql ? `${filtered.length} of ${candidates.length} shown.` : `${candidates.length} to choose from.`} Their own reports move with them.
+          </p>
+        )}
       </DialogContent>
     </Dialog>
   );

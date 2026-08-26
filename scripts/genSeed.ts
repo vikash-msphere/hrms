@@ -5,7 +5,7 @@
 // come from the same generators the runtime/tests use (test/seedDrift stays green).
 //
 //   Run:  node --import ./scripts/tsResolve.mjs scripts/genSeed.ts > scripts/seed.sql
-import { renderAccessRulesSeed } from "./genAccessRulesSeed";
+import { renderAccessRulesSeed, seedRuleId } from "./genAccessRulesSeed";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
 import { bytesToBase32 } from "../src/lib/idCodec";
 
@@ -139,12 +139,14 @@ emit(renderAccessRulesSeed());
 // The `markAllRead` row is a COLLECTION-level custom method, so it is encoded broad (scope all, match_code
 // NULL) exactly as compileGrant encodes a 2-token verb pattern - a match_code would file it in the
 // per-object lane, which a verb with no object id never reaches, and the capability would be unreachable.
-// Separate INSERT so the generated block above still byte-matches the drift gate.
+// Separate INSERT so the generated block above still byte-matches the drift gate. The ids come from the same
+// helper the compiled block uses (a rule id must be a real 13-char base32 internal id: the list cursor
+// tokenizes it through the wire codec), from a range far past the compiled rows.
 emit(`INSERT INTO access_rules (uuid,subject,subject_kind,namespace,pattern,scope_kind,scope_code,match_code,level,effect,created_at,updated_at) VALUES
- ('nsntf0001','everyone','role','notifications','notifications','all','',NULL,'read','allow',${T0},${T0}),
- ('nsntf0002','everyone','role','notifications','notifications.me.**','self','',NULL,'read','allow',${T0},${T0}),
- ('nsntf0003','everyone','role','notifications','notifications.me.**','self','',NULL,'write','allow',${T0},${T0}),
- ('nsntf0004','everyone','role','notifications','notifications.markAllRead','all','',NULL,NULL,'allow',${T0},${T0});`);
+ (${q(seedRuleId(900_001))},'everyone','role','notifications','notifications','all','',NULL,'read','allow',${T0},${T0}),
+ (${q(seedRuleId(900_002))},'everyone','role','notifications','notifications.me.**','self','',NULL,'read','allow',${T0},${T0}),
+ (${q(seedRuleId(900_003))},'everyone','role','notifications','notifications.me.**','self','',NULL,'write','allow',${T0},${T0}),
+ (${q(seedRuleId(900_004))},'everyone','role','notifications','notifications.markAllRead','all','',NULL,NULL,'allow',${T0},${T0});`);
 emit(`INSERT INTO policy (key,value_json,updated_at) VALUES\n ('manifest',${q(JSON.stringify(DEFAULT_POLICY))},${T0});`);
 emit(`INSERT INTO users (uuid,email,role,status,employee_id,created_at,updated_at) VALUES
  ('2rn42k33dszrc','super@example.com','super_admin','active','00000000033kg',${T0},${T0}),
@@ -164,13 +166,18 @@ emit("INSERT INTO leave_types (uuid,code,name,accrual_days_per_year,paid,created
 emit(LT.map((t) => ` (${q(t.uuid)},${q(t.code)},${q(t.name)},${t.accr},${t.name === "Unpaid" ? 0 : 1},${T0},${T0})`).join(",\n") + ";");
 
 const ymd = (ms: number) => Math.floor(ms / DAY) * DAY;
+// name, kind, date, location (null = company-wide), half_day. The last two rows exercise the regional and
+// half-day cases the page draws differently, so a dev seed shows them without hand-editing rows.
 const HOL = [
-  ["New Year","fixed",Date.UTC(2026, 0, 1)],["Republic Day","fixed",Date.UTC(2026, 0, 26)],["Holi","optional",Date.UTC(2026, 2, 4)],
-  ["Good Friday","optional",Date.UTC(2026, 3, 3)],["Independence Day","fixed",Date.UTC(2026, 7, 15)],["Gandhi Jayanti","fixed",Date.UTC(2026, 9, 2)],
-  ["Diwali","fixed",Date.UTC(2026, 10, 8)],["Christmas","fixed",Date.UTC(2026, 11, 25)],
+  ["New Year","fixed",Date.UTC(2026, 0, 1),null,0],["Republic Day","fixed",Date.UTC(2026, 0, 26),null,0],
+  ["Holi","optional",Date.UTC(2026, 2, 4),null,0],["Good Friday","optional",Date.UTC(2026, 3, 3),null,0],
+  ["Independence Day","fixed",Date.UTC(2026, 7, 15),null,0],["Gandhi Jayanti","fixed",Date.UTC(2026, 9, 2),null,0],
+  ["Diwali","fixed",Date.UTC(2026, 10, 8),null,0],["Christmas","fixed",Date.UTC(2026, 11, 25),null,0],
+  ["Maharashtra Day","fixed",Date.UTC(2026, 4, 1),"Mumbai",0],
+  ["Christmas Eve","fixed",Date.UTC(2026, 11, 24),null,1],
 ] as const;
-emit("INSERT INTO holidays (uuid,code,date,name,kind,created_at,updated_at) VALUES");
-emit(HOL.map(([n, k, d], i) => ` (${q(nid())},${q((i + 10).toString(36))},${d},${q(n)},${q(k)},${T0},${T0})`).join(",\n") + ";");
+emit("INSERT INTO holidays (uuid,code,date,name,kind,location,half_day,created_at,updated_at) VALUES");
+emit(HOL.map(([n, k, d, loc, half], i) => ` (${q(nid())},${q((i + 10).toString(36))},${d},${q(n)},${q(k)},${loc === null ? "NULL" : q(loc)},${half},${T0},${T0})`).join(",\n") + ";");
 
 const RC = [
   { uuid: nid(), code: "0a", name: "Travel" }, { uuid: nid(), code: "0b", name: "Meals" },
@@ -181,17 +188,24 @@ emit(RC.map((c) => ` (${q(c.uuid)},${q(c.code)},${q(c.name)},${c.name === "Trave
 
 // compliance events (kept from the prior seed - good calendar demo)
 emit(`INSERT INTO compliance_events (uuid,code,title,category,frequency,due_date,period_label,status,filed_date,reference,assignee_id,notes,created_at,updated_at) VALUES
- ('cmpev1a2b3c4d','0a','TDS deposit (May 2026)','Income Tax (TDS)','monthly',1780790400000,'May 2026','filed',1780617600000,'ITNS281-0001',NULL,'Monthly TDS challan',${T0},${T0}),
+ ('cmpev1a2b3c4c','0a','TDS deposit (May 2026)','Income Tax (TDS)','monthly',1780790400000,'May 2026','filed',1780617600000,'ITNS281-0001',NULL,'Monthly TDS challan',${T0},${T0}),
  ('cmpev2b3c4d5e','0b','Professional Tax (May 2026)','Professional Tax','monthly',1782000000000,'May 2026','pending',NULL,NULL,NULL,NULL,${T0},${T0}),
- ('cmpev3c4d5e6f','0c','GST GSTR-3B (May 2026)','GST','monthly',1781913600000,'May 2026','filed',1781740800000,'AA0726000001',NULL,NULL,${T0},${T0}),
+ ('cmpev3c4d5e6e','0c','GST GSTR-3B (May 2026)','GST','monthly',1781913600000,'May 2026','filed',1781740800000,'AA0726000001',NULL,NULL,${T0},${T0}),
  ('cmpev4d5e6f7g','0d','PF (EPF) contribution (Jun 2026)','EPFO','monthly',1784073600000,'Jun 2026','pending',NULL,NULL,NULL,NULL,${T0},${T0}),
- ('cmpev5e6f7g8h','0e','TDS deposit (Jun 2026)','Income Tax (TDS)','monthly',1783382400000,'Jun 2026','pending',NULL,NULL,NULL,NULL,${T0},${T0}),
+ ('cmpev5e6f7g8g','0e','TDS deposit (Jun 2026)','Income Tax (TDS)','monthly',1783382400000,'Jun 2026','pending',NULL,NULL,NULL,NULL,${T0},${T0}),
  ('cmpev6f7g8h9j','0f','Annual Return (FY 2025-26)','MCA / Registrar','annual',1790726400000,'FY 2025-26','pending',NULL,NULL,NULL,NULL,${T0},${T0});`);
 
 // --- Activity ------------------------------------------------------------------------------------------------
 const ownSeq: Record<string, number> = {};
 const ocode = (empCode: string) => `${empCode}-${String((ownSeq[empCode] = (ownSeq[empCode] ?? 0) + 1)).padStart(3, "0")}`;
 const userOf: Record<string, string> = { "28n3tk2zdszr4": "2wn44k34dszre", "2gn3yk31dszr8": "30n46k35dszrg" }; // decider user ids
+
+// One OPEN position per employee (effective_to NULL = current), which is also where the app reads someone's
+// work LOCATION from - so the seeded regional holiday ("Maharashtra Day", Mumbai) is a day off for the Mumbai
+// third of the company and a normal working day for the rest.
+const OFFICES = ["Mumbai", "Bengaluru", "Delhi"];
+emit("INSERT INTO positions (uuid,code,employee_id,job_title,department_id,location,effective_from,created_at,updated_at) VALUES");
+emit(employees.map((e, i) => ` (${q(nid())},${q(ocode(e.code))},${q(e.uuid)},${q(e.title)},${q(e.deptUuid)},${q(OFFICES[i % OFFICES.length]!)},${e.start},${T0},${T0})`).join(",\n") + ";");
 
 // Leave balances: every employee gets a balance row per paid leave type.
 const lbRows: string[] = [];
@@ -288,13 +302,15 @@ const exRows = [
 emit(`INSERT INTO expenses (${EXP_COLS}) VALUES`);
 emit(exRows.join(",\n") + ";");
 
+// The monthly caps repeat (the cron opens each next month at the same amount); the annual one is set by hand
+// each year, so it does not.
 const BUD = [
-  { code: "0a", dept: null, cat: EC[2]!.uuid, pt: "monthly", pk: "2026-06", amt: 200000 },
-  { code: "0b", dept: finDept, cat: EC[0]!.uuid, pt: "monthly", pk: "2026-06", amt: 500000 },
-  { code: "0c", dept: null, cat: null, pt: "yearly", pk: "2026", amt: 5000000 },
+  { code: "0a", dept: null, cat: EC[2]!.uuid, pt: "monthly", pk: "2026-06", amt: 200000, rec: 1 },
+  { code: "0b", dept: finDept, cat: EC[0]!.uuid, pt: "monthly", pk: "2026-06", amt: 500000, rec: 1 },
+  { code: "0c", dept: null, cat: null, pt: "yearly", pk: "2026", amt: 5000000, rec: 0 },
 ];
-emit("INSERT INTO expense_budgets (uuid,code,department_id,category_id,period_type,period_key,amount,alert_level,created_at,updated_at) VALUES");
-emit(BUD.map((x) => ` (${q(nid())},${q(x.code)},${x.dept ? q(x.dept) : "NULL"},${x.cat ? q(x.cat) : "NULL"},${q(x.pt)},${q(x.pk)},${x.amt},0,${T0},${T0})`).join(",\n") + ";");
+emit("INSERT INTO expense_budgets (uuid,code,department_id,category_id,period_type,period_key,amount,recurring,alert_level,created_at,updated_at) VALUES");
+emit(BUD.map((x) => ` (${q(nid())},${q(x.code)},${x.dept ? q(x.dept) : "NULL"},${x.cat ? q(x.cat) : "NULL"},${q(x.pt)},${q(x.pk)},${x.amt},${x.rec},0,${T0},${T0})`).join(",\n") + ";");
 
 // Kudos: ~35 peer recognitions.
 const VALUES = ["Teamwork","Ownership","Customer First","Craft","Integrity"];

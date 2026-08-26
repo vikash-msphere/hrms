@@ -13,7 +13,11 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitives.Viewport
     ref={ref}
     className={cn(
-      "fixed bottom-0 right-0 z-[100] flex max-h-screen w-full flex-col gap-2 p-4 sm:max-w-[400px]",
+      // On a phone the toast stack has to clear the fixed bottom nav (and the home indicator below it),
+      // otherwise every confirmation lands on top of the navigation - the one strip that must stay tappable.
+      // From `md` up there is no bottom bar, so it returns to the corner.
+      // The side insets are the landscape notch: a full-width stack would otherwise start under it.
+      "fixed inset-x-0 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-[100] flex max-h-screen w-full flex-col gap-2 p-4 pl-[calc(1rem+env(safe-area-inset-left))] pr-[calc(1rem+env(safe-area-inset-right))] md:inset-x-auto md:bottom-0 md:right-0 md:max-w-[400px]",
       className
     )}
     {...props}
@@ -22,7 +26,11 @@ const ToastViewport = React.forwardRef<
 ToastViewport.displayName = ToastPrimitives.Viewport.displayName;
 
 const toastVariants = cva(
-  "group pointer-events-auto relative flex w-full items-start gap-3 overflow-hidden rounded-lg border bg-card p-4 pr-8 shadow-lg transition-all data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-80 data-[state=open]:slide-in-from-bottom-full data-[state=closed]:slide-out-to-right-full",
+  // The data-[swipe] set makes the card follow the finger and leave along the axis it was pushed. Radix only
+  // publishes the offset for the axis in use, so both translations read their own var with a 0 fallback -
+  // which lets the swipe direction differ by breakpoint (down on a phone, right on a desktop; see toaster.tsx)
+  // without the classes having to change with it.
+  "group pointer-events-auto relative flex w-full items-start gap-3 overflow-hidden rounded-lg border bg-card p-4 pr-8 shadow-lg transition-all data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-80 data-[state=open]:slide-in-from-bottom-full data-[state=closed]:slide-out-to-right-full data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x,0px)] data-[swipe=move]:translate-y-[var(--radix-toast-swipe-move-y,0px)] data-[swipe=move]:transition-none data-[swipe=cancel]:translate-x-0 data-[swipe=cancel]:translate-y-0 data-[swipe=end]:animate-out",
   {
     variants: {
       variant: {
@@ -51,7 +59,11 @@ const ToastClose = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Close
     ref={ref}
-    className={cn("absolute right-2 top-2 rounded-md p-1 text-muted-foreground opacity-60 transition-opacity hover:opacity-100", className)}
+    className={cn(
+      // A toast is transient, so its dismiss has to be hit first time - the glyph stays 16px, the box grows.
+      "absolute right-1 top-1 flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground opacity-60 transition-opacity hover:opacity-100 coarse:h-11 coarse:w-11",
+      className,
+    )}
     toast-close=""
     {...props}
   >

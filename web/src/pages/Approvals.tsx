@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMemo, useState } from "react";
-import { CalendarCheck, ReceiptText, Hourglass, House, Check, X, CheckCheck, ExternalLink, Clock, Coins, Banknote, Timer, Inbox, Users, History, Landmark, type LucideIcon } from "lucide-react";
+import { CalendarCheck, ReceiptText, Hourglass, House, Check, X, CheckCheck, ExternalLink, Clock, Coins, Banknote, Timer, Inbox, Users, History, Landmark, Wallet, Laptop, type LucideIcon } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { navigate } from "@/router";
 import { useApprovals, APPROVAL_COLLECTIONS } from "@/lib/approvals";
@@ -11,9 +11,13 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { resourceRoute } from "@/lib/resourceRoute";
 import { EmptyState } from "@/components/common/EmptyState";
+import { CardsSkeleton } from "@/components/common/Skeletons";
+import { DataState } from "@/components/common/DataState";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { useKpiFocus } from "@/lib/kpiFocus";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { AccessAction } from "@/components/access/AccessAction";
+import { usePermission } from "@/lib/perm";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -24,196 +28,20 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
-import type { Employee, LeaveRequest, LeaveType, LeaveBalance, ReimbursementCategory, Project, Me, Reimbursement, OvertimeRequest, RemoteWorkRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry } from "@/types";
+import type { Employee, LeaveRequest, LeaveType, LeaveBalance, ReimbursementCategory, Project, Me, Reimbursement, OvertimeRequest, RemoteWorkRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetCategory, AssetRequest } from "@/types";
 import type { ApprovalsBuckets, TaxVerification } from "@/lib/approvals";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
-
-// The minimum shape every approvable row shares: an id/etag and the per-object verb hints the server attaches.
-type Approvable = { path: string; etag?: string; create_time?: string; update_time?: string; access?: { can?: string[] } };
+import { leaveDecisionContext, leaveSummary } from "@/lib/leaveApproval";
+import { ApprovalRow, DecidedBadge, RejectDialog, waitingDays, waitingLabel, type Approvable, type RejectTarget } from "@/components/common/ApprovalRow";
 
 // A single inbox tab. `summary`/`context` erase to accept the heterogeneous union; the group() factory below
 // preserves each tab's concrete row type at the call site so a renamed/removed field fails the typecheck.
+// A request waiting this long is the one to decide first - the strip calls it out and can filter to it.
+const AGING_DAYS = 7;
+
 type GroupDef = { key: string; label: string; icon: LucideIcon; collection: string; items: Approvable[]; summary: (r: Approvable) => React.ReactNode; context?: (r: Approvable) => React.ReactNode };
 function group<T extends Approvable>(g: { key: string; label: string; icon: LucideIcon; collection: string; items: T[]; summary: (r: T) => React.ReactNode; context?: (r: T) => React.ReactNode }): GroupDef {
   return g as unknown as GroupDef;
-}
-
-// Each request type lives on its own page; "Open" jumps there from the unified inbox.
-
-// Collections whose :reject verb accepts an optional `note` in the body (relayed to the requester).
-const REJECT_NOTE = new Set(["overtime-requests", "remote-work-requests"]);
-
-// How long a request has been sitting in the inbox, from its create time.
-const waitingDays = (t?: string) => (t ? Math.max(0, Math.floor((Date.now() - +new Date(t)) / 86_400_000)) : 0);
-const waitingLabel = (d: number) => (d === 0 ? "Today" : d === 1 ? "1 day" : `${d} days`);
-
-// A single pending item: who raised it, a one-line summary, decision context, and inline approve/reject.
-// Buttons follow the row's own `access.can` so this respects per-object ACLs exactly like each source page does.
-function ApprovalRow({
-  collection,
-  row,
-  employeeId,
-  name,
-  photo,
-  summary,
-  context,
-  kind,
-  decidedState,
-  onApproved,
-  onRejectClick,
-  checked,
-  onCheckedChange,
-}: {
-  collection: string;
-  row: Approvable;
-  employeeId?: string;
-  name: string;
-  photo?: string;
-  summary: React.ReactNode;
-  // Extra decision context (balance, overlaps, the requester's reason) so the approver can decide here.
-  context?: React.ReactNode;
-  // Type chip shown on the merged "All" stream, where rows of different kinds interleave.
-  kind?: { label: string; icon: LucideIcon };
-  // History mode: the terminal state to badge (approved/rejected/…); no action buttons, no waiting label.
-  decidedState?: string;
-  onApproved: (path: string) => void;
-  onRejectClick: () => void;
-  // Multi-select for bulk approve/reject (pending mode only). Undefined = row not selectable.
-  checked?: boolean;
-  onCheckedChange?: () => void;
-}) {
-  const { toast } = useToast();
-  const [busy, setBusy] = useState(false);
-  const can = row.access?.can ?? [];
-  const ref = { collection, objectPath: row.path, can };
-  const waited = waitingDays(row.create_time);
-  async function approve() {
-    setBusy(true);
-    try {
-      await invoke(`${collection}/${idOf(row.path)}`, "approve", row.etag);
-      toast({ title: "Approved", variant: "success" });
-      onApproved(row.path);
-    } catch (e) {
-      toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-      {onCheckedChange && (
-        <Checkbox checked={checked} onCheckedChange={onCheckedChange} aria-label={`Select ${name}'s request`} className="shrink-0" />
-      )}
-      <PhotoAvatar employeeId={employeeId ?? ""} name={name} photo={photo} className="h-9 w-9 shrink-0" />
-      <div className="min-w-0 flex-1">
-        <p className="flex items-center gap-2 truncate text-sm font-medium">
-          {name}
-          {kind && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-px text-[11px] font-normal text-muted-foreground">
-              <kind.icon className="h-3 w-3" /> {kind.label}
-            </span>
-          )}
-        </p>
-        <p className="truncate text-sm text-muted-foreground">{summary}</p>
-        {context && <p className="truncate text-xs text-muted-foreground">{context}</p>}
-      </div>
-      {decidedState ? (
-        <DecidedBadge state={decidedState} />
-      ) : (
-        <span
-          className={`hidden shrink-0 text-xs sm:block ${waited >= 7 ? "font-medium text-warning" : "text-muted-foreground"}`}
-          title={row.create_time ? `Requested ${formatDate(row.create_time)}` : undefined}
-        >
-          {waited === 0 ? "Today" : `Waiting ${waitingLabel(waited)}`}
-        </span>
-      )}
-      <div className="flex shrink-0 items-center gap-1.5">
-        <RowActivityButton resource={row.path} />
-        {resourceRoute(collection) && (
-          <Button size="sm" variant="ghost" onClick={() => navigate(resourceRoute(collection)!)} title="Open the source page">
-            <ExternalLink className="h-4 w-4" /> Open
-          </Button>
-        )}
-        {!decidedState && can.includes("approve") && (
-          <AccessAction {...ref} verb="approve" label="Approve">
-            <Button size="sm" variant="success" loading={busy} onClick={approve}><Check className="h-4 w-4" /> Approve</Button>
-          </AccessAction>
-        )}
-        {!decidedState && can.includes("reject") && (
-          <AccessAction {...ref} verb="reject" label="Reject">
-            <Button size="sm" variant="outline" disabled={busy} onClick={onRejectClick}><X className="h-4 w-4" /> Reject</Button>
-          </AccessAction>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Terminal-state badge for the history view (approved/rejected/cancelled/other).
-function DecidedBadge({ state }: { state: string }) {
-  const s = state.toUpperCase();
-  const variant = s === "APPROVED" || s === "DISBURSED" || s === "CLOSED" ? "success" : s === "REJECTED" ? "destructive" : "muted";
-  const label = s.charAt(0) + s.slice(1).toLowerCase();
-  return <Badge variant={variant} className="shrink-0">{label}</Badge>;
-}
-
-// What the reject dialog is acting on.
-type RejectTarget = { collection: string; row: Approvable; name: string; summary: React.ReactNode };
-
-// Reject confirmation: prevents the accidental one-click reject and, where the API supports it, carries an
-// optional note back to the requester explaining why.
-function RejectDialog({ target, onClose, onRejected }: { target: RejectTarget | null; onClose: () => void; onRejected: (path: string) => void }) {
-  const { toast } = useToast();
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const supportsNote = !!target && REJECT_NOTE.has(target.collection);
-  async function reject() {
-    if (!target) return;
-    setBusy(true);
-    try {
-      await invoke(`${target.collection}/${idOf(target.row.path)}`, "reject", target.row.etag, supportsNote && note.trim() ? { note: note.trim() } : undefined);
-      toast({ title: "Rejected", variant: "success" });
-      onRejected(target.row.path);
-      onClose();
-    } catch (e) {
-      toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Dialog open={!!target} onOpenChange={(o) => { if (!o && !busy) { setNote(""); onClose(); } }}>
-      <DialogContent
-        className="max-w-md"
-        onKeyDown={(e) => {
-          // Enter rejects unless typing in the note (where Enter should make a new line).
-          if (e.key === "Enter" && !(e.target instanceof HTMLTextAreaElement)) {
-            e.preventDefault();
-            if (!busy) void reject();
-          }
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>Reject this request?</DialogTitle>
-          <DialogDescription>
-            {target?.name}
-            {target?.summary ? <> · {target.summary}</> : null}
-          </DialogDescription>
-        </DialogHeader>
-        {supportsNote && (
-          <Textarea
-            autoFocus
-            placeholder="Reason for rejecting (optional, shared with the requester)"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        )}
-        <DialogFooter>
-          <Button variant="outline" disabled={busy} onClick={() => { setNote(""); onClose(); }}>Keep pending</Button>
-          <Button variant="destructive" loading={busy} onClick={reject}><X className="h-4 w-4" /> Reject request</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 // Prior-employer tax declarations awaiting verification. A bespoke queue (not a collection), so it renders as
@@ -223,6 +51,10 @@ function RejectDialog({ target, onClose, onRejected }: { target: RejectTarget | 
 function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]; money: (n: number) => string; onDone: () => void }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState<string | null>(null);
+  // The decision is a PATCH of employees/<id>/tax, so that is the capability it needs. Reading the queue and
+  // deciding on it are separate grants: a reader who cannot write the sub-resource gets the list without the
+  // two buttons, rather than buttons that can only 403.
+  const canDecide = usePermission("employees.tax.write");
   async function decide(v: TaxVerification, action: "verify" | "reject") {
     setBusy(v.employee + action);
     try {
@@ -237,7 +69,7 @@ function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]
   }
   return (
     <Card className="mb-4">
-      <CardContent className="pt-6">
+      <CardContent className="pt-4 sm:pt-6">
         <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
           <Landmark className="h-4 w-4 text-primary" /> Tax verifications
           <Badge variant="secondary">{rows.length}</Badge>
@@ -250,10 +82,14 @@ function TaxVerificationsCard({ rows, money, onDone }: { rows: TaxVerification[]
                 <p className="font-medium">{v.employee_name}</p>
                 <p className="text-xs text-muted-foreground">Income {money(v.prior_employer_income)} · TDS {money(v.prior_employer_tds)}</p>
               </div>
-              <div className="flex items-center gap-1.5">
-                <Button size="sm" variant="outline" loading={busy === v.employee + "verify"} disabled={!!busy} onClick={() => decide(v, "verify")}><Check className="h-4 w-4" /> Verify</Button>
-                <Button size="sm" variant="ghost" className="text-destructive" disabled={!!busy} onClick={() => decide(v, "reject")}><X className="h-4 w-4" /> Reject</Button>
-              </div>
+              {canDecide && (
+                <div className="flex items-center gap-1.5">
+                  <AccessAction collection="employees" objectPath={v.employee} field="tax" label="Verify prior-employer tax">
+                    <Button size="sm" variant="outline" loading={busy === v.employee + "verify"} disabled={!!busy} onClick={() => decide(v, "verify")}><Check className="h-4 w-4" /> Verify</Button>
+                  </AccessAction>
+                  <Button size="sm" variant="ghost" className="text-destructive" disabled={!!busy} onClick={() => decide(v, "reject")}><X className="h-4 w-4" /> Reject</Button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -270,17 +106,25 @@ export default function Approvals({ me }: { me: Me }) {
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
 
-  const { rows: employees } = useCollection<Employee>("employees");
-  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
-  const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories");
-  const { rows: projects } = useCollection<Project>("projects");
-  // Decision context for leave: the requester's remaining balance and who else is already off in that window.
-  // Both are served scoped to what the caller may read, so these quietly stay blank for approvers without access.
-  const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
-  const { rows: allLeave } = useCollection<LeaveRequest>("leave-requests");
   // Pending items + a shared reload come from the session-wide provider, so approving here also updates the
   // sidebar count badge.
-  const { leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, taxVerifications, total, history, reload } = useApprovals();
+  const { leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, expenses, assetRequests, taxVerifications, total, history, reload, loading, error } = useApprovals();
+
+  // Reference lists exist to LABEL rows, so each one waits for a row of its own kind to be in the inbox (or in
+  // the decided history, which the same buckets carry). An inbox holding two leave requests reads leave types -
+  // not reimbursement categories, projects and asset categories as well. An empty inbox reads nothing at all.
+  const anyOf = (kind: keyof typeof history) => (history[kind]?.length ?? 0) > 0;
+  const hasLeave = leaves.length > 0 || anyOf("leaves");
+  const { rows: employees } = useCollection<Employee>("employees", { enabled: total > 0 || Object.values(history).some((b) => b.length > 0) });
+  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: hasLeave || encashments.length > 0 || anyOf("encashments") });
+  const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories", { enabled: reimbs.length > 0 || anyOf("reimbs") });
+  const { rows: projects } = useCollection<Project>("projects", { enabled: timeEntries.length > 0 || anyOf("timeEntries") });
+  const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories", { enabled: assetRequests.length > 0 || anyOf("assetRequests") });
+  // Decision context for leave: the requester's remaining balance and who else is already off in that window.
+  // Both are served scoped to what the caller may read, so these quietly stay blank for approvers without
+  // access - and are read only when there is a leave decision to make.
+  const { rows: balances } = useCollection<LeaveBalance>("leave-balances", { enabled: hasLeave });
+  const { rows: allLeave } = useCollection<LeaveRequest>("leave-requests", { enabled: hasLeave });
 
   // Pending inbox vs the decided-history audit trail. Toggled at the top; the "All" merged stream + per-type
   // tabs render for whichever set is active.
@@ -311,63 +155,43 @@ export default function Approvals({ me }: { me: Me }) {
     const m = new Map(projects.map((p) => [idOf(p.path), p.name]));
     return (p?: string) => (p ? m.get(idOf(p)) ?? p : undefined);
   }, [projects]);
+  const assetCatName = useMemo(() => {
+    const m = new Map(assetCategories.map((c) => [idOf(c.path), c.display_name]));
+    return (p?: string) => (p ? m.get(idOf(p)) ?? "Asset" : "Asset");
+  }, [assetCategories]);
 
   const personOf = (p?: string) => {
     const e = emp(p);
     return { employeeId: p ? idOf(p) : undefined, name: e ? `${e.first_name} ${e.last_name}` : "Someone", photo: e?.photo };
   };
 
-  // Remaining balance for the requested leave type, when the caller may read it.
-  const balanceOf = (r: LeaveRequest): number | undefined =>
-    r.employee && r.leave_type
-      ? balances.find((b) => b.employee && b.leave_type && idOf(b.employee) === idOf(r.employee!) && idOf(b.leave_type) === idOf(r.leave_type!))?.balance_days
-      : undefined;
-  // How many OTHER people already have approved leave overlapping this request's dates.
-  const overlapOf = (r: LeaveRequest): number => {
-    const others = new Set<string>();
-    for (const l of allLeave) {
-      if (l.path === r.path || !l.employee || (l.state ?? "").toUpperCase() !== "APPROVED") continue;
-      if (r.employee && idOf(l.employee) === idOf(r.employee)) continue;
-      if (l.start_date <= r.end_date && l.end_date >= r.start_date) others.add(idOf(l.employee));
-    }
-    return others.size;
-  };
-  // Balance + overlap + the requester's own reason, joined as one muted context line under the summary.
-  const leaveContext = (r: LeaveRequest): React.ReactNode => {
-    const parts: React.ReactNode[] = [];
-    const bal = balanceOf(r);
-    if (bal != null)
-      parts.push(
-        bal < r.days
-          ? <span key="bal" className="font-medium text-destructive">Balance {bal}d - not enough for {r.days}d</span>
-          : <span key="bal">Balance after: {Math.round((bal - r.days) * 10) / 10}d</span>,
-      );
-    const overlap = overlapOf(r);
-    if (overlap > 0) parts.push(<span key="ov" className="font-medium text-warning">{overlap} {overlap === 1 ? "person is" : "people are"} already off then</span>);
-    if (r.reason?.trim()) parts.push(<span key="why">"{r.reason.trim()}"</span>);
-    if (parts.length === 0) return undefined;
-    return parts.map((p, i) => (
-      <React.Fragment key={i}>{i > 0 && <span aria-hidden> · </span>}{p}</React.Fragment>
-    ));
-  };
+  // Balance / overlap / reason - the decision aid, shared with the Leaves page's own pending band.
+  const leaveContext = (r: LeaveRequest): React.ReactNode => leaveDecisionContext(r, balances, allLeave);
 
+  // Pending items, oldest submission first, minus anything decided in this session.
   const bySubmitTime = <T extends Approvable>(rows: T[]) =>
     rows.filter((r) => !decided.has(r.path)).sort((a, b) => (a.create_time ?? "").localeCompare(b.create_time ?? ""));
 
-  // Per-type one-line summaries, pulled out as typed consts so the pending inbox AND the history trail share
-  // the exact same rendering (each keeps `r` typed to its row type, so a renamed field fails the typecheck).
   const sumReg = (r: AttendanceRegularization) => {
     const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const times = r.sessions.length === 0 ? "remove punches" : r.sessions.map((s) => `${t(s.clock_in)}–${t(s.clock_out)}`).join(", ");
     return `${formatDate(r.date)} · ${times}${r.reason ? ` · ${r.reason}` : ""}`;
   };
-  const sumLeave = (r: LeaveRequest) => `${typeName(r.leave_type)} · ${formatDate(r.start_date)} – ${formatDate(r.end_date)} · ${r.days} day${r.days === 1 ? "" : "s"}`;
+  const sumLeave = (r: LeaveRequest) => leaveSummary(r, (ref) => typeName(ref) ?? "Leave");
   const sumReimb = (r: Reimbursement) => `${money(r.amount)}${r.category ? ` · ${catName(r.category)}` : ""}${r.description ? ` · ${r.description}` : ""}`;
   const sumOt = (r: OvertimeRequest) => `${formatDate(r.date)} · ${Math.round(r.minutes / 6) / 10}h${r.reason ? ` · ${r.reason}` : ""}`;
   const sumRemote = (r: RemoteWorkRequest) => `${formatDate(r.start_date)} – ${formatDate(r.end_date)} · ${r.days} day${r.days === 1 ? "" : "s"}${r.reason ? ` · ${r.reason}` : ""}`;
   const sumEncash = (r: LeaveEncashment) => `${typeName(r.leave_type)} · ${r.days} day${r.days === 1 ? "" : "s"}${r.amount != null ? ` · ${money(r.amount)}` : ""}`;
   const sumLoan = (r: Loan) => `${r.kind === "advance" ? "Advance" : "Loan"} · ${money(r.principal)} · ${r.installments} installment${r.installments === 1 ? "" : "s"}${r.reason ? ` · ${r.reason}` : ""}`;
   const sumTime = (r: TimeEntry) => `${projName(r.project) ?? "Project"}${r.date ? ` · ${formatDate(r.date)}` : ""} · ${r.hours}h${r.description ? ` · ${r.description}` : ""}`;
+  // An asset request is decided on what kind of thing is wanted, by when, and why - the specific machine is
+  // picked later, at hand-over.
+  const sumAssetReq = (r: AssetRequest) =>
+    `${assetCatName(r.category)}${r.needed_by ? ` · needed by ${formatDate(r.needed_by)}` : ""}${r.justification ? ` · ${r.justification}` : ""}`;
+  // Company expenses read off the row alone - resolving vendor/category names would cost two more collection
+  // reads on a page that already fetches seven, and the amount + note is what the decision turns on.
+  const sumExpense = (r: Expense) =>
+    `${money(r.amount)}${r.reimbursable ? " · employee-fronted" : ""}${r.description ? ` · ${r.description}` : ""}${r.invoice_number ? ` · invoice ${r.invoice_number}` : ""}${r.has_invoice ? "" : " · no invoice attached"}`;
 
   // One tab per request type, in priority order. Pending items are oldest-first (clear the longest waits
   // first); the history buckets arrive newest-decided first. Only non-empty tabs render. `leaveContext` (the
@@ -383,14 +207,26 @@ export default function Approvals({ me }: { me: Me }) {
       group({ key: "encashment", label: "Leave encashment", icon: Coins, collection: "leave-encashments", items: items(b.encashments), summary: sumEncash }),
       group({ key: "loan", label: "Loans & advances", icon: Banknote, collection: "loans", items: items(b.loans), summary: sumLoan }),
       group({ key: "timesheet", label: "Timesheets", icon: Timer, collection: "time-entries", items: items(b.timeEntries), summary: sumTime }),
+      group({ key: "expense", label: "Company expenses", icon: Wallet, collection: "expenses", items: items(b.expenses), summary: sumExpense }),
+      group({ key: "asset-request", label: "Asset requests", icon: Laptop, collection: "asset-requests", items: items(b.assetRequests), summary: sumAssetReq }),
     ];
   };
   const isHistory = mode === "history";
-  const groups = isHistory
+  const allGroups = isHistory
     ? buildGroups(history, true)
-    : buildGroups({ leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries }, false);
+    : buildGroups({ leaves, reimbs, overtimes, remotes, regularizations, encashments, loans, timeEntries, expenses, assetRequests }, false);
+  // Metrics count the whole queue; the tabs below show whichever slice a metric has been clicked into, so the
+  // numbers never move under the reader as they narrow.
+  const queue = allGroups.flatMap((g) => g.items);
+  const kf = useKpiFocus<Approvable, "aging" | "mine" | "today">({
+    aging: { label: `requests waiting over ${AGING_DAYS} days`, match: (r) => waitingDays(r.create_time) >= AGING_DAYS },
+    mine: { label: "requests you can decide", match: (r) => (r.access?.can ?? []).some((v) => v === "approve" || v === "reject") },
+    today: { label: "requests submitted today", match: (r) => waitingDays(r.create_time) === 0 },
+  });
+  const groups = kf.focus && !isHistory ? allGroups.map((g) => ({ ...g, items: kf.apply(g.items) })) : allGroups;
   const activeGroups = groups.filter((g) => g.items.length > 0);
   const visibleTotal = activeGroups.reduce((n, g) => n + g.items.length, 0);
+  const queueTotal = queue.length;
   const historyTotal = Object.values(history).reduce((n, arr) => n + arr.length, 0);
 
   // The merged queue behind the "All" stream: every visible item across types, tagged with its group. Pending
@@ -465,10 +301,14 @@ export default function Approvals({ me }: { me: Me }) {
     }
   }
 
-  const oldestWait = merged.length ? waitingDays(merged[0]!.r.create_time) : 0;
+  // Queue-wide (never focus-narrowed) figures behind the metric strip.
+  const oldestWait = queue.reduce((n, r) => Math.max(n, waitingDays(r.create_time)), 0);
+  const agingCount = queue.filter((r) => waitingDays(r.create_time) >= AGING_DAYS).length;
+  const todayCount = queue.filter((r) => waitingDays(r.create_time) === 0).length;
+  const decidableCount = queue.filter(canDecideRow).length;
   const requesterCount = (() => {
     const s = new Set<string>();
-    for (const { r } of merged) {
+    for (const r of queue) {
       const e = (r as { employee?: string }).employee;
       if (e) s.add(idOf(e));
     }
@@ -523,12 +363,12 @@ export default function Approvals({ me }: { me: Me }) {
       </TabsList>
       {showAll && (
         <TabsContent value="all">
-          <Card><CardContent className="divide-y pt-6">{merged.map(({ g, r }) => rowFor(g, r, true))}</CardContent></Card>
+          <Card><CardContent className="divide-y pt-4 sm:pt-6">{merged.map(({ g, r }) => rowFor(g, r, true))}</CardContent></Card>
         </TabsContent>
       )}
       {activeGroups.map((g) => (
         <TabsContent key={g.key} value={g.key}>
-          <Card><CardContent className="divide-y pt-6">{g.items.map((r) => rowFor(g, r, false))}</CardContent></Card>
+          <Card><CardContent className="divide-y pt-4 sm:pt-6">{g.items.map((r) => rowFor(g, r, false))}</CardContent></Card>
         </TabsContent>
       ))}
     </Tabs>
@@ -542,7 +382,15 @@ export default function Approvals({ me }: { me: Me }) {
       />
 
       <TruncationNotice collection={APPROVAL_COLLECTIONS} what="pending requests" className="mb-3" />
-      {total === 0 && historyTotal === 0 ? (
+      {/* "You're all caught up" is a claim a manager acts on, and a queue contributes no rows whether it is
+          empty, still arriving, or failed - three states that looked identical here. The wait is the shape of
+          the list that is coming; a failed read says so and offers a retry, because the one thing this page
+          must never do is report an empty inbox it could not actually read. */}
+      {loading && total === 0 && historyTotal === 0 ? (
+        <CardsSkeleton count={4} />
+      ) : error && total === 0 && historyTotal === 0 ? (
+        <DataState state="error" error={error} onRetry={reload}><div /></DataState>
+      ) : total === 0 && historyTotal === 0 ? (
         <EmptyState icon={CheckCheck} title="You're all caught up" illustration="allClear"
                 description="Nothing is waiting on your approval right now." />
       ) : (
@@ -563,22 +411,38 @@ export default function Approvals({ me }: { me: Me }) {
           </div>
 
           {mode === "pending" ? (
-            visibleTotal === 0 && taxVerifications.length === 0 ? (
+            queueTotal === 0 && taxVerifications.length === 0 ? (
               <EmptyState icon={CheckCheck} title="You're all caught up" description="All pending requests have been decided." />
             ) : (
               <>
                 {taxVerifications.length > 0 && <TaxVerificationsCard rows={taxVerifications} money={money} onDone={reload} />}
-                {visibleTotal > 0 && (
+                {queueTotal > 0 && (
                   <>
                     <SummaryStrip
                       items={[
-                        { label: "Awaiting your decision", value: visibleTotal, icon: Inbox, tone: "warning" },
-                        { label: "Longest waiting", value: waitingLabel(oldestWait), icon: Hourglass, tone: oldestWait >= 7 ? "warning" : "default", hint: oldestWait >= 7 ? "Getting stale - decide these first" : "Oldest request in the queue" },
-                        { label: "People waiting", value: requesterCount, icon: Users },
+                        { label: "Awaiting your decision", value: queueTotal, icon: Inbox, tone: "warning", hint: "the whole queue", onClick: () => { kf.clear(); setTab("all"); }, active: kf.focus === null },
+                        { label: "Longest waiting", value: waitingLabel(oldestWait), icon: Hourglass, tone: oldestWait >= AGING_DAYS ? "warning" : "default", hint: agingCount ? `${agingCount} over ${AGING_DAYS}d` : "oldest in the queue", ...(agingCount ? kf.kpi("aging") : {}) },
+                        ...(decidableCount && decidableCount < queueTotal
+                          ? [{ label: "Yours to decide", value: decidableCount, icon: CheckCheck, tone: "primary" as const, hint: "rest are read-only", ...kf.kpi("mine") }]
+                          : []),
+                        ...(todayCount ? [{ label: "Arrived today", value: todayCount, icon: Inbox, tone: "default" as const, hint: "raised today", ...kf.kpi("today") }] : []),
+                        // A distinct-person count over the same rows the first tile opens - there is no narrower
+                        // list behind it, so it stays a read-only figure rather than a filter that does nothing.
+                        { label: "People waiting", value: requesterCount, icon: Users, hint: requesterCount === 1 ? "one requester" : "distinct requesters" },
                       ]}
                     />
+                    {kf.focus && visibleTotal === 0 && (
+                      <p className="mb-4 rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                        No {kf.activeLabel}.{" "}
+                        <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={kf.clear}>Show the whole queue</button>
+                      </p>
+                    )}
                     {sel.size > 0 && (
-                      <div className="sticky top-2 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop">
+                      // `top-16`, not `top-2`: the app bar is `sticky top-0 h-14` at z-30, so a bar that
+                      // pins 8px from the top of the VIEWPORT pins underneath it - the selection count and
+                      // its Approve/Reject buttons slid out of sight the moment the list scrolled, which is
+                      // exactly when a bulk decision is being made. 4rem clears the bar with a small gap.
+                      <div className="sticky top-16 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop">
                         <span className="text-sm font-medium tabular-nums">{sel.size} selected</span>
                         <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSel(new Set())}>
                           Clear
@@ -597,7 +461,7 @@ export default function Approvals({ me }: { me: Me }) {
                         </Button>
                       </div>
                     )}
-                    {tabsBlock}
+                    {visibleTotal > 0 && tabsBlock}
                   </>
                 )}
               </>

@@ -36,11 +36,11 @@ const live = (deps: Deps): SQL =>
 // Per-object EXCEPTION rules for one request: the caller's USER exceptions AND any exact ROLE rules in this
 // collection whose match_code is an ANCESTOR of the requested object's code (the exact ancestor-code IN
 // narrowing - the second index). A share/deny on a leaf matches that exact code; one on a parent covers its
-// descendants; the engine then does the precise isUnder match. No SQL prefix/LIKE. Not cached: per-object,
-// tiny, index-only, and rare - the broad role grant is the cached part. Returns [] for the common no-row case.
-// One indexed read covers both subjects; the `(subject, subject_kind)` pairing keeps a role named like a uuid
-// (or vice-versa) from cross-loading the other kind's rows. NULL-match_code broad role rows never match (NULL
-// is not IN any set), so this never re-pulls the cached grant.
+// descendants; the engine then does the precise isUnder match. No SQL prefix/LIKE. Sliced out of the caller's
+// cached per-object rule set (objectRulesFor, below) rather than read per request. Returns [] for the common
+// no-row case. The `(subject, subject_kind)` pairing there keeps a role named like a uuid (or vice-versa) from
+// cross-loading the other kind's rows, and NULL-match_code broad role rows are excluded, so this never
+// re-pulls the cached grant.
 export async function loadObjectRulesForRequest(
   deps: Deps,
   userUuid: string,
@@ -49,6 +49,27 @@ export async function loadObjectRulesForRequest(
   ancestorCodes: string[],
 ): Promise<CompiledRule[]> {
   if (ancestorCodes.length === 0) return [];
+  const codes = new Set(ancestorCodes);
+  return (await objectRulesFor(deps, userUuid, roles)).filter(
+    (r) => (r.namespace === collection || r.namespace === "*") && r.matchCode !== null && codes.has(r.matchCode),
+  );
+}
+
+// ---- The caller's per-object rules, once per caller ---------------------------------------------------------
+// Every per-object lane above and below - the item path's rule merge, a list's shares/denies, the fan-out
+// transports' per-collection exceptions - wants a DIFFERENT slice of the SAME tiny row set: the match-coded
+// rules whose subject is this caller or one of their roles. Asked per slice, that was an indexed read on every
+// item request AND every list request, for a row set that is usually empty and always small (a caller's ACL
+// shares, not the org's).
+//
+// So it is loaded once per caller and sliced in memory, cached exactly like the broad grant next to it: same
+// TTL, same correctness contract (a pure reduction of the same rows - a cold isolate computes the identical
+// verdict), same busting (any rule write clears the band, see services/accessRules.ts). The liveness predicate
+// is applied AFTER the cache, because expiry is time-dependent: an expiring share must stop deciding the
+// moment it lapses, not when the entry does.
+type StoredObjectRule = CompiledRule & { status: string | null; expiresAt: Date | null };
+
+async function objectRulesUncached(deps: Deps, userUuid: string, roles: string[]): Promise<StoredObjectRule[]> {
   return (await deps.db
     .select({
       namespace: schema.accessRules.namespace,
@@ -58,6 +79,8 @@ export async function loadObjectRulesForRequest(
       matchCode: schema.accessRules.matchCode,
       level: schema.accessRules.level,
       effect: schema.accessRules.effect,
+      status: schema.accessRules.status,
+      expiresAt: schema.accessRules.expiresAt,
     })
     .from(schema.accessRules)
     .where(
@@ -66,11 +89,21 @@ export async function loadObjectRulesForRequest(
           and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user")),
           and(inArray(schema.accessRules.subject, roles), eq(schema.accessRules.subjectKind, "role")),
         ),
-        inArray(schema.accessRules.namespace, [collection, "*"]),
-        inArray(schema.accessRules.matchCode, ancestorCodes),
-        live(deps),
+        isNotNull(schema.accessRules.matchCode),
       ),
-    )) as CompiledRule[];
+    )) as StoredObjectRule[];
+}
+
+async function objectRulesFor(deps: Deps, userUuid: string, roles: string[]): Promise<StoredObjectRule[]> {
+  const rows = await cached(`objRules:${userUuid}:${[...roles].sort().join("|")}`, TTL_MS, () =>
+    objectRulesUncached(deps, userUuid, roles),
+  );
+  const now = deps.clock.now();
+  // Same predicate as `live()`, applied in memory: a `pending` rule is inert, a `pending_delete` one still
+  // enforces, and a lapsed one decides nothing.
+  return rows.filter(
+    (r) => (r.status === "active" || r.status === "pending_delete") && (r.expiresAt === null || +new Date(r.expiresAt) > +now),
+  );
 }
 
 const TTL_MS = 5000; // ~5s: read-mostly authority; an edit reflects within this window (accepted lag).
@@ -128,35 +161,22 @@ export async function loadRoleGrantUncached(deps: Deps, role: string): Promise<G
 }
 
 // The caller's per-object exception codes for a collection, split into shares (allow) and denies, for the
-// LIST predicate. Covers the caller's USER exceptions AND any exact ROLE rules (both per-object). One indexed
-// read; match_code is the object code (exact codes only - applyScope binds them with IN / NOT IN, no SQL
-// prefix). `match_code IS NOT NULL` keeps the broad scope role rows out of this list query. Returns empty
-// arrays for the common no-row case.
+// LIST predicate. Covers the caller's USER exceptions AND any exact ROLE rules (both per-object). Sliced out
+// of the caller's cached per-object rule set, so a list request pays no read for it; match_code is the object
+// code (exact codes only - applyScope binds them with IN / NOT IN, no SQL prefix). Returns empty arrays for
+// the common no-row case.
 export async function loadObjectExceptionCodes(deps: Deps, userUuid: string, roles: string[], collection: string): Promise<{ shares: string[]; denies: string[] }> {
-  const rows = await deps.db
-    .select({ matchCode: schema.accessRules.matchCode, effect: schema.accessRules.effect })
-    .from(schema.accessRules)
-    .where(
-      and(
-        or(
-          and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user")),
-          and(inArray(schema.accessRules.subject, roles), eq(schema.accessRules.subjectKind, "role")),
-        ),
-        inArray(schema.accessRules.namespace, [collection, "*"]),
-        isNotNull(schema.accessRules.matchCode),
-        live(deps),
-      ),
-    );
+  const rows = (await objectRulesFor(deps, userUuid, roles)).filter((r) => r.namespace === collection || r.namespace === "*");
   const shares: string[] = [];
   const denies: string[] = [];
   for (const r of rows) if (r.matchCode) (r.effect === "deny" ? denies : shares).push(r.matchCode);
   return { shares, denies };
 }
 
-// Same rows as loadObjectExceptionCodes, but for MANY collections in ONE read, keyed by collection. Global
-// search fans a single query across ~60 collections; asking per collection would be ~60 indexed reads for a
-// row set that is tiny and shares one index. Namespace `*` rules apply to every collection, so they are
-// merged into each key. A collection with no exception rows gets empty arrays.
+// Same rows as loadObjectExceptionCodes, but keyed by collection for MANY collections at once - what the
+// fan-out transports (search, the summaries) need. Namespace `*` rules apply to every collection, so they are
+// merged into each key. A collection with no exception rows gets empty arrays. Same cached row set: the whole
+// fan-out costs no read of its own.
 export async function loadObjectExceptionCodesFor(
   deps: Deps,
   userUuid: string,
@@ -164,20 +184,7 @@ export async function loadObjectExceptionCodesFor(
   collections: string[],
 ): Promise<Map<string, { shares: string[]; denies: string[] }>> {
   const wanted = new Set(collections);
-  const rows = await deps.db
-    .select({ namespace: schema.accessRules.namespace, matchCode: schema.accessRules.matchCode, effect: schema.accessRules.effect })
-    .from(schema.accessRules)
-    .where(
-      and(
-        or(
-          and(eq(schema.accessRules.subject, userUuid), eq(schema.accessRules.subjectKind, "user")),
-          and(inArray(schema.accessRules.subject, roles), eq(schema.accessRules.subjectKind, "role")),
-        ),
-        inArray(schema.accessRules.namespace, [...collections, "*"]),
-        isNotNull(schema.accessRules.matchCode),
-        live(deps),
-      ),
-    );
+  const rows = (await objectRulesFor(deps, userUuid, roles)).filter((r) => r.namespace === "*" || wanted.has(r.namespace));
   const out = new Map<string, { shares: string[]; denies: string[] }>();
   const bucket = (c: string) => {
     let b = out.get(c);

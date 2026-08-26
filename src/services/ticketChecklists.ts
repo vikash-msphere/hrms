@@ -9,7 +9,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete } from "./softDelete";
 
@@ -18,16 +18,9 @@ export type TicketChecklistInput = { display_name?: string; items?: string[] };
 const cleanItems = (items?: string[]) => (items ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
 
 export async function listTicketChecklists(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.ticketChecklists), showDeleted).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
+  const all = visibleByDelete(await deps.db.select().from(schema.ticketChecklists), showDeleted);
+  // Oldest first: a checklist template is read top-down, in the order its steps were written.
+  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc");
   return { items: slice, nextPageToken };
 }
 

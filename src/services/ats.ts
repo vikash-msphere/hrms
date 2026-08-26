@@ -17,13 +17,15 @@ import { etagOf } from "../http/serialize";
 import { idFromPath } from "./documentsCommon";
 import { getSettingValue } from "./settings";
 import {
-  DEFAULT_ATS_CONFIG, type AtsConfig, isStage, nextStage, statusForStage,
+  DEFAULT_ATS_CONFIG, type AtsConfig, isStage, nextStage, statusForStage, bandPointAmount,
   REQUISITION_STATUSES, type RequisitionStatus, canOfferTransition, type OfferStatus,
 } from "../domain/ats";
 import { createEmployee } from "./employees";
 import { reviseCompensation } from "./compensation";
 import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
+import { renderEmail, loadEmailBrand } from "../lib/emailLayout";
+import { buildTimedIcs } from "../lib/ics";
 
 const cfgOf = (deps: Deps) => getSettingValue<AtsConfig>(deps, "ats", DEFAULT_ATS_CONFIG);
 const parseDate = (s: string, field: string): Date => {
@@ -43,6 +45,7 @@ export type RequisitionInput = {
   employment_type?: string | null;
   openings?: number | null;
   description?: string | null;
+  pay_grade?: string | null;
   status?: string | null;
   opened_date?: string | null;
   closed_date?: string | null;
@@ -54,7 +57,7 @@ export async function listRequisitions(deps: Deps, scope: ListScope | undefined,
   if (!showDeleted) conds.push(isNull(schema.jobRequisitions.deleteTime));
   const scoped = applyScope(scope, schema.jobRequisitions.code, schema.jobRequisitions.code);
   if (scoped) conds.push(scoped);
-  return keysetPage(deps, schema.jobRequisitions, "job-requisitions", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.jobRequisitions, "job-requisitions", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
 }
 
 // Active-application counts keyed by requisition uuid, for the Jobs list badge (one grouped query).
@@ -91,6 +94,7 @@ export async function createRequisition(deps: Deps, actor: AppUser, input: Requi
       employmentType: (input.employment_type as any) || null,
       openings: input.openings ?? 1,
       description: input.description?.trim() || null,
+      payGradeId: input.pay_grade ? idFromPath(input.pay_grade) : null,
       status,
       openedDate: input.opened_date ? parseDate(input.opened_date, "opened_date") : status === "open" ? new Date() : null,
       closedDate: input.closed_date ? parseDate(input.closed_date, "closed_date") : null,
@@ -112,6 +116,7 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
   if (patch.employment_type !== undefined) set.employmentType = patch.employment_type ? oneOf(patch.employment_type, EMPLOYMENT_TYPES, "invalid employment_type") : null;
   if (patch.openings !== undefined && patch.openings != null) { if (!(patch.openings > 0)) throw invalidArgument("openings must be greater than 0"); set.openings = patch.openings; }
   if (patch.description !== undefined) set.description = patch.description?.trim() || null;
+  if (patch.pay_grade !== undefined) set.payGradeId = patch.pay_grade ? idFromPath(patch.pay_grade) : null;
   if (patch.opened_date !== undefined) set.openedDate = patch.opened_date ? parseDate(patch.opened_date, "opened_date") : null;
   if (patch.closed_date !== undefined) set.closedDate = patch.closed_date ? parseDate(patch.closed_date, "closed_date") : null;
   if (patch.status !== undefined) {
@@ -143,7 +148,7 @@ export type CandidateInput = {
 
 export async function listCandidates(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const where = and(showDeleted ? undefined : isNull(schema.candidates.deleteTime), applyScope(scope, schema.candidates.code, schema.candidates.code));
-  return keysetPage(deps, schema.candidates, "candidates", where, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.candidates, "candidates", where, { max: maxPageSize, pageToken });
 }
 
 export async function getCandidate(deps: Deps, id: string) {
@@ -213,7 +218,7 @@ export async function listApplications(deps: Deps, scope: ListScope | undefined,
   if (!opts.showDeleted) conds.push(isNull(schema.applications.deleteTime));
   const scoped = applyScope(scope, schema.applications.code, schema.applications.code);
   if (scoped) conds.push(scoped);
-  return keysetPage(deps, schema.applications, "applications", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.applications, "applications", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
 }
 
 async function getApplication(deps: Deps, id: string) {
@@ -248,7 +253,81 @@ export async function createApplication(deps: Deps, actor: AppUser, input: Appli
     })
     .returning())[0]!;
   await audit(deps, actor, "application.create", "applications", row.uuid, undefined, row);
+  // A candidate entering the pipeline is the first transition, so it is an event like every other one: rules
+  // acknowledge the applicant, alert the hiring manager, or route a referral.
+  await emitApplicationEvent(deps, actor, "application.created", row);
   return row;
+}
+
+// ---- Pipeline events -----------------------------------------------------------------------------------------
+//
+// Everything a rule could want to know about an application, gathered once, so the ENGINE can ACT on a
+// transition instead of only announcing it. The difference is concrete: a payload carrying the candidate, the
+// requisition and the pay band is what lets the seeded "draft the offer" rule create a real, filled-in offer;
+// a payload of `{stage, status}` can only send a message. Three small reads per transition is far cheaper than
+// every rule doing its own apiCall reads, and it keeps rules declarative instead of turning them into scripts.
+//
+// Stage identity is carried BOTH ways on purpose: `stage` is the org's own key (what a condition reads today),
+// while `stageKind`/`stageIndex` survive an org renaming or reordering its stages.
+async function applicationEventPayload(
+  deps: Deps,
+  app: typeof schema.applications.$inferSelect,
+  extra: Record<string, unknown> = {},
+) {
+  const cfg = await cfgOf(deps);
+  const cand = (await deps.db.select().from(schema.candidates).where(eq(schema.candidates.uuid, app.candidateId)).limit(1))[0];
+  const req = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, app.requisitionId)).limit(1))[0];
+  const grade = req?.payGradeId
+    ? (await deps.db.select().from(schema.payGrades).where(eq(schema.payGrades.uuid, req.payGradeId)).limit(1))[0]
+    : undefined;
+  const org = await getSettingValue<{ default_currency?: string }>(deps, "organization", {});
+  const idx = cfg.stages.findIndex((s) => s.key === app.stage);
+  const day = 86_400_000;
+  const now = +deps.clock.now();
+  return {
+    stage: app.stage,
+    stageLabel: cfg.stages[idx]?.label ?? app.stage,
+    stageKind: cfg.stages[idx]?.kind ?? "active",
+    stageIndex: idx,
+    status: app.status,
+    applicationId: app.uuid,
+    candidateId: app.candidateId,
+    candidateName: cand?.name ?? null,
+    candidateEmail: cand?.email ?? null,
+    requisitionId: app.requisitionId,
+    requisitionTitle: req?.title ?? null,
+    openings: req?.openings ?? 1,
+    departmentId: req?.departmentId ?? null,
+    hiringManagerId: req?.hiringManagerId ?? null,
+    source: app.source ?? cand?.source ?? null,
+    referralId: app.referralId ?? cand?.referralId ?? null,
+    // The money an offer needs, from the requisition's pay band, plus the figure the org's policy proposes.
+    bandMin: grade?.bandMin ?? null,
+    bandMid: grade?.bandMid ?? null,
+    bandMax: grade?.bandMax ?? null,
+    currency: grade?.currency ?? org.default_currency ?? "INR",
+    offerAmount: bandPointAmount(cfg, { min: grade?.bandMin, mid: grade?.bandMid, max: grade?.bandMax }),
+    // Dates computed here once, from settings, so a rule body holds no arithmetic and no magic numbers.
+    offerDate: ymd(new Date(now)),
+    suggestedJoinDate: ymd(new Date(now + cfg.join_notice_days * day)),
+    suggestedExpiryDate: ymd(new Date(now + cfg.offer_validity_days * day)),
+    ...extra,
+  };
+}
+
+/** Announce a pipeline transition with that full context. */
+async function emitApplicationEvent(
+  deps: Deps,
+  actor: AppUser,
+  type: string,
+  app: typeof schema.applications.$inferSelect,
+  extra: Record<string, unknown> = {},
+) {
+  await emitEvent(deps, actor, type, {
+    subject: `applications/${app.uuid}`,
+    employeeId: app.hiredEmployeeId ?? null,
+    payload: await applicationEventPayload(deps, app, extra),
+  });
 }
 
 // Set the pipeline stage directly (HR edit) or via `:advance`. Landing on a hired-kind stage flips status to
@@ -264,7 +343,9 @@ async function setStage(deps: Deps, actor: AppUser, id: string, stage: string): 
     .where(eq(schema.applications.uuid, id))
     .returning();
   await audit(deps, actor, "application.stage", "applications", id, { stage });
-  await emitEvent(deps, actor, "application.stageChanged", { subject: `applications/${id}`, payload: { stage, status: updated!.status } });
+  // `previousStage` is what makes "moved FORWARD into offer" expressible - without it a rule can't tell a
+  // genuine advance from a card being dragged back and forth.
+  await emitApplicationEvent(deps, actor, "application.stageChanged", updated!, { previousStage: row.stage });
   return updated!;
 }
 
@@ -295,7 +376,7 @@ export async function advanceApplication(deps: Deps, actor: AppUser, id: string,
 }
 
 // `:reject` - end the application with a coarse "rejected" status + a reason.
-export async function rejectApplication(deps: Deps, actor: AppUser, id: string, reason?: string) {
+export async function rejectApplication(deps: Deps, actor: AppUser, id: string, reason?: string, notifyCandidate?: boolean) {
   const row = await getApplication(deps, id);
   if (row.deleteTime) throw notFound("application not found");
   const [updated] = await deps.db
@@ -303,9 +384,43 @@ export async function rejectApplication(deps: Deps, actor: AppUser, id: string, 
     .set({ status: "rejected", rejectionReason: reason?.trim() || null, stageChangedDate: new Date(), updatedAt: new Date() })
     .where(eq(schema.applications.uuid, id))
     .returning();
-  await audit(deps, actor, "application.reject", "applications", id, { reason });
+  await audit(deps, actor, "application.reject", "applications", id, { reason, notified: !!notifyCandidate });
+  // The end of a pipeline is a transition too: rules tell the hiring manager, and a "position filled" reason
+  // can close the search. `notified` says whether the candidate was already written to, so a rule doesn't
+  // write to them twice.
+  await emitApplicationEvent(deps, actor, "application.rejected", updated!, { reason: reason?.trim() || null, notified: !!notifyCandidate });
+  // Telling the candidate is opt-in and deliberately silent about the reason: the internal taxonomy ("Failed
+  // interview") is a record for the hiring team, not a message to a person. Best-effort - the rejection itself
+  // is already filed, and a bounced mail must not undo it.
+  if (notifyCandidate) {
+    try { await emailCandidateRejection(deps, row); }
+    catch (e) { console.error("[ats] rejection email failed (non-fatal)", e); }
+  }
   return updated!;
 }
+
+/** The polite, reason-free note a candidate gets when the team opts to tell them. */
+async function emailCandidateRejection(deps: Deps, app: typeof schema.applications.$inferSelect) {
+  const cand = (await deps.db.select().from(schema.candidates).where(eq(schema.candidates.uuid, app.candidateId)).limit(1))[0];
+  if (!cand?.email) return;
+  const req = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, app.requisitionId)).limit(1))[0];
+  const brand = await loadEmailBrand(deps);
+  const role = req?.title ? ` for <strong>${escapeHtml(req.title)}</strong>` : "";
+  const html = renderEmail(
+    {
+      heading: "Thank you for your time",
+      preheader: `An update on your application${req?.title ? ` for ${req.title}` : ""}`,
+      bodyHtml:
+        `<p>Hello ${escapeHtml(cand.name.split(/\s+/)[0] ?? cand.name)},</p>` +
+        `<p>Thank you for applying${role} at ${escapeHtml(brand.orgName)}, and for the time you gave us. On this occasion we have decided not to take your application further.</p>` +
+        `<p>We keep the details you shared on file, and we would be glad to hear from you again for a role that fits.</p>`,
+    },
+    brand,
+  );
+  await deps.email.send(cand.email, `Your application at ${brand.orgName}`, html);
+}
+
+const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 
 // ---- Interviews ----------------------------------------------------------------------------------------------
@@ -332,7 +447,7 @@ export async function listInterviews(deps: Deps, scope: ListScope | undefined, m
   if (!opts.showDeleted) conds.push(isNull(schema.interviews.deleteTime));
   const scoped = applyScope(scope, schema.interviews.code, schema.interviews.code);
   if (scoped) conds.push(scoped);
-  return keysetPage(deps, schema.interviews, "interviews", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.interviews, "interviews", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
 }
 
 async function getInterview(deps: Deps, id: string) {
@@ -376,6 +491,7 @@ export async function createInterview(deps: Deps, actor: AppUser, input: Intervi
   const when = row.scheduledStart ? ` on ${new Date(row.scheduledStart).toLocaleString()}` : "";
   for (const iv of parseIdList(row.interviewerIds).filter((x) => x !== actor.employeeId))
     await notify(deps, { recipient: iv, type: "recruiting.interview_scheduled", title: "Interview scheduled", body: `${title} with ${candName}${when}.`, link: "interviews", subject: `interviews/${row.uuid}`, action: "respond", actorId: actor.employeeId });
+  await emitInterviewEvent(deps, actor, "interview.scheduled", row);
   return row;
 }
 
@@ -411,10 +527,86 @@ async function setInterviewStatus(deps: Deps, actor: AppUser, id: string, status
   if (row.deleteTime) throw notFound("interview not found");
   const [updated] = await deps.db.update(schema.interviews).set({ status, updatedAt: new Date() }).where(eq(schema.interviews.uuid, id)).returning();
   await audit(deps, actor, `interview.${status === "done" ? "complete" : "cancel"}`, "interviews", id);
+  await emitInterviewEvent(deps, actor, status === "done" ? "interview.completed" : "interview.cancelled", updated!);
   return updated!;
+}
+
+/** An interview event, carrying its panel and its application's context. */
+async function emitInterviewEvent(deps: Deps, actor: AppUser, type: string, iv: typeof schema.interviews.$inferSelect) {
+  const app = (await deps.db.select().from(schema.applications).where(eq(schema.applications.uuid, iv.applicationId)).limit(1))[0];
+  const panel = parseIdList(iv.interviewerIds);
+  await emitEvent(deps, actor, type, {
+    subject: `interviews/${iv.uuid}`,
+    payload: {
+      ...(app ? await applicationEventPayload(deps, app) : {}),
+      interviewId: iv.uuid,
+      interviewTitle: iv.title,
+      mode: iv.mode,
+      interviewStatus: iv.status,
+      // `panelSize` lets a rule ask "is every scorecard in?" without reading the panel itself.
+      panel,
+      panelSize: panel.length,
+      scheduledStart: iv.scheduledStart ? new Date(iv.scheduledStart).toISOString() : null,
+      location: iv.location ?? null,
+    },
+  });
 }
 export const completeInterview = (deps: Deps, actor: AppUser, id: string) => setInterviewStatus(deps, actor, id, "done");
 export const cancelInterview = (deps: Deps, actor: AppUser, id: string) => setInterviewStatus(deps, actor, id, "cancelled");
+
+// `:invite` - mail the CANDIDATE their slot, with a calendar attachment.
+//
+// Scheduling has always notified the panel and told the candidate nothing: somebody then copied the time into
+// a mail client by hand, which is where the wrong timezone and the missing meeting link come from. This sends
+// the round, the time, the mode and the link from the record itself, so the invitation and the schedule cannot
+// disagree. Explicit, not automatic - the recruiter decides when the candidate is told.
+export async function inviteCandidate(deps: Deps, actor: AppUser, id: string) {
+  const row = await getInterview(deps, id);
+  if (row.deleteTime) throw notFound("interview not found");
+  if (row.status === "cancelled") throw failedPrecondition("this interview is cancelled");
+  if (!row.scheduledStart) throw failedPrecondition("give the interview a time before inviting the candidate");
+  const app = (await deps.db.select().from(schema.applications).where(eq(schema.applications.uuid, row.applicationId)).limit(1))[0];
+  if (!app) throw failedPrecondition("application not found");
+  const cand = (await deps.db.select().from(schema.candidates).where(eq(schema.candidates.uuid, app.candidateId)).limit(1))[0];
+  if (!cand?.email) throw failedPrecondition("the candidate has no email address on file");
+  const req = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, app.requisitionId)).limit(1))[0];
+
+  const start = new Date(row.scheduledStart).toISOString();
+  const end = new Date(row.scheduledEnd ?? +new Date(row.scheduledStart) + 3_600_000).toISOString();
+  const brand = await loadEmailBrand(deps);
+  const when = new Date(start).toUTCString().replace(" GMT", " UTC");
+  const modeLine = row.mode === "video" ? "Video call" : row.mode === "phone" ? "Phone call" : "In person";
+  const html = renderEmail(
+    {
+      heading: `${row.title}${req?.title ? ` · ${req.title}` : ""}`,
+      preheader: `Your interview is booked for ${when}`,
+      bodyHtml:
+        `<p>Hello ${escapeHtml(cand.name.split(/\s+/)[0] ?? cand.name)},</p>` +
+        `<p>Your <strong>${escapeHtml(row.title)}</strong>${req?.title ? ` for <strong>${escapeHtml(req.title)}</strong>` : ""} at ${escapeHtml(brand.orgName)} is booked.</p>` +
+        `<p><strong>When:</strong> ${escapeHtml(when)}<br/><strong>How:</strong> ${escapeHtml(modeLine)}` +
+        (row.location ? `<br/><strong>Where:</strong> ${escapeHtml(row.location)}` : "") +
+        `</p><p>The attached calendar file adds it to your own calendar in your local time. If the slot does not work, reply to this email and we will move it.</p>`,
+    },
+    brand,
+  );
+  const ics = buildTimedIcs(
+    [{
+      uid: `interview-${row.uuid}@hrms`,
+      start,
+      end,
+      summary: `${row.title}${req?.title ? ` · ${req.title}` : ""} · ${brand.orgName}`,
+      description: modeLine,
+      location: row.location ?? undefined,
+    }],
+    "Interview",
+    +deps.clock.now(),
+  );
+  await deps.email.send(cand.email, `Interview: ${row.title}${req?.title ? ` · ${req.title}` : ""}`, html, [
+    { filename: "interview.ics", content: new TextEncoder().encode(ics), contentType: "text/calendar" },
+  ]);
+  await audit(deps, actor, "interview.invite", "interviews", id, { to: cand.email });
+  return row;
+}
 
 
 // ---- Interview feedback (scorecards) -------------------------------------------------------------------------
@@ -433,7 +625,7 @@ export async function listInterviewFeedback(deps: Deps, scope: ListScope, maxPag
   const conds = [applyScope(scope, schema.interviewFeedback.code, schema.interviewFeedback.authorId)];
   if (opts.interview) conds.push(eq(schema.interviewFeedback.interviewId, idFromPath(opts.interview)!));
   if (!opts.showDeleted) conds.push(isNull(schema.interviewFeedback.deleteTime));
-  return keysetPage(deps, schema.interviewFeedback, "interview-feedback", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.interviewFeedback, "interview-feedback", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 async function getInterviewFeedback(deps: Deps, id: string) {
@@ -500,7 +692,7 @@ export async function listOffers(deps: Deps, scope: ListScope | undefined, maxPa
   if (!opts.showDeleted) conds.push(isNull(schema.offers.deleteTime));
   const scoped = applyScope(scope, schema.offers.code, schema.offers.code);
   if (scoped) conds.push(scoped);
-  return keysetPage(deps, schema.offers, "offers", conds.length ? and(...conds) : undefined, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.offers, "offers", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
 }
 
 async function getOffer(deps: Deps, id: string) {
@@ -527,6 +719,9 @@ export async function createOffer(deps: Deps, actor: AppUser, input: OfferInput,
     })
     .returning())[0]!;
   await audit(deps, actor, "offer.create", "offers", row.uuid, undefined, row);
+  // Emitted whether a person wrote the offer or the "draft the offer" rule did, so approval chasing is one rule
+  // either way.
+  await emitOfferEvent(deps, actor, "offer.created", row);
   return row;
 }
 
@@ -557,12 +752,152 @@ async function transitionOffer(deps: Deps, actor: AppUser, id: string, to: Offer
   const [updated] = await deps.db.update(schema.offers).set({ status: to, updatedAt: new Date(), ...extra }).where(and(eq(schema.offers.uuid, id), eq(schema.offers.status, row.status))).returning();
   if (!updated) throw failedPrecondition(`cannot move an offer from ${row.status} to ${to}`);
   await audit(deps, actor, `offer.${to}`, "offers", id);
+  // Every step of the offer workflow is an event, so chasing an unanswered offer and reacting to a "no" are
+  // rules rather than more code. `accepted` is emitted by acceptOffer instead - it means far more than a status
+  // change, and it carries the hire it produced.
+  if (to !== "accepted") await emitOfferEvent(deps, actor, `offer.${to}`, updated);
   return updated;
+}
+
+/** An offer event, carrying its terms and its application's context (so a rule can name the candidate). */
+async function emitOfferEvent(deps: Deps, actor: AppUser, type: string, offer: typeof schema.offers.$inferSelect) {
+  const app = (await deps.db.select().from(schema.applications).where(eq(schema.applications.uuid, offer.applicationId)).limit(1))[0];
+  await emitEvent(deps, actor, type, {
+    subject: `offers/${offer.uuid}`,
+    payload: {
+      ...(app ? await applicationEventPayload(deps, app) : {}),
+      offerId: offer.uuid,
+      offerStatus: offer.status,
+      baseComp: offer.baseComp ?? null,
+      offerCurrency: offer.currency,
+      joinDate: offer.joinDate ? ymd(offer.joinDate) : null,
+      expiryDate: offer.expiryDate ? ymd(offer.expiryDate) : null,
+      approverId: offer.approverId ?? null,
+    },
+  });
 }
 export const approveOffer = (deps: Deps, actor: AppUser, id: string) => transitionOffer(deps, actor, id, "approved", { approverId: actor.employeeId ?? null });
 export const extendOffer = (deps: Deps, actor: AppUser, id: string) => transitionOffer(deps, actor, id, "extended", { offerDate: undefined });
 export const declineOffer = (deps: Deps, actor: AppUser, id: string) => transitionOffer(deps, actor, id, "declined");
 export const rescindOffer = (deps: Deps, actor: AppUser, id: string) => transitionOffer(deps, actor, id, "rescinded");
+
+// The candidate -> employee conversion, shared by the two ways a hire happens: accepting an offer, and hiring
+// straight off the pipeline board (`applications:hire`, for teams who never write an offer down here). It
+// creates the employee, seeds compensation when there is an agreed figure, links the referral that produced
+// them, and stamps the application with who it became.
+//
+// Onboarding is deliberately NOT opened here: createEmployee emits `employee.created`, and the seeded "Onboard
+// a new hire" automation opens the onboarding transition (+ enrols benefits, etc.). That keeps the
+// hire->onboarding hand-off DATA, editable in the Workflows builder, rather than hardcoded here. Disable that
+// rule and no transition opens - the point of a workflow engine.
+async function convertCandidate(
+  deps: Deps,
+  actor: AppUser,
+  app: typeof schema.applications.$inferSelect,
+  cand: typeof schema.candidates.$inferSelect,
+  terms: { startDate?: string; baseComp?: number | null; currency?: string | null },
+) {
+  const req = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, app.requisitionId)).limit(1))[0];
+  // Split the candidate's display name into first / last (last defaults to "." so the employee validator passes).
+  const parts = cand.name.trim().split(/\s+/);
+  const firstName = parts[0] || cand.name.trim();
+  const lastName = parts.slice(1).join(" ") || ".";
+  const employee = await createEmployee(deps, actor, {
+    first_name: firstName,
+    last_name: lastName,
+    work_email: cand.email!,
+    job_title: req?.title ?? null,
+    department: req?.departmentId ? `departments/${req.departmentId}` : null,
+    start_date: terms.startDate ?? null,
+  });
+
+  // Seed the hire's compensation from the agreed figure, so it is authoritative and HR doesn't re-key it
+  // (risking drift). Goes through reviseCompensation - not a raw insert - so the CTC split, structure
+  // application and CTC-line derivation match every other surface. Best-effort: if the figure can't be split
+  // under the current config (e.g. too low for the basic %), fall back to manual comp entry rather than
+  // failing the whole hire (the employee already exists at this point).
+  if (terms.baseComp && terms.baseComp > 0) {
+    try {
+      await reviseCompensation(deps, actor, {
+        employee: `employees/${employee.uuid}`,
+        annual_ctc: terms.baseComp,
+        currency_code: terms.currency ?? undefined,
+        effective_from: terms.startDate ?? ymd(deps.clock.now()),
+      });
+    } catch { /* best-effort: leave comp for manual entry if the agreed CTC can't be split under current config */ }
+  }
+
+  const cfg = await cfgOf(deps);
+  const hiredStage = cfg.stages.find((s) => s.kind === "hired")?.key ?? app.stage;
+  await deps.db
+    .update(schema.applications)
+    .set({ status: "hired", stage: hiredStage, hiredEmployeeId: employee.uuid, stageChangedDate: new Date(), updatedAt: new Date() })
+    .where(eq(schema.applications.uuid, app.uuid));
+
+  // Referral seam: if this hire came from a referral, link the new employee as the referral's milestone anchor
+  // so the existing referral-bonus cron awards the referrer. Prefer the application's referral, else the
+  // candidate's. Only sets the anchor when the referral hasn't already been linked.
+  const referralId = app.referralId ?? cand.referralId ?? null;
+  if (referralId) {
+    await deps.db
+      .update(schema.referrals)
+      .set({ hiredEmployeeId: employee.uuid, status: "joined", updatedAt: new Date() })
+      .where(and(eq(schema.referrals.uuid, referralId), isNull(schema.referrals.hiredEmployeeId)));
+  }
+  return employee;
+}
+
+// `:hire` - the hired column, made real. Moving a card into a hired stage only ever changed a string: the
+// person had no employee record, so onboarding had nothing to open and the "hire" existed on the board only.
+// This performs the conversion the hired column has always implied, and is what the board's one hired-card
+// action calls.
+//
+// Idempotent by design, because the board offers the action on every hired card: an application already
+// stamped with its hire returns unchanged, an accepted offer's employee is adopted rather than duplicated, and
+// an employee who already exists on that email is linked instead of created again (work_email is unique, so a
+// racing second call fails at the database rather than making a second person).
+export async function hireApplication(deps: Deps, actor: AppUser, id: string) {
+  const app = await getApplication(deps, id);
+  if (app.deleteTime) throw notFound("application not found");
+  if (app.hiredEmployeeId) return app;
+  if (app.status === "rejected" || app.status === "withdrawn") throw failedPrecondition(`cannot hire a ${app.status} application`);
+  const cand = (await deps.db.select().from(schema.candidates).where(eq(schema.candidates.uuid, app.candidateId)).limit(1))[0];
+  if (!cand) throw failedPrecondition("candidate not found");
+  if (!cand.email) throw failedPrecondition("the candidate needs an email address before they can be hired - it becomes their work email");
+
+  // Already converted elsewhere? Adopt that employee. Two ways it happens: an offer on this application was
+  // accepted (before this column existed, or by someone else a moment ago), or the person was created by hand.
+  const offers = await deps.db.select().from(schema.offers).where(eq(schema.offers.applicationId, app.uuid));
+  const converted = offers.find((o) => o.createdEmployeeId)?.createdEmployeeId ?? null;
+  const existing = converted
+    ? null
+    : (await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(eq(schema.employees.workEmail, cand.email)).limit(1))[0]?.uuid ?? null;
+  const already = converted ?? existing;
+
+  if (!already) {
+    // Terms, if anyone wrote them down: the live offer's join date and CTC beat re-keying them by hand.
+    const live = offers.filter((o) => o.status !== "declined" && o.status !== "rescinded").sort((a, b) => +b.updatedAt - +a.updatedAt)[0];
+    await convertCandidate(deps, actor, app, cand, {
+      startDate: live?.joinDate ? ymd(live.joinDate) : undefined,
+      baseComp: live?.baseComp ?? null,
+      currency: live?.currency ?? null,
+    });
+  } else {
+    const cfg = await cfgOf(deps);
+    const hiredStage = cfg.stages.find((s) => s.kind === "hired")?.key ?? app.stage;
+    await deps.db
+      .update(schema.applications)
+      .set({ status: "hired", stage: hiredStage, hiredEmployeeId: already, updatedAt: new Date() })
+      .where(eq(schema.applications.uuid, app.uuid));
+  }
+
+  await audit(deps, actor, "application.hire", "applications", id, { existing: !!already });
+  // One hire event for BOTH routes into a hire (here and `offers:accept`), so the rules that close the
+  // requisition and tell the hiring manager fire whichever way the team works.
+  const hired = await getApplication(deps, id);
+  await emitApplicationEvent(deps, actor, "application.hired", hired, { existing: !!already, viaOffer: false });
+  return hired;
+}
 
 // Accept an extended offer: convert the candidate to an employee and open an onboarding transition, then mark
 // the application hired. Idempotent-ish: guarded by the workflow (only `extended` -> `accepted` is legal).
@@ -576,18 +911,12 @@ export async function acceptOffer(deps: Deps, actor: AppUser, id: string) {
   const cand = (await deps.db.select().from(schema.candidates).where(eq(schema.candidates.uuid, app.candidateId)).limit(1))[0];
   if (!cand) throw failedPrecondition("candidate not found");
   if (!cand.email) throw failedPrecondition("candidate needs an email before they can be converted to an employee");
-  const req = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, app.requisitionId)).limit(1))[0];
-
-  // Split the candidate's display name into first / last (last defaults to "." so the employee validator passes).
-  const parts = cand.name.trim().split(/\s+/);
-  const firstName = parts[0] || cand.name.trim();
-  const lastName = parts.slice(1).join(" ") || ".";
   const startDate = offer.joinDate ? ymd(offer.joinDate) : undefined;
 
   // Claim the offer FIRST, after the (read-only) validation above: flip extended->accepted with a conditional
   // update guarded on the current status. Two concurrent accepts both pass the read-time canOfferTransition
   // check, but only one wins this update - the loser gets 0 rows and aborts, so the candidate is never
-  // converted to an employee twice. createdEmployeeId is stamped after createEmployee below; a crash between
+  // converted to an employee twice. createdEmployeeId is stamped after the conversion below; a crash between
   // leaves an accepted offer with a null createdEmployeeId (visible, recoverable) rather than a duplicate hire.
   const claim = await deps.db
     .update(schema.offers)
@@ -596,49 +925,8 @@ export async function acceptOffer(deps: Deps, actor: AppUser, id: string) {
     .returning();
   if (!claim.length) throw aborted("this offer has already been accepted");
 
-  const employee = await createEmployee(deps, actor, {
-    first_name: firstName,
-    last_name: lastName,
-    work_email: cand.email,
-    job_title: req?.title ?? null,
-    department: req?.departmentId ? `departments/${req.departmentId}` : null,
-    start_date: startDate ?? null,
-  });
-
-  // Seed the hire's compensation from the (already-approved) offered CTC, so the offered figure is authoritative
-  // and HR doesn't re-key it (risking drift). Goes through reviseCompensation - not a raw insert - so the CTC
-  // split, structure application and CTC-line derivation match every other surface. Best-effort: if the figure
-  // can't be split under the current config (e.g. too low for the basic %), fall back to manual comp entry
-  // rather than failing the whole hire (the employee already exists at this point).
-  if (offer.baseComp && offer.baseComp > 0) {
-    try {
-      await reviseCompensation(deps, actor, {
-        employee: `employees/${employee.uuid}`,
-        annual_ctc: offer.baseComp,
-        currency_code: offer.currency,
-        effective_from: startDate ?? ymd(deps.clock.now()),
-      });
-    } catch { /* best-effort: leave comp for manual entry if the offered CTC can't be split under current config */ }
-  }
-
-  // Onboarding is no longer opened inline here: creating the employee emits `employee.created`, and the seeded
-  // "Onboard a new hire" automation opens the onboarding transition (+ enrols benefits, etc.). This makes the
-  // hire->onboarding hand-off DATA (editable in the Workflows builder), not hardcoded. Disable that rule and no
-  // transition opens - the point of a workflow engine.
-  const cfg = await cfgOf(deps);
-  const hiredStage = cfg.stages.find((s) => s.kind === "hired")?.key ?? app.stage;
-  await deps.db.update(schema.applications).set({ status: "hired", stage: hiredStage, stageChangedDate: new Date(), updatedAt: new Date() }).where(eq(schema.applications.uuid, app.uuid));
-
-  // Referral seam: if this hire came from a referral, link the new employee as the referral's milestone anchor
-  // so the existing referral-bonus cron awards the referrer. Prefer the application's referral, else the
-  // candidate's. Only sets the anchor when the referral hasn't already been linked.
-  const referralId = app.referralId ?? cand.referralId ?? null;
-  if (referralId) {
-    await deps.db
-      .update(schema.referrals)
-      .set({ hiredEmployeeId: employee.uuid, status: "joined", updatedAt: new Date() })
-      .where(and(eq(schema.referrals.uuid, referralId), isNull(schema.referrals.hiredEmployeeId)));
-  }
+  const employee = await convertCandidate(deps, actor, app, cand, { startDate, baseComp: offer.baseComp, currency: offer.currency });
+  const req = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, app.requisitionId)).limit(1))[0];
 
   // Status was already flipped to "accepted" by the claim above; here we only link the created employee.
   const [updated] = await deps.db
@@ -650,14 +938,71 @@ export async function acceptOffer(deps: Deps, actor: AppUser, id: string) {
   // Tell the hiring manager their candidate accepted (the req is on its way to filled).
   if (req?.hiringManagerId && req.hiringManagerId !== actor.employeeId)
     await notify(deps, { recipient: req.hiringManagerId, type: "recruiting.offer_accepted", title: "Offer accepted", body: `${cand.name} accepted the offer for ${req.title}.`, link: "job-requisitions", subject: `job-requisitions/${req.uuid}`, priority: "high", actorId: actor.employeeId });
-  // Announce the hire so automations run the "next logical steps" (open onboarding, enrol benefits, mark the
-  // requisition filled, ...). subject = the offer; employee = the hire. requisitionId/openings let a rule close
-  // the req when it's the last opening.
+  // Two events, deliberately: `offer.accepted` is about the OFFER (a candidate said yes - offer-specific rules
+  // hang off it), while `application.hired` is about the HIRE and is emitted by both routes into one, so the
+  // rules that close the requisition and announce the hire don't care how the team works.
   await emitEvent(deps, actor, "offer.accepted", {
     subject: `offers/${id}`,
     employeeId: employee.uuid,
     payload: { candidateId: cand.uuid, applicationId: app.uuid, requisitionId: app.requisitionId, openings: req?.openings ?? 1, startDate: startDate ?? null },
   });
+  await emitApplicationEvent(deps, actor, "application.hired", await getApplication(deps, app.uuid), { existing: false, viaOffer: true, offerId: id });
   return updated!;
 }
 
+
+// ── Chasing scorecards ──────────────────────────────────────────────────────────────────────────────────────
+//
+// The commonest reason a hiring decision stalls is not disagreement, it is silence: a round is held, marked
+// done, and two of the four panelists never file. Nothing ever asked them twice. This is the same ladder the
+// policy chase-up uses - a fixed set of ages rather than a daily nag, so the age of the interview IS the
+// schedule and no per-person reminder state has to be stored.
+//
+// NO access control here: the cron runs as the system principal.
+const DAY = 86_400_000;
+/** Days after a held interview at which the automatic chase-up fires. */
+export const SCORECARD_NUDGE_DAYS = [1, 3, 7];
+
+export async function nudgeMissingScorecards(deps: Deps): Promise<number> {
+  const now = +deps.clock.now();
+  const dayOf = (ms: number) => Date.UTC(new Date(ms).getUTCFullYear(), new Date(ms).getUTCMonth(), new Date(ms).getUTCDate());
+  const today = dayOf(now);
+  const held = await deps.db.select().from(schema.interviews).where(eq(schema.interviews.status, "done"));
+  let sent = 0;
+  for (const iv of held) {
+    if (iv.deleteTime) continue;
+    // The slot is the clock, not the day it was marked done: an interview closed a week late should not start
+    // its ladder a week late too.
+    const at = iv.scheduledStart ? +new Date(iv.scheduledStart) : +new Date(iv.updatedAt);
+    const age = Math.round((today - dayOf(at)) / DAY);
+    if (!SCORECARD_NUDGE_DAYS.includes(age)) continue;
+    const panel = parseIdList(iv.interviewerIds);
+    if (!panel.length) continue;
+    const filed = await deps.db.select({ authorId: schema.interviewFeedback.authorId }).from(schema.interviewFeedback).where(eq(schema.interviewFeedback.interviewId, iv.uuid));
+    const done = new Set(filed.map((f) => f.authorId));
+    const owed = panel.filter((id) => !done.has(id));
+    if (!owed.length) continue;
+    const candName = await candidateNameForApplication(deps, iv.applicationId);
+    for (const employeeId of owed) {
+      await notify(deps, {
+        recipient: employeeId,
+        type: "recruiting.scorecard_due",
+        title: `Scorecard still owed: ${iv.title}`,
+        body: `${candName} was interviewed ${age === 1 ? "yesterday" : `${age} days ago`} and the decision is waiting on your verdict.`,
+        link: "interviews",
+        subject: `interviews/${iv.uuid}`,
+        action: "respond",
+        priority: age >= SCORECARD_NUDGE_DAYS[SCORECARD_NUDGE_DAYS.length - 1]! ? "high" : "normal",
+      });
+      sent++;
+    }
+    // One escalation signal at the end of the ladder, so a rule can chase the hiring manager instead.
+    if (age === SCORECARD_NUDGE_DAYS[SCORECARD_NUDGE_DAYS.length - 1]) {
+      await emitEvent(deps, null, "interview.scorecardOverdue", {
+        subject: `interviews/${iv.uuid}`,
+        payload: { title: iv.title, candidate: candName, pending: owed.length, daysOpen: age },
+      });
+    }
+  }
+  return sent;
+}

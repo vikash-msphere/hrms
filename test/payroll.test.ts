@@ -73,9 +73,11 @@ describe("CTC breakdown (ctcLines, pure)", () => {
     const erEsi = { kind: "employer_contribution" as const, method: "esi", name: "Employer ESI", rate: 3.25, cap: 21000, recurring: true };
     const inCtc = employerCostLines(50000, 60000, [gratuity, erPf, erEsi], true);
     // Gratuity + PF only: gross 60000 is over the ESI ceiling, so no employer ESI.
+    // `basis` is the wage each was priced on - basic for gratuity (percent_base), PF wages for employer PF -
+    // carried so the statutory register states the run's own wage instead of dividing a rounded contribution.
     expect(inCtc).toEqual([
-      { code: "ER_GRATUITY", name: "Gratuity", monthly: 2405, aboveCtc: false },
-      { code: "ER_EPF", name: "Employer PF", monthly: 1800, aboveCtc: false },
+      { code: "ER_GRATUITY", name: "Gratuity", monthly: 2405, aboveCtc: false, basis: 50000 },
+      { code: "ER_EPF", name: "Employer PF", monthly: 1800, aboveCtc: false, basis: 50000 },
     ]);
     // Each component decides its own side: here PF rides above CTC while gratuity stays inside it, and vice
     // versa - the flag is data on the row, not a policy about PF.
@@ -88,7 +90,7 @@ describe("CTC breakdown (ctcLines, pure)", () => {
     // PF is opt-in per employee, exactly as on the employee side.
     expect(employerCostLines(50000, 60000, [erPf], false)).toEqual([]);
     // An explicit ESI verdict (payroll's sticky eligibility) overrides the plain ceiling test.
-    expect(employerCostLines(20000, 24000, [erEsi], true, true)[0]).toEqual({ code: "ER_ESI", name: "Employer ESI", monthly: 780, aboveCtc: false });
+    expect(employerCostLines(20000, 24000, [erEsi], true, true)[0]).toEqual({ code: "ER_ESI", name: "Employer ESI", monthly: 780, aboveCtc: false, basis: 24000 });
     expect(employerCostLines(20000, 20000, [erEsi], true, false)).toEqual([]);
   });
   it("top-down split with an over-and-above-CTC contribution solves the rest and lets it ride on top", () => {

@@ -11,7 +11,8 @@ import { getSettingValue } from "./settings";
 import { applyStructure, type StructureLine } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { allStructureLines } from "./salaryStructures";
-import { DEFAULT_TAX_CONFIG, computeAnnualTax, monthlyTds, allowedDeductions, type TaxConfig, type RegimeConfig, type TaxBreakdown, type DeductionRow } from "../domain/incomeTax";
+import { DEFAULT_TAX_CONFIG, computeAnnualTax, monthlyTds, allowedDeductions, assertSupportedRegime, type TaxConfig, type RegimeConfig, type TaxBreakdown, type DeductionRow } from "../domain/incomeTax";
+import { refPayComponents, refPayPeriods } from "../lib/refData";
 
 // The stored (encrypted) tax-details blob. Prior-employer income/TDS are employee-DECLARED; HR/payroll then
 // VERIFY (accepting the declared figure or an override) before they may affect withholding. `priorEmployerIncome`
@@ -74,7 +75,7 @@ export function fyWindow(asOf: Date) {
 }
 
 // Monthly recurring GROSS = basic + recurring earning components + the Special Allowance plug of a top-down
-// (CTC-in) row (income_tax/deduction/rate_qty add nothing). The plug is a taxable earning, so it belongs in
+// (CTC-in) row (income_tax + deduction components add nothing). The plug is a taxable earning, so it belongs in
 // gross. Employer PF is CTC-only (on top of gross), so it rightly never enters the taxable gross here.
 export function monthlyRecurringGross(basePay: number, components: PayComp[], specialAllowance = 0): number {
   let g = basePay + specialAllowance;
@@ -186,15 +187,31 @@ export function compGrossPricer<T extends CompRow>(components: PayComp[], linesB
 // was collected (pay-date keyed - feeds collectibleMonths) and `earnedMonths` the PERIOD months whose salary is
 // already priced (feeds unpaidEarningMonths, so the projection doesn't re-price a month a run already covered
 // while leaving the real unpaid one out).
+// `pt` is the year's professional tax already withheld - the state annual cap is measured against it, and it
+// comes from the same rows, so the build never pays for a second scan of the items table.
 export type FinalizedTotals = {
   gross: number;
   taxableGross: number;
   tax: number;
+  pt: number;
   months: number;
   paidMonths: Set<string>;
   earnedMonths: Set<string>;
 };
-export const EMPTY_FINALIZED_TOTALS = (): FinalizedTotals => ({ gross: 0, taxableGross: 0, tax: 0, months: 0, paidMonths: new Set<string>(), earnedMonths: new Set<string>() });
+export const EMPTY_FINALIZED_TOTALS = (): FinalizedTotals => ({ gross: 0, taxableGross: 0, tax: 0, pt: 0, months: 0, paidMonths: new Set<string>(), earnedMonths: new Set<string>() });
+
+// Professional tax withheld by one stored item, by its stable "PT" line code. Unparseable lines contribute 0
+// rather than failing a build: the cap is a ceiling, and reading it as lower only ever withholds more.
+function ptOf(linesJson: string | null): number {
+  if (!linesJson) return 0;
+  try {
+    return (JSON.parse(linesJson) as { code?: string; kind?: string; amount?: number }[])
+      .filter((l) => l.code === "PT" && l.kind === "deduction")
+      .reduce((s, l) => s + (l.amount ?? 0), 0);
+  } catch {
+    return 0;
+  }
+}
 
 export async function finalizedTotals(
   deps: Deps,
@@ -202,7 +219,7 @@ export async function finalizedTotals(
   excludeRunId?: string,
   employeeId?: string,
 ): Promise<Map<string, FinalizedTotals>> {
-  const periods = new Map((await deps.db.select().from(schema.payPeriods)).map((p) => [p.uuid, p]));
+  const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
   const runs = await deps.db.select().from(schema.payrollRuns);
   const inFy = (d: Date) => d >= fy.start && d <= fy.end;
   const runIds = new Set(
@@ -235,6 +252,7 @@ export async function finalizedTotals(
       cur.gross += it.gross;
       cur.taxableGross += it.taxableGross ?? it.gross; // taxable base excludes non-taxable lines (e.g. reimbursements)
       cur.tax += it.tax;
+      cur.pt += ptOf(it.linesJson);
       cur.months += 1;
       const pm = paidMonth.get(it.runId);
       if (pm) cur.paidMonths.add(pm);
@@ -313,6 +331,9 @@ export function assembleProjection(args: {
   // decides which of them survive; under the new regime that is only 80CCD(2)/80CCH.
   declaredDeductions?: Record<string, number>;
 }): TaxProjection {
+  // A configured regime this build cannot compute correctly must fail loudly, not fall back to the new regime's
+  // slabs under the old regime's label - that withholds a number matching neither.
+  assertSupportedRegime(args.regime);
   const regimeCfg: RegimeConfig = args.cfg.regimes[args.regime] ?? args.cfg.regimes.new!;
   const prior = Math.max(0, args.decl.priorEmployerIncome ?? 0);
   // Prior-employer income is folded into the full-year total, so the year's tax is computed on both jobs.
@@ -370,7 +391,7 @@ export async function verifiedDeductions(deps: Deps, employeeId: string, financi
 // Read-only projection for one employee (the Tax page). `decl` are the employee's declarations.
 export async function getEmployeeTaxProjection(deps: Deps, employee: typeof schema.employees.$inferSelect, decl: TaxDeclarations, asOf: Date = new Date()): Promise<TaxProjection> {
   const cfg = await loadTaxConfig(deps);
-  const components = await deps.db.select().from(schema.payComponents);
+  const components = await refPayComponents(deps);
   const tds = tdsComponent(components);
   const regime = tds?.regime ?? "new";
   const fy = fyWindow(asOf);

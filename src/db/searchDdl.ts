@@ -81,7 +81,16 @@ function ownerExpr(entry: SearchEntry, prefix: string): string {
   return c ? qualify(prefix, c) : "NULL";
 }
 
-const DOC_COLS = "collection, record_id, code, owner_id, title, subtitle, deleted, restricted";
+const DOC_COLS = "collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at";
+
+// The source row's own creation stamp, copied into the doc so "how many arrived since I last looked" is one
+// indexed count over search_docs rather than a page of every collection. Every searchable table has
+// `createdAt` (pinned by test/searchDdlDrift.test.ts); NULL for any that ever stops having one, which reads as
+// "never new" rather than as an error.
+function createdExpr(entry: SearchEntry, prefix: string): string {
+  const c = col(entry.table, "createdAt");
+  return c ? qualify(prefix, c) : "NULL";
+}
 
 function triggersFor(entry: SearchEntry): string[] {
   const table = getTableConfig(entry.table).name;
@@ -99,6 +108,7 @@ function triggersFor(entry: SearchEntry): string[] {
       firstNonEmpty(entry.table, entry.subtitle, prefix),
       deletedExpr(entry, prefix),
       restrictedExpr(entry, prefix),
+      createdExpr(entry, prefix),
     ].join(", ");
 
   const body = (prefix: string) => joined(entry.table, entry.match, prefix);
@@ -137,6 +147,7 @@ function backfillFor(entry: SearchEntry): string[] {
     firstNonEmpty(entry.table, entry.subtitle, "t."),
     deletedExpr(entry, "t."),
     restrictedExpr(entry, "t."),
+    createdExpr(entry, "t."),
   ].join(", ");
   return [
     `INSERT INTO "search_docs" (${DOC_COLS}) SELECT ${select} FROM "${table}" t`,

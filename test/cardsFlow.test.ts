@@ -31,7 +31,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.cardTodos, schema.cardComments, schema.cardMovements, schema.cards, schema.sprints, schema.boards, schema.goals, schema.eventLog, schema.settings, schema.users, schema.employees, schema.roles];
+const TABLES = [schema.cardTodos, schema.cardComments, schema.cardMovements, schema.cards, schema.sprints, schema.boards, schema.goals, schema.eventLog, schema.notifications, schema.settings, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
 });
@@ -274,6 +274,26 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect(withC._comments.map((c) => c.body)).toEqual(["first", "second"]); // oldest-first
     expect((await getCardWithComments(deps, actor, card.uuid))._comments.length).toBe(2);
     await expect(commentCard(deps, actor, card.uuid, "  ")).rejects.toThrow(/body is required/i);
+  });
+
+  it("naming someone in a card comment notifies them, and never notifies the author", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Mention board" });
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Needs a decision" });
+    // A second employee to name. The token carries the WIRE id, which is what an author's client would write.
+    const otherId = genId();
+    await deps.db.insert(schema.employees).values({ uuid: otherId, code: `04-${genId().slice(0, 3)}`, firstName: "Priya", lastName: "Nair", workEmail: `${otherId}@test.example`, status: "active" });
+    const otherToken = await deps.idCodec.encode("employees", otherId);
+    const selfToken = await deps.idCodec.encode("employees", actor.employeeId!);
+
+    await commentCard(deps, actor, card.uuid, `[@Priya Nair](employees/${otherToken}) can you look? cc [@Me](employees/${selfToken})`);
+
+    const notes = await deps.db.select().from(schema.notifications);
+    const mentions = notes.filter((n) => n.type === "board.mention");
+    expect(mentions).toHaveLength(1); // the other person, once; the author names themselves for free
+    expect(mentions[0]!.recipientId).toBe(otherId);
+    expect(mentions[0]!.subject).toBe(`cards/${card.uuid}`);
+    expect(mentions[0]!.link).toBe("boards");
   });
 
   it("card department: set on create, changed and cleared on update, org default when omitted", async () => {

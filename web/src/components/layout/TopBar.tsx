@@ -1,9 +1,12 @@
-import { Menu, Search, ChevronRight, Plus, Sparkles, LifeBuoy, Ticket } from "lucide-react";
+import { Search, ChevronRight, Plus, Sparkles, LifeBuoy, Ticket, LogIn, CircleDot } from "lucide-react";
 import { navBreadcrumb } from "@/nav";
 import { navigate } from "@/router";
 import { cn, humanize } from "@/lib/utils";
 import { resolveQuickMenu, visibleQuickActions, runQuickAction, KUDOS_ACTION_ID } from "@/lib/quickActions";
 import { useOrg } from "@/lib/org";
+import { useClock, useElapsedMinutes } from "@/lib/clock";
+import { usePermission } from "@/lib/perm";
+import { fmtDuration } from "@/lib/attendance";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { NotificationBell } from "@/components/layout/NotificationBell";
 import { UserMenu } from "@/components/layout/UserMenu";
@@ -15,19 +18,22 @@ import type { Me } from "@/types";
 const isMac = typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform);
 
 // The sticky application top bar: breadcrumb context on the left; a quick-create "+" menu and global search
-// on the right. On mobile it also carries the hamburger that opens the off-canvas sidebar. This gives every
-// page consistent chrome and one-step access to the common create flows from anywhere.
+// on the right. This gives every page consistent chrome and one-step access to the common create flows.
+//
+// On a phone the bar is deliberately thin. The full desktop cluster is nine controls, which at 390px leaves
+// the breadcrumb no room at all and puts a row of 36px targets under the hand that is holding the phone. What
+// stays is what has to be reachable from any page: where you are, the clock, search, alerts, and you. Create
+// moves to the bottom bar's raised "+", the drawer to its Menu tab, kudos and support into that create menu,
+// and the theme switch into the user menu - each one still one tap away, just not all in the same row.
 export function TopBar({
   me,
   page,
   sub,
-  onOpenMenu,
   onOpenSearch,
 }: {
   me: Me;
   page: string;
   sub?: string;
-  onOpenMenu: () => void;
   onOpenSearch: () => void;
 }) {
   const crumb = navBreadcrumb(page, sub);
@@ -39,17 +45,17 @@ export function TopBar({
   // raises a ticket (reusing the new-ticket quick action) or jumps to the full Support page. Gated on the
   // presence of the new-ticket action, which is itself employee-only.
   const newTicket = visibleQuickActions(me).find((a) => a.id === "new-ticket");
+  // Reading the queue is its own grant: somebody who may raise a ticket but not list them gets the raise
+  // entry without a link to a page the router would wall off anyway.
+  const canSeeTickets = usePermission("tickets.read");
   const hasActions = groups.length > 0;
   return (
-    <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur sm:px-6 lg:px-8">
-      <button
-        className="-ml-1 rounded-md p-2 text-foreground hover:bg-accent md:hidden"
-        onClick={onOpenMenu}
-        aria-label="Open menu"
-      >
-        <Menu className="h-5 w-5" />
-      </button>
-
+    // data-app-top: installed as a PWA this is what the status bar overlaps, so it reserves the top inset
+    // (see index.css). h-14 stays the bar's own height either way.
+    <header
+      data-app-top
+      className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur standalone:h-auto standalone:min-h-14 sm:px-6 lg:px-8"
+    >
       <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
         {crumb ? (
           <>
@@ -63,7 +69,9 @@ export function TopBar({
             {crumb.sub && (
               <>
                 <ChevronRight className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground/50 sm:inline" />
-                <a href={`#/${page}`} className="truncate rounded font-semibold text-foreground hover:text-primary">
+                {/* A 14px line of text makes a 20px-tall link. This is the way back up from a detail page,
+                    so it takes the touch floor without the type changing size: the box grows around it. */}
+                <a href={`#/${page}`} className="inline-flex items-center truncate rounded font-semibold text-foreground hover:text-primary coarse:min-h-9">
                   {crumb.sub}
                 </a>
               </>
@@ -74,17 +82,20 @@ export function TopBar({
         )}
       </nav>
 
-      {/* Right-side chrome cluster: quick-create, theme switch, global search. */}
+      {/* Right-side chrome cluster: the clock, quick-create, theme switch, global search. */}
       <div className="ml-auto flex items-center gap-2">
+        <ClockChip />
+
+        {/* Create: the bottom bar's raised "+" owns this on a phone, so the top-bar copy starts at `md`. */}
         {hasActions && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" className="gap-1.5">
+              <Button size="sm" className="hidden gap-1.5 md:inline-flex">
                 <Plus className="h-4 w-4" />
                 <span className="hidden sm:inline">New</span>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuContent align="end" className="max-h-[70dvh] w-56 overflow-y-auto">
               {groups.map((g, gi) => (
                 <div key={g.id}>
                   {gi > 0 && <DropdownMenuSeparator />}
@@ -109,7 +120,7 @@ export function TopBar({
             onClick={() => runQuickAction(kudos)}
             aria-label="Give kudos"
             title="Give kudos"
-            className="flex h-9 items-center gap-2 rounded-lg border bg-card px-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+            className="hidden h-9 items-center gap-2 rounded-lg border bg-card px-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground md:flex"
           >
             <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
             <span className="hidden lg:inline">Kudos</span>
@@ -122,7 +133,7 @@ export function TopBar({
               <button
                 aria-label="Support"
                 title="Support"
-                className="flex h-9 items-center justify-center rounded-lg border bg-card px-2.5 text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                className="hidden h-9 items-center justify-center rounded-lg border bg-card px-2.5 text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground md:flex"
               >
                 <LifeBuoy className="h-4 w-4 shrink-0" />
               </button>
@@ -132,22 +143,27 @@ export function TopBar({
                 <LifeBuoy className="h-4 w-4" />
                 Raise a ticket
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => navigate("tickets")}>
-                <Ticket className="h-4 w-4" />
-                My tickets
-              </DropdownMenuItem>
+              {canSeeTickets && (
+                <DropdownMenuItem onClick={() => navigate("tickets")}>
+                  <Ticket className="h-4 w-4" />
+                  My tickets
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
 
         <NotificationBell />
 
-        <ThemeToggle />
+        {/* Theme: a preference, not a page action. On a phone it lives in the user menu instead (UserMenu). */}
+        <div className="hidden md:block">
+          <ThemeToggle />
+        </div>
 
         <button
           onClick={onOpenSearch}
           aria-label="Search"
-          className="flex h-9 items-center gap-2 rounded-lg border bg-card px-3 text-sm text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground sm:w-36 lg:w-44"
+          className="flex h-9 w-9 items-center justify-center gap-2 rounded-lg border bg-card text-sm text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground sm:w-36 sm:justify-start sm:px-3 lg:w-44"
         >
           <Search className="h-4 w-4 shrink-0" />
           <span className="hidden sm:inline">Search…</span>
@@ -159,5 +175,32 @@ export function TopBar({
         <UserMenu me={me} />
       </div>
     </header>
+  );
+}
+
+// Punch from anywhere: the clock lives in the chrome, not only on the Attendance page. The label is the
+// ACTION ("Clock out" while on the clock, "Clock in" when off it) - state is carried by the pulsing dot and
+// the success tint, and the elapsed time rides the tooltip, where it informs without competing with the verb.
+// Hidden until the open-session fetch lands, so it never flashes the wrong state.
+function ClockChip() {
+  const clock = useClock();
+  const elapsed = useElapsedMinutes(clock.mine?.clock_in);
+  if (!clock.enabled || !clock.ready) return null;
+  const on = !!clock.mine;
+  const label = on ? "Clock out" : "Clock in";
+  return (
+    <button
+      onClick={() => void clock.punch(on ? "clockOut" : "clockIn")}
+      disabled={clock.busy}
+      aria-label={on ? `${label} (clocked in for ${fmtDuration(elapsed)})` : label}
+      title={on ? `Clocked in for ${fmtDuration(elapsed)} - clock out` : label}
+      className={cn(
+        "flex h-9 items-center gap-2 rounded-lg border px-2.5 text-sm font-medium shadow-sm transition-colors disabled:opacity-60",
+        on ? "border-success/40 bg-success/10 text-success hover:bg-success/20" : "bg-card text-foreground hover:bg-accent hover:text-accent-foreground",
+      )}
+    >
+      {on ? <CircleDot className="h-4 w-4 shrink-0 animate-pulse" /> : <LogIn className="h-4 w-4 shrink-0" />}
+      <span className="hidden lg:inline">{label}</span>
+    </button>
   );
 }

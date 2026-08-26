@@ -19,7 +19,10 @@ export function EmptyState({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 px-6 py-16 text-center">
+    // Tighter on a phone: 16px of side padding rather than 24 (the description is the widest thing here and
+    // it is already capped at max-w-sm), and 48px of air above and below instead of 64 - a zero state that
+    // fills the screen reads as a failure rather than as "nothing here yet".
+    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 px-4 py-12 text-center sm:px-6 sm:py-16">
       {illustration ? (
         <img
           src={illustrationSrc(illustration)}

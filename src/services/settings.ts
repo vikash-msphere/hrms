@@ -5,6 +5,7 @@ import type { AppUser } from "../env";
 import { audit, fieldDiff } from "../lib/audit";
 import { notFound } from "../lib/errors";
 import { paginate } from "../http/pagination";
+import { refSettings, bustRef } from "../lib/refData";
 
 // Settings keys whose VALUES are stored in this table but are NOT exposed through the broadly-readable
 // generic settings API. They are served only by their own access-gated namespaces (/v1/bank-formats,
@@ -14,13 +15,17 @@ import { paginate } from "../http/pagination";
 export const MANAGED_KEYS = new Set<string>(["bank-formats", "payroll-debit"]);
 
 // Org-wide settings (one row per key). Readable by all; writes gated at the route.
+//
+// Every read here comes off ONE per-request snapshot of the table (lib/refData.ts) instead of its own query.
+// The table is tiny and read constantly - a page reads a handful of keys and half the money code consults one -
+// so `WHERE key = ?` per key meant a scan per key. Same request, one read; a write inside the request drops it.
 export async function listSettings(deps: Deps, maxPageSize = 50, pageToken?: string) {
-  const rows = (await deps.db.select().from(schema.settings)).filter((r) => !MANAGED_KEYS.has(r.key));
+  const rows = (await refSettings(deps)).filter((r) => !MANAGED_KEYS.has(r.key));
   return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.updatedAt), (r) => r.key);
 }
 
 export async function getSetting(deps: Deps, key: string) {
-  const row = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];
+  const row = (await refSettings(deps)).find((r) => r.key === key);
   if (!row) throw notFound("setting not found");
   return row;
 }
@@ -29,7 +34,7 @@ export async function getSetting(deps: Deps, key: string) {
  *  falls back to the default rather than throwing a 500 - this backs esign/tax/letter/etc. config reads, so
  *  one corrupt row must not take down every request that touches it. */
 export async function getSettingValue<T>(deps: Deps, key: string, fallback: T): Promise<T> {
-  const row = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];
+  const row = (await refSettings(deps)).find((r) => r.key === key);
   if (!row) return fallback;
   try {
     return { ...fallback, ...(JSON.parse(row.value) as object) };
@@ -67,14 +72,29 @@ function settingDiff(before: string, after: string): Record<string, { from: unkn
 
 export async function upsertSetting(deps: Deps, actor: AppUser, key: string, value: unknown) {
   const json = JSON.stringify(value ?? {});
+  // Read-for-diff goes straight to the row: this is the one path that must see the CURRENT value (a stale
+  // snapshot would write a wrong audit diff).
   const existing = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];
   if (existing) {
     const [updated] = await deps.db.update(schema.settings).set({ value: json, updatedAt: new Date() }).where(eq(schema.settings.key, key)).returning();
+    // After the write: the rest of THIS request (an automation the save triggers, the serialized response)
+    // must see the new value, not the snapshot taken before it.
+    bustRef(deps, "settings");
     const diff = settingDiff(existing.value, json);
     await audit(deps, actor, "setting.update", "settings", key, diff ? { diff } : undefined);
     return updated!;
   }
   const [inserted] = await deps.db.insert(schema.settings).values({ key, value: json }).returning();
+  bustRef(deps, "settings");
   await audit(deps, actor, "setting.create", "settings", key);
   return inserted!;
+}
+
+// The org's single currency (settings/organization `default_currency`, "INR" out of the box). The app is
+// deliberately single-currency: every payable is guarded against it at payroll build time, so anything that
+// MINTS a payable must default to this rather than to a literal - a hardcoded "INR" in a non-INR org creates a
+// bonus or a compensation row that fails the whole run's currency guard the moment payroll touches it.
+export async function orgCurrency(deps: Deps): Promise<string> {
+  const org = await getSettingValue<{ default_currency?: string }>(deps, "organization", {});
+  return org.default_currency?.trim() || "INR";
 }

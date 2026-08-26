@@ -7,21 +7,22 @@ describe("stateMachines - ticket workflow (default)", () => {
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "resolve", "IN_PROGRESS")).toBe(true);
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "resolve", "OPEN")).toBe(true);
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "close", "RESOLVED")).toBe(true);
+    expect(canTransition(DEFAULT_TICKET_WORKFLOW, "close", "OPEN")).toBe(true); // closable without a resolve hop
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "reopen", "CLOSED")).toBe(true);
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "cancel", "OPEN")).toBe(true);
   });
   it("rejects illegal transitions", () => {
-    expect(canTransition(DEFAULT_TICKET_WORKFLOW, "close", "OPEN")).toBe(false); // must resolve first
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "start", "RESOLVED")).toBe(false);
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "cancel", "CLOSED")).toBe(false);
     expect(canTransition(DEFAULT_TICKET_WORKFLOW, "nope", "OPEN")).toBe(false); // unknown verb
   });
   it("transitionFor returns the target state", () => {
     expect(transitionFor(DEFAULT_TICKET_WORKFLOW, "start", "OPEN")?.to).toBe("IN_PROGRESS");
-    expect(transitionFor(DEFAULT_TICKET_WORKFLOW, "close", "OPEN")).toBeNull();
+    expect(transitionFor(DEFAULT_TICKET_WORKFLOW, "close", "OPEN")?.to).toBe("CLOSED");
+    expect(transitionFor(DEFAULT_TICKET_WORKFLOW, "reopen", "CANCELLED")).toBeNull(); // cancelling is final
   });
   it("verbsFrom lists the legal next actions", () => {
-    expect(verbsFrom(DEFAULT_TICKET_WORKFLOW, "OPEN").sort()).toEqual(["cancel", "resolve", "start"]);
+    expect(verbsFrom(DEFAULT_TICKET_WORKFLOW, "OPEN").sort()).toEqual(["cancel", "close", "resolve", "start"]);
     expect(verbsFrom(DEFAULT_TICKET_WORKFLOW, "RESOLVED").sort()).toEqual(["close", "reopen"]);
   });
 });

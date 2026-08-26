@@ -1,6 +1,9 @@
+import type { Context } from "hono";
 import { z } from "zod";
 import * as schema from "../db/schema";
+import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
+import { jsonBody } from "../http/jsonRequest";
 import {
   listRemoteWorkRequests, createRemoteWorkRequest,
   approveRemoteWorkRequest, rejectRemoteWorkRequest, cancelRemoteWorkRequest,
@@ -21,7 +24,7 @@ const createSchema = z
   .strict();
 
 // The approver's optional note is taken as sent, exactly as the hand-written route did.
-const noteOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c.req.json().catch(() => ({}))) as { note?: string })?.note;
+const noteOf = async (c: Context<AppEnv>) => (await jsonBody<{ note?: string }>(c)).note;
 
 // Work-from-home requests. Same shape as leave: filed, then approved, rejected or cancelled - never edited or
 // deleted, and the table has no delete_time.
@@ -36,7 +39,11 @@ export const remoteWorkRequests = collectionRoutes<RemoteWorkInput, typeof schem
   overrides: {
     create: (deps, actor, input) => createRemoteWorkRequest(deps, actor, input),
   },
-  list: (c, page) => listRemoteWorkRequests(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("q")),
+  list: (c, page) =>
+    listRemoteWorkRequests(
+      c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken,
+      c.req.query("state"), c.req.query("q"), c.req.query("from"), c.req.query("to"),
+    ),
   verbs: {
     approve: { run: async (deps, user, id, _body, c) => approveRemoteWorkRequest(deps, user, id, await noteOf(c)) },
     reject: { run: async (deps, user, id, _body, c) => rejectRemoteWorkRequest(deps, user, id, await noteOf(c)) },

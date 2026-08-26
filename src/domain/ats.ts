@@ -10,7 +10,31 @@ export type AtsConfig = {
   sources: string[]; // candidate/application sources (referral | job_board | ...)
   rejection_reasons: string[]; // canned reasons offered when rejecting an application
   scorecard_criteria: ScorecardCriterion[]; // interview scorecard rating dimensions
+  // Hide the rest of the panel's verdicts from an interviewer until they have filed their own. Anchoring is
+  // the standard failure of a shared scorecard: the second panelist scores the first one's opinion.
+  blind_scorecards: boolean;
+  // ---- Offer defaults ----
+  // What the pipeline proposes when a card reaches the offer stage. These exist so the seeded "draft the offer"
+  // rule stays data: the numbers a rule fills in are the org's policy, not constants buried in an action body.
+  offer_validity_days: number; // how long an offer stands before it expires
+  join_notice_days: number; // proposed start date, counted from the day the offer is drafted
+  // Which point of the requisition's pay band an auto-drafted offer proposes. `none` leaves the figure blank
+  // for whoever approves it - correct for orgs that negotiate every number.
+  offer_band_point: OfferBandPoint;
 };
+
+export const OFFER_BAND_POINTS = ["mid", "min", "max", "none"] as const;
+export type OfferBandPoint = (typeof OFFER_BAND_POINTS)[number];
+
+/** The figure an auto-drafted offer proposes, from the requisition's pay band. Null = leave it blank. */
+export function bandPointAmount(cfg: AtsConfig, band: { min?: number | null; mid?: number | null; max?: number | null }): number | null {
+  switch (cfg.offer_band_point) {
+    case "min": return band.min ?? null;
+    case "max": return band.max ?? null;
+    case "mid": return band.mid ?? band.min ?? band.max ?? null;
+    default: return null;
+  }
+}
 
 export const DEFAULT_ATS_CONFIG: AtsConfig = {
   stages: [
@@ -28,6 +52,10 @@ export const DEFAULT_ATS_CONFIG: AtsConfig = {
     { key: "culture", label: "Culture fit" },
     { key: "problem_solving", label: "Problem solving" },
   ],
+  blind_scorecards: false,
+  offer_validity_days: 7,
+  join_notice_days: 30,
+  offer_band_point: "mid",
 };
 
 // Application status is the coarse outcome; `stage` is the fine-grained pipeline position.

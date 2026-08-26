@@ -15,6 +15,9 @@ import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { Field } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { Button } from "@/components/ui/button";
@@ -23,7 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 export default function ReimbursementCategories({ embedded, openId }: { me?: Me; embedded?: boolean; openId?: string }) {
@@ -39,20 +42,26 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ReimbursementCategory | null>(null);
   const [form, setForm] = useState({ name: "", requiresReceipt: false });
+  const [err, setErr] = useState<string | null>(null);
+  const [again, setAgain] = useState(false);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "category" });
 
   function openCreate() {
     setEditing(null);
     setForm({ name: "", requiresReceipt: false });
+    setErr(null);
     setOpen(true);
   }
   function openEdit(c: ReimbursementCategory) {
     setEditing(c);
     setForm({ name: c.display_name, requiresReceipt: !!c.requires_receipt });
+    setErr(null);
     setOpen(true);
   }
 
   async function submit() {
     setBusy(true);
+    setErr(null);
     try {
       const body = { display_name: form.name, requires_receipt: form.requiresReceipt };
       if (editing) {
@@ -62,10 +71,18 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
         await create("reimbursement-categories", body);
         toast({ title: "Category created", variant: "success" });
       }
-      setOpen(false);
+      // The receipt rule usually holds across a batch (Travel, Meals, Equipment all want one), so it carries over.
+      if (again && !editing) {
+        const next = { name: "", requiresReceipt: form.requiresReceipt };
+        setForm(next);
+        guard.markSaved(next);
+      } else {
+        guard.markSaved();
+        setOpen(false);
+      }
       reload();
     } catch (e) {
-      toast({ title: "Couldn't save category", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -122,11 +139,14 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
         <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+          <AccessScope collection="reimbursement-categories" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit category" : "New category"}</DialogTitle>
+            <DialogDescription>Categories are what employees pick from when filing a claim.</DialogDescription>
           </DialogHeader>
+          <FormError error={err} />
           <Field label="Name">
             <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Travel" autoFocus />
           </Field>
@@ -136,10 +156,17 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
           </div>
           <p className="-mt-2 text-xs text-muted-foreground">When on, a claim in this category can't be submitted without a receipt.</p>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+          {!editing && (
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox checked={again} onCheckedChange={(v) => setAgain(v === true)} />
+              Keep this open to add another
+            </label>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : "Create"}</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
+            <Button onClick={submit} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : again ? "Create & add another" : "Create"}</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>

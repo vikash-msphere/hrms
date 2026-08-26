@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 // KPI-card icons live in lib/kpiIcons (shared with Settings); only icons used elsewhere on the page (clock
 // widget, section headers, my-day tiles) are imported here; shortcut tiles carry their own icons.
 import {
   Users,
   CalendarCheck,
   CalendarDays,
+  ScanLine,
   Megaphone,
   ArrowRight,
   Cake,
@@ -28,14 +29,19 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
+import { useEmployee } from "@/hooks/useEmployee";
+import { useVisibleRegions } from "@/hooks/useInView";
 import { usePermission } from "@/lib/perm";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { get, invoke } from "@/api";
 import { fmtDuration, DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
-import type { AttendanceSession } from "@/types";
+import { useClock, useElapsedMinutes } from "@/lib/clock";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
 import { useApprovals } from "@/lib/approvals";
+import { boardTime } from "@/lib/boardOrder";
 import { useNotifications, timeAgo } from "@/lib/notifications";
 import { navigate } from "@/router";
 import { fireIntent } from "@/lib/intent";
@@ -45,6 +51,8 @@ import { type DashboardConfig, type KpiCategory, KPI_DEFS, KPI_CATEGORIES, KPI_D
 import { useDashPrefs } from "@/lib/dashboardPrefs";
 import { KPI_ICONS, CATEGORY_ICONS } from "@/lib/kpiIcons";
 import { StatCard } from "@/components/common/StatCard";
+import { StatRow } from "@/components/common/StatRow";
+import { CARD_CAPS, TILE_CAPS, ACTION_CAPS } from "@/lib/statRows";
 import { TeamTimeline } from "@/components/common/TeamTimeline";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { kudosCardArtUrl, ART_DIECUT_SM } from "@/lib/kudosArt";
@@ -59,6 +67,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { resolveDashboardShortcuts } from "@/lib/dashboardShortcuts";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useOrg, currencyDecimals, orgAnniversary, CELEBRATION_WEEK_DAYS } from "@/lib/org";
+import { getSetting } from "@/lib/settingsStore";
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
@@ -105,6 +114,7 @@ const SUMMARY_KEYS = [
   "assets_assigned", "goals_active", "loans_outstanding",
   "candidates_pipeline", "interviews_upcoming", "referrals_open", "reviews_open",
   "tax_verify", "bgchecks_open", "suggestions_open", "benefits_enrolled",
+  "headcount", "joiners", "probation_ending", "on_leave",
   "cards_blocked", "cards_overdue", "cards_due_week", "my_open_cards",
   "notice_serving", "remote_today", "timesheets_draft", "timesheet_week", "team_hours_week",
   "reviews_due_soon", "offers_pending", "transitions_active", "onboarding_tasks_pending", "open_positions",
@@ -153,19 +163,53 @@ function relativeDay(date: string): string {
 }
 
 export default function Dashboard({ me }: { me: Me }) {
-  const { rows: employees, state: employeesState } = useCollection<Employee>("employees");
-  const { rows: holidays, state: holidaysState } = useCollection<Holiday>("holidays");
-  const { rows: announcements, state: announcementsState } = useCollection<Announcement>("announcements");
-  const { rows: leave } = useCollection<LeaveRequest>("leave-requests");
-  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
+  // ---- Read on sight -----------------------------------------------------------------------------------
+  // The dashboard is a column of widgets over a dozen collections, and most of them start below the fold. So
+  // nothing here reads on mount: each section carries a probe (`regionRef`), and its collections are gated on
+  // that slot reaching the viewport. Two consequences worth stating:
+  //  - CHEAP FIRST PAINT. A cold open reads only what is actually on screen - typically the KPI wall and the
+  //    reader's own numbers - instead of every widget's page of rows, most of which are never looked at.
+  //  - FEW REQUESTS. Every region already on screen is reported in ONE observer callback, so their reads fire
+  //    in one commit and the coalescer collapses them into a single POST /v1/batch:run. A scroll down is one
+  //    more batch, not a request per widget. (Nothing per-widget is wired for that: see lib/getCoalescer.ts.)
+  // A cached collection still renders instantly from the store while off screen - gating decides who FETCHES,
+  // not what may be shown.
+  const { regionRef, seen } = useVisibleRegions();
+  // Everything awaiting the caller's decision - ALL request types, from the same session-wide provider that
+  // feeds the sidebar badge and the Approvals inbox, so the three never disagree. Counts first, rows only for
+  // the queues the count says are non-empty; empty (and free) for callers who can't approve anything.
+  const approvals = useApprovals();
+  // Read up here because whether this caller DECIDES leave also decides whether the wall below needs leave
+  // rows: an approver's card reads the approvals count instead of counting requests.
+  const canDecide = usePermission("leave-requests.approve");
+  // "Approver" for KPI purposes: can decide leave, or has anything (of any type) awaiting their decision.
+  const isApprover = canDecide || approvals.total > 0;
+  const wantMyDay = seen("myday");
+  const wantKpis = seen("kpis");
+  const wantApprovals = seen("approvals");
+  const wantTimeline = seen("timeline");
+  const wantCalendar = seen("calendar");
+  const wantBoard = seen("board");
+
+  // Shared reads, each gated on the union of the sections that actually consume it. Generous by design: a
+  // section listed here fetches the collection the moment it is on screen, so no widget can render a number
+  // computed from rows it never asked for.
+  //  holidays    - the holidays card, "is today a holiday" (not-clocked-in), timeline day shading, my-day.
+  const { rows: holidays, state: holidaysState } = useCollection<Holiday>("holidays", { enabled: wantCalendar || wantKpis || wantTimeline || wantMyDay });
+  const { rows: announcements, state: announcementsState } = useCollection<Announcement>("announcements", { enabled: wantBoard });
+  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: wantMyDay || wantTimeline });
   // Org events (private-by-default; yields [] for callers without events.read). Marked as bands on the timeline.
-  const { rows: events } = useCollection<Event>("events");
+  const { rows: events } = useCollection<Event>("events", { enabled: wantKpis || wantTimeline });
+  // `employees` and `leave-requests` - the two widest reads on the page - are further down, where the summary
+  // has settled and their gates can tell whether the wall still needs rows at all.
 
-  const selfEmp = me.employee_id ? employees.find((e) => idOf(e.path) === me.employee_id) : undefined;
-
+  // Birthdays and anniversaries: the celebrations card, the "celebrating this week" KPI and the timeline's
+  // markers. Scans the directory server-side, so it waits for one of those three to be on screen.
+  const wantCelebrations = wantCalendar || wantKpis || wantTimeline;
   const [celebrations, setCelebrations] = useState<Celebration[]>([]);
   const [celebsLoading, setCelebsLoading] = useState(true);
   useEffect(() => {
+    if (!wantCelebrations) return;
     let live = true;
     get<{ results: Celebration[] }>("employees:upcomingCelebrations")
       .then((r) => live && setCelebrations(r.results ?? []))
@@ -174,9 +218,8 @@ export default function Dashboard({ me }: { me: Me }) {
     return () => {
       live = false;
     };
-  }, []);
+  }, [wantCelebrations]);
 
-  const canDecide = usePermission("leave-requests.approve");
   const canTimeline = usePermission("timeline.read");
   // Events are private by default, so the events card is dropped entirely for callers without the grant
   // rather than shown reading a permanent zero (an absent kpiData entry hides the card - see allBands).
@@ -186,28 +229,18 @@ export default function Dashboard({ me }: { me: Me }) {
   const [attendanceRefresh, setAttendanceRefresh] = useState(0);
   const onClockChange = () => setAttendanceRefresh((n) => n + 1);
 
-  // Open attendance sessions, fetched ONCE for the whole page: the clocked-in KPI counts them and the clock
-  // widget finds the caller's own session in the same result (it used to fire a second identical read).
-  const [openSessions, setOpenSessions] = useState<AttendanceSession[]>([]);
-  useEffect(() => {
-    let live = true;
-    get<{ results: AttendanceSession[] }>("attendance?open=true")
-      .then((r) => live && setOpenSessions(r.results ?? []))
-      .catch(() => live && setOpenSessions([]));
-    return () => { live = false; };
-  }, [attendanceRefresh]);
+  // Open attendance sessions come from the session-wide clock state (one read for the whole app, shared with
+  // the top-bar chip and the Attendance page): the clocked-in KPI counts them and the clock widget finds the
+  // caller's own session in the same result.
+  const openSessions = useClock().openSessions;
   const clockedIn = openSessions.length;
-  const myOpenSession = useMemo(
-    () => (me.employee_id ? openSessions.find((s) => s.employee && idOf(s.employee) === me.employee_id) ?? null : null),
-    [openSessions, me.employee_id],
-  );
 
   // Role-based dashboard config (which KPIs + timeline markers each role sees). Read is open; default (unset)
   // shows everything. Edited in Settings → Organization → Dashboard.
   const [dashCfg, setDashCfg] = useState<DashboardConfig>({});
   const [cfgReady, setCfgReady] = useState(false);
   useEffect(() => {
-    get<{ value?: DashboardConfig }>("settings/dashboard")
+    getSetting<DashboardConfig>("dashboard")
       .then((s) => setDashCfg(s.value ?? {}))
       .catch(() => setDashCfg({}))
       .finally(() => setCfgReady(true));
@@ -259,14 +292,6 @@ export default function Dashboard({ me }: { me: Me }) {
     [dashCfg, me.role, me.employee_id],
   );
 
-  // Recent joiner (started within the last 60 days): also fetch transitions so the "your onboarding" tile can
-  // show the caller's own checklist even when no transition KPI is shared with them.
-  const recentJoiner = useMemo(() => {
-    if (!selfEmp?.start_date) return false;
-    const cutoff = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
-    return selfEmp.start_date >= cutoff;
-  }, [selfEmp?.start_date]);
-
   // ---- Aggregated KPI counts: GET /v1/dashboard-summary computes every count/sum below server-side (one
   // request, one D1 batch, numbers only), gated per backing collection by the caller's real list decision.
   // Keys the server omits (not listable, older server) fall back to the per-collection row fetches below, so
@@ -276,9 +301,17 @@ export default function Dashboard({ me }: { me: Me }) {
   const [summaryState, setSummaryState] = useState<"loading" | "ready" | "error">("loading");
   useEffect(() => {
     if (!cfgReady) return;
+    // Counts, but not before they are wanted: every key below belongs to the KPI wall, bar the one my-day tile
+    // that rides along (assets_pending_scan). Each aggregate is a scoped COUNT server-side, so this one
+    // request replaces a page of rows per card - but it is still work, and an off-screen wall doesn't need it.
+    if (!wantKpis && !wantMyDay) return;
     const wanted = new Set(SUMMARY_KEYS.filter((k) => kpiVisible(k)));
-    // The not-clocked-in card needs the remote-today count even when the remote card itself is hidden.
-    if (kpiVisible("not_clocked_in")) wanted.add("remote_today");
+    // Not-clocked-in is arithmetic over three other numbers, so it needs all three even when their own cards
+    // are hidden: the headcount denominator, plus who is legitimately away (remote / on leave).
+    if (kpiVisible("not_clocked_in")) for (const k of ["headcount", "remote_today", "on_leave"]) wanted.add(k);
+    // Several cards read "of N people" in their hint, so the headcount count earns its place whenever one of
+    // them shows - otherwise the hint would have to fall back to counting a page of the directory.
+    if (["on_leave", "remote_today", "joiners", "benefits_enrolled"].some((k) => kpiVisible(k))) wanted.add("headcount");
     if (wanted.size === 0) {
       setSummary({});
       setSummaryState("ready");
@@ -291,22 +324,61 @@ export default function Dashboard({ me }: { me: Me }) {
     return () => { live = false; };
     // kpiVisible closes over dashCfg/me; re-request when the config (or viewer) changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfgReady, dashCfg, me.role, me.employee_id]);
-  // Do the rows for this KPI still need fetching? Yes if the summary failed, or settled without the key.
+  }, [cfgReady, dashCfg, me.role, me.employee_id, wantKpis, wantMyDay]);
+  // Do the rows for this KPI still need fetching? Yes if the summary failed, or settled without the key. Until
+  // the wall is on screen the summary hasn't been asked for, so nothing falls back to rows either.
   const needRows = (key: string) => summaryState === "error" || (summaryState === "ready" && !summary?.[key]);
-  const wantRows = (key: string) => kpiVisible(key) && needRows(key);
+  const wantRows = (key: string) => wantKpis && kpiVisible(key) && needRows(key);
   // Summary-first value/extra, falling back to the row-computed number.
   const sv = (key: string, fallback: number) => summary?.[key]?.value ?? fallback;
   const sx = (key: string, fallback: number) => summary?.[key]?.extra ?? fallback;
 
-  // ---- Module KPIs (one collection each). Private by default: the fetch is gated on kpiVisible AND on the
-  // summary above not already carrying the number (wantRows), so a viewer who can't see the card - or whose
-  // count arrived aggregated - never pays the D1 read. The card also stays gated by the collection's real
-  // grants (an empty list -> a "0" the viewer is entitled to see). Each drills through to its module page.
+  // ---- The two widest reads on the page, and the only two whose gate needs the summary to have settled -----
+  // The directory: the timeline draws every person on it, the approval rows and a kudos post show names. The
+  // KPI wall's four directory numbers (headcount, joiners, probation, and the not-clocked-in denominator) are
+  // scoped COUNTs server-side, so the wall reaches for a page of rows only if the summary came back without
+  // them - and then it is counting one page rather than the org, which is exactly why the counts exist.
+  // A hidden card whose number feeds a VISIBLE one still needs its number, so the not-clocked-in arithmetic
+  // gets the same treatment here as it does in the summary request above.
+  const forNotClockedIn = (key: string) => wantKpis && kpiVisible("not_clocked_in") && needRows(key);
+  const readEmployees =
+    wantTimeline || wantApprovals || wantBoard ||
+    wantRows("headcount") || wantRows("joiners") || wantRows("probation_ending") || forNotClockedIn("headcount");
+  const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { enabled: readEmployees });
+  // Leave: the timeline's away bands, my-day's next time off, and - for a caller who decides nothing - their
+  // own pending count (an approver's card reads the approvals count instead, which costs no rows). Gated on
+  // the PERMISSION rather than on `isApprover`, because the approvals count arrives asynchronously and a gate
+  // that flips with it would have fetched the rows before the answer landed. "On leave today" is a server-side
+  // count like the directory numbers above.
+  const { rows: leave } = useCollection<LeaveRequest>("leave-requests", {
+    enabled: wantMyDay || wantTimeline || (wantKpis && !canDecide) || wantRows("on_leave") || forNotClockedIn("on_leave"),
+  });
+
+  // The greeting wants ONE row - the caller's own - and it paints before any section is in view, so it reads
+  // that row by id rather than pulling a 100-row directory page for a first name. Once a section that needs
+  // the directory has loaded it, that row wins (same data, and it stays fresh with the list); on a cached
+  // revisit the list answers straight away and the by-id read never happens.
+  const selfFromList = me.employee_id ? employees.find((e) => idOf(e.path) === me.employee_id) : undefined;
+  const { emp: selfRow } = useEmployee(me.employee_id && !selfFromList ? me.employee_id : null);
+  const selfEmp = selfFromList ?? selfRow ?? undefined;
+  // Recent joiner (started within the last 60 days): also fetch transitions so the "your onboarding" tile can
+  // show the caller's own checklist even when no transition KPI is shared with them.
+  const recentJoiner = useMemo(() => {
+    if (!selfEmp?.start_date) return false;
+    const cutoff = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
+    return selfEmp.start_date >= cutoff;
+  }, [selfEmp?.start_date]);
+
+  // ---- Module KPIs (one collection each). Private by default, and read only as a LAST resort: `wantRows`
+  // requires the wall to be on screen, the card to be visible to this viewer, and the summary above to have
+  // settled WITHOUT the count - so a viewer who can't see the card, or whose number arrived aggregated, or who
+  // never scrolled this far, never pays the D1 read. The card also stays gated by the collection's real grants
+  // (an empty list -> a "0" the viewer is entitled to see). Each drills through to its module page.
   // Open support tickets the caller can see (scoped server-side); count of those still OPEN drives a KPI.
   const { rows: tickets } = useCollection<Ticket>("tickets", { enabled: wantRows("open_tickets") });
   const openTickets = useMemo(() => tickets.filter((t) => (t.state ?? "").toUpperCase() === "OPEN").length, [tickets]);
-  const { rows: transitions } = useCollection<Transition>("transitions", { enabled: wantRows("transitions_active") || wantRows("onboarding_tasks_pending") || recentJoiner });
+  // Also the new joiner's own onboarding checklist, which is a my-day tile rather than a KPI.
+  const { rows: transitions } = useCollection<Transition>("transitions", { enabled: wantRows("transitions_active") || wantRows("onboarding_tasks_pending") || (wantMyDay && recentJoiner) });
   const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: wantRows("open_positions") });
   const { rows: expenses } = useCollection<Expense>("expenses", { enabled: wantRows("expenses_pending") || wantRows("recurring_expenses_due") });
   const { rows: complianceEvents } = useCollection<ComplianceEvent>("compliance-events", { enabled: wantRows("compliance_due") || wantRows("compliance_overdue") || wantRows("compliance_week") });
@@ -325,34 +397,35 @@ export default function Dashboard({ me }: { me: Me }) {
   // didn't already count them.
   const { rows: cards } = useCollection<CardT>("cards", { enabled: wantRows("cards_blocked") || wantRows("cards_overdue") || wantRows("my_open_cards") || wantRows("cards_due_week") });
   // Budget utilization is a service-derived rollup, not a column - not summarizable; the rows stay.
-  const { rows: budgets } = useCollection<ExpenseBudget>("expense-budgets", { enabled: kpiVisible("budget_over") });
+  const { rows: budgets } = useCollection<ExpenseBudget>("expense-budgets", { enabled: wantKpis && kpiVisible("budget_over") });
   // Document ack/sign state is per-caller (join against acknowledgements) - the rows stay too.
-  const { rows: orgDocuments } = useCollection<DocumentResource>("org-documents", { enabled: kpiVisible("docs_to_ack") });
-  const { rows: personalDocuments } = useCollection<DocumentResource>("personal-documents", { enabled: kpiVisible("docs_expiring") || kpiVisible("letters_to_sign") });
+  const { rows: orgDocuments } = useCollection<DocumentResource>("org-documents", { enabled: wantKpis && kpiVisible("docs_to_ack") });
+  const { rows: personalDocuments } = useCollection<DocumentResource>("personal-documents", { enabled: wantKpis && (kpiVisible("docs_expiring") || kpiVisible("letters_to_sign")) });
   const { rows: noticePeriods } = useCollection<NoticePeriod>("notice-periods", { enabled: wantRows("notice_serving") });
   // Remote-work rows also feed the "not clocked in" math (people working remotely aren't missing).
-  const { rows: remoteRequests } = useCollection<RemoteWorkRequest>("remote-work-requests", { enabled: wantRows("remote_today") || (kpiVisible("not_clocked_in") && needRows("remote_today")) });
+  const { rows: remoteRequests } = useCollection<RemoteWorkRequest>("remote-work-requests", { enabled: wantRows("remote_today") || (wantKpis && kpiVisible("not_clocked_in") && needRows("remote_today")) });
   const { rows: timeEntries } = useCollection<TimeEntry>("time-entries", { enabled: wantRows("timesheet_week") || wantRows("timesheets_draft") || wantRows("team_hours_week") });
   const { rows: reviewCycles } = useCollection<ReviewCycle>("review-cycles", { enabled: wantRows("reviews_due_soon") });
   const { rows: offers } = useCollection<Offer>("offers", { enabled: wantRows("offers_pending") });
 
   // ---- My-day data: the caller's own numbers (leave balance, payday, own upcoming leave, own onboarding,
   // recent request outcomes). All self-scoped or already-loaded - no org-wide reads.
-  const { rows: leaveBalances } = useCollection<LeaveBalance>("leave-balances", { enabled: !!me.employee_id });
-  const { rows: payPeriods } = useCollection<PayPeriod>("pay-periods", { enabled: !!me.employee_id });
+  const { rows: leaveBalances, state: balancesState } = useCollection<LeaveBalance>("leave-balances", { enabled: wantMyDay && !!me.employee_id });
+  const { rows: payPeriods, state: payPeriodsState } = useCollection<PayPeriod>("pay-periods", { enabled: wantMyDay && !!me.employee_id });
   const { notifications } = useNotifications();
 
   // Org work schedule (working week + shift times) for the timeline's shading and per-day attendance status.
   const [schedule, setSchedule] = useState<AttendanceSchedule>(DEFAULT_SCHEDULE);
   useEffect(() => {
-    get<{ value?: Partial<AttendanceSchedule> }>("settings/attendance")
+    getSetting<Partial<AttendanceSchedule>>("attendance")
       .then((s) => { if (s.value) setSchedule({ ...DEFAULT_SCHEDULE, ...s.value }); })
       .catch(() => {});
   }, []);
   const today = todayStr();
 
   const upcomingHolidays = useMemo(
-    () => holidays.filter((h) => h.date >= today && !h.disabled).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5),
+    // `applies === false` is a regional holiday for another location - not this viewer's day off.
+    () => holidays.filter((h) => h.date >= today && !h.disabled && h.applies !== false).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5),
     [holidays, today]
   );
   const isHolidayToday = useMemo(() => holidays.some((h) => h.date === today && !h.disabled), [holidays, today]);
@@ -377,7 +450,10 @@ export default function Dashboard({ me }: { me: Me }) {
       announcements
         // Official announcements only - generic board posts live on the Board page, not the dashboard feed.
         .filter((a) => (a.kind ?? "announcement") === "announcement" && a.published !== false && !a.disabled)
-        .sort((a, b) => (b.publish_time ?? "").localeCompare(a.publish_time ?? ""))
+        // By when it went live, the same date the card prints (lib/boardOrder) - an announcement published on
+        // the spot carries no publish_time, so sorting on that field alone sank the newest ones to the end.
+        // Not the pin-aware key: this card is the LATEST news, not the board's curated order.
+        .sort((a, b) => boardTime(b) - boardTime(a))
         .slice(0, 4),
     [announcements]
   );
@@ -387,8 +463,8 @@ export default function Dashboard({ me }: { me: Me }) {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     return announcements
       .filter((a) => a.read === false && a.published !== false && !a.disabled)
-      .filter((a) => +new Date(a.publish_time ?? a.create_time ?? 0) >= weekAgo)
-      .sort((a, b) => (b.publish_time ?? b.create_time ?? "").localeCompare(a.publish_time ?? a.create_time ?? ""));
+      .filter((a) => boardTime(a) >= weekAgo)
+      .sort((a, b) => boardTime(b) - boardTime(a));
   }, [announcements]);
   // One board card, not two: unread items lead (any kind), then the latest announcements that aren't already
   // in the unread set, capped at 5 rows.
@@ -426,10 +502,6 @@ export default function Dashboard({ me }: { me: Me }) {
   }, [approved, today]);
 
   const { org } = useOrg();
-  // Everything awaiting the caller's decision - ALL request types, from the same session-wide provider that
-  // feeds the sidebar badge and the Approvals inbox, so the three never disagree. Merged oldest-first for the
-  // "Awaiting your approval" card; empty (and free) for callers who can't approve anything.
-  const approvals = useApprovals();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   type ApprovalItem = { path: string; collection: string; etag?: string; can: string[]; employee?: string; when?: string; kind: string; desc: string };
   const approvalItems = useMemo(() => {
@@ -453,16 +525,20 @@ export default function Dashboard({ me }: { me: Me }) {
     const t = approvalItems[0]?.when;
     return t ? Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 86_400_000)) : 0;
   }, [approvalItems]);
-  // "Approver" for KPI purposes: can decide leave, or has anything (of any type) awaiting their decision.
-  const isApprover = canDecide || approvals.total > 0;
 
   // Inline decision state for the approvals card. Approve is one click; reject confirms via a small dialog
   // (with an optional note where the collection's :reject accepts one), exactly like the Approvals inbox.
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [deciding, setDeciding] = useState<string | null>(null); // path being decided (disables its row buttons)
   const [rejecting, setRejecting] = useState<ApprovalItem | null>(null);
   const [rejectNote, setRejectNote] = useState("");
   async function decideInline(it: ApprovalItem, verb: "approve" | "reject", note?: string) {
+    // Rejection arrives from its own dialog (which collects the note); approval is the bare click, and on a
+    // dashboard it sits among widgets people scroll past rather than in a queue they came to work through.
+    const who = it.employee ? employees.find((e) => idOf(e.path) === idOf(it.employee!)) : undefined;
+    const whose = who ? `${who.first_name} ${who.last_name}'s` : "this";
+    if (verb === "approve" && !(await confirmDecision(confirm, "approve", `${whose} ${it.kind.toLowerCase()} request (${it.desc})`))) return;
     setDeciding(it.path);
     try {
       const body = verb === "reject" && note?.trim() && REJECT_NOTE.has(it.collection) ? { note: note.trim() } : undefined;
@@ -683,7 +759,14 @@ export default function Dashboard({ me }: { me: Me }) {
     () => notifications.filter((n) => /\.(approved|rejected)$/.test(n.type ?? "")).slice(0, 4),
     [notifications],
   );
-  const showMyDay = !!me.employee_id && (myBalances.length > 0 || !!nextPayday || !!myNextLeave || !!upcomingHolidays[0] || !!myOnboarding || myOutcomes.length > 0);
+  // Assets handed to the caller that are still waiting for them to scan the tag. The number rides the summary
+  // the page already fetches (scoped to their own rows server-side), so the ask costs no extra read.
+  const myAssetsToConfirm = summary?.assets_pending_scan?.value ?? 0;
+  const showMyDay = !!me.employee_id && (myBalances.length > 0 || !!nextPayday || !!myNextLeave || !!upcomingHolidays[0] || !!myOnboarding || myOutcomes.length > 0 || myAssetsToConfirm > 0);
+  // WHICH my-day tiles exist is an answer from the data, so "no tiles" and "not read yet" look identical from
+  // here. Placeholders hold the row until its own reads have settled - both while it waits to come into view
+  // and while the reads it triggered are in flight - so the row never appears, vanishes and reappears.
+  const myDayPending = !wantMyDay || balancesState === "loading" || payPeriodsState === "loading" || holidaysState === "loading";
 
   // Per-KPI card data keyed by KPI key. Label, icon and category all come from KPI_DEFS + KPI_ICONS (shared
   // with the Settings editor); `label` here overrides the config label only when the card wants a shorter
@@ -731,20 +814,28 @@ export default function Dashboard({ me }: { me: Me }) {
   const onbTasksV = sv("onboarding_tasks_pending", onboardingTasksPending);
   const openPositionsV = sv("open_positions", openReqs.length);
   const openSeatsV = sx("open_positions", openSeats);
+  // The four directory/leave numbers the wall used to derive from loaded rows. Server-side they are scoped
+  // COUNTs over the whole org; the row fallbacks behind them only run when the summary omitted the key.
+  const headcountV = sv("headcount", employees.length);
+  const joinersV = sv("joiners", newJoiners);
+  const probationEndingV = sv("probation_ending", probationEnding);
+  const onLeaveV = sv("on_leave", onLeaveToday);
+  const people = `${headcountV} ${headcountV === 1 ? "person" : "people"}`;
   // How many people are unaccounted for right now: not clocked in, not on approved leave, not on approved
-  // remote work. On an org holiday nobody is expected in, so the card reads 0 with a holiday hint.
-  const notClockedIn = isHolidayToday ? 0 : Math.max(0, employees.length - clockedIn - onLeaveToday - remoteTodayV);
+  // remote work. On an org holiday nobody is expected in, so the card reads 0 with a holiday hint. The
+  // denominator is the org's headcount, not the page of employees this browser happens to have loaded.
+  const notClockedIn = isHolidayToday ? 0 : Math.max(0, headcountV - clockedIn - onLeaveV - remoteTodayV);
   const kpiData: Record<string, KpiDatum> = {
     // --- For you (the caller's own items) ---
-    docs_to_ack: { value: policiesToSign, tone: policiesToSign > 0 ? "warning" : "muted", hint: policiesToSign === 0 ? "All acknowledged" : "Awaiting your signature", target: { collection: "org-documents", label: "Org documents" }, onClick: () => navigate("documents") },
+    docs_to_ack: { value: policiesToSign, tone: policiesToSign > 0 ? "warning" : "muted", hint: policiesToSign === 0 ? "All acknowledged" : "Needs your signature", target: { collection: "org-documents", label: "Org documents" }, onClick: () => navigate("documents") },
     letters_to_sign: { value: lettersToSign, tone: lettersToSign > 0 ? "primary" : "muted", hint: lettersToSign === 0 ? "Nothing to sign" : "Awaiting e-signature", target: { collection: "personal-documents", label: "Personal documents" }, onClick: () => navigate("documents") },
     timesheets_draft: { value: timesheetsDraftV, tone: timesheetsDraftV > 0 ? "primary" : "muted", hint: timesheetsDraftV === 0 ? "Nothing in draft" : "Submit for approval", target: { collection: "time-entries", label: "Time entries" }, onClick: () => navigate("timesheets") },
     my_open_cards: { value: myOpenCardsV, tone: myOpenCardsV > 0 ? "primary" : "muted", hint: myOpenCardsV === 0 ? "All done" : "Assigned to you", target: { collection: "cards", label: "Board cards" }, onClick: () => navigate("boards") },
-    timesheet_week: { value: Math.round(myHoursV * 10) / 10, tone: myHoursV > 0 ? "primary" : "muted", hint: "logged by you this week", target: { collection: "time-entries", label: "Time entries" }, onClick: () => navigate("timesheets") },
+    timesheet_week: { value: Math.round(myHoursV * 10) / 10, tone: myHoursV > 0 ? "primary" : "muted", hint: "by you this week", target: { collection: "time-entries", label: "Time entries" }, onClick: () => navigate("timesheets") },
     // --- Needs attention ---
     pending: isApprover
       // Approvers: the full cross-type approvals queue (same number as the sidebar badge), not just leave.
-      ? { label: "Pending approvals", value: approvals.total, tone: approvals.total > 0 ? "warning" : "muted", hint: approvals.total === 0 ? "All clear" : `Oldest waiting ${oldestPendingDays} day${oldestPendingDays === 1 ? "" : "s"}`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("approvals") }
+      ? { label: "Pending approvals", value: approvals.total, tone: approvals.total > 0 ? "warning" : "muted", hint: approvals.total === 0 ? "All clear" : `Oldest waiting ${oldestPendingDays}d`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("approvals") }
       : { label: "My pending leave", value: pending.length, tone: pending.length > 0 ? "warning" : "muted", hint: pending.length === 0 ? "All clear" : "Awaiting decision", target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("leave-requests") },
     open_tickets: { label: "Open tickets", value: openTicketsV, tone: openTicketsV > 0 ? "warning" : "muted", hint: openTicketsV === 0 ? "All clear" : "Awaiting resolution", target: { collection: "tickets", label: "Support tickets" }, onClick: () => navigate("tickets") },
     expenses_pending: { value: expensesPendingV, tone: expensesPendingV > 0 ? "warning" : "muted", hint: expensesPendingV === 0 ? "All clear" : money(expensesPendingAmountV), target: { collection: "expenses", label: "Expenses" }, onClick: () => navigateFiltered("expenses", "expenses", { state: "SUBMITTED" }) },
@@ -752,40 +843,40 @@ export default function Dashboard({ me }: { me: Me }) {
     cards_overdue: { value: cardsOverdueV, tone: cardsOverdueV > 0 ? "warning" : "muted", hint: cardsOverdueV === 0 ? "On track" : "Past due date", target: { collection: "cards", label: "Board cards" }, onClick: () => navigate("boards") },
     budget_over: { value: budgetsOver, tone: budgetsOver > 0 ? "warning" : "muted", hint: budgetsOver === 0 ? "All within budget" : `of ${budgets.length} ${budgets.length === 1 ? "budget" : "budgets"}`, target: { collection: "expense-budgets", label: "Expense budgets" }, onClick: () => navigate("expense-budgets") },
     compliance_overdue: { value: complianceOverdueV, tone: complianceOverdueV > 0 ? "warning" : "muted", hint: complianceOverdueV === 0 ? "Nothing overdue" : "Past due, not filed", target: { collection: "compliance-events", label: "Compliance events" }, onClick: () => navigateFiltered("compliance", "compliance-events", { status: "Overdue" }) },
-    tax_verify: { value: taxVerifyV, tone: taxVerifyV > 0 ? "warning" : "muted", hint: taxVerifyV === 0 ? "All clear" : "Awaiting verification", target: { collection: "tax-declarations", label: "Tax declarations" }, onClick: () => navigate("tax-declarations") },
-    bgchecks_open: { label: "Background checks", value: bgChecksV, tone: bgChecksV > 0 ? "warning" : "muted", hint: bgChecksV === 0 ? "None open" : "Pending or running", target: { collection: "background-checks", label: "Background checks" }, onClick: () => navigate("background-checks") },
-    suggestions_open: { value: suggestionsV, tone: suggestionsV > 0 ? "warning" : "muted", hint: suggestionsV === 0 ? "All answered" : "Awaiting a response", target: { collection: "suggestions", label: "Suggestions" }, onClick: () => navigate("suggestions") },
+    tax_verify: { value: taxVerifyV, tone: taxVerifyV > 0 ? "warning" : "muted", hint: taxVerifyV === 0 ? "All clear" : "Needs verifying", target: { collection: "tax-declarations", label: "Tax declarations" }, onClick: () => navigate("tax-declarations?focus=awaiting") },
+    bgchecks_open: { label: "Background checks", value: bgChecksV, tone: bgChecksV > 0 ? "warning" : "muted", hint: bgChecksV === 0 ? "None open" : "Pending or running", target: { collection: "background-checks", label: "Background checks" }, onClick: () => navigate("background-checks?focus=open") },
+    suggestions_open: { value: suggestionsV, tone: suggestionsV > 0 ? "warning" : "muted", hint: suggestionsV === 0 ? "All answered" : "Awaiting a reply", target: { collection: "suggestions", label: "Suggestions" }, onClick: () => navigate("suggestions") },
     docs_expiring: { label: "Documents expiring", value: docsExpiring, tone: docsExpiring > 0 ? "warning" : "muted", hint: docsExpiring === 0 ? "None in 30 days" : "Within 30 days", target: { collection: "personal-documents", label: "Personal documents" }, onClick: () => navigate("documents") },
-    probation_ending: { label: "Probation ending", value: probationEnding, tone: probationEnding > 0 ? "warning" : "muted", hint: probationEnding === 0 ? "None in 30 days" : "Confirm or extend", target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
-    notice_serving: { value: noticeServingV, tone: noticeServingV > 0 ? "warning" : "muted", hint: noticeServingV === 0 ? "None exiting" : "Working notice period", target: { collection: "notice-periods", label: "Notice periods" }, onClick: () => navigateFiltered("notice-periods", "notice-periods", { status: "serving" }) },
+    probation_ending: { label: "Probation ending", value: probationEndingV, tone: probationEndingV > 0 ? "warning" : "muted", hint: probationEndingV === 0 ? "None in 30 days" : "Confirm or extend", target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
+    notice_serving: { value: noticeServingV, tone: noticeServingV > 0 ? "warning" : "muted", hint: noticeServingV === 0 ? "None exiting" : "Working notice", target: { collection: "notice-periods", label: "Notice periods" }, onClick: () => navigateFiltered("notice-periods", "notice-periods", { status: "serving" }) },
     // --- Coming up (leading; toned neutral-to-primary - a runway window is not a breach) ---
-    ...(canEvents ? { events_upcoming: { value: upcomingEvents.length, tone: upcomingEvents.length > 0 ? "primary" : "muted", hint: upcomingEvents[0] ? (eventsToday > 0 ? `${eventsToday} today · next: ${upcomingEvents[0].title}` : `Next: ${upcomingEvents[0].title} · ${relativeDay((upcomingEvents[0].start_time ?? "").slice(0, 10))}`) : "Nothing in the next 7 days", target: { collection: "events", label: "Events" }, onClick: () => navigate("events") } } : {}),
+    ...(canEvents ? { events_upcoming: { value: upcomingEvents.length, tone: upcomingEvents.length > 0 ? "primary" : "muted", hint: upcomingEvents[0] ? (eventsToday > 0 ? `${eventsToday} today` : `Next: ${relativeDay((upcomingEvents[0].start_time ?? "").slice(0, 10))}`) : "None in 7 days", target: { collection: "events", label: "Events" }, onClick: () => navigate("events?focus=upcoming") } } : {}),
     compliance_due: { label: "Compliance due", value: complianceDueV, tone: complianceDueOverdueV > 0 ? "warning" : complianceDueV > 0 ? "primary" : "muted", hint: complianceDueV === 0 ? "None in 30 days" : complianceDueOverdueV > 0 ? `${complianceDueOverdueV} overdue` : "Within 30 days", target: { collection: "compliance-events", label: "Compliance events" }, onClick: () => navigate("compliance") },
-    compliance_week: { value: complianceWeekV, tone: complianceWeekV > 0 ? "primary" : "muted", hint: complianceWeekV === 0 ? "Nothing due soon" : "File before the deadline", target: { collection: "compliance-events", label: "Compliance events" }, onClick: () => navigate("compliance") },
+    compliance_week: { value: complianceWeekV, tone: complianceWeekV > 0 ? "primary" : "muted", hint: complianceWeekV === 0 ? "Nothing due soon" : "File before due", target: { collection: "compliance-events", label: "Compliance events" }, onClick: () => navigate("compliance?focus=dueSoon") },
     cards_due_week: { value: cardsDueWeekV, tone: cardsDueWeekV > 0 ? "primary" : "muted", hint: cardsDueWeekV === 0 ? "Nothing due soon" : "Plan ahead", target: { collection: "cards", label: "Board cards" }, onClick: () => navigate("boards") },
-    reviews_due_soon: { value: reviewsDueSoonV, tone: reviewsDueSoonV > 0 ? "primary" : "muted", hint: reviewsDueSoonV === 0 ? "No deadlines this week" : "Wrap up before due date", target: { collection: "reviews", label: "Reviews" }, onClick: () => navigate("reviews") },
-    interviews_upcoming: { value: interviewsUpcomingV, tone: interviewsUpcomingV > 0 ? "primary" : "muted", hint: interviewsUpcomingV === 0 ? "None scheduled" : interviewsTodayV > 0 ? `${interviewsTodayV} today` : "Upcoming", target: { collection: "interviews", label: "Interviews" }, onClick: () => navigate("interviews") },
-    onboarding_tasks_pending: { value: onbTasksV, tone: onbTasksV > 0 ? "primary" : "muted", hint: onbTasksV === 0 ? "All checklists done" : transitionsActiveV > 0 ? `across ${transitionsActiveV} ${transitionsActiveV === 1 ? "transition" : "transitions"}` : "Open checklist items", target: { collection: "transitions", label: "Transitions" }, onClick: () => navigate("transitions") },
-    offers_pending: { value: offersPendingV, tone: offersPendingV > 0 ? "primary" : "muted", hint: offersPendingV === 0 ? "None outstanding" : "Follow up with candidates", target: { collection: "offers", label: "Offers" }, onClick: () => navigate("offers") },
-    recurring_expenses_due: { value: recurringDueV, tone: recurringDueV > 0 ? "primary" : "muted", hint: recurringDueV === 0 ? "Nothing due soon" : "Raise before the cycle", target: { collection: "expenses", label: "Expenses" }, onClick: () => navigate("expenses") },
+    reviews_due_soon: { value: reviewsDueSoonV, tone: reviewsDueSoonV > 0 ? "primary" : "muted", hint: reviewsDueSoonV === 0 ? "None due this week" : "Wrap up before due", target: { collection: "reviews", label: "Reviews" }, onClick: () => navigate("reviews") },
+    interviews_upcoming: { value: interviewsUpcomingV, tone: interviewsUpcomingV > 0 ? "primary" : "muted", hint: interviewsUpcomingV === 0 ? "None scheduled" : interviewsTodayV > 0 ? `${interviewsTodayV} today` : "Upcoming", target: { collection: "interviews", label: "Interviews" }, onClick: () => navigate("interviews?focus=scheduled") },
+    onboarding_tasks_pending: { value: onbTasksV, tone: onbTasksV > 0 ? "primary" : "muted", hint: onbTasksV === 0 ? "All checklists done" : transitionsActiveV > 0 ? `in ${transitionsActiveV} ${transitionsActiveV === 1 ? "transition" : "transitions"}` : "Open checklist items", target: { collection: "transitions", label: "Transitions" }, onClick: () => navigate("transitions") },
+    offers_pending: { value: offersPendingV, tone: offersPendingV > 0 ? "primary" : "muted", hint: offersPendingV === 0 ? "None outstanding" : "Chase candidates", target: { collection: "offers", label: "Offers" }, onClick: () => navigate("offers?focus=extended") },
+    recurring_expenses_due: { value: recurringDueV, tone: recurringDueV > 0 ? "primary" : "muted", hint: recurringDueV === 0 ? "Nothing due soon" : "Raise before due", target: { collection: "expenses", label: "Expenses" }, onClick: () => navigate("expenses") },
     // --- At a glance (snapshot) ---
-    on_leave: { value: onLeaveToday, tone: onLeaveToday > 0 ? "primary" : "muted", hint: `of ${employees.length} ${employees.length === 1 ? "person" : "people"}`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("leave-requests") },
-    clocked_in: { value: clockedIn, tone: clockedIn > 0 ? "success" : "muted", hint: "Currently on the clock", target: { collection: "attendance", label: "Attendance" }, onClick: () => navigate("attendance") },
-    not_clocked_in: { value: notClockedIn, tone: "muted", hint: isHolidayToday ? "Holiday today" : "excludes leave & remote", target: { collection: "attendance", label: "Attendance" }, onClick: () => navigate("attendance") },
-    remote_today: { value: remoteTodayV, tone: remoteTodayV > 0 ? "primary" : "muted", hint: `of ${employees.length} ${employees.length === 1 ? "person" : "people"}`, target: { collection: "remote-work-requests", label: "Remote work" }, onClick: () => navigate("remote-work") },
-    celebrations: { value: celebsThisWeek.length, tone: celebsThisWeek.length > 0 ? "success" : "muted", hint: nextCeleb ? `Next: ${nextCelebLabel} · ${whenLabel(nextCeleb.in_days)}` : "None this week", target: { collection: "employees", label: "Celebrations (employee data)" }, onClick: () => document.getElementById("dash-celebrations")?.scrollIntoView({ behavior: "smooth", block: "center" }) },
-    joiners: { value: newJoiners, tone: newJoiners > 0 ? "primary" : "muted", hint: `${employees.length} total ${employees.length === 1 ? "employee" : "employees"}`, target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
-    headcount: { value: employees.length, tone: "primary", hint: "across the organization", target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
+    on_leave: { value: onLeaveV, tone: onLeaveV > 0 ? "primary" : "muted", hint: `of ${people}`, target: { collection: "leave-requests", label: "Leave requests" }, onClick: () => navigate("leave-requests") },
+    clocked_in: { value: clockedIn, tone: clockedIn > 0 ? "success" : "muted", hint: "On the clock now", target: { collection: "attendance", label: "Attendance" }, onClick: () => navigate("attendance") },
+    not_clocked_in: { value: notClockedIn, tone: "muted", hint: isHolidayToday ? "Holiday today" : "excl. leave & remote", target: { collection: "attendance", label: "Attendance" }, onClick: () => navigate("attendance") },
+    remote_today: { value: remoteTodayV, tone: remoteTodayV > 0 ? "primary" : "muted", hint: `of ${people}`, target: { collection: "remote-work-requests", label: "Remote work" }, onClick: () => navigate("remote-work") },
+    celebrations: { value: celebsThisWeek.length, tone: celebsThisWeek.length > 0 ? "success" : "muted", hint: nextCeleb ? `Next: ${nextCelebLabel}` : "None this week", target: { collection: "employees", label: "Celebrations (employee data)" }, onClick: () => document.getElementById("dash-celebrations")?.scrollIntoView({ behavior: "smooth", block: "center" }) },
+    joiners: { value: joinersV, tone: joinersV > 0 ? "primary" : "muted", hint: `${headcountV} total ${headcountV === 1 ? "employee" : "employees"}`, target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
+    headcount: { value: headcountV, tone: "primary", hint: "across the org", target: { collection: "employees", label: "Employees" }, onClick: () => navigate("employees") },
     transitions_active: { value: transitionsActiveV, tone: transitionsActiveV > 0 ? "primary" : "muted", hint: transitionsActiveV === 0 ? "Nothing in progress" : `${transitionsOnboardingV} joining · ${transitionsActiveV - transitionsOnboardingV} exiting`, target: { collection: "transitions", label: "Transitions" }, onClick: () => navigate("transitions") },
-    open_positions: { value: openPositionsV, tone: openPositionsV > 0 ? "primary" : "muted", hint: openPositionsV === 0 ? "No open reqs" : `${openSeatsV} seat${openSeatsV === 1 ? "" : "s"} to fill`, target: { collection: "job-requisitions", label: "Job requisitions" }, onClick: () => navigate("job-requisitions") },
-    candidates_pipeline: { value: pipelineV, tone: pipelineV > 0 ? "primary" : "muted", hint: pipelineV === 0 ? "Pipeline empty" : "Active applications", target: { collection: "applications", label: "Applications" }, onClick: () => navigate("pipeline") },
-    referrals_open: { value: referralsOpenV, tone: referralsOpenV > 0 ? "primary" : "muted", hint: referralsOpenV === 0 ? "None in flight" : "In progress", target: { collection: "referrals", label: "Referrals" }, onClick: () => navigate("referrals") },
+    open_positions: { value: openPositionsV, tone: openPositionsV > 0 ? "primary" : "muted", hint: openPositionsV === 0 ? "No open reqs" : `${openSeatsV} seat${openSeatsV === 1 ? "" : "s"} to fill`, target: { collection: "job-requisitions", label: "Job requisitions" }, onClick: () => navigate("job-requisitions?focus=open") },
+    candidates_pipeline: { value: pipelineV, tone: pipelineV > 0 ? "primary" : "muted", hint: pipelineV === 0 ? "Pipeline empty" : "Active applications", target: { collection: "applications", label: "Applications" }, onClick: () => navigate("pipeline?focus=active") },
+    referrals_open: { value: referralsOpenV, tone: referralsOpenV > 0 ? "primary" : "muted", hint: referralsOpenV === 0 ? "None in flight" : "In progress", target: { collection: "referrals", label: "Referrals" }, onClick: () => navigate("referrals?focus=progress") },
     reviews_open: { value: reviewsOpenV, tone: reviewsOpenV > 0 ? "primary" : "muted", hint: reviewsOpenV === 0 ? "All closed out" : "Not yet acknowledged", target: { collection: "reviews", label: "Reviews" }, onClick: () => navigate("reviews") },
-    assets_assigned: { value: assetsAssignedV, tone: assetsAssignedV > 0 ? "primary" : "muted", hint: `of ${assetsTotalV} in inventory`, target: { collection: "assets", label: "Assets" }, onClick: () => navigate("assets") },
+    assets_assigned: { value: assetsAssignedV, tone: assetsAssignedV > 0 ? "primary" : "muted", hint: `of ${assetsTotalV} total`, target: { collection: "assets", label: "Assets" }, onClick: () => navigate("assets") },
     goals_active: { value: goalsActiveV, tone: goalsOverdueV > 0 ? "warning" : goalsActiveV > 0 ? "primary" : "muted", hint: goalsActiveV === 0 ? "None in flight" : goalsOverdueV > 0 ? `${goalsOverdueV} past due` : "In progress", target: { collection: "goals", label: "Goals" }, onClick: () => navigate("goals") },
     loans_outstanding: { value: loansOutstandingV, tone: loansOutstandingV > 0 ? "primary" : "muted", hint: loansOutstandingV === 0 ? "Nothing owed" : money(loansTotalV), target: { collection: "loans", label: "Loans" }, onClick: () => navigate("loans") },
-    benefits_enrolled: { value: benefitsV, tone: benefitsV > 0 ? "primary" : "muted", hint: `across ${employees.length} ${employees.length === 1 ? "person" : "people"}`, target: { collection: "benefit-enrollments", label: "Benefit enrollments" }, onClick: () => navigate("benefits") },
-    team_hours_week: { value: Math.round(teamHoursV * 10) / 10, tone: teamHoursV > 0 ? "primary" : "muted", hint: "across everyone you can see", target: { collection: "time-entries", label: "Time entries" }, onClick: () => navigate("timesheets") },
+    benefits_enrolled: { value: benefitsV, tone: benefitsV > 0 ? "primary" : "muted", hint: `across ${people}`, target: { collection: "benefit-enrollments", label: "Benefit enrollments" }, onClick: () => navigate("benefits") },
+    team_hours_week: { value: Math.round(teamHoursV * 10) / 10, tone: teamHoursV > 0 ? "primary" : "muted", hint: "across your team", target: { collection: "time-entries", label: "Time entries" }, onClick: () => navigate("timesheets") },
   };
   // Group the visible cards into their category bands (band order from KPI_CATEGORIES). A card shows only if
   // the viewer may see it, the org hasn't switched its whole category off (hiddenKpiCategories), and the
@@ -860,13 +951,15 @@ export default function Dashboard({ me }: { me: Me }) {
                     return (
                       <div key={k} className={cn("flex items-center gap-1 rounded-md px-2 py-1 hover:bg-accent/50", hidden && "opacity-50")}>
                         <span className="flex-1 truncate text-sm">{def.label}</span>
-                        <Button variant="ghost" size="icon" className="h-6 w-6" disabled={i === 0} onClick={() => moveSection(k, -1)} aria-label={`Move ${def.label} up`}>
+                        {/* Reordering the dashboard is a phone-friendly job (it is where the layout matters
+                            most), so these three keep a real target on touch. */}
+                        <Button variant="ghost" size="icon" className="h-6 w-6 coarse:h-9 coarse:w-9" disabled={i === 0} onClick={() => moveSection(k, -1)} aria-label={`Move ${def.label} up`}>
                           <ArrowUp className="h-3.5 w-3.5" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-6 w-6" disabled={i === sectionOrderResolved.length - 1} onClick={() => moveSection(k, 1)} aria-label={`Move ${def.label} down`}>
+                        <Button variant="ghost" size="icon" className="h-6 w-6 coarse:h-9 coarse:w-9" disabled={i === sectionOrderResolved.length - 1} onClick={() => moveSection(k, 1)} aria-label={`Move ${def.label} down`}>
                           <ArrowDown className="h-3.5 w-3.5" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => toggleSection(k)} aria-label={hidden ? `Show ${def.label}` : `Hide ${def.label}`} title={hidden ? "Show" : "Hide"}>
+                        <Button variant="ghost" size="icon" className="h-6 w-6 coarse:h-9 coarse:w-9" onClick={() => toggleSection(k)} aria-label={hidden ? `Show ${def.label}` : `Hide ${def.label}`} title={hidden ? "Show" : "Hide"}>
                           {hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                         </Button>
                       </div>
@@ -899,7 +992,7 @@ export default function Dashboard({ me }: { me: Me }) {
           )}
         </div>
         <div className="w-full lg:w-[480px]">
-          <ClockWidget open={myOpenSession} onClockChange={onClockChange} />
+          <ClockWidget onClockChange={onClockChange} />
         </div>
       </div>
 
@@ -912,17 +1005,27 @@ export default function Dashboard({ me }: { me: Me }) {
           Shortcuts), capability-gated per caller. They lead the page - a dashboard's first job is "do the
           thing I came here for". Nothing configured for this person = no row at all. */}
       {showSection("shortcuts") && shortcuts.length > 0 && (
-        <div style={sectionStyle("shortcuts")} className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <StatRow caps={ACTION_CAPS} gap={{ base: "0.75rem" }} style={sectionStyle("shortcuts")} className="mb-6">
           {shortcuts.map((s) => (
             <QuickAction key={s.id} label={s.label} icon={s.icon} onClick={s.run} />
           ))}
-        </div>
+        </StatRow>
       )}
 
       {/* My day: the caller's own numbers - leave balance, payday, next time off, onboarding checklist and
-          recent decisions on their requests. Self-scoped data only; hidden for logins with no employee. */}
-      {showSection("myday") && showMyDay && (
-        <div style={sectionStyle("myday")} className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          recent decisions on their requests. Self-scoped data only; hidden for logins with no employee.
+          Which tiles there are is itself an answer from the data, so until the reads have happened the row
+          holds its slot with placeholders - a probe with no height would sit at the top of the page and read as
+          "in view" whatever the reader is actually looking at. */}
+      {showSection("myday") && !!me.employee_id && myDayPending && (
+        <StatRow ref={regionRef("myday")} caps={TILE_CAPS} gap={{ base: "1rem" }} style={sectionStyle("myday")} className="mb-6">
+          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[104px] rounded-xl" />)}
+        </StatRow>
+      )}
+      {/* Which tiles exist is data (a tile appears only when it has something to say), so the row is split
+          into balanced rows rather than poured into fixed columns - five tiles are 3+2, never 4-and-a-hole. */}
+      {showSection("myday") && !myDayPending && showMyDay && (
+        <StatRow caps={TILE_CAPS} gap={{ base: "1rem" }} style={sectionStyle("myday")} className="mb-6">
           {myBalances.length > 0 && (
             <MyDayTile icon={Plane} title="Leave balance" target={{ collection: "leave-balances", label: "Leave balances" }} onClick={() => navigate("leave-requests")}>
               <div className="space-y-1">
@@ -962,6 +1065,12 @@ export default function Dashboard({ me }: { me: Me }) {
               {myOnboardingOpen[0] && <p className="truncate text-xs text-muted-foreground">Next: {myOnboardingOpen[0].title}</p>}
             </MyDayTile>
           )}
+          {myAssetsToConfirm > 0 && (
+            <MyDayTile icon={ScanLine} title="Confirm an asset" target={{ collection: "assets", label: "Assets" }} onClick={() => navigate("assets")}>
+              <p className="text-sm font-semibold tabular-nums">{myAssetsToConfirm} waiting for you</p>
+              <p className="text-xs text-muted-foreground">Scan its tag to confirm you have it</p>
+            </MyDayTile>
+          )}
           {myOutcomes.length > 0 && (
             <MyDayTile icon={BellRing} title="Recent decisions" target={{ collection: "notifications", label: "Notifications" }} onClick={() => navigate("notifications")}>
               <div className="space-y-1">
@@ -974,18 +1083,20 @@ export default function Dashboard({ me }: { me: Me }) {
               </div>
             </MyDayTile>
           )}
-        </div>
+        </StatRow>
       )}
 
       {/* KPIs render in ONE dense grid so rows always fill (separate per-band grids left ragged last rows).
           Cards are ordered by band and carry a category-colored left accent; the legend pills above name each band,
           show its count, and double as a focus filter (click to show only that band). Snapshot cards render as a
           compact strip below the grid. Org visibility in Settings; pin/hide are the viewer's own. */}
-      {/* First-paint skeleton: the KPI wall assembles from many collections, but `employees` is the one
-          always-on read, so its load state stands in for "the dashboard hasn't painted yet". Cached
-          revisits come back "ready" immediately and skip straight to the real cards - no flash. */}
-      {showSection("kpis") && (employeesState === "loading" ? (
-        <div style={sectionStyle("kpis")} className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* First-paint skeleton, which doubles as the wall's probe: until this grid has been in view the wall's
+          collections are not read at all. Once they are, the wall waits for the aggregate counts, and for the
+          directory only if it turned out to need the rows - a wall answered entirely by counts must NOT wait
+          on a read that will never happen. Cached revisits settle immediately and skip straight to the real
+          cards - no flash. */}
+      {showSection("kpis") && (!wantKpis || summaryState === "loading" || (readEmployees && employeesState === "loading") ? (
+        <StatRow ref={regionRef("kpis")} caps={CARD_CAPS} gap={{ base: "1rem" }} style={sectionStyle("kpis")} className="mb-6">
           {Array.from({ length: 8 }).map((_, i) => (
             <Card key={i} className="p-5">
               <div className="flex items-start justify-between">
@@ -998,10 +1109,12 @@ export default function Dashboard({ me }: { me: Me }) {
               </div>
             </Card>
           ))}
-        </div>
+        </StatRow>
       ) : allBands.length > 0 && (
         <div style={sectionStyle("kpis")} className="mb-6 space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
+          {/* The category filters scroll as one row on a phone rather than wrapping to three - the KPI cards
+              they filter are what the dashboard is for, and they should not start below the fold. */}
+          <div className="scroll-shadow-x no-scrollbar -mx-1 flex items-center gap-2 overflow-x-auto px-1 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0">
             {kpiBands.map(({ cat, defs }) => {
               const CatIcon = CATEGORY_ICONS[cat.key];
               const active = catFilter === cat.key;
@@ -1013,7 +1126,7 @@ export default function Dashboard({ me }: { me: Me }) {
                   title={cat.blurb}
                   aria-pressed={active}
                   className={cn(
-                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                    "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium transition-colors coarse:min-h-9 coarse:px-3.5",
                     active ? "border-transparent bg-foreground text-background" : "hover:bg-accent",
                     !active && catFilter !== null && "opacity-50",
                   )}
@@ -1033,7 +1146,7 @@ export default function Dashboard({ me }: { me: Me }) {
                 type="button"
                 onClick={() => updatePrefs({ hiddenKpis: [] })}
                 title="Restore the cards you hid"
-                className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent"
+                className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent coarse:min-h-9 coarse:px-3.5"
               >
                 <Eye className="h-3.5 w-3.5" />
                 Show {personallyHidden} hidden
@@ -1046,7 +1159,7 @@ export default function Dashboard({ me }: { me: Me }) {
                 aria-pressed={hideClear}
                 title="Hide zero-valued cards with nothing needing attention"
                 className={cn(
-                  "ml-auto inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                  "ml-auto inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium transition-colors coarse:min-h-9 coarse:px-3.5",
                   hideClear ? "border-transparent bg-foreground text-background" : "text-muted-foreground hover:bg-accent",
                 )}
               >
@@ -1058,7 +1171,13 @@ export default function Dashboard({ me }: { me: Me }) {
           {kpiBands.length > 0 || pinnedDefs.length > 0 ? (
             <>
               {(pinnedDefs.length > 0 || cardBands.length > 0) && (
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                // Two across on a phone. One per row put eight full-width cards - eight screens of scrolling -
+                // between the user and everything the dashboard is actually for; the card is built to be read
+                // at half width (see StatCard). Three across on a tablet: without the `md` step it stayed at
+                // two there and left a third of the row empty. How many cards there are is the viewer's own
+                // (pins, hides, all-clear, the band filter), so the rows are balanced rather than poured into
+                // four columns - eleven cards are 4+4+3 and not 4+4+2-and-a-hole.
+                <StatRow caps={CARD_CAPS} gap={{ base: "0.75rem", sm: "1rem" }}>
                   {pinnedDefs
                     .filter(({ cat }) => !catFilter || cat.key === catFilter)
                     .map(({ cat, d }) => {
@@ -1077,7 +1196,7 @@ export default function Dashboard({ me }: { me: Me }) {
                         );
                       }),
                     )}
-                </div>
+                </StatRow>
               )}
               {/* At-a-glance strip: snapshot numbers as one compact row instead of a wall of cards. */}
               {snapshotDefs.length > 0 && (!catFilter || catFilter === "snapshot") && (
@@ -1134,8 +1253,11 @@ export default function Dashboard({ me }: { me: Me }) {
 
       {/* Needs-you first: everything awaiting the caller's decision, across every request type, oldest first,
           with one-click approve and a confirm-first reject right here. */}
+      {/* Awaiting-your-decision rows come from the shared approvals provider (count first, then rows only for
+          the queues the count says are non-empty), so this card has nothing of its own to defer. Its probe is
+          here for the sake of the NAMES on those rows, which come from the directory. */}
       {showSection("approvals") && approvals.total > 0 && (
-        <Card style={sectionStyle("approvals")} className="mb-6 border-warning/40">
+        <Card ref={regionRef("approvals")} style={sectionStyle("approvals")} className="mb-6 border-warning/40">
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-base">
               <CalendarCheck className="h-4 w-4 text-warning" /> Awaiting your approval
@@ -1169,14 +1291,14 @@ export default function Dashboard({ me }: { me: Me }) {
                     {/* Inline decision, following the row's own access.can exactly like the Approvals inbox. */}
                     <span className="flex shrink-0 items-center gap-1">
                       {it.can.includes("approve") && (
-                        <AccessAction collection={it.collection} objectPath={it.path} verb="approve" label="Approve">
+                        <AccessAction collection={it.collection} objectPath={it.path} verb="approve" can={it.can} label="Approve">
                           <Button size="sm" variant="success" loading={busy} onClick={() => decideInline(it, "approve")} aria-label={`Approve ${it.kind.toLowerCase()}`}>
                             <Check className="h-4 w-4" />
                           </Button>
                         </AccessAction>
                       )}
                       {it.can.includes("reject") && (
-                        <AccessAction collection={it.collection} objectPath={it.path} verb="reject" label="Reject">
+                        <AccessAction collection={it.collection} objectPath={it.path} verb="reject" can={it.can} label="Reject">
                           <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => { setRejecting(it); setRejectNote(""); }} aria-label={`Reject ${it.kind.toLowerCase()}`}>
                             <X className="h-4 w-4" />
                           </Button>
@@ -1220,9 +1342,16 @@ export default function Dashboard({ me }: { me: Me }) {
       </Dialog>
 
       {showSection("timeline") && canTimeline && (
-        <div style={sectionStyle("timeline")} className="mb-6">
+        <div ref={regionRef("timeline")} style={sectionStyle("timeline")} className="mb-6">
           {timelineOpen ? (
-            <TeamTimeline me={me} employees={employees} leaves={leave} leaveTypes={leaveTypes} holidays={holidays} celebrations={celebrations} events={events} schedule={schedule} hiddenMarkers={hiddenMarkers} refreshKey={attendanceRefresh} />
+            // The heaviest widget on the page: 14 days x every visible employee of attendance, on top of the
+            // five collections it draws over. It stays unmounted - and none of that is read - until its slot
+            // is in view, so a reader who never scrolls this far never pays for it.
+            wantTimeline ? (
+              <TeamTimeline me={me} employees={employees} leaves={leave} leaveTypes={leaveTypes} holidays={holidays} celebrations={celebrations} events={events} schedule={schedule} hiddenMarkers={hiddenMarkers} refreshKey={attendanceRefresh} onCollapse={isMobile ? () => updatePrefs({ timelineOpen: false }) : undefined} />
+            ) : (
+              <Skeleton className="h-64 w-full rounded-xl" />
+            )
           ) : (
             // Mount-on-open on phones: the timeline's attendance fan-out doesn't run until asked for.
             <Button variant="outline" className="w-full" onClick={() => updatePrefs({ timelineOpen: true })}>
@@ -1232,9 +1361,10 @@ export default function Dashboard({ me }: { me: Me }) {
         </div>
       )}
 
-      {/* Holidays + celebrations side by side */}
+      {/* Holidays + celebrations side by side. Both cards already draw a list skeleton while their read is
+          outstanding, and a gated read stays "loading" - so the probe is all this section needs. */}
       {showSection("calendar") && (
-        <div style={sectionStyle("calendar")} className="mb-6 grid gap-6 md:grid-cols-2">
+        <div ref={regionRef("calendar")} style={sectionStyle("calendar")} className="mb-6 grid gap-6 md:grid-cols-2">
           {/* Upcoming holidays */}
           <Card>
             <CardHeader>
@@ -1340,9 +1470,10 @@ export default function Dashboard({ me }: { me: Me }) {
         </div>
       )}
 
-      {/* The board, one card: unread items lead (dot-marked), then the latest announcements. */}
+      {/* The board, one card: unread items lead (dot-marked), then the latest announcements. Bottom of the
+          page by default, so its read is the one most often skipped entirely. */}
       {showSection("board") && (
-        <Card style={sectionStyle("board")} className="mb-6">
+        <Card ref={regionRef("board")} style={sectionStyle("board")} className="mb-6">
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-base">
               <Megaphone className="h-4 w-4 text-primary" /> Latest from the board
@@ -1412,10 +1543,11 @@ export default function Dashboard({ me }: { me: Me }) {
 }
 
 // One "My day" tile: icon + title header, free-form body, optional drill-through.
-function MyDayTile({ icon: Icon, title, target, onClick, children }: { icon: typeof Users; title: string; target?: AccessTargetRef; onClick?: () => void; children: ReactNode }) {
+function MyDayTile({ icon: Icon, title, target, onClick, style, children }: { icon: typeof Users; title: string; target?: AccessTargetRef; onClick?: () => void; style?: CSSProperties; children: ReactNode }) {
   return (
     <Card
       className={cn("p-4", onClick && "cursor-pointer transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-card-hover")}
+      style={style}
       onClick={onClick}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
@@ -1432,27 +1564,19 @@ function MyDayTile({ icon: Icon, title, target, onClick, children }: { icon: typ
 }
 
 // Compact self-service clock in/out on the dashboard. Shows live clocked-in duration; links to Attendance.
-// The open session arrives from the parent (one shared attendance read for the whole page); `onClockChange`
-// fires after a successful clock in/out so the parent refetches sessions and refreshes the team timeline.
-function ClockWidget({ open, onClockChange }: { open: AttendanceSession | null; onClockChange?: () => void }) {
-  const { toast } = useToast();
-  const [busy, setBusy] = useState(false);
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
+// Am I on the clock comes from the session-wide clock state, so this widget, the top-bar chip and the
+// Attendance page can never disagree; `onClockChange` fires after a punch so the page's org-wide KPI and the
+// team timeline (which read their own attendance snapshot) refresh too.
+function ClockWidget({ onClockChange }: { onClockChange?: () => void }) {
+  const clockState = useClock();
+  // Nothing to punch without an employee record (the clock still reports who else is on it, for presence).
+  if (!clockState.enabled) return null;
+  const open = clockState.mine ?? null;
+  const busy = clockState.busy;
+  const elapsed = useElapsedMinutes(open?.clock_in);
   async function clock(verb: "clockIn" | "clockOut") {
-    setBusy(true);
-    try {
-      await invoke("attendance/me", verb);
-      onClockChange?.();
-      toast({ title: verb === "clockIn" ? "Clocked in" : "Clocked out", variant: "success" });
-    } catch (e) {
-      toast({ title: "Clock failed", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    await clockState.punch(verb);
+    onClockChange?.();
   }
   return (
     <Card className="flex flex-col items-start justify-between gap-3 px-4 py-3 sm:flex-row sm:items-center">
@@ -1471,12 +1595,12 @@ function ClockWidget({ open, onClockChange }: { open: AttendanceSession | null; 
           <p className="whitespace-nowrap text-sm font-semibold">{open ? "Clocked in" : "Not clocked in"}</p>
           <p className="whitespace-nowrap text-xs text-muted-foreground">
             {open
-              ? `Since ${new Date(open.clock_in).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${fmtDuration(Math.max(0, Math.round((now - +new Date(open.clock_in)) / 60000)))}`
+              ? `Since ${new Date(open.clock_in).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${fmtDuration(elapsed)}`
               : "Start your day from here."}
           </p>
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {open ? (
           <AccessAction collection="attendance" verb="clockOut" label="Clock out">
             <Button size="sm" variant="destructive" loading={busy} onClick={() => clock("clockOut")}><LogOut className="h-4 w-4" /> Clock out</Button>
@@ -1492,10 +1616,11 @@ function ClockWidget({ open, onClockChange }: { open: AttendanceSession | null; 
   );
 }
 
-function QuickAction({ label, icon: Icon, onClick }: { label: string; icon: typeof Users; onClick: () => void }) {
+function QuickAction({ label, icon: Icon, onClick, style }: { label: string; icon: typeof Users; onClick: () => void; style?: CSSProperties }) {
   return (
     <button
       onClick={onClick}
+      style={style}
       className="group flex items-center justify-between rounded-xl border bg-card p-4 text-left text-sm font-medium shadow-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
     >
       <span className="flex items-center gap-3">

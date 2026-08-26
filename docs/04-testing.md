@@ -48,7 +48,8 @@ hook (`.husky/pre-commit`, installed by `npm install`) and in CI (`.github/workf
 red), `documentAck`, `esign`, `employeeSignature`, `attendanceRegularizationFlow`, `checkInRecurrence`,
 `complianceRecurrence`, `expenseBudgetRecurring`, `referrals`, `goalAlignment`, `kudos`, `kudosSelf`,
 `boardEngagement`, `announcementDraft` / `announcementReadBy` / `announcementSticker`, `ticketRouting`,
-`foundPage`, `assetTags`, `globalSearch`, `dashboardSummary`,
+`foundPage`, `assetTags`, `assetBatchCreate` (a delivery: quantity + serial list, one contiguous tag run),
+`assetBulk` (the paste/scan parsing behind it), `globalSearch`, `dashboardSummary`,
 `celebrations`, `listTruncation`, `employeeNumber`, `employeeCompleteness`, `profileCompleteness`.
 
 **Platform** - `crypto` (field encryption round-trip, ciphertext ≠ plaintext), `idCodec` (round-trip,

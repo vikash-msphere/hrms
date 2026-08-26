@@ -154,7 +154,7 @@ export function FineRulesEditor({
     { id: "perm", header: "Permission", filter: "select", accessor: (r) => permText(r), cell: (r) => <Badge variant={r.effect === "deny" ? "destructive" : r.verb ? "default" : "secondary"}>{permText(r)}</Badge> },
     { id: "state", header: "State", filter: "select", accessor: (r) => (r.status && r.status !== "active" ? "awaiting approval" : r.expire_time ? "temporary" : "live") },
     ...(canWrite
-      ? [{ id: "actions", header: "", sortable: false, filter: "none", align: "right", cell: (r: AccessRule) => <Button variant="ghost" size="icon" className="h-8 w-8" disabled={busy} onClick={() => del(r)}><Trash2 className="h-4 w-4" /></Button> } as Column<AccessRule>]
+      ? [{ id: "actions", header: "", sortable: false, filter: "none", align: "right", cell: (r: AccessRule) => <Button variant="ghost" size="icon" aria-label="Delete this rule" className="h-8 w-8" disabled={busy} onClick={() => del(r)}><Trash2 className="h-4 w-4" /></Button> } as Column<AccessRule>]
       : []),
   ];
 

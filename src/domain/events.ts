@@ -38,6 +38,62 @@ export const COMMON_EVENT_FIELDS: EventField[] = [
   { name: "subject", type: "string", label: "Subject" },
 ];
 
+// The pipeline context every application/interview/offer event carries (built once by applicationEventPayload
+// in services/ats.ts). Declared once here because it is the SAME block on each of them: a rule written against
+// one recruiting event reads the same field names on all of them, and the builder offers the same list. This
+// is what makes a rule able to act - draft an offer at the band's midpoint, title an interview after the role,
+// route a notification to the hiring manager - instead of only announcing a transition.
+export const APPLICATION_EVENT_FIELDS: EventField[] = [
+  { name: "stage", type: "string" },
+  { name: "stageLabel", type: "string", label: "Stage name" },
+  { name: "stageKind", type: "string", label: "Stage kind (active/hired/rejected)" },
+  { name: "stageIndex", type: "number", label: "Stage position" },
+  { name: "status", type: "string" },
+  { name: "applicationId", type: "ref", label: "Application" },
+  { name: "candidateId", type: "ref", label: "Candidate" },
+  { name: "candidateName", type: "string", label: "Candidate name" },
+  { name: "candidateEmail", type: "string", label: "Candidate email" },
+  { name: "requisitionId", type: "ref", label: "Requisition" },
+  { name: "requisitionTitle", type: "string", label: "Role" },
+  { name: "openings", type: "number" },
+  { name: "departmentId", type: "ref", label: "Department" },
+  { name: "hiringManagerId", type: "ref", label: "Hiring manager" },
+  { name: "source", type: "string", label: "Candidate source" },
+  { name: "referralId", type: "ref", label: "Referral" },
+  { name: "bandMin", type: "number", label: "Pay band minimum" },
+  { name: "bandMid", type: "number", label: "Pay band midpoint" },
+  { name: "bandMax", type: "number", label: "Pay band maximum" },
+  { name: "currency", type: "string" },
+  { name: "offerAmount", type: "number", label: "Offer figure the band implies" },
+  { name: "offerDate", type: "date", label: "Today" },
+  { name: "suggestedJoinDate", type: "date", label: "Proposed start date" },
+  { name: "suggestedExpiryDate", type: "date", label: "Proposed offer expiry" },
+];
+
+/** An offer event: the pipeline context, plus the terms on the offer itself. */
+export const OFFER_EVENT_FIELDS: EventField[] = [
+  { name: "offerId", type: "ref", label: "Offer" },
+  { name: "offerStatus", type: "string", label: "Offer status" },
+  { name: "baseComp", type: "number", label: "Offered CTC" },
+  { name: "offerCurrency", type: "string", label: "Offer currency" },
+  { name: "joinDate", type: "date", label: "Agreed start date" },
+  { name: "expiryDate", type: "date", label: "Offer expires" },
+  { name: "approverId", type: "ref", label: "Approver" },
+  ...APPLICATION_EVENT_FIELDS,
+];
+
+/** An interview event: the pipeline context, plus the round and its panel. */
+export const INTERVIEW_EVENT_FIELDS: EventField[] = [
+  { name: "interviewId", type: "ref", label: "Interview" },
+  { name: "interviewTitle", type: "string", label: "Round" },
+  { name: "mode", type: "string" },
+  { name: "interviewStatus", type: "string", label: "Interview status" },
+  { name: "panelSize", type: "number", label: "Panel size" },
+  { name: "scheduledStart", type: "date", label: "Scheduled for" },
+  { name: "location", type: "string" },
+  ...APPLICATION_EVENT_FIELDS,
+];
+
 // The authoritative event catalog. Adding a new reaction point = emit a new type here + call emitEvent at the
 // service tail; the UI and engine pick it up with no further wiring.
 export const EVENT_TYPES: EventTypeDef[] = [
@@ -91,14 +147,52 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { type: "milestone.thirtyDays", label: "New hire's first month", module: "Lifecycle", subjectCollection: "employees", fields: [] },
   { type: "schedule.probationEnding", label: "Probation ending", module: "Lifecycle", subjectCollection: "employees", fields: [{ name: "probationEndDate", type: "date" }] },
   { type: "schedule.workAnniversary", label: "Work anniversary", module: "Lifecycle", subjectCollection: "employees", fields: [{ name: "years", type: "number" }] },
-  { type: "document.expiring", label: "Document expiring", module: "Compliance", subjectCollection: "personal-documents", fields: [{ name: "daysLeft", type: "number" }] },
+  { type: "document.expiring", label: "Document expiring", module: "Compliance", subjectCollection: "personal-documents", fields: [{ name: "daysLeft", type: "number" }, { name: "title", type: "string", label: "Document title" }] },
 
-  // Assets & inventory
-  { type: "asset.created", label: "Asset added to inventory", module: "Assets", subjectCollection: "assets", fields: [{ name: "category", type: "string" }, { name: "hasTag", type: "boolean", label: "Has an asset tag" }] },
+  // Assets & inventory. The custody events are what make a printed tag actionable: `acknowledged` carries the
+  // condition its holder reported (so "arrived damaged" can raise a ticket), and the two chase-up events fire
+  // from the nightly tick when a scan that was owed never happened.
+  { type: "asset.created", label: "Asset added to inventory", module: "Assets", subjectCollection: "assets", fields: [{ name: "categoryId", type: "ref" }, { name: "assetTag", type: "string", label: "Asset tag" }] },
+  // Every custody event carries the TAG as well as the category: a rule that opens a ticket or writes a message
+  // about an asset has to be able to say which physical thing it means, and the tag is what is written on it.
+  { type: "asset.verified", label: "Asset verified by scan", module: "Assets", subjectCollection: "assets", fields: [{ name: "categoryId", type: "ref" }, { name: "assetTag", type: "string", label: "Asset tag" }, { name: "scanned", type: "boolean", label: "Confirmed by scanning the tag" }, { name: "checkedIn", type: "boolean", label: "Counted into stock" }, { name: "condition", type: "string" }] },
+  { type: "asset.acknowledged", label: "Asset receipt confirmed by holder", module: "Assets", subjectCollection: "assets", fields: [{ name: "categoryId", type: "ref" }, { name: "assetTag", type: "string", label: "Asset tag" }, { name: "condition", type: "string" }, { name: "scanned", type: "boolean", label: "Confirmed by scanning the tag" }, { name: "waitedDays", type: "number", label: "Days waiting to be confirmed" }] },
+  { type: "asset.custodyOverdue", label: "Asset custody unconfirmed", module: "Assets", subjectCollection: "assets", fields: [{ name: "categoryId", type: "ref" }, { name: "assetTag", type: "string", label: "Asset tag" }, { name: "name", type: "string", label: "Asset name" }, { name: "kind", type: "string", label: "ack | verification" }, { name: "days", type: "number", label: "Days unconfirmed" }] },
+  { type: "asset.stale", label: "Asset not sighted for a long time", module: "Assets", subjectCollection: "assets", fields: [{ name: "categoryId", type: "ref" }, { name: "assetTag", type: "string", label: "Asset tag" }, { name: "name", type: "string", label: "Asset name" }, { name: "days", type: "number", label: "Days since last sighting" }] },
+  // Inventory counts. `stocktakeMissing` fires once per missing asset THAT HAS A HOLDER when a count closes -
+  // the rows a nudge can actually act on - which is what turns a missing list into somebody going to look.
+  { type: "asset.stocktakeMissing", label: "Asset not found in a stocktake", module: "Assets", subjectCollection: "assets", fields: [{ name: "categoryId", type: "ref" }, { name: "assetTag", type: "string", label: "Asset tag" }, { name: "name", type: "string", label: "Asset name" }, { name: "label", type: "string", label: "Stocktake" }, { name: "days", type: "number", label: "Days since last sighting" }] },
+  { type: "stocktake.closed", label: "Stocktake closed", module: "Assets", subjectCollection: "stocktakes", fields: [{ name: "label", type: "string", label: "Stocktake" }, { name: "scopeTotal", type: "number", label: "Assets in scope" }, { name: "sighted", type: "number", label: "Sighted" }, { name: "missing", type: "number", label: "Missing" }, { name: "found", type: "number", label: "Unexpected finds" }, { name: "flagged", type: "number", label: "Reported damaged" }] },
+  // Requests for kit. `issued` is the hand-over, so it is the one an org hangs "order another laptop" or
+  // "open an IT onboarding ticket" off.
+  { type: "assetRequest.requested", label: "Asset requested", module: "Assets", subjectCollection: "asset-requests", fields: [{ name: "categoryId", type: "ref" }, { name: "neededBy", type: "date", label: "Needed by" }] },
+  { type: "assetRequest.approved", label: "Asset request approved", module: "Assets", subjectCollection: "asset-requests", fields: [{ name: "categoryId", type: "ref" }] },
+  { type: "assetRequest.issued", label: "Asset request fulfilled", module: "Assets", subjectCollection: "asset-requests", fields: [{ name: "categoryId", type: "ref" }, { name: "assetId", type: "ref" }] },
 
   // ATS / recruiting
+  //
+  // Every application event carries the SAME context block (see applicationEventPayload in services/ats.ts):
+  // the candidate, the requisition, the hiring manager, the pay band and the dates the org's offer policy
+  // implies. That is what lets a rule DO the next thing - draft the offer, schedule the round, close the req -
+  // rather than only announce that something happened. The fields listed here are what the Workflows builder
+  // offers for conditions and `{{templates}}`.
   { type: "offer.accepted", label: "Offer accepted", module: "Recruiting", subjectCollection: "offers", fields: [{ name: "candidateId", type: "ref" }, { name: "applicationId", type: "ref" }, { name: "requisitionId", type: "ref" }, { name: "openings", type: "number" }, { name: "startDate", type: "date" }] },
-  { type: "application.stageChanged", label: "Application stage changed", module: "Recruiting", subjectCollection: "applications", fields: [{ name: "stage", type: "string" }, { name: "status", type: "string" }] },
+  { type: "application.created", label: "Application received", module: "Recruiting", subjectCollection: "applications", fields: [...APPLICATION_EVENT_FIELDS] },
+  { type: "application.stageChanged", label: "Application stage changed", module: "Recruiting", subjectCollection: "applications", fields: [{ name: "previousStage", type: "string", label: "Previous stage" }, ...APPLICATION_EVENT_FIELDS] },
+  { type: "application.hired", label: "Candidate hired", module: "Recruiting", subjectCollection: "applications", fields: [{ name: "viaOffer", type: "boolean", label: "Hired by accepting an offer" }, ...APPLICATION_EVENT_FIELDS] },
+  { type: "application.rejected", label: "Application rejected", module: "Recruiting", subjectCollection: "applications", fields: [{ name: "reason", type: "string" }, { name: "notified", type: "boolean", label: "Candidate already told" }, ...APPLICATION_EVENT_FIELDS] },
+  { type: "interview.scheduled", label: "Interview scheduled", module: "Recruiting", subjectCollection: "interviews", fields: [...INTERVIEW_EVENT_FIELDS] },
+  { type: "interview.completed", label: "Interview held", module: "Recruiting", subjectCollection: "interviews", fields: [...INTERVIEW_EVENT_FIELDS] },
+  { type: "interview.cancelled", label: "Interview cancelled", module: "Recruiting", subjectCollection: "interviews", fields: [...INTERVIEW_EVENT_FIELDS] },
+  { type: "offer.created", label: "Offer drafted", module: "Recruiting", subjectCollection: "offers", fields: [...OFFER_EVENT_FIELDS] },
+  { type: "offer.approved", label: "Offer approved", module: "Recruiting", subjectCollection: "offers", fields: [...OFFER_EVENT_FIELDS] },
+  { type: "offer.extended", label: "Offer extended to candidate", module: "Recruiting", subjectCollection: "offers", fields: [...OFFER_EVENT_FIELDS] },
+  { type: "offer.declined", label: "Offer declined", module: "Recruiting", subjectCollection: "offers", fields: [...OFFER_EVENT_FIELDS] },
+  // The candidate answered, either way. Emitted by the seeded chase rule when its wait is resolved, so "we are
+  // no longer waiting on this person" is one signal an org can hang its own reporting or follow-ups off.
+  { type: "offer.answered", label: "Offer answered (either way)", module: "Recruiting", subjectCollection: "offers", fields: [{ name: "answer", type: "string", label: "accepted / declined" }, ...OFFER_EVENT_FIELDS] },
+  { type: "offer.rescinded", label: "Offer rescinded", module: "Recruiting", subjectCollection: "offers", fields: [...OFFER_EVENT_FIELDS] },
+  { type: "interview.scorecardOverdue", label: "Scorecard overdue", module: "Recruiting", subjectCollection: "interviews", fields: [{ name: "title", type: "string" }, { name: "candidate", type: "string" }, { name: "pending", type: "number" }, { name: "daysOpen", type: "number" }] },
   { type: "referral.awarded", label: "Referral bonus awarded", module: "Recruiting", subjectCollection: "referrals", fields: [{ name: "amount", type: "number" }] },
   { type: "referral.paid", label: "Referral bonus paid", module: "Recruiting", subjectCollection: "referrals", fields: [{ name: "amount", type: "number" }] },
 
@@ -106,6 +200,9 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { type: "announcement.published", label: "Announcement published", module: "Engagement", subjectCollection: "announcements", fields: [{ name: "title", type: "string" }] },
   { type: "suggestion.submitted", label: "Suggestion submitted", module: "Engagement", subjectCollection: "suggestions", fields: [{ name: "anonymous", type: "boolean" }] },
   { type: "document.published", label: "Document published", module: "Compliance", subjectCollection: "org-documents", fields: [{ name: "requiresAck", type: "boolean" }] },
+  // Emitted by the daily chase-up once a policy has gone unsigned for two weeks, so escalation (manager ping,
+  // a ticket, an email) is a rule someone writes rather than code someone adds.
+  { type: "document.ackOverdue", label: "Acknowledgement overdue", module: "Compliance", subjectCollection: "org-documents", fields: [{ name: "title", type: "string" }, { name: "pending", type: "number" }, { name: "daysOpen", type: "number" }] },
 
   // Support
   { type: "ticket.created", label: "Ticket created", module: "Support", subjectCollection: "tickets", fields: [{ name: "category", type: "string" }, { name: "priority", type: "string" }] },

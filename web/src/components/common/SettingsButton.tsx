@@ -7,19 +7,22 @@ import {
 } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AccessTarget } from "@/components/access/AccessTarget";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import type { AccessTargetRef } from "@/components/access/AccessModeProvider";
 import { settingsEntry, hostSettings, entryScope } from "@/settings/registry";
 import { hasCapability, useCapabilities, usePermission } from "@/lib/perm";
 import { useRoute, setQueryParam, setQueryParams, navigate } from "@/router";
 import { useToast } from "@/components/ui/use-toast";
+import { lazyPage } from "@/lib/lazyPage";
 
 // The heavy panel bodies live in their own on-demand chunk; this lazy import is what keeps a feature page's
 // bundle lean - nothing here pulls Settings.tsx until the sheet actually opens.
-const SettingsPanelContent = React.lazy(() =>
+// lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
+const SettingsPanelContent = lazyPage(() =>
   import("@/settings/panels").then((m) => ({ default: m.SettingsPanelContent })),
 );
 
-const panelLoading = <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>;
+const panelLoading = <PanelSkeleton />;
 
 // A gear on a feature page that opens that page's relevant settings panel inline, in a right-docked Sheet -
 // the SAME panel as the central Settings hub, no navigation away. One affordance for every scope:

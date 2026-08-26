@@ -3,16 +3,15 @@ import { Contact } from "lucide-react";
 import { get, patch } from "@/api";
 import type { PersonalDetails } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { IconEdit } from "@/components/common/IconEdit";
 import { FieldAccess } from "@/components/access/FieldAccess";
 import { AccessAction } from "@/components/access/AccessAction";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 /** An employee's contact details. Stored encrypted (with emergency info, edited via the
@@ -23,7 +22,8 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   const [denied, setDenied] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<PersonalDetails>({});
-  const [saving, setSaving] = useState(false);
+  // Empty passes: the inline error should fire on a malformed entry, never on a field nobody has touched.
+  const emailOk = !form.personal_email?.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.personal_email.trim());
 
   async function load() {
     try {
@@ -43,19 +43,11 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   const set = (patch: Partial<PersonalDetails>) => setForm((f) => ({ ...f, ...patch }));
 
   async function save() {
-    setSaving(true);
-    try {
-      // Save the full record so emergency fields (edited in the emergency modal) are preserved.
-      const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
-      setData(updated);
-      toast({ title: "Contact details saved", variant: "success" });
-      onSaved?.();
-      setOpen(false);
-    } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setSaving(false);
-    }
+    // Save the full record so emergency fields (edited in the emergency modal) are preserved.
+    const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
+    setData(updated);
+    toast({ title: "Contact details saved", variant: "success" });
+    onSaved?.();
   }
 
   if (denied) return null;
@@ -81,30 +73,45 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
         </dl>
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto" onEnterSubmit={() => { if (!saving) save(); }}>
-          <DialogHeader>
-            <DialogTitle>Edit contact details</DialogTitle>
-          </DialogHeader>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Personal email"><Input type="email" value={form.personal_email ?? ""} onChange={(e) => set({ personal_email: e.target.value })} /></Field>
-            <Field label="Personal phone"><Input value={form.personal_phone ?? ""} onChange={(e) => set({ personal_phone: e.target.value })} /></Field>
-            <Field label="Alternate phone"><Input value={form.alternate_phone ?? ""} onChange={(e) => set({ alternate_phone: e.target.value })} /></Field>
-          </div>
-          <Field label="Communication address"><Textarea rows={2} value={form.communication_address ?? ""} onChange={(e) => set({ communication_address: e.target.value })} /></Field>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Edit contact details"
+        description="Stored encrypted. Used to reach them off work channels and as the address on letters and statutory filings."
+        collection="employees"
+        objectPath={`employees/${employeeId}`}
+        guardLabel="contact details"
+        form={form}
+        submitLabel="Save"
+        canSubmit={emailOk}
+        whyNot="That personal email isn't a valid address."
+        onSubmit={save}
+      >
+          <FieldRow>
+            <Field
+              label="Personal email"
+              field="personal-info.personal_email"
+              error={!emailOk ? "Enter a valid email address." : undefined}
+              hint="Where they're reachable after their work account is closed."
+            >
+              <Input type="email" value={form.personal_email ?? ""} onChange={(e) => set({ personal_email: e.target.value })} placeholder="name@example.com" />
+            </Field>
+            <Field label="Personal phone" field="personal-info.personal_phone"><Input type="tel" inputMode="tel" value={form.personal_phone ?? ""} onChange={(e) => set({ personal_phone: e.target.value })} /></Field>
+          </FieldRow>
+          <Field label="Alternate phone" field="personal-info.alternate_phone" hint="Optional second number, e.g. a landline or a family member.">
+            <Input type="tel" inputMode="tel" value={form.alternate_phone ?? ""} onChange={(e) => set({ alternate_phone: e.target.value })} />
+          </Field>
+          <Field label="Communication address" field="personal-info.communication_address" hint="Where post actually reaches them.">
+            <Textarea rows={2} value={form.communication_address ?? ""} onChange={(e) => set({ communication_address: e.target.value })} />
+          </Field>
           <div className="flex items-center gap-2">
             <Checkbox id="same-addr" checked={!!form.same_as_communication} onCheckedChange={(v) => set({ same_as_communication: v === true })} />
             <Label htmlFor="same-addr">Permanent address same as communication</Label>
           </div>
           {!form.same_as_communication && (
-            <Field label="Permanent address"><Textarea rows={2} value={form.permanent_address ?? ""} onChange={(e) => set({ permanent_address: e.target.value })} /></Field>
+            <Field label="Permanent address" field="personal-info.permanent_address"><Textarea rows={2} value={form.permanent_address ?? ""} onChange={(e) => set({ permanent_address: e.target.value })} /></Field>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={save} loading={saving}>Save</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </WriteDialog>
     </Card>
   );
 }

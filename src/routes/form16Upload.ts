@@ -31,6 +31,8 @@ export const form16Upload = new Hono<AppEnv>().post("/", async (c) => {
   const contentType = c.req.query("content_type") ?? "application/pdf";
   if (!isPdfUpload(fileName, contentType)) throw invalidArgument("Form 16 must be a PDF");
 
+  // An oversized body never reaches here: middleware/bodyLimit.ts refuses it from `Content-Length` before any
+  // handler reads. This assertion is the backstop for a chunked body, which declares no length.
   const bytes = await c.req.arrayBuffer();
   if (bytes.byteLength === 0) throw invalidArgument("empty file");
   assertUploadSize(bytes.byteLength);

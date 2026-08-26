@@ -1,11 +1,12 @@
 /* App UI font: Inter, self-hosted (@fontsource - bundled, served same-origin; no third-party request, no
-   render-blocking remote @import). Only the UI font loads up front; the optional wordmark/post faces
-   (Settings -> Organization, board-post typefaces) lazy-load on first use via lib/fonts.ts. */
-@import "@fontsource/inter/400.css";
-@import "@fontsource/inter/500.css";
-@import "@fontsource/inter/600.css";
-@import "@fontsource/inter/700.css";
-@import "@fontsource/inter/800.css";
+   render-blocking remote @import). Its @font-face rules are pulled in from main.tsx, not @import-ed here
+   (see the note there). Only the UI font loads up front; the optional wordmark/post faces (Settings ->
+   Organization, board-post typefaces) lazy-load on first use via lib/fonts.ts.
+   Wherever a @fontsource face is imported, use the latin/latin-ext SUBSET entrypoints and never the bare
+   `<weight>.css`: that one declares a @font-face for every subset Google ships (cyrillic, greek,
+   vietnamese, devanagari...) and Vite emits a file for each, so the bundle carries megabytes of faces the
+   app has no copy to render. latin-ext covers the European diacritics; widen the subset list in main.tsx
+   and lib/fonts.ts together if the app ever ships another script. */
 
 @tailwind base;
 @tailwind components;
@@ -198,6 +199,219 @@
     font-feature-settings: "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
   }
+
+  /* ============================================================================================
+     THE DOCUMENT NEVER SCROLLS SIDEWAYS. One over-wide box anywhere - a table that outgrew its
+     wrapper, a filter row that would not wrap, a single long unbroken word - otherwise widens the
+     whole document, and the result on a phone is not a local glitch: the top bar detaches from the
+     content it labels, every page gains a strip of bare background down its right edge, and vertical
+     scrolling starts drifting horizontally under the thumb.
+
+     `clip` rather than `hidden`: `hidden` turns the element into a scroll container, which silently
+     kills `position: sticky` for every descendant (the pinned table headers, the SummaryStrip
+     totals, the sticky first column in Schedule). `clip` clips without ever becoming scrollable.
+
+     Applied to `html` only, deliberately. `body` here is `height: 100%`, so clipping it too would
+     make BODY the scroll port instead of the viewport, and the page's own scroll position would stop
+     being `window.scrollY` - which is what router.ts's scroll restore and usePullToRefresh both read.
+
+     This is a backstop, not a licence. Content that genuinely wants to be wider than the viewport
+     (a kanban board, a roster grid, a wide table) still has to say so with its own `overflow-x-auto`
+     box, because anything past the edge HERE is unreachable rather than merely off screen.
+     test/responsiveCoverage.test.ts is what keeps that honest per component. */
+  html {
+    overflow-x: clip;
+  }
+
+  /* ============================================================================================
+     AN OVERLAY MUST NOT SEND THE PAGE BACK TO THE TOP. Every Radix layer (the row-actions menu, a
+     dialog, a sheet, a select) locks the background by way of react-remove-scroll, which injects
+     `body[data-scroll-locked] { overflow: hidden !important }`. `body` here is `height: 100%`, so
+     hiding its overflow turns it from the box the page grows out of into a viewport-tall clipper:
+     the document's scrollable height collapses to one screen, the browser clamps the scroll position
+     to 0, and unlocking restores the overflow but never the position. Tapping the three dots on the
+     last card of a long list therefore threw the reader back to the first one.
+
+     Keeping the overflow visible costs no locking: react-remove-scroll's side car is what actually
+     holds the page still, cancelling wheel and touch scrolling anywhere outside the open layer, and
+     it is unaffected by this. The scrollbar-compensation margin goes with it - the scrollbar is no
+     longer removed, so there is nothing left to compensate for and the margin would only shift the
+     page sideways as the layer opens.
+
+     `html` prefix purely to outrank that runtime-injected rule, whose own specificity is equal and
+     whose position among the stylesheets is not ours to decide. Overlays outside Radix take the same
+     care a different way - see web/src/lib/scrollLock.ts. */
+  html body[data-scroll-locked] {
+    overflow: visible !important;
+    margin-right: 0 !important;
+  }
+
+  /* A long unbroken string - an email address, a wire id, a pasted URL, a filename - is one
+     unbreakable box. It sets the min-content width of every ancestor, so it pushes a card past the
+     viewport rather than wrapping inside it, and no amount of `min-w-0` upstream helps. Breaking mid
+     string is worse typography and a readable layout, which is the right trade on a 360px screen.
+     Inherited, so this one declaration covers every text node in the app; `white-space: nowrap`
+     still wins where a caller asked for one line (table cells, tabular numbers). */
+  body {
+    overflow-wrap: break-word;
+  }
+
+  /* ============================================================================================
+     TOUCH. Everything below is about a finger on a phone rather than a cursor on a desktop, and
+     none of it has a Tailwind class to hang off - it has to hold for every control in the app,
+     including the raw <input>/<button> a page writes inline.
+     ============================================================================================ */
+
+  /* No grey flash box on tap (iOS paints one over any tapped link/button by default), and no 300ms
+     wait for a possible double-tap before a tap counts. Both read as lag on an app-like UI. */
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  button,
+  a,
+  label,
+  summary,
+  [role="button"],
+  [role="tab"],
+  [role="menuitem"],
+  [role="option"] {
+    touch-action: manipulation;
+  }
+
+  /* iOS Safari zooms the whole page in when a focused field's text is under 16px, then leaves the
+     viewport zoomed - which on a form means every subsequent field is off screen. A 16px floor is
+     the only thing that prevents it. Phone-scoped, because iPad Safari and desktop never do this
+     and 14px is the right size there. `!important` because a utility class (`.text-sm`, 0-1-0)
+     outranks any element selector this rule can use, so nothing else would win.
+     Field HEIGHTS are bumped alongside it: 16px text in an h-9 box leaves no vertical breathing
+     room, and a 44px control is the touch target these want anyway. */
+  @media (max-width: 639px) and (pointer: coarse) {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+    select {
+      min-height: 2.5rem;
+    }
+  }
+
+  /* Touch-target floor. Apple/Material both put the comfortable minimum near 44px; the design
+     language's dense defaults (an h-8 button, a py-1.5 menu row) are a cursor's dimensions, not a
+     finger's. Applied by ROLE so it reaches every Radix menu/select/tab without each primitive
+     opting in, and only on coarse pointers so desktop density is untouched.
+     Table cells are excluded: a data grid's rows are sized by their content, and inflating each
+     row's controls would push the columns off screen instead of making them easier to hit. Tabs are
+     excluded too and sized in components/ui/tabs.tsx instead - a floor here would overflow the
+     segmented variant's fixed-height track. */
+  @media (pointer: coarse) {
+    [role="menuitem"],
+    [role="menuitemcheckbox"],
+    [role="menuitemradio"],
+    /* A segmented choice (components/common/Segmented) is a row of radios, and its dense default is a
+       cursor's row height. Its track is a plain flex box with no fixed height, so growing the options
+       grows the control - unlike the segmented TAB variant, which is why tabs are sized in tabs.tsx. */
+    [role="radio"],
+    [role="option"] {
+      min-height: 2.75rem;
+    }
+  }
+
+  /* The floor itself, for every remaining control.
+     The two rules above grow specific SHAPES (a small square icon button, a menu/option row). Measuring the
+     rendered pages on a phone - not reading the source - found ~90 controls that neither rule reaches and
+     that no call site had thought about: a filter chip at 26px, a "Compare with the previous 30 days" toggle
+     at 28px, the day rows on the attendance sheet at 26px, an author's name under a post at 16px, a
+     `Button size="sm"` at 32px. Every one of them is under the 36px this document calls the floor.
+     So the floor is stated once, here, for anything that is a control, instead of at ninety call sites.
+     Three things make this safe to apply this broadly:
+       - `min-height` does not apply to a non-replaced INLINE box, so a link inside a paragraph is untouched
+         and prose keeps its line height. Only block-ish controls (`inline-flex`, `inline-block`, `flex`) grow.
+       - it is a FLOOR, so anything already taller - every default Button, every input - is unchanged.
+       - it is `pointer: coarse` only, so the dense cursor design is exactly as it was.
+     Table cells stay excluded for the same reason as the rule above: inflating the controls inside a data
+     grid's rows pushes its columns off screen rather than making anything easier to hit. */
+  @media (pointer: coarse) {
+    :is(button, [role="button"], [role="switch"], [role="checkbox"], a[href]):not(td *, th *) {
+      min-height: 2.25rem;
+      /* Both axes: an icon-only control is as easy to miss sideways as vertically, and several measured
+         24-33px wide while already tall enough. Harmless on a labelled control, which is always wider. */
+      min-width: 2.25rem;
+    }
+
+    /* Form controls get the same floor. The primitives are already `h-9`, so this only catches the call
+       sites that asked for a denser one (`h-8` on a filter box). Checkboxes and radios are excluded on
+       purpose - they are 16px by design and get their hit area from the `::before` trick above, and a
+       min-height here would stretch the box instead of the target. Ranges are handled just below. */
+    :is(input:not([type="hidden"], [type="range"], [type="checkbox"], [type="radio"]), select):not(td *, th *) {
+      min-height: 2.25rem;
+    }
+
+    /* Inside a table cell the floor above is deliberately not applied - growing every control in a data grid
+       pushes its columns off screen, which trades one problem for a worse one. But leaving them is not right
+       either: measured on a touch tablet, the attendance sheet's expand chevron is 16px and its correction
+       pencil 14px, and those are per-row actions people use constantly. So the BOX stays exactly as it is and
+       the HIT AREA grows underneath it - the same trick the checkbox uses. Layout is untouched; only what a
+       fingertip lands on changes. Adjacent controls in one cell end up with overlapping areas, and the later
+       one wins in the overlap - still far better than a 14px target. */
+    :is(td, th) :is(button, [role="button"], a[href]) {
+      position: relative;
+    }
+    :is(td, th) :is(button, [role="button"], a[href])::after {
+      content: "";
+      position: absolute;
+      /* 11px each side takes the smallest of them (a 14px pencil) to exactly the 36px floor. */
+      inset: -0.6875rem;
+    }
+
+    /* A range input is the one control whose VISIBLE size is meant to be a few pixels: the goal progress
+       slider is a 6px track, which is a 6px drag target - unusable with a thumb. Grow the control box to the
+       floor and keep the track thin by styling it directly, so the slider looks the same and can be grabbed.
+       The thumb is centred by the track's own line box, so nothing needs positioning. */
+    input[type="range"] {
+      height: 2.25rem;
+      background: transparent;
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 0.375rem;
+      border-radius: 9999px;
+      background: hsl(var(--muted));
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      margin-top: -0.3125rem; /* (thumb 16px - track 6px) / 2, so it rides the centre of the track */
+    }
+  }
+
+  /* A scrolled overlay (dialog body, drawer, sheet, menu) should not hand its leftover scroll to the
+     page behind it - on a phone that shows up as the page creeping away under a modal, and on iOS as
+     a rubber-band bounce of the whole document. `contain` keeps the gesture inside the overlay. */
+  [data-radix-popper-content-wrapper],
+  [role="dialog"],
+  [role="menu"],
+  [role="listbox"] {
+    overscroll-behavior: contain;
+  }
+
+  /* Installed as a PWA there is no browser chrome above the app, so the status bar / notch sits over
+     whatever paints at y=0. Only the standalone case needs the inset: in a browser tab the chrome
+     already reserves it, and padding it twice leaves a dead band. */
+  @media (display-mode: standalone) {
+    [data-app-top] {
+      padding-top: env(safe-area-inset-top);
+    }
+  }
+
+  /* Held sideways, the notch and the home indicator take a slice off the LEFT and RIGHT edges rather than
+     the top and bottom. Since the viewport meta opts into painting under them (`viewport-fit=cover`), the
+     shell reserves those two insets for everything in the normal flow - one rule instead of a side-inset
+     class on every page. Fixed chrome is positioned against the viewport, not this box, so it carries its
+     own `pl-safe-l` / `pr-safe-r` (bottom nav, drawer, toasts, docked bars). Zero on every other device. */
+  [data-app-shell] {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
   /* Cross-fade colours when the theme flips, so the light/dark switch feels intentional rather than a flash.
      Scoped to colour/shadow so layout/transform animations elsewhere are untouched. */
   .theme-transition * {
@@ -251,6 +465,203 @@
     }
   }
 
+  /* Small square icon buttons, on a finger.
+     A 24-28px box is the right VISUAL weight for a secondary control in a dense row and about half the
+     width a fingertip can reliably hit. `min-height`/`min-width` beat the `height` the utility set, so the
+     box grows to 36px on touch while the glyph inside and the class the author wrote both stay as they are -
+     the alternative was the same two classes appended at ~70 call sites across 34 files.
+     Scoped to actual controls (a button, a link, a role=button), so the many non-interactive h-7 boxes -
+     avatars, badges, swatches, spinners - are untouched. */
+  @media (pointer: coarse) {
+    button[class~="h-6"][class~="w-6"],
+    button[class~="h-7"][class~="w-7"],
+    a[class~="h-6"][class~="w-6"],
+    a[class~="h-7"][class~="w-7"],
+    [role="button"][class~="h-6"][class~="w-6"],
+    [role="button"][class~="h-7"][class~="w-7"] {
+      min-height: 2.25rem;
+      min-width: 2.25rem;
+    }
+  }
+
+  /* Hover-reveal controls, on a device with no hover.
+     The pattern `opacity-0 group-hover:opacity-100` keeps a row's secondary controls out of the way until the
+     row is pointed at - remove, pin, snooze, promote-to-task, a card's row-actions menu. On touch there is no
+     pointing: the control is simply invisible and, since it still occupies its box, tapping it is a blind hit
+     on something the user cannot see. Every one of those affordances is a real action, so on a coarse pointer
+     they are all shown.
+     Selected by CLASS rather than one-by-one in ~30 components, because the class IS the declaration of intent
+     ("reveal me on hover"), and any future one is covered the moment it is written. `!important` because
+     Tailwind's utilities layer would otherwise win over anything written here, and the named-group variants
+     (`group-hover/col:`) are deliberately NOT matched - those reveal drag/resize handles for gestures that
+     only exist with a cursor. */
+  @media (pointer: coarse) {
+    [class~="group-hover:opacity-100"],
+    [class~="group-focus-within:opacity-100"] {
+      opacity: 1 !important;
+    }
+  }
+
+  /* Horizontal scroll affordance. A tab bar or table that scrolls sideways gives no hint it does -
+     on a phone that is content nobody finds, because there is no scrollbar to see and no hover to
+     reveal one. This paints a soft shadow at whichever edge still has content beyond it.
+     Pure CSS, no JS scroll listener: the two `local` gradients are painted in the CONTENT's
+     coordinate space so they slide away as you scroll, uncovering the two `scroll`-attached
+     shadows that are fixed to the box. Both cover-gradients use the container's own background,
+     so a `.scroll-shadow-x` on a non-default surface passes its colour in via `--scroll-ground`. */
+  .scroll-shadow-x {
+    --scroll-ground: hsl(var(--background));
+    background:
+      linear-gradient(to right, var(--scroll-ground) 40%, hsl(0 0% 100% / 0)) left center / 28px 100% no-repeat
+        local,
+      linear-gradient(to left, var(--scroll-ground) 40%, hsl(0 0% 100% / 0)) right center / 28px 100% no-repeat
+        local,
+      radial-gradient(farthest-side at 0 50%, hsl(var(--foreground) / 0.14), hsl(0 0% 100% / 0)) left center / 14px
+        100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, hsl(var(--foreground) / 0.14), hsl(0 0% 100% / 0)) right center /
+        14px 100% no-repeat scroll;
+  }
+
+  /* ============================================================================================
+     THE EDITOR ROW. Settings and the workflow/board/template editors are built from the same shape
+     over and over: a name field, one or two narrow fields beside it (a cap, a WIP limit, a points
+     value), and a couple of icon buttons at the end. On a laptop that is one comfortable line. On a
+     phone the stated widths alone (a `w-32` plus a `w-24` plus three 32px buttons plus gaps) come to
+     more than the 328px of content column a 360px screen has, before the name field gets a pixel.
+
+     Two classes, because the row and its flexible member need different things:
+
+     `.editor-row` lets the line break. That alone is not enough, though: the name field is usually
+     `flex-1`, which means `flex-basis: 0%`, and flex line-breaking uses each item's basis - so a
+     zero-basis field never triggers a break. Every control stays on one line and the name field is
+     squeezed to 60px instead.
+
+     `.editor-row-main` is what actually breaks it: full width below `sm`, so the name field takes a
+     line of its own and pushes the narrow fields and buttons onto the next one, then back to normal
+     flex-1 behaviour from `sm` up where the single line was right all along. `min-width: 0` because
+     an <input>'s intrinsic width would otherwise be its floor (see ui/input.tsx).
+     ============================================================================================ */
+  .editor-row {
+    @apply flex flex-wrap items-center gap-2;
+  }
+  .editor-row-main {
+    @apply w-full min-w-0 sm:w-auto sm:flex-1;
+  }
+
+  /* ============================================================================================
+     THE STACKED TABLE. A table is a grid of columns, and a phone has room for about two of them.
+     The usual answer here is a scroll box, and for a genuinely tabular surface - a roster, a payroll
+     run's line items - that is still right. For the small hand-written tables the app is full of
+     (my assets, my bonuses, a role history, a settlement breakdown) it is not: sideways scrolling
+     inside a card is a gesture nobody discovers, the column headers scroll away from the values they
+     label, and the page reads as broken rather than dense.
+
+     `.table-stack` turns those tables into a list of labelled rows below `sm`, and leaves them
+     exactly as they are from `sm` up. Every cell states its own label through `data-label`, which is
+     what makes the stacked form readable: without it a phone reader gets a column of bare values
+     whose headings are in a `thead` that is no longer on screen.
+
+     The first cell is the row's title (left aligned, no label, heavier); the rest are label-left /
+     value-right pairs. A cell with no `data-label` and no value renders as a plain block - which is
+     what an action cell or a `colSpan` note wants.
+
+     Callers keep their `min-w-[…]` for the table form, but must scope it to `sm:` - a min-width on a
+     `display: block` table is still a floor, and would put the page right back where it started.
+     ============================================================================================ */
+  @media (max-width: 639px) {
+    /* `:not(.hidden)` throughout: a column folded away on a phone (`hidden sm:table-cell`) is a
+       `display: none` from a single utility class, and these selectors are more specific than it -
+       without the guard, stacking would bring every folded column back. */
+    .table-stack,
+    .table-stack > thead,
+    .table-stack > tbody,
+    .table-stack > tfoot,
+    .table-stack tr:not(.hidden),
+    .table-stack td:not(.hidden),
+    .table-stack th:not(.hidden) {
+      display: block;
+      width: auto;
+    }
+    /* The headings live on the cells now. */
+    .table-stack > thead {
+      display: none;
+    }
+    .table-stack tr:not(.hidden) {
+      @apply border-b py-2;
+    }
+    .table-stack tr:last-child {
+      @apply border-b-0;
+    }
+    .table-stack td[data-label]:not(.hidden) {
+      @apply flex items-baseline justify-between gap-3 py-0.5 pr-0 text-right;
+    }
+    /* The label may wrap and is capped at 45% of the row: "Servicing department" beside a long value would
+       otherwise refuse to give ground and push the value past the card. */
+    .table-stack td[data-label]::before {
+      content: attr(data-label);
+      @apply max-w-[45%] text-left text-xs text-muted-foreground;
+    }
+    /* A cell that names nothing - the row title, an action cluster, a `colSpan` note - lays out as a
+       plain block: a label-and-value row with no label would just reserve an empty column. */
+    .table-stack td:not([data-label]):not(.hidden) {
+      @apply block pr-0;
+    }
+    .table-stack td:first-child {
+      @apply font-medium;
+    }
+    /* A totals strip reads as a row of its own, not as another record. */
+    .table-stack > tfoot tr {
+      @apply border-b-0 border-t;
+    }
+  }
+
+  /* ============================================================================================
+     CHARTS. frappe-charts injects its own stylesheet, written for one light theme: a fixed grey ink
+     (#555b51) on the axes and labels, a fixed light gridline, and a black tooltip. All three are
+     wrong here on at least one of our two grounds, so the parts that carry COLOUR are re-pointed at
+     the app's tokens and the parts that carry SHAPE (stroke widths, dash patterns, text anchors) are
+     left exactly as the library drew them.
+
+     Selectors mirror the library's own specificity so no `!important` is needed, and the font is
+     inherited rather than restated - the app self-hosts its faces, and a chart falling back to the
+     system UI font is the one place text would suddenly look foreign.
+     ============================================================================================ */
+  .chart-container {
+    font-family: inherit;
+    @apply text-foreground;
+  }
+  .chart-container .axis,
+  .chart-container .chart-label {
+    fill: hsl(var(--muted-foreground));
+  }
+  .chart-container .axis line,
+  .chart-container .chart-label line {
+    stroke: hsl(var(--border));
+  }
+  .chart-container .legend-dataset-text {
+    fill: hsl(var(--muted-foreground));
+  }
+  /* Data points sit on the page's own surface, not on white: the ring around a dot is there to
+     separate it from the line under it, so it has to be the ground colour to do that job. */
+  .chart-container .dataset-units circle {
+    stroke: hsl(var(--card));
+  }
+  /* The tooltip is a popover like every other popover in the app - same surface, same border, same
+     elevation - rather than a black box that belongs to a different design language. */
+  .graph-svg-tip {
+    @apply rounded-md border text-popover-foreground;
+    background: hsl(var(--popover));
+    border-color: hsl(var(--border));
+    box-shadow: var(--shadow-pop);
+  }
+  .graph-svg-tip strong,
+  .graph-svg-tip .title {
+    @apply text-popover-foreground;
+  }
+  .graph-svg-tip .svg-pointer {
+    border-top-color: hsl(var(--popover));
+  }
+
   /* Elevation utilities backed by themeable tokens (see --shadow-* above). */
   .shadow-card {
     box-shadow: var(--shadow-card);
@@ -260,6 +671,61 @@
   }
   .shadow-pop {
     box-shadow: var(--shadow-pop);
+  }
+
+  /* Balanced metric rows (see web/src/lib/statRows.ts, which computes the numbers).
+     A row of tiles whose count does not divide the column count leaves an orphan row - four KPIs then three
+     against a hole - and the hole is the first thing the eye finds. So the count is split into rows as evenly
+     as the cap allows and every row is stretched to the full width instead.
+     Flex rather than grid, deliberately: the share is per ITEM (`--per-*` is the size of the row THAT item is
+     in), so each line's bases add up to exactly the full width and the browser breaks the line where the split
+     says it should. A grid would need one column count for the whole track, which is the thing that cannot
+     express "four, then three".
+     `--stat-gap` has to be known here because a share is `(100% - (size - 1) * gap) / size`; `--gap-eff` is
+     the resolved value (a var cannot reference itself, so the breakpoint override needs its own name), and it
+     inherits to the cells, which is how their basis reads the same gap the container drew. */
+  .stat-row {
+    --gap-eff: var(--stat-gap, 0px);
+    /* The caps are chosen against THIS box, not the viewport: every page sits beside a 16rem sidebar, and the
+       same row is also used inside dialogs and half-width panels. A viewport rule sizes cells against room the
+       row does not have; a container query asks how much room there actually is. */
+    container-type: inline-size;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gap-eff);
+  }
+  .stat-row > * {
+    --stat-per: var(--per-0, 1);
+    /* grow so rounding cannot leave a hairline at the end of a row; shrink so it can never overflow. */
+    flex: 1 1 calc((100% - (var(--stat-per) - 1) * var(--gap-eff)) / var(--stat-per));
+    min-width: 0;
+  }
+  /* The rungs of STAT_ROW_LADDER in web/src/lib/statRows.ts, which writes the matching --per-N. Each falls
+     back to the rung below, so a row that only cares about two widths sets only two variables. */
+  @media (min-width: 640px) {
+    .stat-row {
+      --gap-eff: var(--stat-gap-sm, var(--stat-gap, 0px));
+    }
+  }
+  @container (min-width: 480px) {
+    .stat-row > * {
+      --stat-per: var(--per-1, var(--per-0, 1));
+    }
+  }
+  @container (min-width: 720px) {
+    .stat-row > * {
+      --stat-per: var(--per-2, var(--per-1, var(--per-0, 1)));
+    }
+  }
+  @container (min-width: 1000px) {
+    .stat-row > * {
+      --stat-per: var(--per-3, var(--per-2, var(--per-1, var(--per-0, 1))));
+    }
+  }
+  @container (min-width: 1240px) {
+    .stat-row > * {
+      --stat-per: var(--per-4, var(--per-3, var(--per-2, var(--per-1, var(--per-0, 1)))));
+    }
   }
 }
 
@@ -352,4 +818,46 @@
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none; /* Chrome/Safari */
+}
+
+/* Print: paper wants the page's CONTENT, not its chrome. The app shell (sidebar, top bar), and anything a page
+   marks `data-print-hide` (toolbars, filters, action buttons), drop out; what's left prints full width on a
+   white ground. Pages that print as a grid mark their rows `data-print-keep` so a week is never split across
+   two sheets. Landscape suits every grid we print (month calendars, timelines). */
+@media print {
+  @page {
+    size: landscape;
+    margin: 12mm;
+  }
+  aside,
+  header,
+  [data-print-hide] {
+    display: none !important;
+  }
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+  body {
+    background: #fff !important;
+  }
+  [data-print-keep] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .shadow-sm,
+  .shadow,
+  .shadow-lg {
+    box-shadow: none !important;
+  }
+}
+
+/* Date-range calendar sizing.
+   The card spans its form column like any other control and the seven day columns divide that width evenly,
+   so there is no dead gutter inside the border and nothing to centre.
+   Note for anyone tempted by a container query here: `container-type: inline-size` applies inline-axis
+   containment, which makes an element's width independent of its contents. Paired with a content-derived
+   width (`max-content`) the box resolves against empty contents and collapses. */
+.cal-scope {
+  width: 100%;
 }

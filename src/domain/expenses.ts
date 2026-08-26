@@ -49,9 +49,11 @@ export function advanceRecurrence(d: Date, rule: RecurrenceRule): Date {
   return new Date(Date.UTC(targetY, targetMo, day, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()));
 }
 
-// Utilization from a cap + spent. `remaining` goes negative on overspend; `utilization` is a 0..>1 fraction
-// (0 when the cap is 0, to avoid divide-by-zero).
-export function budgetUtilization(amount: number, spent: number): { spent: number; remaining: number; utilization: number } {
+// Utilization from a cap + spent (+ spend still awaiting approval). `remaining` goes negative on overspend;
+// `utilization` is a 0..>1 fraction (0 when the cap is 0, to avoid divide-by-zero). `pending` is NOT part of
+// utilization - it is not yet spend - but a cap at 92% with a queue behind it is already blown, so the number
+// travels alongside instead of being discovered after approval.
+export function budgetUtilization(amount: number, spent: number, pending = 0): { spent: number; pending: number; remaining: number; utilization: number } {
   const s = round2(spent);
-  return { spent: s, remaining: round2(amount - s), utilization: amount > 0 ? s / amount : 0 };
+  return { spent: s, pending: round2(pending), remaining: round2(amount - s), utilization: amount > 0 ? s / amount : 0 };
 }

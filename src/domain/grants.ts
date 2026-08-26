@@ -18,6 +18,7 @@ const COMMON_READ: Record<string, Level> = {
   "pay-components.**": "read",
   "reimbursement-categories.**": "read", // everyone reads categories to file a claim
   "expense-categories.**": "read", // everyone reads expense categories to file an expense
+  "asset-categories.**": "read", // everyone reads asset categories to see what kind of thing they are holding
   "settings.**": "read", // org settings GET is open today (the SPA reads e.g. settings/holidays)
   "benefit-plans.**": "read", // everyone reads the plan catalog to enroll/waive
   "shifts.**": "read", // everyone reads the shift catalog (your roster assignment names one)
@@ -114,6 +115,8 @@ const employee: Grant = {
     "overtime-requests.me.**": "write",
     "remote-work-requests": "write",
     "remote-work-requests.me.**": "write",
+    "asset-requests": "write", // ask for kit (a laptop, a monitor); the category catalog is readable above
+    "asset-requests.me.**": "write",
     "time-entries": "write", // log own timesheet rows against the project catalog
     "time-entries.me.**": "write",
     "goals": "write", // own performance goals (manager sets/edits team goals via my-dept)
@@ -153,6 +156,7 @@ const employee: Grant = {
     ...BOARD_SOCIAL_ALLOW,
     "overtime-requests.me.cancel",
     "remote-work-requests.me.cancel",
+    "asset-requests.me.cancel",
     "time-entries.me.submit",
     "goals.me.updateProgress",
     "tax-declarations.me.upload", // attach/download own investment proofs
@@ -175,6 +179,8 @@ const employee: Grant = {
     "employees.me.downloadIdentityDoc",
     "employees.me.clearIdentityDoc",
     "leave-requests.me.cancel",
+    "leave-requests.me.upload", // attach a supporting document (sick note) to own request
+    "leave-requests.me.download", // read back own request's document
     "reimbursements.me.cancel",
     "reimbursements.me.upload", // attach a receipt to own claim
     "reimbursements.me.download", // download own claim's receipt
@@ -205,6 +211,7 @@ const manager: Grant = {
     "attendance-regularizations.my-dept.**": "read", // dept's regularization requests (to review)
     "overtime-requests.my-dept.**": "read", // dept's overtime requests (to review)
     "remote-work-requests.my-dept.**": "read", // dept's remote-work requests (to review)
+    "asset-requests.my-dept.**": "read", // dept's asset requests (to review; handing the kit over is HR/IT's step)
     "time-entries.my-dept.**": "read", // dept's timesheets (to review)
     "goals.my-dept.**": "write", // set + edit the team's goals
     "check-ins.my-dept.**": "write", // run 1:1s with the team
@@ -222,12 +229,15 @@ const manager: Grant = {
     ...employee.allow,
     "leave-requests.my-dept.approve",
     "leave-requests.my-dept.reject",
+    "leave-requests.my-dept.download", // read the sick note behind a team member's request before deciding
     "attendance-regularizations.my-dept.approve",
     "attendance-regularizations.my-dept.reject",
     "overtime-requests.my-dept.approve",
     "overtime-requests.my-dept.reject",
     "remote-work-requests.my-dept.approve",
     "remote-work-requests.my-dept.reject",
+    "asset-requests.my-dept.approve",
+    "asset-requests.my-dept.reject",
     "time-entries.my-dept.approve",
     "time-entries.my-dept.reject",
     "reviews.my-dept.submitManager", // manager assessment + 360 nominations for the team's reviews
@@ -291,6 +301,7 @@ const hr_admin: Grant = {
     "attendance-regularizations.**": "read", // HR reviews all regularization requests
     "overtime-requests.**": "read", // HR reviews + decides these org-wide (verbs below)
     "remote-work-requests.**": "read",
+    "asset-requests.**": "read", // HR decides these org-wide and hands the kit over (verbs below)
     "time-entries.**": "read", // org-wide timesheet visibility (approval stays the manager's)
     // Recruiting (ATS): HR runs the whole pipeline.
     "job-requisitions.**": "write",
@@ -324,6 +335,7 @@ const hr_admin: Grant = {
     "tickets.**": "write",
     "ticket-checklists.**": "write",
     "assets.**": "write",
+    "asset-categories.**": "write", // HR maintains the kinds of asset, and the tag code each one prints
     "events.**": "write", // org calendar
     "leave-encashments.**": "write", // HR records + decides encashments
     "loans.**": "read", // visibility only; decisions are payroll's verbs
@@ -338,10 +350,14 @@ const hr_admin: Grant = {
     "attendance-regularizations.*.reject",
     "leave-requests.*.approve", // leave.decide includes hr_admin (not just managers)
     "leave-requests.*.reject",
+    "leave-requests.*.download", // any request's supporting document
     "overtime-requests.*.approve", // HR decides overtime + remote-work org-wide (like regularizations)
     "overtime-requests.*.reject",
     "remote-work-requests.*.approve",
     "remote-work-requests.*.reject",
+    "asset-requests.*.approve",
+    "asset-requests.*.reject",
+    "asset-requests.*.issue", // hand over the actual asset, which is what closes the request
     "job-requisitions.**", // every ATS custom method (advance/reject, complete/cancel, offer workflow, uploads)
     "candidates.**",
     "applications.**",
@@ -367,6 +383,7 @@ const hr_admin: Grant = {
     "tickets.**", // run the help desk (assign/start/resolve/close/comment/todos)
     "ticket-checklists.**",
     "assets.**",
+    "asset-categories.**",
     "events.**",
     "leave-encashments.**", // approve/reject/cancel
     "suggestions.*.respond", // HR triage (status + response) on any suggestion

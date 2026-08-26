@@ -25,9 +25,19 @@ export function makePushSender(publicKey: string, privateKey: string, subject: s
           vapid
         );
         const res = await fetch(sub.endpoint, init as RequestInit);
-        if (res.status === 404 || res.status === 410) return "gone";
-        return res.ok ? "ok" : "error";
-      } catch {
+        if (res.status === 404 || res.status === 410) return "gone"; // dead subscription: expected, pruned by the caller
+        if (res.ok) return "ok";
+        // Anything else is a MISCONFIGURATION, not a fact about this device, and it is otherwise invisible:
+        // delivery is best-effort, so nothing upstream surfaces a failure. The overwhelmingly likely cause is
+        // the two halves of the VAPID keypair disagreeing - the browser subscribed against the SPA's
+        // VITE_VAPID_PUBLIC_KEY while the Worker signs with a different VAPID_PUBLIC_KEY/PRIVATE_KEY - which
+        // every push service rejects with 401/403 for every device on every send. Log the status so
+        // `wrangler tail` can tell that apart from "nobody has enabled notifications".
+        // Only the endpoint's ORIGIN is logged: the full URL is a bearer capability to push to that device.
+        console.error(`[push] ${res.status} from ${new URL(sub.endpoint).origin}${res.status === 401 || res.status === 403 ? " - VAPID key mismatch? the SPA's VITE_VAPID_PUBLIC_KEY must equal the Worker's VAPID_PUBLIC_KEY secret" : ""}`);
+        return "error";
+      } catch (e) {
+        console.error("[push] send threw", e);
         return "error";
       }
     },

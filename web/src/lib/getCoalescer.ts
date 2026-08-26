@@ -17,20 +17,29 @@ const MAX = 20; // matches the batch:run sub-request cap; >MAX reads in a window
 // resolve + list + enrichment ≈ 1-3 subrequests), and a Worker invocation is capped at 50 subrequests total.
 // ~20 subs is already near that ceiling; raising it risks whole-batch failure. Raising needs BOTH this and the
 // server cap (routes/batch.ts) moved together, and really only pays off on Workers Paid.
-// Coalescing window (ms). Long enough to span the mount commits of one page load (shell providers -> lazy
-// page chunk -> nested widgets) so they share one batch; short enough to be imperceptible against a network
-// read (tens to hundreds of ms). 32ms (up from 16) spans slower mount cascades on slower devices / slower
-// chunk parse, so a page's reads collapse into ONE batch:run instead of spilling into a second window. It does
-// NOT (and should not) merge data-DEPENDENT reads a widget fires only after an earlier read resolves - those
-// are a genuinely later phase. A cold reload whose page chunk arrives after the window still gets its own
-// batch - that JS round-trip is inherent to code-splitting, not a coalescing miss.
-const WINDOW_MS = 32;
+// The window is a TRAILING one, not a fixed one from the first read.
+//
+// A page load does not fire its reads in a single burst: the shell's providers mount, then the lazy page chunk
+// resolves and mounts, then a workspace's sibling tabs, then a widget whose parent had to render first. Those
+// waves are milliseconds apart, but a FIXED window from the first read cuts wherever it happens to land - a wave
+// arriving one millisecond late became its own `batch:run`, which is why pages showed several small batches.
+//
+// So each new read extends the window by IDLE_MS (waves keep merging while they keep coming), bounded by
+// MAX_WAIT_MS from the first queued read so nothing is ever held for long. Both are imperceptible against a
+// network read of tens to hundreds of ms; the cap is what stops a steady drip of reads from delaying the batch
+// indefinitely.
+//
+// What this deliberately does NOT do is merge data-DEPENDENT reads - a widget that reads only after an earlier
+// read resolves is a genuinely later phase, and its batch is a second round-trip by nature.
+const IDLE_MS = 24; // quiet gap that ends a window
+const MAX_WAIT_MS = 120; // hard cap from the first queued read
 
 type Settler = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 const inflight = new Map<string, Promise<unknown>>(); // path -> shared promise (dedup while pending)
 const settlers = new Map<string, Settler>(); // path -> its resolve/reject
 let queue: string[] = [];
 let timer: ReturnType<typeof setTimeout> | null = null;
+let windowStart = 0; // when the current window's first read was queued
 
 // `path` is the resource path WITHOUT the /v1 prefix, e.g. "employees?max_page_size=200" or "settings/dashboard".
 export function coalescedGet<T>(path: string): Promise<T> {
@@ -40,14 +49,27 @@ export function coalescedGet<T>(path: string): Promise<T> {
     settlers.set(path, { resolve: resolve as (v: unknown) => void, reject });
   });
   inflight.set(path, p as Promise<unknown>);
+  const now = Date.now();
+  if (queue.length === 0) windowStart = now;
   queue.push(path);
-  if (timer == null) timer = setTimeout(() => { timer = null; flush(); }, WINDOW_MS);
+  // Extend to the next quiet gap, but never past the cap (which may already have elapsed -> flush next tick).
+  const wait = Math.max(0, Math.min(IDLE_MS, MAX_WAIT_MS - (now - windowStart)));
+  if (timer != null) clearTimeout(timer);
+  timer = setTimeout(() => {
+    timer = null;
+    flush();
+  }, wait);
   return p;
 }
 
 function flush() {
   const paths = queue;
   queue = [];
+  if (import.meta.env?.DEV && paths.length) {
+    // What ended up in one request, and how long the window stayed open - the two things you need to see when a
+    // page still makes several batches (a second batch here means a genuinely later, dependent read).
+    console.debug(`[coalescer] batch:run x${paths.length} after ${Date.now() - windowStart}ms`, paths);
+  }
   for (let i = 0; i < paths.length; i += MAX) {
     void runChunk(paths.slice(i, i + MAX));
   }

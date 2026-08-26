@@ -4,6 +4,7 @@ import type { Deps } from "../deps";
 import { invalidArgument, notFound } from "../lib/errors";
 import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 import type { StructureLine } from "../domain/payroll";
+import { refPayComponents } from "../lib/refData";
 
 // A structure line on the wire: `component` is a `pay-components/<id>` ref (the inbound edge decodes the
 // token to an internal id; we store just the id). `rate` overrides the component's own rate, or null.
@@ -27,7 +28,7 @@ export function parseLines(linesJson: string): StructureLine[] {
 // Validate + normalise the wire lines into stored lines (internal component ids). Every referenced component
 // must exist, be live, and be an EARNING (deductions/statutory aren't part of a structure). No duplicates.
 async function normalizeLines(deps: Deps, lines: StructureLineInput[]): Promise<StructureLine[]> {
-  const comps = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.deleteTime);
+  const comps = (await refPayComponents(deps)).filter((c) => !c.deleteTime);
   const byId = new Map(comps.map((c) => [c.uuid, c]));
   const seen = new Set<string>();
   const out: StructureLine[] = [];
@@ -37,9 +38,6 @@ async function normalizeLines(deps: Deps, lines: StructureLineInput[]): Promise<
     const c = byId.get(id);
     if (!c) throw notFound("pay component not found in a structure line");
     if (c.kind !== "earning") throw invalidArgument(`"${c.name}" is a deduction; a structure governs earnings only`);
-    // rate_qty is priced per run (rate x quantity), so it has no fixed monthly value and contributes 0 to the
-    // CTC split a structure defines - listing it would show a misleading 0 line and never flag the split stale.
-    if (c.method === "rate_qty") throw invalidArgument(`"${c.name}" is a rate x quantity component; it has no fixed monthly value, so it cannot sit in a salary structure (add it as a global earning instead)`);
     if (seen.has(id)) throw invalidArgument(`"${c.name}" is listed twice`);
     seen.add(id);
     out.push({ component: id, rate: l.rate ?? null });

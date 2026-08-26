@@ -25,10 +25,12 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "attendance-regularizations": ["approve", "reject", "cancel"],
   "overtime-requests": ["approve", "reject", "cancel"],
   "remote-work-requests": ["approve", "reject", "cancel"],
+  // `issue` is the hand-over: an approved request is closed by giving the person an actual asset.
+  "asset-requests": ["approve", "reject", "cancel", "issue"],
   operations: ["run"],
   "cron-runs": ["run"],
-  "leave-requests": ["update", "delete", "approve", "reject", "cancel"],
-  goals: ["update", "delete", "updateProgress"],
+  "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download"],
+  goals: ["update", "delete", "updateProgress", "comment"],
   boards: ["update", "delete", "configure", "metrics"],
   cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo"],
   sprints: ["update", "delete", "activate", "complete"],
@@ -43,6 +45,9 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   announcements: ["update", "delete", "post", "giveKudos", "markRead", "markAllRead", "react", "reply", "vote", "publish", "unpublish", "disable", "enable", "lock", "unlock", "pin", "unpin"],
   "api-keys": ["delete", "revoke"], // no update: a credential's scope is fixed at mint time, so there is no PATCH
   holidays: ["update", "delete"],
+  // `respond` is the attendee's RSVP: a verb an ordinary employee holds on an event aimed at them, without any
+  // write access to the event itself.
+  events: ["update", "delete", "respond"],
   "leave-types": ["update", "delete"],
   "letter-templates": ["update", "delete"],
   "pay-components": ["update", "delete"],
@@ -54,6 +59,14 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   "leave-encashments": ["approve", "reject", "cancel"],
   "reimbursement-categories": ["update", "delete"],
   "ticket-checklists": ["update", "delete"],
+  // Asset custody: `verify` counts one into stock, `acknowledge` is its holder confirming receipt, and
+  // `printTag` is what a caller needs before the resource will even carry the tag secret (serialize.ts).
+  // `batchCreate` is collection-level (a delivery, not a row); it is listed so the ACL modal can grant or deny
+  // "add many at once" by name, exactly as announcements lists markAllRead.
+  assets: ["update", "delete", "verify", "acknowledge", "printTag", "reissueTag", "batchCreate"],
+  // Inventory counts. The route is factory-built (so its own hint comes from the verbs it mounts); this entry
+  // exists so the ACL modal can grant/deny `close` and `recordFound` by name like any other custom method.
+  stocktakes: ["update", "delete", "restore", "recordFound", "close"],
   bonuses: ["award"], // award a flat bonus across a scope (company/department/individual)
   // NOTE: `tickets` is not listed because it does not need to be: the route is factory-built, so the hint is
   // derived from the verbs it actually mounts (http/collectionRoute.ts) and this table is never consulted for
@@ -61,17 +74,17 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   // read those verb names out of `access.can`. Verb rules validate by name (policyValidate), not against this map.
   "bank-formats": ["update", "uploadTemplate"],
   payslips: ["preview", "download"],
-  "org-documents": ["update", "delete", "download", "acknowledge"],
+  "org-documents": ["update", "delete", "download", "acknowledge", "remindAck"],
   "personal-documents": ["update", "delete", "download", "sign", "refreshEsign"],
   "document-acknowledgements": ["delete"],
-  suggestions: ["update", "delete", "respond", "upvote", "downvote"],
+  suggestions: ["update", "delete", "respond", "upvote", "downvote", "merge"],
   referrals: ["update", "delete", "upload", "download", "award"],
   "job-requisitions": ["update", "delete"],
   candidates: ["update", "delete", "upload", "download"],
-  applications: ["update", "delete", "advance", "reject"],
-  interviews: ["update", "delete", "complete", "cancel"],
+  applications: ["update", "delete", "advance", "hire", "reject"],
+  interviews: ["update", "delete", "complete", "cancel", "invite"],
   "interview-feedback": ["update", "delete"],
-  offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind"],
+  offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind", "letter"],
   expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["update", "delete", "enable", "disable", "test"],
   "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject"],
@@ -111,16 +124,26 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "clockIn", "clockOut", // attendance punches (self-service)
   "sign", // in-place e-signature of a generated letter/contract (personal-documents, owner-only)
   "refreshEsign", // poll an e-sign vendor for a pending document's status and apply it (personal-documents)
+  "remindAck", // nudge whoever still owes a signature on a policy's current version (org-documents)
   "run", // run a queued job (operations) or fire a cron tick on demand (cron-runs)
   "uploadTemplate", // upload a bank's blank bulk-payment .xlsx (bank-formats)
   "award", // award a flat bonus across a scope (bonuses)
-  "respond", "upvote", "downvote", // suggestion box: HR triage (status + reply) + peer up/down vote (suggestions)
+  "respond", "upvote", "downvote", // suggestion box: HR triage (status + reply) + peer up/down vote (suggestions); `respond` is also an attendee's RSVP (events)
+  "merge", // fold a duplicate suggestion into the one it repeats, taking its votes with it (suggestions)
   "route", // re-route a ticket to a different servicing department (tickets)
   "advance", // ATS: move an application one stage forward in the configured pipeline (applications)
+  "hire", // ATS: convert the candidate into an employee, which starts their onboarding (applications)
   "extend", "accept", "rescind", // ATS: offer workflow (offers) - decline/approve reuse existing verbs
+  "invite", // ATS: mail the candidate their interview slot, with a calendar attachment (interviews)
+  "letter", // ATS: render an offer's own letter as a PDF, inline, nothing persisted (offers)
   "enrollDefaultBenefits", // auto-enrol a new hire in default benefit plans (employees; wired via automation)
   "test", // dry-run an automation rule against a sample event (automations)
   "requestAccess", // ask access admins for a missing grant (access-rules)
+  "printTag", "reissueTag", // asset sticker: stamp it as printed / rotate its secret so a lost tag dies (assets)
+  "batchCreate", // add a whole delivery of assets in one call - a quantity of identical things, or a list of serials (assets)
+  "recordFound", // log a scan that matched no asset during an inventory count (stocktakes)
+  "close", // freeze an inventory count: snapshot its counts + missing list, one-way (stocktakes)
+  "issue", // hand an in-stock asset to the person whose request was approved (asset-requests)
 ]);
 
 // The verbs this caller may perform on the object with internal `code`, decided by the engine over `grant`

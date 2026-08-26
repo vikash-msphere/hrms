@@ -89,6 +89,12 @@ export const COLLECTION_META: Record<string, CollectionMeta> = {
     plural: "tickets",
     note: "Helpdesk tickets. Each ticket action (start, resolve, comment, …) is managed from that action's own key icon rather than method chips here.",
   },
+  stocktakes: {
+    label: "Stocktakes",
+    singular: "stocktake",
+    plural: "stocktakes",
+    note: "Inventory counts run from the Assets page. Write starts and annotates a count; the close method freezes its result and raises the chase-up notices. Recording the sightings themselves is the assets verify method, not this one.",
+  },
   payslips: {
     label: "Payslips",
     singular: "payslip",

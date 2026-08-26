@@ -32,6 +32,14 @@ export function formatDate(value?: string | null): string {
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+/** A file size a person can read: "812 B", "44 KB", "2.1 MB". Null for nothing/zero, so callers can skip it. */
+export function formatBytes(n?: number): string | null {
+  if (!n) return null;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /** Compact phrase for a moment still to come: "in 20m", "in 3h", "in 5d", then "on 4 Aug 2026". */
 export function relativeFuture(iso: string): string {
   const min = Math.round((+new Date(iso) - Date.now()) / 60000);

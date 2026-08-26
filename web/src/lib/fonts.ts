@@ -10,53 +10,88 @@
 
 // Weight range per face matching what the wordmark weight picker offers (Regular..Extra bold; faces that stop
 // at 700 stop there, Pacifico is single-weight). Vite turns each import into cached same-origin woff2 chunks.
+// Import the latin/latin-ext SUBSET entrypoints, never the bare `<weight>.css`: that one declares a @font-face
+// per subset Google ships (cyrillic, greek, vietnamese, devanagari...) and Vite emits a file for every one of
+// them - a decorative face nobody picks would still cost megabytes in the deployed bundle. Same rule as the
+// Inter imports in index.css; widen the subset list in both places together.
 const FONT_LOADERS: Record<string, () => Promise<unknown>> = {
   geometric: () =>
     Promise.all([
-      import("@fontsource/poppins/400.css"),
-      import("@fontsource/poppins/500.css"),
-      import("@fontsource/poppins/600.css"),
-      import("@fontsource/poppins/700.css"),
-      import("@fontsource/poppins/800.css"),
+      import("@fontsource/poppins/latin-400.css"),
+      import("@fontsource/poppins/latin-ext-400.css"),
+      import("@fontsource/poppins/latin-500.css"),
+      import("@fontsource/poppins/latin-ext-500.css"),
+      import("@fontsource/poppins/latin-600.css"),
+      import("@fontsource/poppins/latin-ext-600.css"),
+      import("@fontsource/poppins/latin-700.css"),
+      import("@fontsource/poppins/latin-ext-700.css"),
+      import("@fontsource/poppins/latin-800.css"),
+      import("@fontsource/poppins/latin-ext-800.css"),
     ]),
   modern: () =>
     Promise.all([
-      import("@fontsource/montserrat/400.css"),
-      import("@fontsource/montserrat/500.css"),
-      import("@fontsource/montserrat/600.css"),
-      import("@fontsource/montserrat/700.css"),
-      import("@fontsource/montserrat/800.css"),
+      import("@fontsource/montserrat/latin-400.css"),
+      import("@fontsource/montserrat/latin-ext-400.css"),
+      import("@fontsource/montserrat/latin-500.css"),
+      import("@fontsource/montserrat/latin-ext-500.css"),
+      import("@fontsource/montserrat/latin-600.css"),
+      import("@fontsource/montserrat/latin-ext-600.css"),
+      import("@fontsource/montserrat/latin-700.css"),
+      import("@fontsource/montserrat/latin-ext-700.css"),
+      import("@fontsource/montserrat/latin-800.css"),
+      import("@fontsource/montserrat/latin-ext-800.css"),
     ]),
   grotesk: () =>
     Promise.all([
-      import("@fontsource/space-grotesk/400.css"),
-      import("@fontsource/space-grotesk/500.css"),
-      import("@fontsource/space-grotesk/600.css"),
-      import("@fontsource/space-grotesk/700.css"),
+      import("@fontsource/space-grotesk/latin-400.css"),
+      import("@fontsource/space-grotesk/latin-ext-400.css"),
+      import("@fontsource/space-grotesk/latin-500.css"),
+      import("@fontsource/space-grotesk/latin-ext-500.css"),
+      import("@fontsource/space-grotesk/latin-600.css"),
+      import("@fontsource/space-grotesk/latin-ext-600.css"),
+      import("@fontsource/space-grotesk/latin-700.css"),
+      import("@fontsource/space-grotesk/latin-ext-700.css"),
     ]),
   rounded: () =>
     Promise.all([
-      import("@fontsource/comfortaa/400.css"),
-      import("@fontsource/comfortaa/500.css"),
-      import("@fontsource/comfortaa/600.css"),
-      import("@fontsource/comfortaa/700.css"),
+      import("@fontsource/comfortaa/latin-400.css"),
+      import("@fontsource/comfortaa/latin-ext-400.css"),
+      import("@fontsource/comfortaa/latin-500.css"),
+      import("@fontsource/comfortaa/latin-ext-500.css"),
+      import("@fontsource/comfortaa/latin-600.css"),
+      import("@fontsource/comfortaa/latin-ext-600.css"),
+      import("@fontsource/comfortaa/latin-700.css"),
+      import("@fontsource/comfortaa/latin-ext-700.css"),
     ]),
   condensed: () =>
     Promise.all([
-      import("@fontsource/oswald/400.css"),
-      import("@fontsource/oswald/500.css"),
-      import("@fontsource/oswald/600.css"),
-      import("@fontsource/oswald/700.css"),
+      import("@fontsource/oswald/latin-400.css"),
+      import("@fontsource/oswald/latin-ext-400.css"),
+      import("@fontsource/oswald/latin-500.css"),
+      import("@fontsource/oswald/latin-ext-500.css"),
+      import("@fontsource/oswald/latin-600.css"),
+      import("@fontsource/oswald/latin-ext-600.css"),
+      import("@fontsource/oswald/latin-700.css"),
+      import("@fontsource/oswald/latin-ext-700.css"),
     ]),
   elegant: () =>
     Promise.all([
-      import("@fontsource/playfair-display/400.css"),
-      import("@fontsource/playfair-display/500.css"),
-      import("@fontsource/playfair-display/600.css"),
-      import("@fontsource/playfair-display/700.css"),
-      import("@fontsource/playfair-display/800.css"),
+      import("@fontsource/playfair-display/latin-400.css"),
+      import("@fontsource/playfair-display/latin-ext-400.css"),
+      import("@fontsource/playfair-display/latin-500.css"),
+      import("@fontsource/playfair-display/latin-ext-500.css"),
+      import("@fontsource/playfair-display/latin-600.css"),
+      import("@fontsource/playfair-display/latin-ext-600.css"),
+      import("@fontsource/playfair-display/latin-700.css"),
+      import("@fontsource/playfair-display/latin-ext-700.css"),
+      import("@fontsource/playfair-display/latin-800.css"),
+      import("@fontsource/playfair-display/latin-ext-800.css"),
     ]),
-  script: () => import("@fontsource/pacifico/400.css"),
+  script: () =>
+    Promise.all([
+      import("@fontsource/pacifico/latin-400.css"),
+      import("@fontsource/pacifico/latin-ext-400.css"),
+    ]),
 };
 const loaded = new Set<string>();
 

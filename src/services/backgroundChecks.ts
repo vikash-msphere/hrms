@@ -25,6 +25,8 @@ export type BackgroundCheckInput = {
   initiated_date?: string | null;
   completed_date?: string | null;
   notes?: string | null;
+  /** `personal-documents/<id>`: the vendor's report, filed as the employee's own document. */
+  document?: string | null;
 };
 
 const parseDate = (s: string, field: string): Date => {
@@ -44,7 +46,7 @@ function validate(input: BackgroundCheckInput) {
 // / own department / all), in SQL - not by the generic whole-table read.
 export async function listBackgroundChecks(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const where = and(showDeleted ? undefined : isNull(schema.backgroundChecks.deleteTime), applyScope(scope, schema.backgroundChecks.code, schema.backgroundChecks.employeeId));
-  return keysetPage(deps, schema.backgroundChecks, "background-checks", where, { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.backgroundChecks, "background-checks", where, { max: maxPageSize, pageToken });
 }
 
 export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.backgroundChecks> = {
@@ -66,6 +68,7 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
       initiatedDate: input.initiated_date ? parseDate(input.initiated_date, "initiated_date") : new Date(),
       completedDate: input.completed_date ? parseDate(input.completed_date, "completed_date") : isFinal(status) ? new Date() : null,
       notes: input.notes ?? null,
+      documentId: idFromPath(input.document) ?? null,
     };
   },
   patch: (patch, row) => {
@@ -82,6 +85,7 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
     if (has(patch, "initiated_date")) set.initiatedDate = patch.initiated_date ? parseDate(patch.initiated_date, "initiated_date") : null;
     if (has(patch, "completed_date")) set.completedDate = patch.completed_date ? parseDate(patch.completed_date, "completed_date") : null;
     if (has(patch, "notes")) set.notes = patch.notes ?? null;
+    if (has(patch, "document")) set.documentId = idFromPath(patch.document) ?? null;
     if (has(patch, "status")) {
       set.status = patch.status;
       // Reaching a final status stamps completion (unless one was given); reopening clears it.

@@ -4,6 +4,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { describeRow } from "../domain/activityLabel";
 import { tableFor } from "./authzResolve";
+import { insertBatches, runBatch } from "./dbBatch";
 
 // Append-only audit trail. Never store secrets in `meta`. `actor` is the AppUser (preferred — records the
 // actor's employee id + name for clean feed rendering) or a bare email string (system/legacy call sites, no
@@ -64,7 +65,31 @@ export function diffMeta(before: Record<string, unknown> | undefined, after: Rec
   return Object.keys(diff).length ? { diff } : undefined;
 }
 
+/** One audit entry, for the batched form below: the same arguments audit() takes, minus the deps/actor. */
+export type AuditEntry = { action: string; entity: string; entityId?: string; meta?: unknown; snapshot?: Record<string, unknown> | null };
+
+/**
+ * Many audit rows in ONE write, for a create that makes many records in a single act (a box of twenty
+ * adapters). Each row is the row audit() would have written, so every asset still carries its own creation in
+ * the activity feed - but as one statement group instead of twenty round trips, which is what the free-plan
+ * subrequest budget affords (see lib/dbBatch.ts).
+ *
+ * Labels come from the snapshots the caller already holds; unlike audit() this never reads a label back from
+ * the DB, because the batched call sites are creates and always have their rows in hand.
+ */
+export async function auditMany(deps: Deps, actor: AppUser | string, entries: AuditEntry[]): Promise<void> {
+  if (!entries.length) return;
+  const values = entries.map((e) => auditValues(actor, e.action, e.entity, e.entityId, e.meta, describeRow(e.entity, e.snapshot)));
+  await runBatch(deps.db, insertBatches(values, (rows) => deps.db.insert(schema.auditLog).values(rows)));
+}
+
 async function writeAudit(deps: Deps, actor: AppUser | string, action: string, entity: string, entityId?: string, meta?: unknown, entityName?: string) {
+  await deps.db.insert(schema.auditLog).values(auditValues(actor, action, entity, entityId, meta, entityName));
+}
+
+// The audit row itself, built without writing it - shared by the single and batched forms so both record the
+// same actor attribution (view-as, API key) and the same meta stamping.
+function auditValues(actor: AppUser | string, action: string, entity: string, entityId?: string, meta?: unknown, entityName?: string) {
   // "View as" (lib/viewAs.ts) makes the request principal the SIMULATED subject, so the actor here would name
   // the person being watched. The row must name the human who ran the request: attribute it to the real admin
   // and record whose eyes they were borrowing as `viewing_as`.
@@ -82,10 +107,11 @@ async function writeAudit(deps: Deps, actor: AppUser | string, action: string, e
   // Mark the request actor as having logged an activity row, so the authz write backstop doesn't add a
   // duplicate generic one for this request. String actors (system/cron) have no request-scoped flag.
   if (typeof actor !== "string") actor.audited = true;
-  await deps.db.insert(schema.auditLog).values({
+  return {
     actorEmail,
     actorId,
     actorName,
+    apiKeyId: key?.uuid ?? null,
     action,
     entity,
     entityId: entityId ?? null,
@@ -93,5 +119,5 @@ async function writeAudit(deps: Deps, actor: AppUser | string, action: string, e
     meta: meta ? JSON.stringify(meta) : null,
     ip: reqMeta?.ip ?? null,
     userAgent: reqMeta?.ua ?? null,
-  });
+  };
 }

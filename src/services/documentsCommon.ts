@@ -8,6 +8,15 @@ export const VALID_DOC_TYPES = ["CONTRACT", "ID", "PAYSLIP", "POLICY", "LETTER",
 // second full copy) before it reaches R2, so an uncapped upload is a memory + storage DoS. 25 MiB covers real
 // HR documents with margin.
 export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+/**
+ * Backstop on the bytes actually read.
+ *
+ * The real cap is middleware/bodyLimit.ts, which refuses an oversized body from its `Content-Length` before any
+ * handler reads it - that ordering is the point, because `arrayBuffer()` commits the whole payload to isolate
+ * memory and the docstore's AES pass then copies it again, so a check on `byteLength` alone fires after the
+ * memory it was protecting has already been spent. What is left for this function is the one case the header
+ * cannot answer: a chunked body, which declares no length.
+ */
 export function assertUploadSize(byteLength: number): void {
   if (byteLength > MAX_DOCUMENT_BYTES) throw invalidArgument(`file too large (max ${Math.floor(MAX_DOCUMENT_BYTES / (1024 * 1024))} MiB)`);
 }

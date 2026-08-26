@@ -8,7 +8,9 @@ import { usePermission } from "@/lib/perm";
 import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleScope";
-import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, COLLECTION_GROUPS, groupOf } from "@/components/access/permMatrix";
+import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, COLLECTION_GROUPS, groupOf, accessTone } from "@/components/access/permMatrix";
+import { CellOption } from "@/components/access/CellOption";
+import { cloneAccessRules, ruleBody } from "@/components/access/cloneRules";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
@@ -22,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import type { User } from "@/types";
+import { getSetting } from "@/lib/settingsStore";
 
 type Role = { path: string; name: string; label?: string };
 
@@ -48,7 +51,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const [fourEyes, setFourEyes] = React.useState<boolean | null>(null);
   const canWriteSettings = usePermission("settings.write");
   React.useEffect(() => {
-    get<{ value?: { enabled?: boolean } }>("settings/access-approval")
+    getSetting<{ enabled?: boolean }>("access-approval")
       .then((s) => setFourEyes(s.value?.enabled === true))
       .catch(() => setFourEyes(null)); // not readable / not configured -> hide the switch rather than guess
   }, []);
@@ -97,22 +100,9 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // Collections to show as matrix columns/rows: the curated base + any collection a rule already targets.
   const collections = React.useMemo(() => collectionsForRules(rules), [rules]);
   const [matrixFilter, setMatrixFilter] = React.useState("");
-  // Matrix rows in module order ("People & org", "Leave", …, then anything outside the curated catalog),
-  // filtered by label. Same grouping the per-subject dialog uses, so both read the same shape.
-  const groupedCollections = React.useMemo(() => {
-    const q = matrixFilter.trim().toLowerCase();
-    const shown = q ? collections.filter((c) => labelOf(c).toLowerCase().includes(q) || c.includes(q)) : collections;
-    const order = [...COLLECTION_GROUPS.map((g) => g.label), "Other"];
-    const byGroup = new Map<string, string[]>();
-    for (const c of shown) {
-      const g = groupOf(c);
-      const bucket = byGroup.get(g);
-      if (bucket) bucket.push(c);
-      else byGroup.set(g, [c]);
-    }
-    return order.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)!] as const);
-  }, [collections, matrixFilter]);
-
+  // 65 rows where most say "none" for every role buries the dozen that carry the org's access model. This
+  // keeps the rows some role (or `everyone`) actually holds something on.
+  const [onlySet, setOnlySet] = React.useState(false);
   // A subject with a global ("*"/"**") allow rule (super_admin) is admin everywhere - shown read-only.
   const isGlobal = (kind: Kind, subject: string) =>
     rules.some((r) => r.subject_kind === kind && r.subject === subject && (r.collection === "*" || r.collection === "**") && !r.field && !r.verb && r.effect === "allow");
@@ -127,6 +117,25 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     if (rs.some((r) => r.effect === "deny")) return "deny";
     return rs.find((r) => r.effect === "allow")?.level ?? "none";
   };
+
+  // Matrix rows in module order ("People & org", "Leave", …, then anything outside the curated catalog),
+  // filtered by label. Same grouping the per-subject dialog uses, so both read the same shape.
+  const groupedCollections = React.useMemo(() => {
+    const q = matrixFilter.trim().toLowerCase();
+    let shown = q ? collections.filter((c) => labelOf(c).toLowerCase().includes(q) || c.includes(q)) : collections;
+    if (onlySet) shown = shown.filter((c) => roles.some((r) => valueOf("role", r.name, c) !== "none"));
+    const order = [...COLLECTION_GROUPS.map((g) => g.label), "Other"];
+    const byGroup = new Map<string, string[]>();
+    for (const c of shown) {
+      const g = groupOf(c);
+      const bucket = byGroup.get(g);
+      if (bucket) bucket.push(c);
+      else byGroup.set(g, [c]);
+    }
+    return order.filter((g) => byGroup.has(g)).map((g) => [g, byGroup.get(g)!] as const);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collections, matrixFilter, onlySet, roles, rules]);
+
 
   async function setCell(kind: Kind, subject: string, collection: string, value: string, label: string) {
     setBusy(true);
@@ -164,11 +173,12 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     const narrower = narrowerCount(kind, subject, collection);
     const control =
       isGlobal(kind, subject) || !canManage ? (
-        <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"}>{v}</Badge>
+        <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"} className={v === "deny" || v === "none" ? undefined : accessTone(v).text}>{v}</Badge>
       ) : (
+        // line-clamp-none + flex: the default value slot is a -webkit-box, which breaks the dot+label row.
         <Select value={v} onValueChange={(nv) => setCell(kind, subject, collection, nv, label)} disabled={busy}>
-          <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
-          <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}</SelectContent>
+          <SelectTrigger className="h-8 w-28 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
+          <SelectContent>{CELL.map((l) => <SelectItem key={l} value={l}><CellOption value={l} /></SelectItem>)}</SelectContent>
         </Select>
       );
     return (
@@ -202,20 +212,8 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // Rules as JSON: the reviewable, diffable, restorable form of the whole access configuration. Export is a
   // plain download of every rule in its create-body shape; import replays those bodies through the SAME API
   // (and therefore the same validation, four-eyes queue and audit trail) - never a direct row write.
-  const exportBody = (r: AccessRule) => ({
-    subject_kind: r.subject_kind,
-    subject: r.subject,
-    collection: r.collection,
-    scope: r.scope,
-    ...(r.scope_ref ? { scope_ref: r.scope_ref } : {}),
-    ...(r.field ? { field: r.field } : {}),
-    ...(r.verb ? { verb: r.verb } : r.level ? { level: r.level } : {}),
-    ...(r.effect === "deny" ? { effect: "deny" } : {}),
-    ...(r.expire_time ? { expire_time: r.expire_time } : {}),
-  });
-
   function exportRules() {
-    const payload = { exported_at: new Date().toISOString(), rules: rules.filter((r) => r.subject_kind === subjectKind).map(exportBody) };
+    const payload = { exported_at: new Date().toISOString(), rules: rules.filter((r) => r.subject_kind === subjectKind).map(ruleBody) };
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
@@ -259,16 +257,8 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     const source = rules.filter((r) => r.subject_kind === from.kind && r.subject === from.subject);
     if (!(await confirm({ title: `Copy ${source.length} rules?`, description: `Every rule ${from.kind === "role" ? roleLabel(from.subject) : from.subject} holds is added to ${to.kind === "role" ? roleLabel(to.subject) : to.subject}. Existing rules there are kept; nothing is removed.`, confirmLabel: "Copy" }))) return;
     setBusy(true);
-    let added = 0;
-    for (const r of source) {
-      try {
-        await create("access-rules", { ...exportBody(r), subject_kind: to.kind, subject: to.subject });
-        added++;
-      } catch {
-        /* already there, or not grantable to this subject kind - skip, the summary reports the count */
-      }
-    }
-    toast({ title: `Copied ${added} rules`, variant: "success" });
+    const { added, skipped } = await cloneAccessRules(from, to, rules);
+    toast({ title: `Copied ${added} rules${skipped ? ` · ${skipped} already there` : ""}`, variant: "success" });
     await reload();
   }
 
@@ -323,7 +313,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // matrix. Doubles as the copy tool: clone either direction once you can see the gap.
   const compareDialog = compare && (
     <Dialog open onOpenChange={(o) => !o && setCompare(null)}>
-      <DialogContent className="max-h-[85dvh] max-w-3xl overflow-y-auto">
+      <DialogContent className="max-w-3xl lg:max-w-4xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <GitCompareArrows className="h-5 w-5 text-primary" /> Compare roles
@@ -359,8 +349,10 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           return (
             <>
               <p className="text-xs text-muted-foreground">{diffs} of {rows.length} collections differ.</p>
-              <div className="overflow-x-auto rounded-lg border">
-                <table className="w-full border-collapse text-sm">
+              <div className="scroll-shadow-x overflow-x-auto rounded-lg border">
+                {/* Two roles side by side is a comparison, not a matrix: on a phone each collection becomes
+                    a block naming both roles, which still answers "where do these two differ". */}
+                <table className="table-stack w-full border-collapse text-sm">
                   <thead>
                     <tr className="border-b bg-muted/40">
                       <th className="px-3 py-2 text-left font-semibold">Collection</th>
@@ -372,8 +364,8 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                     {rows.map((r) => (
                       <tr key={r.c} className={r.a !== r.b ? "border-b bg-amber-50/50 last:border-0 dark:bg-amber-950/20" : "border-b last:border-0"}>
                         <td className="px-3 py-1.5 font-medium">{labelOf(r.c)}</td>
-                        <td className="px-3 py-1.5">{r.a}</td>
-                        <td className="px-3 py-1.5">{r.b}</td>
+                        <td data-label={roleLabel(compare.a)} className="px-3 py-1.5">{r.a}</td>
+                        <td data-label={roleLabel(compare.b)} className="px-3 py-1.5">{r.b}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -439,7 +431,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
       {compareDialog}
       {pendingCard}
       <Card>
-      <CardContent className="pt-6">
+      <CardContent className="pt-4 sm:pt-6">
         {view === "rules" ? (
           subjectKind === "user" ? (
             <FineRulesEditor rules={rules.filter((r) => r.subject_kind === "user")} reload={reload} userOptions={users} canWrite={canManage} controlsSlot={controlsSlot} />
@@ -457,8 +449,14 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           // 65 flat rows is a wall, and the grouping already exists in the collection registry.
           <div className="space-y-3">
             {matrixNote}
-            <Input className="h-8 max-w-xs" placeholder="Filter collections…" value={matrixFilter} onChange={(e) => setMatrixFilter(e.target.value)} />
-            <div className="overflow-x-auto rounded-lg border">
+            <div className="flex flex-wrap items-center gap-2">
+              <Input className="h-8 max-w-xs" placeholder="Filter collections…" value={matrixFilter} onChange={(e) => setMatrixFilter(e.target.value)} />
+              <Button size="sm" variant={onlySet ? "default" : "outline"} className="h-8" aria-pressed={onlySet} onClick={() => setOnlySet((s) => !s)}>
+                Only rows with access
+              </Button>
+              <span className="text-xs text-muted-foreground">{groupedCollections.reduce((n, [, c]) => n + c.length, 0)} of {collections.length} collections</span>
+            </div>
+            <div className="scroll-shadow-x overflow-x-auto rounded-lg border">
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40">
@@ -487,7 +485,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                   ))}
                   {groupedCollections.length === 0 && (
                     <tr>
-                      <td className="px-3 py-3 text-sm text-muted-foreground" colSpan={roles.length + 1}>No collection matches "{matrixFilter}".</td>
+                      <td className="px-3 py-3 text-sm text-muted-foreground" colSpan={roles.length + 1}>{onlySet && !matrixFilter.trim() ? "No role has access to any collection yet." : `No collection matches "${matrixFilter}".`}</td>
                     </tr>
                   )}
                 </tbody>

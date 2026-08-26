@@ -12,15 +12,17 @@ export const ENCODABLE = new Set<string>([
   "api-keys",
   "employees", "departments", "users", "holidays", "holiday-selections", "leave-types",
   "leave-requests", "leave-balances", "org-documents", "personal-documents", "announcements", "pay-components", "pay-periods",
-  "payroll-runs", "payslips", "compensation", "positions", "bonuses", "assets", "settlements", "leave-encashments", "operations", "reimbursements", "reimbursement-categories",
+  "payroll-runs", "payslips", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "leave-encashments", "operations", "reimbursements", "reimbursement-categories",
   "expenses", "expense-categories", "vendors", "expense-budgets",
   "attendance", "attendance-regularizations", "cron-runs", "tickets", "ticket-checklists", "events", "goals", "boards", "cards", "sprints", "review-cycles", "reviews", "review-feedback", "transitions", "transition-tasks", "check-ins", "benefit-plans", "dependents", "benefit-enrollments", "shifts", "shift-assignments", "projects", "time-entries", "loans", "tax-declarations", "pay-grades", "salary-structures", "document-acknowledgements", "compliance-events", "compliance-rules", "background-checks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications", "referrals", "job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers",
   "letter-templates",
   "automations", "event-log", "automation-runs", "workflow-instances",
 ]);
 
-// `<collection>/<13-char base32 id>` with an optional trailing `:verb` (photo/download style).
-const REF_RE = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})(:[a-zA-Z]+)?$/;
+// `<collection>/<13-char base32 id>` with an optional tail: a `:verb` (photo/download style) or one more
+// path segment (a deep link into a web route, e.g. a notification's `announcements/<id>/view`). The tail
+// rides through untouched; only the id segment is rewritten, so a link never carries an internal id out.
+const REF_RE = /^([a-z][a-z-]*)\/([0-9a-hj-km-np-tv-z]{13})(:[a-zA-Z]+|\/[a-z][a-z-]*)?$/;
 
 const MAX_DEPTH = 40; // bound recursion (responses are server-generated, but stay symmetric with the decoder)
 

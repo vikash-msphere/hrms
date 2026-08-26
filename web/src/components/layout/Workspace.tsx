@@ -4,6 +4,7 @@ import type { NavTab } from "@/nav";
 import { useNotifications } from "@/lib/notifications";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
 import { AccessTarget } from "@/components/access/AccessTarget";
+import { useScrollActiveIntoView } from "@/hooks/useScrollActiveIntoView";
 
 // Renders a workspace's tab bar above the active page. Tabs are plain hash links to each sibling route, so
 // switching between related pages (e.g. Attendance → Overtime) is one click instead of a sidebar hunt, and
@@ -25,10 +26,23 @@ export function Workspace({
   React.useEffect(() => {
     markTabSeen(active);
   }, [active]);
+  // A workspace can carry ten tabs (Payroll, Settings); on a phone that strip is several screens wide, so the
+  // tab you are on has to be brought into view rather than left off the right-hand edge.
+  const bar = React.useRef<HTMLDivElement>(null);
+  useScrollActiveIntoView(bar);
   if (tabs.length <= 1) return <>{children}</>;
   return (
     <div>
-      <div className="no-scrollbar mb-6 flex items-center gap-1 overflow-x-auto border-b">
+      {/* scroll-shadow-x: the only cue that the strip continues past the edge, since there is no scrollbar
+          (no-scrollbar) and no hover on touch. See index.css. */}
+      {/* A landmark, because that is what it is: a set of links between sibling pages, not a tab widget over
+          panels in this document. Naming it lets a screen-reader user jump to it instead of arrowing down
+          through the page to find out how to get to the next section. */}
+      <nav
+        ref={bar}
+        aria-label="Sections in this workspace"
+        className="scroll-shadow-x no-scrollbar mb-6 flex items-center gap-1 overflow-x-auto border-b"
+      >
         {tabs.map((t) => {
           const on = t.key === active;
           // Notification badge takes priority (an actionable, per-recipient signal). With none, fall back to the
@@ -40,7 +54,11 @@ export function Workspace({
               href={`#/${t.key}`}
               aria-current={on ? "page" : undefined}
               className={cn(
-                "-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors",
+                // min-h-11 on touch: a 40px tab in a scrolling strip is a target you miss, and missing it
+                // drags the strip instead.
+                // shrink-0: without it a flex item shrinks below its content width, and since the label is
+                // nowrap the text spills out of the box and over the next tab instead of the strip scrolling.
+                "-mb-px inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors coarse:min-h-11",
                 on
                   ? "border-primary text-foreground"
                   : "border-transparent text-muted-foreground hover:border-border hover:text-foreground",
@@ -61,7 +79,7 @@ export function Workspace({
           );
           // Pair the tab with its access key as a sibling (an anchor can't contain the AccessTarget button).
           return t.collection ? (
-            <span key={t.key} className="inline-flex items-center">
+            <span key={t.key} className="inline-flex shrink-0 items-center">
               {link}
               <AccessTarget target={{ collection: t.collection, label: t.label }} className="-ml-1 h-5 w-5" />
             </span>
@@ -69,7 +87,7 @@ export function Workspace({
             <React.Fragment key={t.key}>{link}</React.Fragment>
           );
         })}
-      </div>
+      </nav>
       {children}
     </div>
   );

@@ -18,6 +18,7 @@ import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, get
 import { putAttachment, downloadAttachment, deleteAttachment } from "../services/attachments";
 import { identityDocSlot } from "../services/identityDetails";
 import { toEmployeeResource } from "../http/serialize";
+import { jsonBody } from "../http/jsonRequest";
 import { redactIdentity, redactFlat, deniedFieldKeys } from "../http/fieldAccess";
 import { invalidArgument, forbidden } from "../lib/errors";
 import { actorCan } from "../domain/access";
@@ -38,6 +39,7 @@ const writeSchema = z
     start_date: z.string().nullable().optional(),
     probation_end_date: z.string().nullable().optional(),
     epf_enrolled: z.boolean().optional(),
+    eps_excluded: z.boolean().optional(),
     national_id: z.string().nullable().optional(),
   })
   .strict();
@@ -94,7 +96,7 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
     create: (deps, actor, input, id) => createEmployee(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateEmployee(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listEmployees(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q")),
+  list: (c, page) => listEmployees(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), page.deletedOnly),
   verbs: {
     // Profile photo: media + clear (no standard equivalent for a binary upload/download).
     getPhoto: { raw: async (c, id) => c.body(await getPhoto(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },
@@ -167,7 +169,7 @@ export const employees = new Hono<AppEnv>()
   })
   .patch("/:employee_id/identity", async (c) => {
     const id = c.req.param("employee_id")!;
-    const body = (await c.req.json().catch(() => ({}))) as { values?: Record<string, string> };
+    const body = await jsonBody<{ values?: Record<string, string> }>(c);
     return c.json({ path: `employees/${id}/identity`, ...(await setIdentityDetails(c.get("deps"), c.get("user"), id, body.values ?? {})) });
   })
   .get("/:employee_id/personal-info", async (c) => {
@@ -183,12 +185,12 @@ export const employees = new Hono<AppEnv>()
   })
   .patch("/:employee_id/tax", async (c) => {
     const id = c.req.param("employee_id")!;
-    const body = (await c.req.json().catch(() => ({}))) as { values?: Record<string, unknown> };
+    const body = await jsonBody<{ values?: Record<string, unknown> }>(c);
     return c.json({ path: `employees/${id}/tax`, ...(await setTaxDetails(c.get("deps"), c.get("user"), id, body.values ?? {})) });
   })
   .patch("/:employee_id/personal-info", async (c) => {
     const id = c.req.param("employee_id")!;
-    const body = (await c.req.json().catch(() => ({}))) as Parameters<typeof setPersonalDetails>[3];
+    const body = await jsonBody<Parameters<typeof setPersonalDetails>[3]>(c);
     return c.json({ path: `employees/${id}/personal-info`, ...(await setPersonalDetails(c.get("deps"), c.get("user"), id, body ?? {})) });
   })
   .get("/:employee_id/notification-prefs", async (c) => {
@@ -205,7 +207,7 @@ export const employees = new Hono<AppEnv>()
   )
   .patch("/:employee_id/notification-prefs", async (c) => {
     const id = c.req.param("employee_id")!;
-    const body = (await c.req.json().catch(() => ({}))) as { muted?: unknown; digest?: unknown };
+    const body = await jsonBody<{ muted?: unknown; digest?: unknown }>(c);
     return c.json({ path: `employees/${id}/notification-prefs`, ...(await setNotificationPrefs(c.get("deps"), c.get("user"), id, body ?? {})) });
   })
   .route("/", records);

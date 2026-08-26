@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
 import { pushSupported, getPushState, enablePush, disablePush, type PushState } from "@/lib/webPush";
 import type { NotificationPrefs } from "@/types";
+import { RowsSkeleton } from "@/components/common/Skeletons";
 
 // Self-service notification preferences: silence event categories FOR YOURSELF (layered over the org config).
 // Reads/writes the caller's own employees/<id>/notification-prefs. Ordered by the shared category meta so
@@ -48,7 +49,7 @@ export function NotificationPrefsPanel({ employeeId }: { employeeId: string }) {
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">Turn a category off to stop those notifications for you.</p>
       {muted === null ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+        <RowsSkeleton rows={6} />
       ) : (
         <div className="divide-y rounded-md border">
           {ORDER.map(([key, meta]) => {
@@ -91,7 +92,25 @@ function BrowserPushRow() {
   useEffect(() => {
     void getPushState().then(setState);
   }, []);
-  if (!pushSupported()) return null;
+  // Never render nothing. This is the screen where someone comes to ask "why am I not getting notified?",
+  // and an empty space answers by implying the feature does not exist. Say which of the two reasons applies
+  // - the browser cannot, or this build was not configured for it - so the answer is on the page instead of
+  // in a support conversation.
+  if (!pushSupported()) {
+    const browserCant = !("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window);
+    return (
+      <div className="flex items-start gap-2.5 rounded-md border border-dashed px-3 py-2.5">
+        <div className="flex-1">
+          <span className="block text-sm font-medium text-muted-foreground">Browser notifications unavailable</span>
+          <span className="block text-xs text-muted-foreground">
+            {browserCant
+              ? "This browser can't deliver them. Private/incognito windows usually block them too - try a normal window, or a different browser."
+              : "Not enabled for this deployment. An administrator has to configure the push keys."}
+          </span>
+        </div>
+      </div>
+    );
+  }
   const on = state === "on";
   async function toggle() {
     setBusy(true);

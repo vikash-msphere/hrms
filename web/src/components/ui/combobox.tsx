@@ -66,12 +66,15 @@ export function Combobox({
           disabled={disabled}
           autoFocus={autoFocus}
           className={cn(
-            "flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50",
+            // min-w-0 / truncate: see ui/input.tsx. The selected label can be an employee's full name or
+            // a whole cost centre, and without a zeroed minimum the trigger claims that width from
+            // whatever row it sits in - which on a phone is the row that then runs off screen.
+            "flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 coarse:min-h-10",
             !selected && "text-muted-foreground",
             className,
           )}
         >
-          <span className="line-clamp-1 text-left">{selected ? selected.label : placeholder}</span>
+          <span className="min-w-0 truncate text-left">{selected ? selected.label : placeholder}</span>
           <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
@@ -95,10 +98,18 @@ export function Combobox({
               }
             }}
             placeholder={searchPlaceholder}
+            // Filtering a list of names and codes, not writing prose: the phone must not capitalise or
+            // autocorrect what is typed here. Enter picks the highlighted row, so the key says Go.
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="go"
             className="h-9 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
-        <div ref={listRef} className="max-h-60 overflow-y-auto p-1">
+        {/* Bounded by the room Radix measured, so on a phone the list ends above the screen edge instead of
+            being clipped by it (a 20-name list otherwise runs off the bottom with no way to reach the tail). */}
+        <div ref={listRef} className="max-h-[min(15rem,var(--radix-popover-content-available-height,15rem))] overflow-y-auto overscroll-contain p-1">
           {filtered.length === 0 ? (
             <p className="px-2 py-6 text-center text-sm text-muted-foreground">{emptyText}</p>
           ) : (
@@ -110,7 +121,7 @@ export function Combobox({
                 onMouseMove={() => setActive(idx)}
                 onClick={() => choose(o)}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors",
+                  "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors coarse:min-h-11",
                   idx === active && "bg-accent text-accent-foreground",
                 )}
               >

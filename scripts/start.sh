@@ -15,6 +15,10 @@
 # Seeded role logins (email -> role):  super@example.com=super_admin  hr@example.com=hr_admin
 #   mgr@example.com=manager  pay@example.com=payroll_admin  emp@example.com=employee
 #
+# All three processes bind 0.0.0.0, so the SPA is reachable from other devices on the LAN (phone testing).
+# The dev fake-auth bypass is on, so ANYONE who can reach this port is the DEV_FAKE_EMAIL identity - only run
+# this on a network you trust. Set BIND=127.0.0.1 to go back to localhost-only.
+#
 # Then open the SPA at:  http://localhost:5173    (Ctrl-C stops all three processes)
 # Press 'r' in this terminal to rebuild the SPA + restart all three processes.
 # Process output goes to ./tmp/{worker,prism,web}.log (blanked on each rebuild)
@@ -26,6 +30,7 @@ SEED=0
 BOOTSTRAP=0
 DEMO=0
 EMAIL="super@example.com"
+BIND="${BIND:-0.0.0.0}"   # interface all three dev servers listen on; override with BIND=127.0.0.1
 for arg in "$@"; do
   case "$arg" in
     --seed) SEED=1 ;;
@@ -77,7 +82,19 @@ if [ "$DEMO" = "1" ]; then
   npx wrangler d1 execute hrms --local --file=bootstrap/demo.sql
 fi
 
+# LAN address to hand to other devices (first non-loopback IPv4; empty when offline or bound to loopback).
+LAN_IP=""
+if [ "$BIND" != "127.0.0.1" ] && [ "$BIND" != "localhost" ]; then
+  for iface in en0 en1 en2 eth0; do
+    LAN_IP=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
+    [ -n "$LAN_IP" ] && break
+  done
+fi
+
 echo "→ DEV_FAKE_EMAIL=$EMAIL   SPA: http://localhost:5173   (worker :8787, prism :4010)"
+if [ -n "$LAN_IP" ]; then
+  echo "→ On the LAN: http://$LAN_IP:5173   (dev auth is ON - anyone reaching this port acts as $EMAIL)"
+fi
 
 # Process logs live under ./tmp in the project root.
 LOG_DIR="tmp"
@@ -97,9 +114,11 @@ stop_stack() {
 start_stack() {
   npm run build
   : > "$LOG_DIR/worker.log"; : > "$LOG_DIR/prism.log"; : > "$LOG_DIR/web.log"
-  npm run dev       > "$LOG_DIR/worker.log" 2>&1 < /dev/null &  PIDS+=($!)  # Worker (Hono API)            :8787
-  npm run dev:proxy > "$LOG_DIR/prism.log"  2>&1 < /dev/null &  PIDS+=($!)  # Prism contract proxy -> 8787 :4010
-  npm run dev:web   > "$LOG_DIR/web.log"    2>&1 < /dev/null &  PIDS+=($!)  # Vite SPA                     :5173
+  # --ip / --host / --host put each server on $BIND (all interfaces by default) so a phone on the same
+  # network can hit the SPA. Vite proxies /v1 to prism/worker over loopback, so only :5173 needs reaching.
+  npm run dev       -- --ip "$BIND"   > "$LOG_DIR/worker.log" 2>&1 < /dev/null &  PIDS+=($!)  # Worker (Hono API)            :8787
+  npm run dev:proxy -- --host "$BIND" > "$LOG_DIR/prism.log"  2>&1 < /dev/null &  PIDS+=($!)  # Prism contract proxy -> 8787 :4010
+  npm run dev:web   -- --host "$BIND" > "$LOG_DIR/web.log"    2>&1 < /dev/null &  PIDS+=($!)  # Vite SPA                     :5173
 }
 
 hint() { echo "→ Press [r] to rebuild & restart · [Ctrl-C] to quit  (logs: $LOG_DIR/{worker,prism,web}.log)"; }

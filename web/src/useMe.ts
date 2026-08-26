@@ -21,7 +21,15 @@ export function fetchMeRaw(): Promise<User | null> {
   }));
 }
 const toMe = (u: User | null): Me | null =>
-  u ? { email: u.email, role: u.role, employee_id: u.employee ? idOf(u.employee) : null, capabilities: u.caller_access?.capabilities ?? [] } : null;
+  u
+    ? {
+        email: u.email,
+        role: u.role,
+        employee_id: u.employee ? idOf(u.employee) : null,
+        capabilities: u.caller_access?.capabilities ?? [],
+        holiday_feed_token: u.holiday_feed_token ?? null,
+      }
+    : null;
 
 function fetchMe(): Promise<Me | null> {
   return fetchMeRaw().then(toMe);

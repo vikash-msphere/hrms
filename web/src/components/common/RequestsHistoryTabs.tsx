@@ -47,6 +47,9 @@ interface Props<T extends { path: string }> {
   isPendingDecision?: (row: T) => boolean;
   /** Label for the Requests tab's access-management target. */
   accessLabel: string;
+  /** Extra SERVER list filters (e.g. `{ leave_type }`) applied to the search read too, so searching inside a
+   *  filtered view stays inside it instead of silently widening back to the whole collection. */
+  listParams?: Record<string, string>;
   requestsLabel?: string;
   defaultTab?: string;
   extraTabs?: RequestsHistoryExtraTab[];
@@ -76,6 +79,7 @@ export function RequestsHistoryTabs<T extends { path: string }>({
   isLive = (r) => upper((r as { state?: string }).state) === "PENDING",
   isPendingDecision,
   accessLabel,
+  listParams,
   requestsLabel = "Requests",
   defaultTab = "requests",
   extraTabs = [],
@@ -88,7 +92,7 @@ export function RequestsHistoryTabs<T extends { path: string }>({
   const [query, setQuery] = React.useState("");
   const debouncedQuery = useDebounced(query.trim(), 250);
   const searching = debouncedQuery.length >= 2;
-  const { rows: searchRows } = useCollection<T>(collection, { q: debouncedQuery, enabled: searching });
+  const { rows: searchRows } = useCollection<T>(collection, { q: debouncedQuery, params: listParams, enabled: searching });
   const source = searching ? searchRows : rows;
   const search: RequestsHistorySearch = { value: query, onChange: setQuery, placeholder: "Search all records…" };
   const tabKeys = React.useMemo(

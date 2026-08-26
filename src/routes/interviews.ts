@@ -1,7 +1,7 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listInterviews, createInterview, updateInterview, completeInterview, cancelInterview, type InterviewInput } from "../services/ats";
+import { listInterviews, createInterview, updateInterview, completeInterview, cancelInterview, inviteCandidate, type InterviewInput } from "../services/ats";
 import { toInterviewResource } from "../http/serialize";
 
 const writeSchema = z
@@ -40,5 +40,6 @@ export const interviews = collectionRoutes<InterviewInput, typeof schema.intervi
   verbs: {
     complete: { run: (deps, user, id) => completeInterview(deps, user, id) },
     cancel: { run: (deps, user, id) => cancelInterview(deps, user, id) },
+    invite: { run: (deps, user, id) => inviteCandidate(deps, user, id) },
   },
 });

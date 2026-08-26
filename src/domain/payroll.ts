@@ -13,7 +13,11 @@ import { esiEmployerContribution } from "./statutory";
 // marks a contribution whose component is set to sit over and above CTC rather than inside it.
 // `perquisite` lines are taxable value the employee never receives in cash (e.g. the interest concession on a
 // cheap employer loan, Rule 3(7)(i)): they lift the income-tax base and nothing else - not gross, not net.
-export type Line = { code: string; name: string; kind: "earning" | "deduction" | "employer_contribution" | "perquisite"; amount: number; taxable?: boolean; aboveCtc?: boolean };
+// `units` and `basis` are the line's own computation facts, carried so downstream readers never have to parse
+// them back out of a display label or reverse-derive them from a rounded amount: `units` is the quantity the
+// amount was priced from (loss-of-pay day-units today), and `basis` the wage a statutory line was computed on
+// (PF wages for EPF/EDLI/administration, ESI wages for ESI). The statutory register and the PF ECR report both.
+export type Line = { code: string; name: string; kind: "earning" | "deduction" | "employer_contribution" | "perquisite"; amount: number; taxable?: boolean; aboveCtc?: boolean; units?: number; basis?: number };
 
 import { round2 } from "./money";
 
@@ -88,6 +92,21 @@ const liveComponent = (c: CtcComponent) => !c.disabled && !c.deleteTime && !!c.r
 
 // Stable line codes for the employer's own contributions, so the payslip/statutory surfaces can find the PF and
 // ESI shares by code instead of by (renameable) component name. Distinct from the employee-side "EPF"/"ESI".
+// Line codes the engine owns. Every one of them is matched by EXACT code downstream (the statutory register,
+// the PF ECR, the loss-of-pay normalisation, the payout rounding line), so a plain pay component must never be
+// able to mint one just by being named "PT" or "LOP".
+const RESERVED_LINE_CODES = new Set([
+  "BASIC", "SPECIAL", "LOP", "ENCASH", "BONUS", "OT", "ARREARS", "REIMB",
+  "EPF", "ESI", "PT", "TDS", "PERQ_LOAN", "LOAN", "ROUND",
+]);
+
+// The line code for an ordinary (non-statutory) pay component. Derived from the component name so it is stable
+// and readable, and prefixed whenever that slug would collide with a code the engine owns.
+export function componentLineCode(name: string): string {
+  const slug = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "");
+  return RESERVED_LINE_CODES.has(slug) || slug.startsWith("ER_") ? `C_${slug}` : slug || "COMPONENT";
+}
+
 export function employerLineCode(c: CtcComponent): string {
   return c.method === "epf" ? "ER_EPF"
     : c.method === "esi" ? "ER_ESI"
@@ -123,7 +142,10 @@ export function pfWagesOf(basic: number, specialAllowance: number, components: C
 // `pfWages` is the wage the PF-family methods (epf / edli / pf_admin) are priced on - the payroll run passes
 // the period's actual PF wages (basic net of loss of pay, plus arrears of basic, per the configured basis),
 // while CTC views leave it undefined and let plain basic stand in.
-export type EmployerCostLine = { code: string; name: string; monthly: number; aboveCtc: boolean };
+// `basis` is the wage the contribution was priced on (PF wages for the PF family, gross for ESI, basic
+// otherwise), carried so the statutory register and the PF challan state the wage the run used instead of
+// dividing a rounded contribution back out by its rate.
+export type EmployerCostLine = { code: string; name: string; monthly: number; aboveCtc: boolean; basis: number };
 export function employerCostLines(
   basic: number,
   gross: number,
@@ -146,7 +168,8 @@ export function employerCostLines(
         ? (esiEligible ? esiEmployerContribution(gross, c.rate ?? 0, Infinity) : 0)
         : componentMonthly(c, basic, gross, pf);
     if (monthly <= 0) continue;
-    out.push({ code: employerLineCode(c), name: c.name, monthly: round2(monthly), aboveCtc: c.inCtc === false });
+    const wage = c.method === "epf" || c.method === "edli" || c.method === "pf_admin" ? pf : c.method === "esi" ? gross : basic;
+    out.push({ code: employerLineCode(c), name: c.name, monthly: round2(monthly), aboveCtc: c.inCtc === false, basis: round2(wage) });
   }
   return out;
 }

@@ -44,13 +44,14 @@ describe("computeCan agrees with decide() for every probed verb", () => {
 });
 
 describe("computeCan concrete expectations", () => {
-  it("employee: own leave-request -> update/delete/cancel; a peer's -> nothing", () => {
-    expect(computeCan(grantFor("employee"), SELF, "leave-requests", OWN_LR).sort()).toEqual(["cancel", "delete", "update"]);
+  it("employee: own leave-request -> update/delete/cancel + document verbs; a peer's -> nothing", () => {
+    // upload/download are the supporting-document slot (sick note), granted on OWN requests only.
+    expect(computeCan(grantFor("employee"), SELF, "leave-requests", OWN_LR).sort()).toEqual(["cancel", "delete", "download", "update", "upload"]);
     expect(computeCan(grantFor("employee"), SELF, "leave-requests", DEPT_PEER_LR)).toEqual([]);
   });
 
-  it("manager: a dept peer's leave-request -> approve/reject (not update/delete/cancel)", () => {
-    expect(computeCan(grantFor("manager"), SELF, "leave-requests", DEPT_PEER_LR).sort()).toEqual(["approve", "reject"]);
+  it("manager: a dept peer's leave-request -> approve/reject + read its document (not update/delete/cancel)", () => {
+    expect(computeCan(grantFor("manager"), SELF, "leave-requests", DEPT_PEER_LR).sort()).toEqual(["approve", "download", "reject"]);
     // another dept -> my-dept does not match -> nothing
     expect(computeCan(grantFor("manager"), SELF, "leave-requests", OTHER_DEPT_LR)).toEqual([]);
   });

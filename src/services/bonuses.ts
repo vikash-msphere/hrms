@@ -9,6 +9,8 @@ import { genId } from "../lib/idCodec";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
 import { notify } from "./notifications";
+import { orgCurrency } from "./settings";
+import { round2 } from "../domain/money";
 
 // One-off awards (bonus/incentive). A flat per-employee log; the bonus letter cites the most recent award.
 export type BonusInput = {
@@ -69,9 +71,12 @@ export async function recordBonus(deps: Deps, actor: AppUser, input: BonusInput)
 
   const kind = input.kind?.trim() || null;
   const reason = input.reason?.trim() || null;
+  // Rounded to paise before anything sees it: every stored monetary value passes round2 (the schema's monetary
+  // invariant), and a bonus is summed straight into a payroll run's gross.
+  const amount = round2(input.amount);
   // Reuse an identical unpaid award from a recent double-submit instead of creating a second payable. `reason`
   // is part of the key so two distinct same-amount awards the same day (e.g. two referral bonuses) stay separate.
-  const dup = await findRecentDuplicate(deps, { employeeId, amount: input.amount, kind, reason, awardDateMs: when, scope: "individual", scopeRef: null }, +deps.clock.now());
+  const dup = await findRecentDuplicate(deps, { employeeId, amount, kind, reason, awardDateMs: when, scope: "individual", scopeRef: null }, +deps.clock.now());
   if (dup) return dup;
 
   const row = (await deps.db
@@ -79,8 +84,8 @@ export async function recordBonus(deps: Deps, actor: AppUser, input: BonusInput)
     .values({
       code: await allocOwnedCode(deps, schema.bonuses, schema.bonuses.employeeId, employeeId),
       employeeId,
-      amount: input.amount,
-      currency: input.currency_code?.trim() || "INR",
+      amount,
+      currency: input.currency_code?.trim() || await orgCurrency(deps),
       kind,
       reason,
       awardDate: new Date(when),
@@ -108,9 +113,10 @@ export type AwardInput = {
 // awards share a batch id. Returns the created rows.
 export async function awardBonus(deps: Deps, actor: AppUser, input: AwardInput) {
   const scope = input.scope ?? "individual";
-  const amount = input.amount;
+  if (typeof input.amount !== "number" || input.amount <= 0) throw invalidArgument("amount must be greater than 0");
+  const amount = round2(input.amount); // stored to the paise, like every other monetary value
   const when = dayMs(input.award_date);
-  if (typeof amount !== "number" || amount <= 0) throw invalidArgument("amount must be greater than 0");
+  if (!(amount > 0)) throw invalidArgument("amount must be greater than 0");
   if (Number.isNaN(when)) throw invalidArgument("award_date is required");
 
   const active = (await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"))).filter((e) => !e.deleteTime);
@@ -132,7 +138,7 @@ export async function awardBonus(deps: Deps, actor: AppUser, input: AwardInput) 
   if (!targets.length) throw invalidArgument("no active employees in the selected scope");
 
   const batchId = scope === "individual" ? null : genId();
-  const currency = input.currency_code?.trim() || "INR";
+  const currency = input.currency_code?.trim() || await orgCurrency(deps);
   const kind = input.kind?.trim() || null;
   const reason = input.reason?.trim() || null;
   const now = +deps.clock.now();
@@ -169,13 +175,12 @@ export async function unpaidBonusesAll(deps: Deps) {
 }
 // Paid by a full-and-final settlement rather than a run (paidAt set, paidRunId left null), and the release a
 // recomputed settlement uses to put them back in the queue. Guarded so neither can touch a run-paid award.
-export async function markBonusesSettled(deps: Deps, ids: string[], at: Date) {
-  if (!ids.length) return;
-  await deps.db.update(schema.bonuses).set({ paidAt: at }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
+// Unexecuted statement, so the FnF commits it in the same atomic batch as the settlement (see reimbursements).
+export function markBonusesSettledStmt(deps: Deps, ids: string[], at: Date) {
+  return deps.db.update(schema.bonuses).set({ paidAt: at }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
 }
-export async function releaseBonusesSettled(deps: Deps, ids: string[]) {
-  if (!ids.length) return;
-  await deps.db.update(schema.bonuses).set({ paidAt: null }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
+export function releaseBonusesSettledStmt(deps: Deps, ids: string[]) {
+  return deps.db.update(schema.bonuses).set({ paidAt: null }).where(and(inArray(schema.bonuses.uuid, ids), isNull(schema.bonuses.paidRunId)));
 }
 // Returns the UNEXECUTED statement so the build can batch it (thenable - a direct await still executes).
 // Guarded on still being unpaid: the build reads the queue up front and flips it at the end, so two runs

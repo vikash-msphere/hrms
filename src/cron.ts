@@ -1,26 +1,32 @@
 import { allocFlatCode, allocOwnedCode } from "./services/codeAlloc";
-import { eq, and, or, ne, isNull, lte, inArray } from "drizzle-orm";
+import { eq, and, or, ne, isNull, lte, lt, sql, inArray } from "drizzle-orm";
 import * as schema from "./db/schema";
 import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
-import { runDeferredActions, runWorkflowTimer, runScheduledAutomations } from "./services/automationEngine";
+import { runDeferredActions, runWorkflowTimer, runScheduledAutomations, withDispatchBudget } from "./services/automationEngine";
 import { flushDigests } from "./services/notificationDigest";
 import { generateRecurringExpenses } from "./services/expenses";
-import { checkBudgetThresholds } from "./services/expenseBudgets";
+import { checkBudgetThresholds, openRecurringBudgetPeriods } from "./services/expenseBudgets";
 import { emitEvent } from "./services/eventBus";
 import { accrueLeave } from "./services/leaveAccrual";
 import { generateComplianceOccurrences } from "./services/complianceRules";
+import { nudgeStaleAcks } from "./services/documentAck";
 import { awardReferralBonuses } from "./services/referrals";
+import { nudgeMissingScorecards } from "./services/ats";
 import { reconcilePendingEsign } from "./services/esign/callback";
 import { publishDueAnnouncements } from "./services/announcements";
+import { nextOccurrence } from "./services/events";
 import { purgeExpiredAccessRules } from "./services/accessRules";
+import { creditHolidayCompOff } from "./services/compOff";
 import { getSettingValue } from "./services/settings";
 import { renderEmail, loadEmailBrand } from "./lib/emailLayout";
 import { notify, managerIdOf } from "./services/notifications";
 import { leaveCaps, encashedDaysThisYear, createAutoEncashment } from "./services/leaveEncashments";
 import { calendarYearOf, splitCarryForward, splitCarryForwardCumulative, splitEncashExcess } from "./domain/carryForward";
+import { custodyPolicy, daysBetween } from "./domain/assetCustody";
 
 import { round2 } from "./domain/money";
+import { refLeaveTypes, refHolidays } from "./lib/refData";
 
 // The scheduled triggers this Worker handles (must mirror wrangler.toml `crons`). Exported so the manual
 // trigger (cron-runs:run) can validate the requested expression against the real, dispatchable set.
@@ -44,11 +50,22 @@ export async function startCronRun(cron: string, deps: Deps): Promise<{ runId: s
 // swallows nothing silently - the error is recorded on the row - but it does not rethrow when detached.
 export async function finishCronRun(cron: string, deps: Deps, runId: string, start: number, rethrow = true): Promise<void> {
   try {
-    const summary = await dispatchCron(cron, deps);
+    const { summary, failures } = await dispatchCron(cron, deps);
     const end = +deps.clock.now();
+    // A tick that lost a subtask is NOT a good tick. Every subtask is best-effort (one failure must not cost
+    // the other twelve), which used to mean a failed accrual still stamped `done` with a zero count - green in
+    // the Operations UI, wrong in fact. Naming the failed subtasks on the row is what makes the difference
+    // visible to someone who is not reading Workers Logs. `error` is reused rather than adding a `partial`
+    // state: the schema keeps one migration, and "some of this tick did not happen" is the actionable bit.
     await deps.db
       .update(schema.cronRuns)
-      .set({ status: "done", finishedAt: new Date(end), durationMs: end - start, summaryJson: JSON.stringify(summary) })
+      .set({
+        status: failures.length ? "error" : "done",
+        finishedAt: new Date(end),
+        durationMs: end - start,
+        summaryJson: JSON.stringify(summary),
+        error: failures.length ? `subtasks failed: ${failures.join(", ")}` : null,
+      })
       .where(eq(schema.cronRuns.uuid, runId));
   } catch (e) {
     const end = +deps.clock.now();
@@ -68,71 +85,164 @@ export async function runScheduled(cron: string, deps: Deps): Promise<string> {
   return runId;
 }
 
-// Best-effort subtask wrapper: a failure must not abort the tick, but with Workers Logs persisted it must
-// also not vanish - a silently failing bonus award or e-sign reconcile is money/documents stuck with no trace.
-const bestEffort = (name: string, p: Promise<number>): Promise<number> =>
-  p.catch((err) => {
-    console.error(`cron subtask ${name} failed (non-fatal)`, err);
-    return 0;
-  });
+// One tick's best-effort runner. A subtask failure must not abort the tick, must not vanish (Workers Logs are
+// persisted), and must not leave the tick looking successful - so the wrapper both logs and records the name,
+// which finishCronRun turns into an `error` cron_runs row. Per-tick rather than module-level state, so
+// concurrent ticks (a manual trigger overlapping the schedule) cannot borrow each other's failures.
+// A subtask is an ORIGINATING ACTION, so each gets its own automation dispatch budget (the whole tick shares
+// one Deps; without this the fiftieth event of the night silently dropped every emission after it, including
+// every later subtask's). `run` therefore takes a THUNK rather than an already-started promise - the budget has
+// to be armed before the work begins. A budget that actually refused something is a lost automation, so it goes
+// on the cron_runs row next to a thrown failure rather than only into Workers Logs.
+function subtasks(deps: Deps) {
+  const failures: string[] = [];
+  const run = (name: string, work: () => Promise<number>): Promise<number> =>
+    withDispatchBudget(deps, work)
+      .then(({ result, dropped }) => {
+        if (dropped > 0) {
+          console.warn(`cron subtask ${name} dropped ${dropped} automation dispatch(es) at the ${name} budget ceiling`);
+          failures.push(`${name} (${dropped} automation dispatch(es) dropped)`);
+        }
+        return result;
+      })
+      .catch((err) => {
+        console.error(`cron subtask ${name} failed (non-fatal)`, err);
+        failures.push(name);
+        return 0;
+      });
+  return { run, failures };
+}
 
-async function dispatchCron(cron: string, deps: Deps): Promise<Record<string, number>> {
+async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record<string, number>; failures: string[] }> {
+  const { run, failures } = subtasks(deps);
   if (cron === "*/5 * * * *") {
     // Scheduled board posts ride the fast tick, not the nightly one: an announcement set for 09:00 has to land
     // at 09:00, give or take the tick. Best-effort - a failure here must not stop the job queue draining.
-    const announcementsPublished = await bestEffort("publishDueAnnouncements", publishDueAnnouncements(deps));
-    return { drained: await drainJobs(deps, 20), announcementsPublished };
+    const announcementsPublished = await run("publishDueAnnouncements", () => publishDueAnnouncements(deps));
+    // The drain runs jobs authored by other people's rules, so it gets its own budget too rather than
+    // inheriting whatever the announcement publish spent.
+    const drained = await run("drainJobs", () => drainJobs(deps, 20));
+    return { summary: { drained, announcementsPublished }, failures };
   }
   if (cron === "0 2 * * *") {
     // Carry-forward runs BEFORE accrual so it caps last year's balance before the new year accrues on top.
-    const carriedForward = await carryForwardLeave(deps);
-    const accrued = await accrueLeave(deps);
+    // Both are best-effort like everything else here: leave balances are the most consequential thing the tick
+    // touches, but an exception in accrual is not a reason to also skip reminders, digests and e-sign
+    // reconciliation. The tick stays alive and the run goes red naming what failed.
+    const carriedForward = await run("carryForwardLeave", () => carryForwardLeave(deps));
+    const accrued = await run("accrueLeave", () => accrueLeave(deps));
     // Roll the compliance-calendar horizon forward (best-effort; never aborts the tick).
-    const complianceGenerated = await generateComplianceOccurrences(deps).catch(() => 0);
+    const complianceGenerated = await run("generateComplianceOccurrences", () => generateComplianceOccurrences(deps));
     // Award referral bonuses whose referred hire reached the configured milestone (best-effort).
-    const referralBonuses = await awardReferralBonuses(deps).catch(() => 0);
+    const referralBonuses = await run("awardReferralBonuses", () => awardReferralBonuses(deps));
     // Reminders are best-effort: an email failure must never abort the accrual tick.
-    const reminders = await sendReminders(deps).catch(() => 0);
+    const reminders = await run("sendReminders", () => sendReminders(deps));
     // Time-based domain events (probation ending, work anniversary, document expiring) so automations can react
     // to the passage of time, not just user actions. Best-effort - never aborts the tick.
-    const scheduledEvents = await emitScheduledEvents(deps).catch(() => 0);
+    const scheduledEvents = await run("emitScheduledEvents", () => emitScheduledEvents(deps));
     // Fire time-driven automation rules whose recurrence matches today (weekly nudges, month-start prep,
     // per-employee smart reminders). Guarded per-day so a re-run can't double-fire. Best-effort.
-    const scheduledAutomations = await runScheduledAutomations(deps).catch(() => 0);
+    const scheduledAutomations = await run("runScheduledAutomations", () => runScheduledAutomations(deps));
     // Flush queued digest notifications into one summary per recipient (best-effort).
-    const digestsFlushed = await flushDigests(deps).catch(() => 0);
+    const digestsFlushed = await run("flushDigests", () => flushDigests(deps));
+    // Chase unconfirmed asset custody: nudge holders who owe a scan, flag stock nobody counted in, and mark
+    // assets nobody has sighted in months as stale (best-effort).
+    const assetCustody = await run("remindAssetCustody", () => remindAssetCustody(deps));
     // Generate due recurring expenses (rent, subscriptions) and raise budget-threshold alerts (best-effort).
-    const recurringExpenses = await generateRecurringExpenses(deps).catch(() => 0);
-    const budgetAlerts = await checkBudgetThresholds(deps).catch(() => 0);
+    const recurringExpenses = await run("generateRecurringExpenses", () => generateRecurringExpenses(deps));
+    const budgetAlerts = await run("checkBudgetThresholds", () => checkBudgetThresholds(deps));
+    // Recurring caps open their next period once the current one closes, so no month goes unbudgeted.
+    const budgetPeriodsOpened = await run("openRecurringBudgetPeriods", () => openRecurringBudgetPeriods(deps));
     // Reconcile e-sign documents stuck pending (missed/dropped vendor webhook): poll the vendor or auto-expire
     // past the signing window. Best-effort - never aborts the tick.
-    const esignReconciled = await reconcilePendingEsign(deps).catch(() => 0);
+    const esignReconciled = await run("reconcilePendingEsign", () => reconcilePendingEsign(deps));
     // Recurring 1:1s roll forward once their date passes, and tomorrow's 1:1s get a day-before nudge.
-    const checkInsRolled = await bestEffort("rollRecurringCheckIns", rollRecurringCheckIns(deps));
-    const checkInReminders = await bestEffort("remindUpcomingCheckIns", remindUpcomingCheckIns(deps));
+    const checkInsRolled = await run("rollRecurringCheckIns", () => rollRecurringCheckIns(deps));
+    const checkInReminders = await run("remindUpcomingCheckIns", () => remindUpcomingCheckIns(deps));
+    // Repeating events (the weekly all-hands, the yearly Founders' Day) create their next occurrence once the
+    // current one has finished, one step at a time.
+    const eventsRolled = await run("rollRepeatingEvents", () => rollRepeatingEvents(deps));
+    // Optional-holiday picks going spare, ahead of the org's pick-by date (best-effort).
+    const holidayPickReminders = await run("remindOptionalHolidayPicks", () => remindOptionalHolidayPicks(deps));
+    // Policies still unsigned: nudge the outstanding people at 3, 7 and 14 days, then emit ackOverdue so a
+    // rule can escalate. Publishing a policy used to be the only time anyone was ever asked.
+    const ackNudges = await run("nudgeStaleAcks", () => nudgeStaleAcks(deps));
+    // Interviews held with scorecards still owed: nudge the panelists at 1, 3 and 7 days, then emit
+    // scorecardOverdue so a rule can escalate. A hiring decision stalls on silence more often than on
+    // disagreement, and nothing used to ask twice.
+    const scorecardNudges = await run("nudgeMissingScorecards", () => nudgeMissingScorecards(deps));
+    // Comp-off for anyone who worked yesterday's holiday (opt-in; idempotent per employee+day).
+    const compOffCredited = await run("creditHolidayCompOff", () => creditHolidayCompOff(deps));
     // Sweep lapsed temporary access rules. They already stopped deciding at their expiry instant (policyLoad
     // filters on it), so this is table hygiene, not the enforcement mechanism.
-    const accessRulesExpired = await bestEffort("purgeExpiredAccessRules", purgeExpiredAccessRules(deps));
-    return { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, recurringExpenses, budgetAlerts, esignReconciled, checkInsRolled, checkInReminders, accessRulesExpired };
+    const accessRulesExpired = await run("purgeExpiredAccessRules", () => purgeExpiredAccessRules(deps));
+    return {
+      summary: { carriedForward, accrued, complianceGenerated, referralBonuses, reminders, scheduledEvents, scheduledAutomations, digestsFlushed, assetCustody, recurringExpenses, budgetAlerts, budgetPeriodsOpened, esignReconciled, checkInsRolled, checkInReminders, eventsRolled, holidayPickReminders, ackNudges, scorecardNudges, compOffCredited, accessRulesExpired },
+      failures,
+    };
   }
-  return {};
+  return { summary: {}, failures };
 }
 
 // A job left `running` longer than this was almost certainly orphaned by a mid-tick crash (real jobs are
-// bounded batches that finish in seconds, and an LRO that legitimately resumes refreshes updated_at each
-// tick). Such a job is reclaimed to `queued` so it gets retried instead of hanging forever.
+// bounded batches that finish in seconds, and an LRO that legitimately resumes stamps `updated_at` on each
+// claim - see schema.ts `updated()`, which carries $onUpdateFn so the clock this cutoff reads actually moves).
+// Such a job is reclaimed to `queued` so it gets retried instead of hanging forever.
 const STALE_RUNNING_MS = 10 * 60 * 1000;
 type JobRow = typeof schema.jobs.$inferSelect;
 
+// A failing job is retried on a widening delay, not parked on its first error. Most job failures are transient
+// (a D1 blip mid-batch, a vendor 503), and a payslip run that dies at attempt 1 with no retry is a month of
+// payslips nobody notices are missing until an employee asks. Past the cap it stops retrying and STAYS `error`:
+// that terminal state IS the dead-letter queue, already listed on the Operations page with a Retry button, so a
+// human keeps the last word. The delay rides `jobs.run_after`, which the drain already honours - no new column.
+const MAX_JOB_ATTEMPTS = 5;
+const RETRY_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+const backoffMs = (attempts: number): number => RETRY_BACKOFF_MS[Math.min(attempts, RETRY_BACKOFF_MS.length) - 1]!;
+
+// Kinds whose failure someone is waiting on, and can act on. Engine-internal kinds (`automation.action`,
+// `workflow.timer`) are deliberately excluded: they already record an automation_runs row for the Workflows UI,
+// and the employee a rule happens to be ABOUT is not the person who can fix a broken rule.
+const OWNER_NOTIFIED_KINDS = new Set(["payslip.generateRun"]);
+
+// Tell the job's owner when it has given up for good. `notify` is itself best-effort (it swallows), so this
+// cannot turn a job failure into a tick failure.
+async function notifyJobDeadLetter(deps: Deps, job: JobRow, error: string): Promise<void> {
+  if (!job.employeeId || !OWNER_NOTIFIED_KINDS.has(job.kind)) return;
+  await notify(deps, {
+    recipient: job.employeeId,
+    type: "system.jobFailed",
+    title: "Background job failed",
+    body: `${job.kind} gave up after ${MAX_JOB_ATTEMPTS} attempts: ${error.slice(0, 300)}`,
+    link: "operations",
+    subject: `operations/${job.uuid}`,
+    priority: "high",
+    action: "retry",
+  });
+}
+
 // Run one job through its state machine. Returns "requeued" if an LRO asked to resume next tick (state
-// unchanged from the queue's perspective), else "done"/"error". Idempotent per call; never throws.
-async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" | "requeued"> {
-  await deps.db.update(schema.jobs).set({ status: "running" }).where(eq(schema.jobs.uuid, job.uuid));
+// unchanged from the queue's perspective), "skipped" if another drain claimed it first, else "done"/"error".
+// Idempotent per call; never throws.
+async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" | "requeued" | "skipped"> {
+  // GUARDED CLAIM, not a bare flip: the `queued` predicate is what makes at-most-one-runner true. Two drains
+  // overlap for real - `cron-runs:run` fires a tick on demand (routes/cronTrigger.ts) with no lock against the
+  // schedule - and both select the same queued rows before either writes. Whoever's UPDATE reports a changed
+  // row owns the job; the loser sees zero and leaves it alone, instead of both running the same automation
+  // actions (duplicate email/notifications) or the same payslip batch.
+  const claim = await deps.db
+    .update(schema.jobs)
+    .set({ status: "running" })
+    .where(and(eq(schema.jobs.uuid, job.uuid), eq(schema.jobs.status, "queued")))
+    .returning({ uuid: schema.jobs.uuid });
+  if (!claim.length) return "skipped";
   try {
     if (job.kind === "payslip.generateRun") {
       const res = await processPayslipRunJob(deps, job.uuid, JSON.parse(job.payload));
       if (!res.done) {
-        await deps.db.update(schema.jobs).set({ status: "queued" }).where(eq(schema.jobs.uuid, job.uuid));
+        // Clear any backoff left over from an earlier failed attempt: this is a healthy LRO asking to continue
+        // next tick, and it must not inherit an hour-long delay set when the same job last errored.
+        await deps.db.update(schema.jobs).set({ status: "queued", runAfter: null }).where(eq(schema.jobs.uuid, job.uuid));
         return "requeued";
       }
     } else if (job.kind === "automation.action") {
@@ -145,19 +255,38 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
     await deps.db.update(schema.jobs).set({ status: "done" }).where(eq(schema.jobs.uuid, job.uuid));
     return "done";
   } catch (e) {
-    await deps.db.update(schema.jobs).set({ status: "error", attempts: job.attempts + 1, lastError: String(e) }).where(eq(schema.jobs.uuid, job.uuid));
-    return "error";
+    const attempts = job.attempts + 1;
+    const retry = attempts < MAX_JOB_ATTEMPTS;
+    await deps.db
+      .update(schema.jobs)
+      .set(
+        retry
+          ? { status: "queued", attempts, lastError: String(e), runAfter: new Date(+deps.clock.now() + backoffMs(attempts)) }
+          : { status: "error", attempts, lastError: String(e) },
+      )
+      .where(eq(schema.jobs.uuid, job.uuid));
+    console.error(`job ${job.kind} ${job.uuid} failed (attempt ${attempts}/${MAX_JOB_ATTEMPTS}, ${retry ? "will retry" : "terminal"})`, e);
+    if (!retry) await notifyJobDeadLetter(deps, job, String(e));
+    // A retry is queue-neutral, like an LRO that asked to resume: the row is back in `queued` and this tick
+    // advanced nothing, so it is not counted as processed.
+    return retry ? "requeued" : "error";
   }
 }
 
 // Re-queue jobs orphaned in `running` so the drain retries them. Returns how many were reclaimed.
+//
+// The cutoff is only meaningful because `updated_at` moves on every write (schema.ts `updated()` carries
+// $onUpdateFn): a job claimed this tick stamps a fresh timestamp, so a drain that overlaps another tick's
+// in-flight work no longer mistakes it for an orphan and yank it back to `queued` underneath the runner.
+// Filtered in SQL rather than read-all-then-filter - `running` is normally a handful of rows, but D1 bills
+// rows read and this runs on every five-minute tick.
 async function reclaimStuckJobs(deps: Deps): Promise<number> {
-  const cutoff = +deps.clock.now() - STALE_RUNNING_MS;
-  const running = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.status, "running"));
-  const stale = running.filter((j) => +new Date(j.updatedAt) < cutoff);
-  for (const j of stale) {
-    await deps.db.update(schema.jobs).set({ status: "queued", attempts: j.attempts + 1 }).where(eq(schema.jobs.uuid, j.uuid));
-  }
+  const cutoff = new Date(+deps.clock.now() - STALE_RUNNING_MS);
+  const stale = await deps.db
+    .update(schema.jobs)
+    .set({ status: "queued", attempts: sql`${schema.jobs.attempts} + 1` })
+    .where(and(eq(schema.jobs.status, "running"), lt(schema.jobs.updatedAt, cutoff)))
+    .returning({ uuid: schema.jobs.uuid });
   return stale.length;
 }
 
@@ -175,7 +304,10 @@ async function drainJobs(deps: Deps, limit: number): Promise<number> {
     .limit(limit);
   let processed = 0;
   for (const job of queued) {
-    if ((await processOneJob(deps, job)) !== "requeued") processed++;
+    // A requeue is queue-neutral (the row is back in `queued`, nothing advanced) and a skip means another
+    // drain owns it - neither is work this tick did, so neither counts.
+    const outcome = await processOneJob(deps, job);
+    if (outcome !== "requeued" && outcome !== "skipped") processed++;
   }
   return processed;
 }
@@ -200,7 +332,7 @@ export async function carryForwardLeave(deps: Deps): Promise<number> {
   const year = calendarYearOf(deps.clock.now());
   const caps = await leaveCaps(deps);
   const employees = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
-  const leaveTypes = await deps.db.select().from(schema.leaveTypes);
+  const leaveTypes = await refLeaveTypes(deps);
   const ltById = new Map(leaveTypes.map((lt) => [lt.uuid, lt] as const));
   // All balances in one read, grouped per employee: on an ordinary night (everything already stamped for
   // `year`) the whole subtask costs 3 reads, not one per employee. This snapshot is only a cheap "is there
@@ -433,6 +565,62 @@ export async function rollRecurringCheckIns(deps: Deps): Promise<number> {
   return rolled;
 }
 
+// Repeating events: once a repeat-bearing event has finished, create the next occurrence (same title, length,
+// attendees and work rules, dates stepped by the cadence) and MOVE the repeat onto it - so exactly one row of a
+// series carries it and nothing quietly fills the calendar years ahead. The claim clears the repeat with a
+// guard on its current value, the same guarded flip recurring 1:1s use: a re-run or a concurrent tick finds it
+// already NULL and skips, so one event can never mint two successors.
+//
+// RSVPs deliberately do NOT carry over: "coming to the all-hands on the 3rd" is not a promise about the 10th.
+export async function rollRepeatingEvents(deps: Deps): Promise<number> {
+  const nowMs = +deps.clock.now();
+  const rows = await deps.db.select().from(schema.events);
+  let rolled = 0;
+  for (const r of rows) {
+    if (r.deleteTime || !r.repeat || +new Date(r.endTime) >= nowMs) continue;
+    // Step until the occurrence is in the future: a series nobody touched for two months lands on its next
+    // real date rather than replaying every date it missed.
+    let { start, end } = nextOccurrence(+new Date(r.startTime), +new Date(r.endTime), r.repeat);
+    let guard = 0;
+    while (end < nowMs && guard++ < 400) ({ start, end } = nextOccurrence(start, end, r.repeat));
+    const claimed = await deps.db
+      .update(schema.events)
+      .set({ repeat: null, updatedAt: new Date() })
+      .where(and(eq(schema.events.uuid, r.uuid), eq(schema.events.repeat, r.repeat)))
+      .returning();
+    if (!claimed.length) continue;
+    const created = (await deps.db
+      .insert(schema.events)
+      .values({
+        code: await allocFlatCode(deps, schema.events),
+        title: r.title,
+        startTime: new Date(start),
+        endTime: new Date(end),
+        allDay: r.allDay,
+        countAsWork: r.countAsWork,
+        requiresClockIn: r.requiresClockIn,
+        color: r.color,
+        description: r.description,
+        attendeeIds: r.attendeeIds,
+        repeat: r.repeat,
+      })
+      .returning())[0]!;
+    // The people it is aimed at hear about it, so an RSVP has something to answer. A company-wide event (no
+    // attendee list) tells nobody: that is the calendar's job, not forty notifications'.
+    let attendees: string[] = [];
+    try {
+      attendees = r.attendeeIds ? (JSON.parse(r.attendeeIds) as string[]) : [];
+    } catch {
+      attendees = [];
+    }
+    const when = new Date(start).toISOString().slice(0, 10);
+    for (const rid of attendees)
+      await notify(deps, { recipient: rid, type: "event.scheduled", title: `${r.title} scheduled`, body: `The next one is on ${when}.`, link: "events", subject: `events/${created.uuid}` });
+    rolled++;
+  }
+  return rolled;
+}
+
 // Day-before reminder: both attendees of a 1:1 dated tomorrow get an in-app nudge on the nightly tick.
 // The one-day window means each 1:1 matches exactly one tick, so there is nothing to dedupe.
 export async function remindUpcomingCheckIns(deps: Deps): Promise<number> {
@@ -460,6 +648,119 @@ export async function remindUpcomingCheckIns(deps: Deps): Promise<number> {
     }
   }
   return sent;
+}
+
+// Nudge anyone who still has optional-holiday picks going spare, `reminder_days` before the org's pick-by date
+// (settings/holidays `pick_by`, `pick_reminder_days`, `max_optional`). An unused pick is a day off silently
+// forfeited, and nobody remembers a deadline nobody told them about. No pick_by set -> nothing to remind about.
+// Fires on exactly one day (and again on the deadline itself), so the daily tick can't turn it into a drip.
+export async function remindOptionalHolidayPicks(deps: Deps): Promise<number> {
+  const cfg = await getSettingValue<{ max_optional?: number; pick_by?: string; pick_reminder_days?: number }>(deps, "holidays", {});
+  const max = cfg.max_optional ?? 2;
+  if (!cfg.pick_by || max <= 0) return 0;
+  const deadlineMs = Date.parse(cfg.pick_by.slice(0, 10) + "T00:00:00Z");
+  if (Number.isNaN(deadlineMs)) return 0;
+  const today = new Date(deps.clock.now());
+  today.setUTCHours(0, 0, 0, 0);
+  const daysLeft = Math.round((deadlineMs - +today) / 86_400_000);
+  const lead = cfg.pick_reminder_days ?? 7;
+  if (daysLeft !== lead && daysLeft !== 0) return 0;
+
+  // Only picks for holidays in the deadline's own year count: last year's choices don't fill this year's quota.
+  const year = new Date(deadlineMs).getUTCFullYear();
+  const holidaysById = new Map((await refHolidays(deps)).map((h) => [h.uuid, h]));
+  const perEmployee = new Map<string, number>();
+  for (const sel of await deps.db.select().from(schema.holidaySelections)) {
+    const h = holidaysById.get(sel.holidayId);
+    if (!h || new Date(h.date).getUTCFullYear() !== year) continue;
+    perEmployee.set(sel.employeeId, (perEmployee.get(sel.employeeId) ?? 0) + 1);
+  }
+  // Something to pick FROM, or the nudge is just noise.
+  const openOptional = [...holidaysById.values()].filter(
+    (h) => h.kind === "optional" && !h.deleteTime && !h.disabled && +new Date(h.date) >= +today && new Date(h.date).getUTCFullYear() === year,
+  ).length;
+  if (!openOptional) return 0;
+
+  let sent = 0;
+  for (const emp of await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"))) {
+    const left = max - (perEmployee.get(emp.uuid) ?? 0);
+    if (left <= 0) continue;
+    const when = daysLeft === 0 ? "today" : `in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`;
+    await notify(deps, {
+      recipient: emp.uuid,
+      type: "holiday.pick_reminder",
+      title: `${left} optional holiday${left === 1 ? "" : "s"} left to pick`,
+      body: `Picks for ${year} close ${when}. Choose your optional holidays before then - unused picks are lost.`,
+      link: "holidays",
+    });
+    sent++;
+  }
+  return sent;
+}
+
+/**
+ * Chase the scans that were owed and never happened.
+ *
+ * An unconfirmed asset is the only kind that goes missing quietly, so the tick does three things: nudges the
+ * holder who has not confirmed receipt (and, once the wait has doubled, their manager), and emits events for
+ * stock that nobody has counted in and for assets nobody has laid eyes on in months. The two events carry no
+ * recipient of their own - there is no "IT role" to notify - so an org routes them wherever it wants through
+ * an automation rule (mail the asset owner, open a ticket, post to the board).
+ */
+export async function remindAssetCustody(deps: Deps): Promise<number> {
+  const policy = custodyPolicy(await getSettingValue<unknown>(deps, "asset-tags", {}));
+  const now = new Date(deps.clock.now());
+  const rows = await deps.db.select().from(schema.assets).where(ne(schema.assets.status, "retired"));
+  let acted = 0;
+  const escalations: { row: (typeof rows)[number]; days: number }[] = [];
+  for (const r of rows) {
+    const waiting = r.custodySince ? daysBetween(r.custodySince, now) : null;
+    if (r.status === "pending_ack" && r.assignedTo && waiting !== null && waiting >= policy.ackReminderDays) {
+      // The holder is nudged on every tick past the threshold: it is one line in their notification list, and
+      // the whole point is that the asset stays visibly unconfirmed until they scan it.
+      await notify(deps, {
+        recipient: r.assignedTo,
+        type: "asset.assigned",
+        title: "Confirm the asset you were given",
+        body: `${r.name}${r.assetTag ? ` (${r.assetTag})` : ""} has been waiting ${waiting} days for you to scan its tag.`,
+        link: "assets",
+        subject: `assets/${r.uuid}`,
+      });
+      acted++;
+      if (waiting >= policy.ackReminderDays * 2) escalations.push({ row: r, days: waiting });
+      await emitEvent(deps, null, "asset.custodyOverdue", { subject: `assets/${r.uuid}`, employeeId: r.assignedTo, payload: { categoryId: r.categoryId, assetTag: r.assetTag, name: r.name, kind: "ack", days: waiting } });
+      continue;
+    }
+    if (r.status === "pending_verification" && waiting !== null && waiting >= policy.ackReminderDays) {
+      await emitEvent(deps, null, "asset.custodyOverdue", { subject: `assets/${r.uuid}`, employeeId: r.assignedTo, payload: { categoryId: r.categoryId, assetTag: r.assetTag, name: r.name, kind: "verification", days: waiting } });
+      acted++;
+      continue;
+    }
+    // Settled assets go stale instead: nobody has seen this one in half a year, which is what makes a
+    // stocktake fall due rather than be remembered. Repeated monthly past the threshold rather than daily, so
+    // a skipped tick costs a month's delay instead of losing the signal entirely.
+    const sinceSeen = daysBetween(r.verifiedAt ?? r.createdAt, now);
+    if (sinceSeen >= policy.verifyStaleDays && (sinceSeen - policy.verifyStaleDays) % 30 === 0) {
+      await emitEvent(deps, null, "asset.stale", { subject: `assets/${r.uuid}`, employeeId: r.assignedTo, payload: { categoryId: r.categoryId, assetTag: r.assetTag, name: r.name, days: sinceSeen } });
+      acted++;
+    }
+  }
+  // Managers hear about it once the holder has ignored the ask for twice the reminder window - one lookup for
+  // all of them rather than one per asset.
+  for (const e of escalations) {
+    const manager = await managerIdOf(deps, e.row.assignedTo!);
+    if (!manager || manager === e.row.assignedTo) continue;
+    await notify(deps, {
+      recipient: manager,
+      type: "asset.assigned",
+      title: "An asset in your team is unconfirmed",
+      body: `${e.row.name}${e.row.assetTag ? ` (${e.row.assetTag})` : ""} has been unconfirmed for ${e.days} days.`,
+      link: "assets",
+      subject: `assets/${e.row.uuid}`,
+    });
+    acted++;
+  }
+  return acted;
 }
 
 // Sends email reminders for probation endings (90-day), expiring documents, and work anniversaries.

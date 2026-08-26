@@ -10,7 +10,7 @@ export const writeSchema = z.object({
   // Mirrors the column enums in db/schema.ts: an employer_contribution row (employer PF/ESI/gratuity) is as
   // writable as either employee-side kind, and esi/pt are creatable statutory methods like epf/income_tax.
   kind: z.enum(["earning", "deduction", "employer_contribution"]).optional(),
-  method: z.enum(["fixed", "percent_base", "rate_qty", "income_tax", "epf", "esi", "pt", "edli", "pf_admin"]).optional(),
+  method: z.enum(["fixed", "percent_base", "income_tax", "epf", "esi", "pt", "edli", "pf_admin"]).optional(),
   rate: z.number().nullable().optional(),
   cap: z.number().min(0).nullable().optional(),
   regime: z.string().nullable().optional(),

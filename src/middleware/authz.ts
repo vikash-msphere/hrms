@@ -7,11 +7,13 @@ import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
 import { forbidden } from "../lib/errors";
 import { resolveRequest, decide, type Decision, type Grant } from "../domain/permissions";
-import { scopeFor, stateReadAllowed, type ListScope } from "../domain/access";
-import { buildCodedPath, uuidToCode, resolveItemState } from "../lib/authzResolve";
+import { scopeFor, verbScopeFor, stateReadAllowed, type ListScope } from "../domain/access";
+import { buildCodedPath, uuidToCode, resolveItemState, RESOURCE_COLLECTIONS } from "../lib/authzResolve";
 import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptionCodesFor } from "../lib/policyLoad";
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
+import { ANALYTICS_COLLECTIONS } from "../domain/peopleAnalytics";
+import { APPROVAL_SUMMARY_COLLECTIONS, TAX_VERIFICATION_QUEUE } from "../domain/approvalsSummary";
 import { ancestorsOf } from "../domain/codes";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
 import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
@@ -19,6 +21,7 @@ import { inScope } from "../domain/keyScope";
 import { accessAudit, mutationAudit } from "../domain/auditAccess";
 import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
 import { audit } from "../lib/audit";
+import { isJsonBody } from "../http/jsonRequest";
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
 // resource-level write already passed, each PROTECTED field present in the body needs write on
@@ -33,7 +36,7 @@ import { audit } from "../lib/audit";
 async function touchedFieldNames(c: Context<AppEnv>): Promise<string[]> {
   const m = c.req.method.toUpperCase();
   if (m !== "POST" && m !== "PATCH" && m !== "PUT") return [];
-  if (!c.req.header("content-type")?.includes("application/json")) return [];
+  if (!isJsonBody(c.req.header("content-type"))) return [];
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
     if (!body || typeof body !== "object" || Array.isArray(body)) return [];
@@ -59,16 +62,27 @@ async function responseResource(c: Context<AppEnv>): Promise<Record<string, unkn
 async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user: AppUser, grant: Grant): Promise<Decision | null> {
   const method = c.req.method.toUpperCase();
   if (method !== "POST" && method !== "PATCH" && method !== "PUT") return null;
-  if (!c.req.header("content-type")?.includes("application/json")) return null;
+  // JSON-FAMILY, not just `application/json`: an Update arrives as `application/merge-patch+json`, so a
+  // substring test for `application/json` skipped this entire gate on every PATCH in the app (see
+  // http/jsonRequest.ts). Every lane that decides whether a body exists asks the same predicate.
+  if (!isJsonBody(c.req.header("content-type"))) return null;
   const segs = coded.replace(/^\/v1\//, "").split("?")[0]!.split("/").filter(Boolean);
-  const collection = segs[0]!;
-  const code = segs[1]; // resource code (or "me"); undefined on create
+  // A custom method carries its verb in the LAST path segment, and the gate is about the COLLECTION and the
+  // OBJECT, never the verb - so it is split off. Both halves matter:
+  //   - a collection-level method (`assets:batchCreate`) otherwise reads as the collection name
+  //     "assets:batchCreate", which is in no policy map, so the gate returned null and the bulk-items loop
+  //     below - written for exactly that route - never ran on it.
+  //   - an item-level method (`assets/<code>:verify`) otherwise reads as the code "<code>:verify", so a
+  //     protected field in a verb body is gated on a resource that no grant can match. Fail-closed rather
+  //     than open, but it denies the caller who does hold the field grant.
+  const collection = segs[0]!.split(":")[0]!;
+  const code = segs[1]?.split(":")[0]; // resource code (or "me"); undefined on create
   const fields = user.policy.protected_fields[collection] ?? [];
   const refs = user.policy.references[collection] ?? {};
   const ownerRefs = user.policy.owner_refs[collection] ?? {};
   // A write to a field-bearing sub-resource (employees/<code>/identity|bank-account|personal-info) gates
   // each body field per `<collection>.<code>.<sub>.<key>` write - the write half of field-level control.
-  const sub = segs.length === 3 ? segs[2]! : null;
+  const sub = segs.length === 3 ? segs[2]!.split(":")[0]! : null;
   const subBodyKey = sub ? subresourceBodyKey(sub) : null;
   if (fields.length === 0 && Object.keys(refs).length === 0 && Object.keys(ownerRefs).length === 0 && subBodyKey === null) return null;
   let body: Record<string, unknown>;
@@ -79,33 +93,51 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   }
   if (!body || typeof body !== "object") return null;
   const self = { employeeCode: user.employeeCode };
-  for (const f of fields) {
-    if (Object.prototype.hasOwnProperty.call(body, f)) {
-      const resource = code ? `${collection}.${code}.${f}` : `${collection}.${f}`;
-      const d = decide(grant, { kind: "standard", resource, level: "write" }, self);
-      if (!d.allow) return { allow: false, reason: `field "${f}": ${d.reason}` };
+  // Protected fields, declared references and the owner-on-create gate, over ONE record's worth of body.
+  const gateRecord = async (rec: Record<string, unknown>): Promise<Decision | null> => {
+    for (const f of fields) {
+      if (Object.prototype.hasOwnProperty.call(rec, f)) {
+        const resource = code ? `${collection}.${code}.${f}` : `${collection}.${f}`;
+        const d = decide(grant, { kind: "standard", resource, level: "write" }, self);
+        if (!d.allow) return { allow: false, reason: `field "${f}": ${d.reason}` };
+      }
     }
-  }
-  for (const [field, spec] of Object.entries(refs)) {
-    const v = body[field];
-    if (typeof v === "string" && v.length > 0) {
-      const refCode = await uuidToCode(deps, spec.collection, v.split("/").pop()!);
-      if (!refCode) return { allow: false, reason: `unresolved reference "${field}"` };
-      const d = decide(grant, { kind: "standard", resource: `${spec.collection}.${refCode}`, level: spec.level }, self);
-      if (!d.allow) return { allow: false, reason: `reference "${field}": ${d.reason}` };
+    for (const [field, spec] of Object.entries(refs)) {
+      const v = rec[field];
+      if (typeof v === "string" && v.length > 0) {
+        const refCode = await uuidToCode(deps, spec.collection, v.split("/").pop()!);
+        if (!refCode) return { allow: false, reason: `unresolved reference "${field}"` };
+        const d = decide(grant, { kind: "standard", resource: `${spec.collection}.${refCode}`, level: spec.level }, self);
+        if (!d.allow) return { allow: false, reason: `reference "${field}": ${d.reason}` };
+      }
     }
-  }
-  // Owner-on-create (closes BOLA gap A): a body owner field assigns who the NEW resource belongs to. The
-  // caller must be allowed to create under that owner - write on `<collection>.<ownerCode>` (own via `me`,
-  // or an admin with that owner's namespace). Absent field => owned by the caller (the service default),
-  // which the resource-level write grant already covers.
-  for (const [field, spec] of Object.entries(ownerRefs)) {
-    const v = body[field];
-    if (typeof v === "string" && v.length > 0) {
-      const ownerCode = await uuidToCode(deps, spec.collection, v.split("/").pop()!);
-      if (!ownerCode) return { allow: false, reason: `unresolved owner "${field}"` };
-      const d = decide(grant, { kind: "standard", resource: `${collection}.${ownerCode}`, level: "write" }, self);
-      if (!d.allow) return { allow: false, reason: `owner "${field}": ${d.reason}` };
+    // Owner-on-create (closes BOLA gap A): a body owner field assigns who the NEW resource belongs to. The
+    // caller must be allowed to create under that owner - write on `<collection>.<ownerCode>` (own via `me`,
+    // or an admin with that owner's namespace). Absent field => owned by the caller (the service default),
+    // which the resource-level write grant already covers.
+    for (const [field, spec] of Object.entries(ownerRefs)) {
+      const v = rec[field];
+      if (typeof v === "string" && v.length > 0) {
+        const ownerCode = await uuidToCode(deps, spec.collection, v.split("/").pop()!);
+        if (!ownerCode) return { allow: false, reason: `unresolved owner "${field}"` };
+        const d = decide(grant, { kind: "standard", resource: `${collection}.${ownerCode}`, level: "write" }, self);
+        if (!d.allow) return { allow: false, reason: `owner "${field}": ${d.reason}` };
+      }
+    }
+    return null;
+  };
+  const denied = await gateRecord(body);
+  if (denied) return denied;
+  // A BULK body (`{ items: [ …one record each… ] }`, as `assets:batchCreate` takes) is many records in one
+  // request, so the same gates apply to each of them. Without this, wrapping a record in an envelope would be
+  // a way to write a protected field or reference something unreadable - the gates would only ever look at the
+  // envelope. Records past a sane count are not gated one by one; the routes' own schemas cap the list far
+  // below this, so reaching it means the request is not one of them.
+  if (Array.isArray(body.items)) {
+    for (const item of body.items.slice(0, 200)) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const itemDenied = await gateRecord(item as Record<string, unknown>);
+      if (itemDenied) return itemDenied;
     }
   }
   // Per-field write gate on a sub-resource: each key PRESENT in the field map needs write on
@@ -122,6 +154,13 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   }
   return { allow: true };
 }
+
+// Aggregate ROUTES: transports that own no rows and grant nothing, answering over many collections at once.
+// The envelope is open to any authenticated caller and the real gating happens per collection inside (see
+// scopesForCollections / approvalScopesFor), which is why they are exempt from the collection-level decision
+// and from its per-object exception read. Listed once, because a transport added to only some of the three
+// places that consult this would be half-gated.
+const AGGREGATE_ROUTES = new Set(["search", "dashboard-summary", "people-analytics", "approvals-summary", "activity-counts", "changes"]);
 
 // Per-collection list verdicts for a fan-out envelope (`GET /v1/search`, `GET /v1/dashboard-summary`): for
 // every named collection, run the very same decision a real `GET /v1/<collection>` would get here, and where
@@ -146,6 +185,40 @@ export async function scopesForCollections(deps: Deps, user: AppUser, collection
 }
 
 export const searchScopesFor = (deps: Deps, user: AppUser) => scopesForCollections(deps, user, SEARCHABLE_COLLECTIONS);
+
+// Which collections this caller may LIST, as names only (`GET /v1/changes` answers with collection names, not
+// rows). The boolean half of scopesForCollections, decided by the same `decide()` a real list request gets -
+// and, because no rows are involved, it needs neither a scope nor the per-object exception read. `settings` is
+// included because it is an audited, cached collection like any other, even though it is not code-scoped.
+export function listableCollectionsFor(user: AppUser): Set<string> {
+  const self = { employeeCode: user.employeeCode };
+  const all = [...RESOURCE_COLLECTIONS, "settings"];
+  return new Set(all.filter((col) => decide(user.grant, resolveRequest("GET", `/v1/${col}`), self).allow));
+}
+
+// Per-queue APPROVE verdicts for the approvals badge (`GET /v1/approvals-summary`). Same shape as the two
+// fan-outs above, one axis over: the decision is the custom verb `approve`, not a list read, because the badge
+// counts what the caller may DECIDE ON. A queue the caller holds `approve` in at no scope is absent from the
+// map, so the service can never count it.
+//
+// Per-object SHARES are deliberately not merged in: a list row's `access.can` hint is computed from the role
+// grant (http/accessHint.ts), so an object-level share has never put a row in this badge. Denies still apply -
+// a denied subtree is out of the caller's list, so it cannot be in their queue either.
+export async function approvalScopesFor(deps: Deps, user: AppUser): Promise<Map<string, ListScope>> {
+  const out = new Map<string, ListScope>();
+  const approvable: string[] = [];
+  for (const col of APPROVAL_SUMMARY_COLLECTIONS) {
+    const scope = verbScopeFor(user, col, "approve");
+    if (!scope) continue;
+    out.set(col, scope);
+    approvable.push(col);
+  }
+  if (!approvable.length) return out;
+  const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
+  const exceptions = await loadObjectExceptionCodesFor(deps, user.uuid, roleSubjects, approvable);
+  for (const col of approvable) out.get(col)!.denies = exceptions.get(col)?.denies ?? [];
+  return out;
+}
 
 export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
   let decision: Decision | null = null;
@@ -184,9 +257,12 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // Global search: `search` is a TRANSPORT, not a resource - it owns no data and widens nothing, like the
       // /v1/batch:run envelope. So the ENVELOPE is allowed for any authenticated caller, and the real gating
       // happens per collection, below, in searchScopesFor() - still here, in the one place that decides.
-      if (collection === "search" || collection === "dashboard-summary") {
+      if (AGGREGATE_ROUTES.has(collection)) {
         // dashboard-summary is the same shape: an aggregate envelope over many collections, each gated below
-        // (scopesForCollections) by the exact decision its own list request would get.
+        // (scopesForCollections) by the exact decision its own list request would get. approvals-summary too,
+        // with `approve` as the per-queue decision instead of a list read; activity-counts likewise, with a
+        // list read per collection, exactly like search. `changes` answers with collection NAMES, so its
+        // per-collection gate is the same list decision reduced to a boolean (below).
         decision = { allow: true };
       // Activity feed: GET /v1/activity?resource=<entity>/<id> is gated by READ on the TARGET resource —
       // decided HERE (the single gate), not on the `activity` capability. The service only queries rows.
@@ -326,10 +402,10 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // widen the result, denies remove rows (deny-wins). Covers user exceptions AND exact role rules. Item
     // paths don't need it (handled in the decision) - and neither do custom methods, which act on what the
     // caller named rather than listing rows, so they stay off this extra read.
-    // `search` and `dashboard-summary` are aggregate ROUTES, not collections: no rule can carry their
-    // namespace, and their handlers read searchScopes/summaryScopes (each already scoped per collection
-    // below), never this scope - so the read would be a guaranteed-empty one thrown away.
-    if (segs.length === 1 && verbAt < 0 && collection !== "search" && collection !== "dashboard-summary") {
+    // The aggregate ROUTES are not collections: no rule can carry their namespace, and their handlers read
+    // searchScopes/summaryScopes/approvalScopes (each already scoped per collection below), never this scope -
+    // so the read would be a guaranteed-empty one thrown away.
+    if (segs.length === 1 && verbAt < 0 && !AGGREGATE_ROUTES.has(collection)) {
       const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
       const exc = await loadObjectExceptionCodes(c.get("deps"), user.uuid, roleSubjects, collection);
       scope.shares = exc.shares;
@@ -340,10 +416,27 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // them - may the caller list it, and with what scope. Both are decided here, exactly as above, and handed
     // over as a map; the search service only binds them to columns. That keeps this middleware the one place
     // access is decided even for a request that spans the whole app.
-    if (collection === "search") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
+    // The tab-bar badge counts ask the same question of the same collections ("what may this caller list, and
+    // with what breadth"), so they ride the same map rather than a second resolve of the same verdicts.
+    if (collection === "search" || collection === "activity-counts") c.set("searchScopes", await searchScopesFor(c.get("deps"), user));
+    // "What changed since I last looked" answers with collection NAMES, so it needs only the boolean half of
+    // that same decision - no scope, and no per-object exception read.
+    if (collection === "changes") c.set("listableCollections", listableCollectionsFor(user));
     // Dashboard summary fans COUNT/SUM queries across the KPI collections - same per-collection decide/scope
     // pair as search, handed over as a map; the service only binds them.
     if (collection === "dashboard-summary") c.set("summaryScopes", await scopesForCollections(c.get("deps"), user, DASHBOARD_SUMMARY_COLLECTIONS));
+    // The people report is the same fan-out one axis over: it answers per PERSON rather than per collection, so
+    // the roster it lists (`employees`) and every measure's own collection are each decided here, by the exact
+    // list decision they would get on their own. A collection missing from the map costs the report a column.
+    if (collection === "people-analytics") c.set("analyticsScopes", await scopesForCollections(c.get("deps"), user, ANALYTICS_COLLECTIONS));
+    // Approvals badge: the same per-queue pattern, decided with the `approve` verb. The prior-employer
+    // verification queue has no table, so its own capability (`tax-verifications.read` - the gate its rows
+    // endpoint gets) is decided here too and handed over as a boolean.
+    if (collection === "approvals-summary") {
+      c.set("approvalScopes", await approvalScopesFor(c.get("deps"), user));
+      const asSelf = { employeeCode: user.employeeCode };
+      c.set("taxVerificationsReadable", decide(user.grant, resolveRequest("GET", `/v1/${TAX_VERIFICATION_QUEUE}`), asSelf).allow);
+    }
   }
 
   await next();

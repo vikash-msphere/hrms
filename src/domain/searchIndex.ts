@@ -57,6 +57,8 @@ export const SEARCH_INDEX: SearchEntry[] = [
     match: ["reason", "state", "decisionNote"], title: ["reason"], subtitle: ["state"] },
   { collection: "remote-work-requests", table: schema.remoteWorkRequests, scoping: scoped("employeeId"),
     match: ["location", "reason", "state"], title: ["reason", "location"], subtitle: ["location", "state"] },
+  { collection: "asset-requests", table: schema.assetRequests, scoping: scoped("employeeId"),
+    match: ["justification", "state"], title: ["justification"], subtitle: ["state"] },
   { collection: "approval-delegations", table: schema.approvalDelegations, scoping: scoped("delegatorId"),
     match: ["reason"], title: ["reason"] },
   { collection: "shifts", table: schema.shifts, scoping: flat, match: ["name"], title: ["name"] },
@@ -163,7 +165,11 @@ export const SEARCH_INDEX: SearchEntry[] = [
   { collection: "suggestions", table: schema.suggestions, scoping: scoped("submitterId"),
     match: ["title", "body", "category", "response", "status"], title: ["title"], subtitle: ["category", "status"] },
   { collection: "assets", table: schema.assets, scoping: scoped("assignedTo"),
-    match: ["name", "assetTag", "serialNumber", "category", "notes", "status"], title: ["name"], subtitle: ["assetTag", "status"] },
+    match: ["name", "assetTag", "serialNumber", "notes", "status"], title: ["name"], subtitle: ["assetTag", "status"] },
+  { collection: "asset-categories", table: schema.assetCategories, scoping: flat, match: ["name", "tagCode"], title: ["name"], subtitle: ["tagCode"] },
+  // Inventory counts: "Q3 count" is a thing people go looking for months later, and the label is the only
+  // handle they remember.
+  { collection: "stocktakes", table: schema.stocktakes, scoping: flat, match: ["label", "notes", "status"], title: ["label"], subtitle: ["status"] },
   { collection: "notifications", table: schema.notifications, scoping: { kind: "self", owner: "recipientId" },
     match: ["title", "body", "type"], title: ["title"], subtitle: ["body"] },
 

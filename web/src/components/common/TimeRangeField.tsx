@@ -75,7 +75,8 @@ function TimeControl({ value, onChange, alignEnd }: { value: string; onChange: (
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <div className="relative w-36">
+      {/* Fluid inside its grid cell on a phone (the cell is already `minmax(0,1fr)`), fixed from `sm` up. */}
+      <div className="relative w-full min-w-0 sm:w-36">
         <Input
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -142,12 +143,15 @@ export function TimeRangeField({ initialStart, initialEnd, onChange, allowEndDat
       {/* Two columns (start | end), each with its date directly above its time; the arrow + duration sit
           between. The end date is editable (start date) on the left and a label on the right that turns amber
           and advances a day when the range crosses midnight. */}
-      <div className="grid grid-cols-[9rem_auto_9rem] items-center justify-center gap-x-5 gap-y-1">
-        <Input type="date" value={st.date} onChange={(e) => e.target.value && apply({ date: e.target.value })} aria-label="Date" className="h-8 w-36 text-xs tabular-nums" />
+      {/* 18rem of fixed columns plus the gutters needs ~350px, which a 320px phone does not have. The gutter
+          tightens first and the columns become fluid below `sm`; the two-column start|end reading is what
+          matters, not the exact widths. */}
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center justify-center gap-x-2 gap-y-1 sm:grid-cols-[9rem_auto_9rem] sm:gap-x-5">
+        <Input type="date" value={st.date} onChange={(e) => e.target.value && apply({ date: e.target.value })} aria-label="Date" className="h-8 w-full text-xs tabular-nums sm:w-36" />
         <div />
         {allowEndDate && st.endDate ? (
           <span className="flex items-center gap-1">
-            <Input type="date" value={st.endDate} min={nextDay(st.date)} onChange={(e) => e.target.value && apply({ endDate: e.target.value })} aria-label="End date" className="h-8 w-32 text-xs tabular-nums" />
+            <Input type="date" value={st.endDate} min={nextDay(st.date)} onChange={(e) => e.target.value && apply({ endDate: e.target.value })} aria-label="End date" className="h-8 w-full min-w-0 text-xs tabular-nums sm:w-32" />
             <button type="button" onClick={() => apply({ endDate: null })} title="Back to a same-day range" aria-label="Clear end date" className="text-muted-foreground transition-colors hover:text-foreground">×</button>
           </span>
         ) : (
@@ -175,7 +179,10 @@ export function TimeRangeField({ initialStart, initialEnd, onChange, allowEndDat
 
       <div className="space-y-2 border-t pt-2.5">
         <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">Quick set</span>
-        <div className="grid grid-cols-8 gap-1.5">
+        {/* Sixteen chips. Eight across is right on a desktop popover; on a phone the track lands near
+            35px while the widest label ("3h 45m", tabular) needs ~40px, so the pill spills out of its
+            own track. Four across on a phone: taller, but every duration is readable and tappable. */}
+        <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-8">
           {QUICK.map((q) => (
             <button key={q} type="button" onClick={() => apply({ end: fmtMin(parseMin(st.start) + q), endDate: null })} className="rounded-full bg-muted px-1 py-1 text-center text-[11px] font-medium tabular-nums text-muted-foreground transition-colors hover:bg-primary hover:text-primary-foreground">{fmtDuration(q)}</button>
           ))}

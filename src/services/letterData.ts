@@ -13,6 +13,7 @@ import type { LetterContext, LetterDefaults } from "../domain/letters";
 type OrgSettings = { name?: string; logo?: string; address?: string; letter_defaults?: LetterDefaults };
 
 import { round2 } from "../domain/money";
+import { refDepartments, refPayComponents } from "../lib/refData";
 
 export async function assembleLetterContext(deps: Deps, employeeId: string): Promise<LetterContext> {
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
@@ -39,7 +40,7 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
     .where(eq(schema.compensation.employeeId, employeeId))
     .orderBy(desc(schema.compensation.effectiveFrom));
   const current = comps.find((c) => c.effectiveTo === null) ?? comps[0];
-  const components = await deps.db.select().from(schema.payComponents);
+  const components = await refPayComponents(deps);
 
   const epfEnrolled = !!emp.epfEnrolled;
   // PF wages follow the org's configured basis (settings/ctc), so the annexure states the same employer PF the
@@ -82,7 +83,7 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
     const deptIds = [next.departmentId, prev.departmentId].filter(Boolean) as string[];
     const deptNames = new Map<string, string>();
     if (deptIds.length) {
-      for (const d of await deps.db.select().from(schema.departments)) if (deptIds.includes(d.uuid)) deptNames.set(d.uuid, d.name);
+      for (const d of await refDepartments(deps)) if (deptIds.includes(d.uuid)) deptNames.set(d.uuid, d.name);
     }
     roleChange = {
       oldTitle: prev.jobTitle ?? undefined,

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlignCenter, AlignLeft, AlignRight, Award, BarChart3, CalendarClock, GripVertical, Megaphone, MessageSquare, Plus, RotateCcw, Smile, X } from "lucide-react";
+import { AlignCenter, AlignLeft, AlignRight, Award, BarChart3, CalendarClock, Check, ChevronDown, GripVertical, Megaphone, MessageSquare, Plus, RotateCcw, Smile, X } from "lucide-react";
 import { create, invoke, patch } from "@/api";
 import { cn, idOf } from "@/lib/utils";
 import type { Announcement, Department, Employee, RecipientLayout, StickerLayout } from "@/types";
@@ -21,6 +21,8 @@ import { ActivitySection } from "@/components/common/ActivitySection";
 import { EmojiPicker } from "@/components/common/EmojiPicker";
 import { useMentions } from "@/components/common/MentionPicker";
 import { useConfirm } from "@/components/common/confirm";
+import { FormError } from "@/components/common/FormError";
+import { describeError } from "@/lib/formError";
 import { useMedia } from "@/hooks/useMedia";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -30,12 +32,16 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/use-toast";
 
 // The board composer: one dialog for every kind of thing that lands on the feed - an announcement, a post, a poll
 // and a kudos.
 //
-// Wide, it is two columns split by what a control touches. Left is the post: what kind of thing this is, what it
+// What kind of thing is being written is the heading - "New <kind>", with the noun as a menu - so the title says
+// it and switching it happens in the same place.
+//
+// Wide, it is two columns split by what a control touches. Left is the post: what it
 // says, and - for the kinds that have one - when it goes out. Right is the card: the card itself, and the
 // controls that act on it as an object (the picture, its placement, where a kudos recipient sits). Controls that
 // act on the TEXT - title alignment, how the words ride in the card - stay inline with the words they affect, on
@@ -103,7 +109,7 @@ function ScaledPreview({ children }: { children: ReactNode }) {
   );
 }
 
-// One-liner under the composer's type switcher so the kinds read as choices, not just icons.
+// One-liner beside each kind in the title's type menu, so the kinds read as choices rather than just words.
 const KIND_HINTS: Record<Kind, string> = {
   announcement: "Official company news. Highlighted in the feed, with read receipts.",
   post: "A regular post to everyone on the board.",
@@ -165,6 +171,9 @@ const EMPTY = {
   bodyValign: DEFAULT_VALIGN as BodyValign,
   publishing: "now" as Publishing,
   publishAt: "", // datetime-local; only read when publishing === "schedule"
+  audienceScope: "everyone" as AudienceScope, // who gets a notification when it goes live
+  audienceDept: "", // the department, when audienceScope === "department"
+  emailIt: false, // also send it as email, to that same audience, when it goes live
   layout: null as StickerLayout | null,
   recipientAt: null as RecipientLayout | null, // kudos only: the recipient block, once dragged off its column // null = the card's own default placement, until the author moves it
 };
@@ -176,6 +185,16 @@ type Form = typeof EMPTY;
 // the next time that same composer opens. Cleared on a successful post and on an explicit discard, because a
 // draft that outlives the thing it became is just a trap.
 const draftKey = (editing: Announcement | null) => `board:composer:${editing ? idOf(editing.path) : "new"}`;
+
+// Who a post notifies. Named for what each one DOES, because "audience" on its own reads like a permission -
+// and "notify nobody" is a real thing to want: a correction to yesterday's post, this week's canteen menu, the
+// minutes of a meeting that are worth having on the board and not worth a second ping.
+type AudienceScope = "everyone" | "department" | "none";
+// The two fixed chips; the third is the department dropdown, which picks the department and the mode at once.
+const AUDIENCE_CHOICES: { value: Exclude<AudienceScope, "department">; label: string; hint: string }[] = [
+  { value: "none", label: "Nobody", hint: "No notification and no email. The post is on the board for whoever goes looking." },
+  { value: "everyone", label: "Everyone", hint: "Everyone gets a notification." },
+];
 type StoredDraft = { at: number; form: Form };
 
 function loadDraft(key: string): StoredDraft | null {
@@ -250,6 +269,9 @@ export function PostComposer({
   const wide = useMedia(WIDE);
   const [form, setForm] = useState(EMPTY);
   const [busy, setBusy] = useState(false);
+  // A failed post has to stay readable WHILE the words are being fixed: a toast lands behind this dialog and is
+  // gone in four seconds, taking the server's reason with it. Pinned in the form instead, cleared on the next try.
+  const [error, setError] = useState<string | null>(null);
   // Narrow screens only: the card is folded away until asked for. Reset on every open.
   const [showPreview, setShowPreview] = useState(false);
   // The form as it was seeded, so "dirty" means "differs from what was opened" rather than "differs from blank".
@@ -270,12 +292,26 @@ export function PostComposer({
     [canAnnounce, canPost, canGiveKudos],
   );
 
+  // Switching kind also seeds the one field a kudos cannot go without, so picking "kudos" never lands on an
+  // empty level.
+  const pickKind = (k: Kind) =>
+    setForm((f) => ({ ...f, kind: k, level: k === "kudos" ? f.level || levels[0]?.name || "" : f.level }));
+
   const isPoll = form.kind === "poll";
   const isKudos = form.kind === "kudos";
   // Whether this composer gets to decide WHEN the post goes out. Only the write-gated create can, and only for a
   // row that hasn't gone out yet: the open `post` verb publishes immediately by design, a kudos is sent rather
   // than staged, and a live post's schedule is history, not a setting.
   const showPublishing = !isKudos && canAnnounce && (editing ? editing.published === false : true);
+  // The author's own department, so "One department" starts somewhere sensible instead of on whichever
+  // department happens to sort first.
+  // Who this post will reach, in the words the rest of the form uses. One phrase, so the publishing hint, the
+  // email checkbox and the audience summary can never describe different audiences.
+  const audienceWord = form.audienceScope === "none"
+    ? "nobody"
+    : form.audienceScope === "department"
+      ? departments.find((d) => idOf(d.path) === idOf(form.audienceDept))?.display_name ?? "that department"
+      : "everyone";
 
   const empByPath = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
   const empName = (ref?: string) => {
@@ -289,6 +325,8 @@ export function PostComposer({
   useEffect(() => {
     if (!open) return;
     setShowPreview(false);
+    // A composer reopened after a failure starts clean rather than showing the last attempt's message.
+    setError(null);
     const seed: Form = !editing
       ? { ...EMPTY, kind: kinds.includes(initialKind) ? initialKind : kinds[0] ?? initialKind, level: levels[0]?.name ?? "" }
       : {
@@ -309,6 +347,9 @@ export function PostComposer({
           // or waiting for someone to press publish.
           publishing: editing.published ? "now" : editing.publish_time ? "schedule" : "draft",
           publishAt: editing.published ? "" : toLocalInput(editing.publish_time),
+          audienceScope: (editing.audience_scope as AudienceScope | undefined) ?? "everyone",
+          audienceDept: editing.audience_department ?? "",
+          emailIt: !!editing.email_audience,
           // Its deadline, so an edit can move it rather than only being told what it is.
           closes: editing.poll?.closes_time ? "custom" : "none",
           closesTime: toLocalInput(editing.poll?.closes_time),
@@ -502,6 +543,8 @@ export function PostComposer({
     // poll no closing time at all, which is the one thing the author just said they didn't want.
     if (isPoll && form.closes === "custom" && !form.closesTime) return "Pick when voting closes.";
     if (showPublishing && form.publishing === "schedule" && !form.publishAt) return "Pick when it should go out.";
+    // "One department" without one would notify the whole company; the server refuses it, so the form does too.
+    if (showPublishing && form.audienceScope === "department" && !form.audienceDept) return "Pick the department to notify.";
     return null;
   })();
   const canSubmit = !blockedReason;
@@ -531,8 +574,18 @@ export function PostComposer({
     // When it goes out. `undefined` everywhere the control isn't offered, so those callers post exactly the
     // payload they always did.
     const scheduleIso = showPublishing && form.publishing === "schedule" ? fromLocalInput(form.publishAt) : undefined;
+    // Who it is addressed to, and whether it also goes out as email. Only offered where publishing is (the open
+    // `post` verb has neither), so it travels only on those calls.
+    const reach = showPublishing
+      ? {
+          audience_scope: form.audienceScope,
+          audience_department: form.audienceScope === "department" ? form.audienceDept : null,
+          email_audience: form.audienceScope === "none" ? false : form.emailIt,
+        }
+      : {};
     const asDraft = showPublishing && form.publishing !== "now";
     setBusy(true);
+    setError(null);
     try {
       let saved: Announcement | undefined;
       if (!editing && isKudos) {
@@ -561,7 +614,9 @@ export function PostComposer({
                 body_valign,
                 ...(editing.kind === "poll" ? { closes_time: pollClosesIso() ?? null } : {}),
                 // Only a draft carries a publishing decision; a live post's schedule is history, not a setting.
-                ...(showPublishing ? { publish_time: scheduleIso ?? null } : {}),
+                // Reach travels with it: the server refuses both once the post is live, because by then the
+                // people it was aimed at have already been told.
+                ...(showPublishing ? { publish_time: scheduleIso ?? null, ...reach } : {}),
               };
         saved = await patch<Announcement>("announcements/" + idOf(editing.path), payload, editing.etag);
         // Going live is its own verb (it owns the notification), so "Publish now" on a draft is a save then a
@@ -575,12 +630,12 @@ export function PostComposer({
       } else if (isPoll) {
         // A poll: options required, body optional. HR uses the write-gated create; anyone else the post gate.
         const payload = { title, body: body || undefined, options: pollOptions, multiple: form.multiple, closes_time: pollClosesIso(), illustration: form.illustration || undefined, illustration_layout: illustration_layout ?? undefined, title_align: title_align ?? undefined, body_valign: body_valign ?? undefined };
-        if (canAnnounce) saved = await create<Announcement>("announcements", { ...payload, kind: "poll", ...draftFields(asDraft, scheduleIso) });
+        if (canAnnounce) saved = await create<Announcement>("announcements", { ...payload, kind: "poll", ...reach, ...draftFields(asDraft, scheduleIso) });
         else saved = await invoke<Announcement>("announcements", "post", undefined, payload);
         toast({ title: postedToast("Poll", asDraft, scheduleIso), variant: "success" });
       } else if (canAnnounce) {
         // The write-gated create; HR chooses the kind.
-        saved = await create<Announcement>("announcements", { title, body, kind: form.kind, illustration: form.illustration || undefined, illustration_layout: illustration_layout ?? undefined, title_align: title_align ?? undefined, body_valign: body_valign ?? undefined, ...draftFields(asDraft, scheduleIso) });
+        saved = await create<Announcement>("announcements", { title, body, kind: form.kind, illustration: form.illustration || undefined, illustration_layout: illustration_layout ?? undefined, title_align: title_align ?? undefined, body_valign: body_valign ?? undefined, ...reach, ...draftFields(asDraft, scheduleIso) });
         toast({ title: postedToast(form.kind === "post" ? "Post" : "Announcement", asDraft, scheduleIso), variant: "success" });
       } else {
         // The board-post gate (anyone granted): always a generic post, authored by the caller.
@@ -593,7 +648,7 @@ export function PostComposer({
       onOpenChange(false);
       onSaved(saved);
     } catch (e) {
-      toast({ title: editing ? "Couldn't save" : isKudos ? "Couldn't send kudos" : isPoll ? "Couldn't post poll" : "Couldn't post", description: (e as Error).message, variant: "destructive" });
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -798,10 +853,14 @@ export function PostComposer({
     <Dialog open={open} onOpenChange={requestClose}>
       <DialogContent
         className={cn(
-          "flex max-h-[90vh] max-w-none flex-col gap-0 overflow-hidden p-0",
+          "flex max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-h-[90vh]",
           // Wide enough that the card column can reach its ceiling and still leave the fields a comfortable
           // measure; 96vw so it never touches the edges of the screen it is on.
-          wide ? "w-[min(96vw,1440px)]" : "w-[min(96vw,780px)]",
+          // Both the width and the 90vh ceiling start at `sm`. On a phone the dialog keeps the shared
+          // bottom-sheet geometry instead (see ui/dialog.tsx): inset from both edges, and a height that gives
+          // way to the on-screen keyboard - which a fixed 96vw/90vh pair would override, leaving the panel
+          // 16px wider than its slot and its footer behind the keys.
+          wide ? "sm:w-[min(96vw,1440px)]" : "sm:w-[min(96vw,780px)]",
         )}
         onKeyDown={(e) => {
           // Cmd/Ctrl+Enter posts from anywhere in the dialog - plain Enter belongs to the poll options.
@@ -814,12 +873,64 @@ export function PostComposer({
         {/* Header and footer stay put; only the fields (and, beside them, the card) scroll. */}
         <div className="flex min-h-0 flex-1 flex-col">
           <DialogHeader className="border-b px-6 py-4 pr-12">
-            <DialogTitle>{title}</DialogTitle>
-            {!editing && <p className="text-sm text-muted-foreground">{KIND_HINTS[form.kind]}</p>}
+            {/* The kind is chosen in the title itself: the heading reads as the sentence "New <kind>", with the
+                noun as the control. One target, at the top, where the eye already is - and it doubles as the
+                statement of what is being written, so nothing further down has to repeat it. */}
+            <DialogTitle className="flex min-h-8 flex-wrap items-center gap-x-1.5 gap-y-1">
+              {editing || kinds.length < 2 ? title : (
+                <>
+                  New
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={`Post type: ${form.kind}`}
+                        className="group inline-flex items-center gap-1.5 rounded-lg border border-dashed border-primary/40 bg-primary/5 px-2 py-1 capitalize text-primary outline-none transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-solid data-[state=open]:bg-primary/10"
+                      >
+                        {(() => { const Icon = KIND_ICONS[form.kind]; return <Icon className="h-4 w-4 shrink-0" />; })()}
+                        {form.kind}
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60 transition-transform group-data-[state=open]:rotate-180" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    {/* The hints live on the options rather than under the heading, so the choice is read where it
+                        is made and the header stays one line once it is made. */}
+                    <DropdownMenuContent align="start" className="w-[min(92vw,20rem)] p-1.5">
+                      {kinds.map((k) => {
+                        const Icon = KIND_ICONS[k];
+                        const on = form.kind === k;
+                        return (
+                          <DropdownMenuItem
+                            key={k}
+                            role="menuitemradio"
+                            aria-checked={on}
+                            className={cn("items-start gap-2.5 rounded-lg p-2", on && "bg-primary/5")}
+                            onSelect={() => pickKind(k)}
+                          >
+                            <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-md", on ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground")}>
+                              <Icon className="h-4 w-4" />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="flex items-center gap-1.5 font-medium capitalize">
+                                {k}
+                                {on && <Check className="h-3.5 w-3.5 text-primary" />}
+                              </span>
+                              <span className="mt-0.5 block whitespace-normal text-xs font-normal leading-snug text-muted-foreground">{KIND_HINTS[k]}</span>
+                            </span>
+                          </DropdownMenuItem>
+                        );
+                      })}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </>
+              )}
+            </DialogTitle>
+            {/* With one kind on offer there is no menu to carry the hint, so the header states it. */}
+            {!editing && kinds.length < 2 && <p className="text-sm text-muted-foreground">{KIND_HINTS[form.kind]}</p>}
           </DialogHeader>
 
           <div className="flex min-h-0 flex-1">
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+            <FormError error={error} />
             {/* Something was written here before and never posted. Offered, never applied - the author may well
                 have meant to abandon it. */}
             {rescued && (
@@ -834,54 +945,6 @@ export function PostComposer({
                     Discard
                   </button>
                 </div>
-              </div>
-            )}
-
-            {/* The kind is fixed once posted (it decides the card, the audience and the gate it went through), so
-                the switcher is only offered while composing. A radiogroup, not tabs: it picks what is being
-                written, and it has no panel of its own to own. */}
-            {!editing && kinds.length > 1 && (
-              <div
-                className="grid gap-1 rounded-xl bg-muted p-1"
-                style={{ gridTemplateColumns: `repeat(${kinds.length}, minmax(0, 1fr))` }}
-                role="radiogroup"
-                aria-label="Post type"
-                onKeyDown={(e) => {
-                  // Arrow keys walk the group, as a radiogroup must.
-                  const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
-                  if (!step) return;
-                  e.preventDefault();
-                  const at = kinds.indexOf(form.kind);
-                  const next = kinds[(at + step + kinds.length) % kinds.length]!;
-                  setForm((f) => ({ ...f, kind: next, level: next === "kudos" ? f.level || levels[0]?.name || "" : f.level }));
-                  requestAnimationFrame(() => (document.querySelector<HTMLElement>(`[data-kind="${next}"]`))?.focus());
-                }}
-              >
-                {kinds.map((k) => {
-                  const Icon = KIND_ICONS[k];
-                  const on = form.kind === k;
-                  return (
-                    <button
-                      key={k}
-                      type="button"
-                      role="radio"
-                      data-kind={k}
-                      aria-checked={on}
-                      tabIndex={on ? 0 : -1}
-                      title={KIND_HINTS[k]}
-                      onClick={() => setForm((f) => ({ ...f, kind: k, level: k === "kudos" ? f.level || levels[0]?.name || "" : f.level }))}
-                      className={cn(
-                        "flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-medium capitalize transition-colors",
-                        on ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      <Icon className="h-4 w-4 shrink-0" />
-                      {/* Four words in four columns don't fit a phone; the icons carry it there. */}
-                      <span className="hidden sm:inline">{k}</span>
-                      <span className="sr-only sm:hidden">{k}</span>
-                    </button>
-                  );
-                })}
               </div>
             )}
 
@@ -1111,10 +1174,95 @@ export function PostComposer({
                   <p className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
                     <CalendarClock className="mt-px h-3.5 w-3.5 shrink-0" />
                     {form.publishing === "now"
-                      ? "Goes live immediately and notifies everyone."
+                      ? `Goes live immediately and notifies ${audienceWord}.`
                       : form.publishing === "draft"
                         ? "Only people who can post see it until you publish it. Nobody is notified."
-                        : "Goes live on its own at that time, and notifies everyone then. Until it does, only people who can post see it."}
+                        : `Goes live on its own at that time, and notifies ${audienceWord} then. Until it does, only people who can post see it.`}
+                  </p>
+                </>
+              </Field>
+            )}
+
+            {/* Who it is for, and whether it also arrives in their inbox.
+                The board reaches whoever opens the board. An office closure or a policy change has to reach the
+                people who won't - hence email, to the same audience, sent once when the post goes live. And a
+                post aimed at one team should not ring 300 bells: naming the audience narrows the notification
+                and puts the team's name on the card, so everyone else can see at a glance that it isn't theirs.
+                Deliberately NOT a permission: the board stays readable by whoever can read the board, because a
+                second quiet access system in a content field is how a "private" post gets read by everyone. */}
+            {showPublishing && (
+              <Field
+                label="Audience - who gets a notification"
+                field="audience_department"
+                info="Audience decides who is notified, and who is emailed if you tick that. It is not access control: the post sits on the board for everyone who can read the board, whichever audience you pick."
+              >
+                <>
+                  {/* Three chips in one row: nobody, everybody, or a department picked straight from the third
+                      one. The department chip IS the choice - a separate "one department" mode and then a select
+                      underneath was two decisions for one answer. */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {AUDIENCE_CHOICES.map((c) => (
+                      <button
+                        key={c.value}
+                        type="button"
+                        title={c.hint}
+                        onClick={() => setForm((f) => ({
+                          ...f,
+                          audienceScope: c.value,
+                          audienceDept: "",
+                          // An email IS a notification, so it cannot outlive turning notifications off. The
+                          // server refuses the pair; the box unticks itself here so nobody has to be refused.
+                          emailIt: c.value === "none" ? false : f.emailIt,
+                        }))}
+                        className={cn(
+                          "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                          form.audienceScope === c.value ? "border-primary bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted",
+                        )}
+                      >
+                        {c.label}
+                      </button>
+                    ))}
+                    {/* Picking a department here selects the department AND the mode in one move; the chip then
+                        carries the name, so the row reads as the answer rather than as a setting plus a field. */}
+                    <Select
+                      value={form.audienceScope === "department" ? form.audienceDept : ""}
+                      onValueChange={(v) => setForm((f) => ({ ...f, audienceScope: "department", audienceDept: v }))}
+                    >
+                      <SelectTrigger
+                        title="Notify one department. Everyone else can still read the post on the board."
+                        className={cn(
+                          "h-auto w-auto gap-1 rounded-full border px-3 py-1 text-xs font-medium shadow-none transition-colors",
+                          form.audienceScope === "department"
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "bg-background text-muted-foreground hover:bg-muted",
+                        )}
+                      >
+                        <SelectValue placeholder="A department" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {departments.map((d) => <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {form.audienceScope !== "none" && (
+                    <label className="mt-2 flex items-start gap-2 text-sm">
+                      <Checkbox checked={form.emailIt} onCheckedChange={(v) => setForm({ ...form, emailIt: v === true })} />
+                      <span>
+                        Also email it to {audienceWord}
+                        <span className="block text-xs text-muted-foreground">
+                          {form.emailIt
+                            ? `Sent once, when it goes live${form.publishing === "schedule" ? " at the scheduled time" : ""}. Anyone without a work email on file is skipped.`
+                            : "Off - the post reaches the board and the bell only."}
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {form.audienceScope === "none"
+                      ? "Nobody is notified and no email goes out. It sits on the board for whoever goes looking - for a correction, a menu, minutes nobody needs pinging about."
+                      : form.audienceScope === "department"
+                        ? `${audienceWord} gets the bell${form.emailIt ? " and the email" : ""}; nobody else is notified. The card carries the ${audienceWord} label so the rest of the company can see it isn't aimed at them - they can still open it.`
+                        : `Everyone gets the bell${form.emailIt ? " and the email" : ""}.`}
                   </p>
                 </>
               </Field>

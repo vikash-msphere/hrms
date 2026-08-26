@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Workflow, Plus, Trash2, Play, Zap, ScrollText, Activity, Hourglass, Search, MoreHorizontal, Pencil,
-  ArrowRight, Bell, Megaphone, Clock, Globe, Cog, CircleSlash, CheckCircle2, XCircle, AlertTriangle, MinusCircle, User, Mail,
+  ArrowRight, Bell, Megaphone, Clock, Globe, Cog, CircleSlash, CheckCircle2, XCircle, AlertTriangle, MinusCircle, User, Mail, Link2, Copy,
 } from "lucide-react";
 import { create, invoke, patch, remove, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { usePermission } from "@/lib/perm";
-import { cn, humanize } from "@/lib/utils";
+import { describeError, isConflict } from "@/lib/formError";
+import { recordUrl, setRouteRecord } from "@/router";
+import { cn, humanize, idOf } from "@/lib/utils";
 import type { Automation, AutomationRun, EventLogEntry, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -15,18 +18,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Card } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { ActivitySection } from "@/components/common/ActivitySection";
+import { Textarea } from "@/components/ui/textarea";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { WorkflowBuilder } from "@/components/workflows/WorkflowBuilder";
 import { useWorkflowMeta } from "@/components/workflows/useWorkflowMeta";
 import { describeActions, triggerInfo, type Step } from "@/components/workflows/describe";
+import { usableRecipes } from "@/components/workflows/recipes";
 import type { AutomationDraft, WorkflowMeta } from "@/components/workflows/types";
 
 type Tab = "rules" | "runs" | "instances" | "events";
 
-export default function Workflows({ me }: { me: Me }) {
+export default function Workflows({ me, openId }: { me: Me; openId?: string }) {
   void me;
   const canWrite = usePermission("automations.write");
   const [tab, setTab] = useState<Tab>("rules");
@@ -39,7 +45,7 @@ export default function Workflows({ me }: { me: Me }) {
         accessCollection="automations"
         actions={<TabButtons tab={tab} setTab={setTab} />}
       />
-      {tab === "rules" && <RulesTab canWrite={canWrite} />}
+      {tab === "rules" && <RulesTab canWrite={canWrite} openId={openId} />}
       {tab === "runs" && <RunsTab />}
       {tab === "instances" && <InstancesTab />}
       {tab === "events" && <EventsTab />}
@@ -126,17 +132,51 @@ function ModuleChip({ active, onClick, label, count }: { active: boolean; onClic
 
 type StatusFilter = "all" | "enabled" | "disabled";
 
-function RulesTab({ canWrite }: { canWrite: boolean }) {
+function RulesTab({ canWrite, openId }: { canWrite: boolean; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Automation>("automations");
   const { meta } = useWorkflowMeta();
   const { toast } = useToast();
   const confirm = useConfirm();
   const [editing, setEditing] = useState<Automation | "new" | null>(null);
+  // A rule being argued about over chat is pasteable, and the link reopens exactly this rule: the outbound
+  // half (writing the id into the hash) is `openRule`, the inbound half is `useDeepOpen`.
+  useDeepOpen(openId, rows, (r) => setEditing(r));
+  // A new rule that starts as a copy of an existing one. The commonest second rule is a variant of the first
+  // (the same chain for another department, another threshold), and the only way to write one was to read the
+  // original off its card and retype it.
+  const [seed, setSeed] = useState<AutomationDraft | null>(null);
+  function openRule(r: Automation | "new") {
+    setSeed(null);
+    setEditing(r);
+    setRouteRecord(r === "new" ? null : idOf(r.path));
+  }
+  function duplicateRule(a: Automation) {
+    setSeed({
+      name: `${a.name} (copy)`,
+      description: a.description ?? "",
+      trigger_type: a.trigger_type,
+      condition: (a.condition as AutomationDraft["condition"]) ?? null,
+      actions: (a.actions as AutomationDraft["actions"]) ?? [],
+      schedule: (a.schedule as AutomationDraft["schedule"]) ?? null,
+    });
+    setEditing("new");
+    setRouteRecord(null);
+  }
+  function closeRule() {
+    setEditing(null);
+    setSeed(null);
+    setRouteRecord(null);
+  }
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [moduleFilter, setModuleFilter] = useState<string>("all");
 
-  async function toggle(a: Automation) { try { await invoke(a.path, a.enabled ? "disable" : "enable"); reload(); } catch (e) { toast({ title: "Couldn't update the rule", description: String((e as Error).message), variant: "destructive" }); } }
+  // Turning a rule ON is easy to undo by turning it off; turning it OFF stops work silently - nothing fires,
+  // and nothing says why - so only that direction asks.
+  async function toggle(a: Automation) {
+    if (a.enabled && !(await confirm({ title: "Turn this rule off?", description: `"${a.name}" stops firing. Anything it was doing automatically - notifications, tickets, emails - stops until it is turned back on.`, confirmLabel: "Turn off", destructive: true }))) return;
+    try { await invoke(a.path, a.enabled ? "disable" : "enable"); reload(); } catch (e) { toast({ title: "Couldn't update the rule", description: String((e as Error).message), variant: "destructive" }); }
+  }
   async function del(a: Automation) {
     const ok = await confirm({ title: "Delete this rule?", description: `"${a.name}" stops firing and is removed. Past runs stay in the log.`, destructive: true, confirmLabel: "Delete" });
     if (!ok) return;
@@ -185,14 +225,14 @@ function RulesTab({ canWrite }: { canWrite: boolean }) {
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[12rem] flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search rules…" className="pl-8" />
+          <Input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search rules…" className="pl-8" />
         </div>
         <div className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
           {filterBtn("all", `All ${rows.length}`)}
           {filterBtn("enabled", `On ${enabledCount}`)}
           {filterBtn("disabled", `Off ${rows.length - enabledCount}`)}
         </div>
-        {canWrite && <Button size="sm" onClick={() => setEditing("new")}><Plus className="mr-1.5 h-4 w-4" /> New rule</Button>}
+        {canWrite && <Button size="sm" onClick={() => openRule("new")}><Plus className="mr-1.5 h-4 w-4" /> New rule</Button>}
       </div>
 
       {/* Module filter: focus the list to one section. Only worth showing when there's more than one module. */}
@@ -220,28 +260,28 @@ function RulesTab({ canWrite }: { canWrite: boolean }) {
               <div className="grid gap-2">
                 {rules.map((a) => (
                   <RuleCard key={a.path} a={a} meta={meta} canWrite={canWrite}
-                    onToggle={() => toggle(a)} onTest={() => test(a)} onEdit={() => setEditing(a)} onDelete={() => del(a)} />
+                    onToggle={() => toggle(a)} onTest={() => test(a)} onEdit={() => openRule(a)} onDuplicate={() => duplicateRule(a)} onDelete={() => del(a)} />
                 ))}
               </div>
             </section>
           ))}
         </div>
       )}
-      {editing && <RuleDialog rule={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); }} />}
+      {editing && <RuleDialog rule={editing} rules={rows} seed={seed} onClose={closeRule} onReload={reload} />}
     </DataState>
   );
 }
 
-function RuleCard({ a, meta, canWrite, onToggle, onTest, onEdit, onDelete }: {
+function RuleCard({ a, meta, canWrite, onToggle, onTest, onEdit, onDuplicate, onDelete }: {
   a: Automation; meta: WorkflowMeta | null; canWrite: boolean;
-  onToggle: () => void; onTest: () => void; onEdit: () => void; onDelete: () => void;
+  onToggle: () => void; onTest: () => void; onEdit: () => void; onDuplicate: () => void; onDelete: () => void;
 }) {
   const trigger = triggerInfo(meta?.events, a.trigger_type);
   const steps = describeActions(a.actions);
   return (
     <Card className={cn("p-3.5 transition-colors", !a.enabled && "bg-muted/30")}>
       <div className="flex items-start gap-3">
-        {canWrite && <div className="pt-0.5"><AccessAction collection="automations" objectPath={a.path} verb={a.enabled ? "disable" : "enable"} label={a.enabled ? "Disable rule" : "Enable rule"}><EnableToggle on={a.enabled} onClick={onToggle} label={a.enabled ? "Disable rule" : "Enable rule"} /></AccessAction></div>}
+        {canWrite && <div className="pt-0.5"><AccessAction collection="automations" objectPath={a.path} can={a.access?.can} verb={a.enabled ? "disable" : "enable"} label={a.enabled ? "Disable rule" : "Enable rule"}><EnableToggle on={a.enabled} onClick={onToggle} label={a.enabled ? "Disable rule" : "Enable rule"} /></AccessAction></div>}
         <div className="min-w-0 flex-1">
           <AccessAction collection="automations" objectPath={a.path} label={a.name}>
             <span className={cn("font-medium", !a.enabled && "text-muted-foreground")}>{a.name}</span>
@@ -271,6 +311,7 @@ function RuleCard({ a, meta, canWrite, onToggle, onTest, onEdit, onDelete }: {
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={onTest}><Play className="mr-2 h-4 w-4" /> Test</DropdownMenuItem>
               <DropdownMenuItem onClick={onEdit}><Pencil className="mr-2 h-4 w-4" /> Edit</DropdownMenuItem>
+              <DropdownMenuItem onClick={onDuplicate}><Copy className="mr-2 h-4 w-4" /> Duplicate</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={onDelete} className="text-destructive focus:text-destructive"><Trash2 className="mr-2 h-4 w-4" /> Delete</DropdownMenuItem>
             </DropdownMenuContent>
@@ -286,7 +327,7 @@ function FlowPreview({ draft, meta }: { draft: AutomationDraft; meta: WorkflowMe
   const steps = describeActions(draft.actions as unknown[]);
   const info = draft.trigger_type ? triggerInfo(meta?.events, draft.trigger_type) : null;
   return (
-    <div className="mb-4 rounded-lg border bg-muted/30 p-3">
+    <div className="rounded-lg border bg-muted/30 p-3">
       <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Preview</div>
       <div className="flex flex-wrap items-center gap-1.5">
         {info ? (
@@ -302,57 +343,241 @@ function FlowPreview({ draft, meta }: { draft: AutomationDraft; meta: WorkflowMe
   );
 }
 
-function RuleDialog({ rule, onClose, onSaved }: { rule: Automation | "new"; onClose: () => void; onSaved: () => void }) {
+const EMPTY_DRAFT: AutomationDraft = { name: "", description: "", trigger_type: "", condition: null, actions: [], schedule: null };
+
+// A sample payload built from what the trigger says it carries, so the box opens with the right field NAMES
+// in it and the reader only fills in values. Guessed by type: a condition is nearly always tested against a
+// number or a string, and an empty object teaches nothing about which fields exist.
+function samplePayload(fields: { name: string; type: string }[]): string {
+  const sample: Record<string, unknown> = {};
+  for (const f of fields) {
+    sample[f.name] = f.type === "number" ? 0 : f.type === "boolean" ? false : f.type === "date" ? new Date().toISOString().slice(0, 10) : "";
+  }
+  return JSON.stringify(sample, null, 2);
+}
+
+// Try the rule's condition against a sample event, without waiting for a real one.
+//
+// A condition used to be unverifiable until something in the app happened to fire it: you saved, waited, and
+// inferred from whether a notification arrived. `:test` evaluates the STORED condition against a payload you
+// supply and reports whether it matched and which actions would have run. Nothing is sent and nothing is
+// written - it is an evaluation, not a dry run of the actions.
+function TestPanel({ rule, meta, dirty }: { rule: Automation; meta: WorkflowMeta | null; dirty: boolean }) {
+  const [open, setOpen] = useState(false);
+  const fields = meta?.events.find((e) => e.type === rule.trigger_type)?.fields ?? [];
+  const [payload, setPayload] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ matched: boolean; would_run: { kind: string }[] } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  function toggle() {
+    setOpen((o) => {
+      if (!o && !payload) setPayload(samplePayload(fields));
+      return !o;
+    });
+  }
+
+  async function run() {
+    setBusy(true);
+    setErr(null);
+    setResult(null);
+    try {
+      let parsed: Record<string, unknown> = {};
+      if (payload.trim()) {
+        try {
+          parsed = JSON.parse(payload) as Record<string, unknown>;
+        } catch {
+          throw new Error("That isn't valid JSON. The payload is the event's own fields, as an object.");
+        }
+      }
+      setResult(await invoke<{ matched: boolean; would_run: { kind: string }[] }>(rule.path, "test", undefined, { payload: parsed }));
+    } catch (e) {
+      setErr(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 border-t pt-3">
+      <button type="button" onClick={toggle} aria-expanded={open} className="flex w-full items-center gap-1.5 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground">
+        <Play className="h-4 w-4" /> Test this rule
+      </button>
+      {open && (
+        <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+          <p className="text-xs text-muted-foreground">
+            Evaluates the condition against a sample event. Nothing is sent and nothing is written.
+            {dirty && <span className="ml-1 font-medium text-amber-600 dark:text-amber-400">Your unsaved edits are not included - this tests the saved rule.</span>}
+          </p>
+          {fields.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              This event carries: {fields.map((f) => `${f.name} (${f.type})`).join(", ")}.
+            </p>
+          )}
+          <Textarea rows={Math.min(8, Math.max(3, fields.length + 2))} value={payload} onChange={(e) => setPayload(e.target.value)} className="font-mono text-xs" spellCheck={false} />
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => void run()} loading={busy}>
+              <Play className="h-3.5 w-3.5" /> Run test
+            </Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setPayload(samplePayload(fields))}>Reset sample</Button>
+          </div>
+          {err && <p className="text-xs text-destructive">{err}</p>}
+          {result && (
+            <div className="space-y-1.5 rounded-md border bg-background p-2.5 text-xs">
+              <p className={cn("flex items-center gap-1.5 font-medium", result.matched ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
+                {result.matched ? <CheckCircle2 className="h-3.5 w-3.5" /> : <MinusCircle className="h-3.5 w-3.5" />}
+                {result.matched ? "The condition matched" : "The condition did not match, so nothing would run"}
+              </p>
+              {result.matched && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-muted-foreground">Would run:</span>
+                  {describeActions(rule.actions).map((s, i) => <StepPill key={i} step={s} />)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleDialog({ rule, rules, seed, onClose, onReload }: { rule: Automation | "new"; rules: Automation[]; seed?: AutomationDraft | null; onClose: () => void; onReload: () => void }) {
   const isNew = rule === "new";
   const cur = isNew ? null : (rule as Automation);
   const { meta, error: metaErr } = useWorkflowMeta();
-  const [draft, setDraft] = useState<AutomationDraft>({
-    name: cur?.name ?? "",
-    description: cur?.description ?? "",
-    trigger_type: cur?.trigger_type ?? "",
-    condition: (cur?.condition as AutomationDraft["condition"]) ?? null,
-    actions: (cur?.actions as AutomationDraft["actions"]) ?? [],
-    schedule: (cur?.schedule as AutomationDraft["schedule"]) ?? null,
-  });
-  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<AutomationDraft>(
+    seed ?? {
+      name: cur?.name ?? "",
+      description: cur?.description ?? "",
+      trigger_type: cur?.trigger_type ?? "",
+      condition: (cur?.condition as AutomationDraft["condition"]) ?? null,
+      actions: (cur?.actions as AutomationDraft["actions"]) ?? [],
+      schedule: (cur?.schedule as AutomationDraft["schedule"]) ?? null,
+    },
+  );
+  // Refreshed when a lost race hands us the other party's version, so the next press goes through.
+  const [etag, setEtag] = useState(cur?.etag);
   const { toast } = useToast();
 
+  // Two rules with the same name are indistinguishable in the list, in the run log and in the event trail -
+  // which is exactly where somebody goes to find out why something fired. Warned in the field, never blocked.
+  const duplicateName =
+    !!draft.name.trim() && rules.some((r) => r.path !== cur?.path && r.name.trim().toLowerCase() === draft.name.trim().toLowerCase());
+
+  // Throws to fail: WriteDialog pins the message in the form and keeps the builder as it was.
   async function save() {
-    setBusy(true);
-    try {
-      const body = { name: draft.name, description: draft.description || null, trigger_type: draft.trigger_type, condition: draft.condition, actions: draft.actions, schedule: draft.schedule ?? null };
-      if (isNew) await create("automations", body);
-      else await patch((rule as Automation).path, body, (rule as Automation).etag);
-      onSaved();
-    } catch (e) { toast({ title: "Could not save rule", description: String((e as Error).message), variant: "destructive" }); }
-    finally { setBusy(false); }
+    const body = { name: draft.name.trim(), description: draft.description || null, trigger_type: draft.trigger_type, condition: draft.condition, actions: draft.actions, schedule: draft.schedule ?? null };
+    if (isNew) {
+      await create("automations", body);
+      toast({ title: "Rule created", variant: "success" });
+    } else {
+      try {
+        await patch(cur!.path, body, etag);
+      } catch (e) {
+        // Lost race: another admin edited the same rule. Take their etag and say what happened - a rule is
+        // shared infrastructure, so two people in the same builder is the ordinary case, not a rare one.
+        if (isConflict(e)) {
+          const fresh = await get<Automation>(cur!.path).catch(() => null);
+          if (fresh) setEtag(fresh.etag);
+          throw new Error("Somebody else changed this rule while you had it open. Press Save again to keep your version.");
+        }
+        throw e;
+      }
+      toast({ title: "Rule saved", variant: "success" });
+    }
+    onReload();
   }
 
-  const missing = !draft.name ? "a name" : !draft.trigger_type ? "a trigger" : draft.actions.length === 0 ? "at least one action" : null;
+  // Whether the builder holds edits the saved rule does not - the test below runs against what is STORED, so
+  // it has to say when the two have parted company.
+  const dirty =
+    !!cur &&
+    JSON.stringify({ n: draft.name, d: draft.description ?? "", t: draft.trigger_type, c: draft.condition, a: draft.actions, s: draft.schedule ?? null }) !==
+      JSON.stringify({ n: cur.name, d: cur.description ?? "", t: cur.trigger_type, c: cur.condition ?? null, a: cur.actions ?? [], s: cur.schedule ?? null });
+
+  const steps = describeActions(draft.actions as unknown[]);
+  // What saving will actually set running, beside the button: the trigger and how many steps follow it.
+  const consequence = !draft.trigger_type
+    ? ""
+    : `${draft.schedule ? describeSchedule(draft.schedule) : `When ${triggerInfo(meta?.events, draft.trigger_type).label}`} · ${steps.length} action${steps.length === 1 ? "" : "s"}`;
+
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <div className="flex items-center gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><Zap className="h-5 w-5" /></span>
-            <div>
-              <DialogTitle>{isNew ? "New automation" : "Edit automation"}</DialogTitle>
-              <p className="text-sm text-muted-foreground">When an event happens, run the next step - no code.</p>
-            </div>
-          </div>
-        </DialogHeader>
-        <div className="max-h-[70vh] overflow-y-auto pr-1">
-          {metaErr && <p className="mb-2 text-xs text-destructive">Could not load builder metadata: {metaErr}</p>}
-          <FlowPreview draft={draft} meta={meta} />
-          <WorkflowBuilder draft={draft} onChange={setDraft} meta={meta} />
+    <WriteDialog
+      open
+      onClose={onClose}
+      className="max-w-3xl lg:max-w-4xl"
+      title={
+        <span className="flex items-center gap-3">
+          <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><Zap className="h-5 w-5" /></span>
+          {isNew ? "New automation" : "Edit automation"}
+        </span>
+      }
+      description="When an event happens, run the next step - no code. A saved rule is live straight away, on every event that matches it from now on."
+      collection="automations"
+      objectPath={cur?.path}
+      guardLabel="rule"
+      form={draft}
+      draftKey={isNew ? "automation:new" : undefined}
+      applyDraft={isNew ? setDraft : undefined}
+      onStartOver={isNew ? () => setDraft(EMPTY_DRAFT) : undefined}
+      submitLabel={isNew ? "Create rule" : "Save changes"}
+      canSubmit={!!draft.name.trim() && !!draft.trigger_type && draft.actions.length > 0}
+      // Every blocker, not the first: a half-built rule is short of two or three things at once, and naming
+      // them one press at a time is how the builder used to be finished by trial and error.
+      whyNot={[
+        !draft.name.trim() && "Give the rule a name.",
+        !draft.trigger_type && "Pick what triggers it.",
+        draft.actions.length === 0 && "Add at least one action.",
+      ]}
+      onSubmit={save}
+      submitAccess={isNew ? (b) => <AccessAction collection="automations" create label="New automation">{b}</AccessAction> : undefined}
+      footerStart={
+        <div className="flex min-w-0 items-center gap-2">
+          {cur && (
+            <Button type="button" variant="ghost" size="sm" onClick={() => { void navigator.clipboard.writeText(recordUrl("workflows", idOf(cur.path))); toast({ title: "Link copied", variant: "success" }); }}>
+              <Link2 className="h-4 w-4" /> Copy link
+            </Button>
+          )}
+          <span className="truncate text-xs text-muted-foreground">{consequence}</span>
         </div>
-        <DialogFooter className="items-center">
-          {missing && <span className="mr-auto text-xs text-muted-foreground">Add {missing} to save</span>}
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} loading={busy} disabled={!!missing}>{isNew ? "Create rule" : "Save changes"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      }
+    >
+      {metaErr && <p className="text-xs text-destructive">Could not load builder metadata: {metaErr}</p>}
+      {/* An empty builder next to a sixty-item trigger list is a blank page. A recipe fills the trigger, the
+          condition and the actions; the wording is meant to be edited afterwards, not accepted. Offered only
+          while the form is untouched, so it can never overwrite something typed. */}
+      {isNew && !draft.trigger_type && !draft.name.trim() && (
+        <div className="space-y-1.5">
+          <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">Start from</span>
+          <div className="flex flex-wrap gap-1.5">
+            {usableRecipes((meta?.events ?? []).map((e) => e.type)).map((r) => (
+              <button
+                key={r.key}
+                type="button"
+                title={r.blurb}
+                onClick={() => setDraft({ ...r.draft })}
+                className="shrink-0 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary coarse:min-h-9 coarse:px-3.5"
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {/* A rule that is off saves fine and then does nothing. Said here, because the toggle that turns it back
+          on is on the card behind this dialog. */}
+      {cur && !cur.enabled && (
+        <p className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50/60 p-2.5 text-xs dark:border-amber-800 dark:bg-amber-950/30">
+          <CircleSlash className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span>This rule is turned off, so nothing here fires until it is switched back on from its card.</span>
+        </p>
+      )}
+      <FlowPreview draft={draft} meta={meta} />
+      <WorkflowBuilder draft={draft} onChange={setDraft} meta={meta} nameError={duplicateName ? "Another rule already has this name." : undefined} />
+      {cur && <TestPanel rule={cur} meta={meta} dirty={dirty} />}
+      {cur && <ActivitySection resource={cur.path} className="border-t pt-3" />}
+    </WriteDialog>
   );
 }
 

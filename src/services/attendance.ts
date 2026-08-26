@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument, failedPrecondition, notFound } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 
 // Attendance clock sessions. A session is one clock-in -> clock-out pair; an OPEN session (clockOut null)
 // means the employee is currently clocked in. Breaks = clock out then clock in again (a new session).
@@ -23,15 +23,10 @@ export async function listSessions(deps: Deps, scope: ListScope, maxPageSize: nu
     .filter((r) => {
       const t = +new Date(r.clockIn);
       return (filters.from === undefined || t >= filters.from) && (filters.to === undefined || t <= filters.to);
-    })
-    // Most recent first (open sessions and today's punches surface at the top).
-    .sort((a, b) => +new Date(b.clockIn) - +new Date(a.clockIn) || b.uuid.localeCompare(a.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? rows.findIndex((e) => +new Date(e.clockIn) < cur.createTimeMs || (+new Date(e.clockIn) === cur.createTimeMs && e.uuid < cur.uid)) : 0;
-  const slice = start < 0 ? [] : rows.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < rows.length && last ? encodeCursor(+new Date(last.clockIn), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+    });
+  // Most recent first (open sessions and today's punches surface at the top), keyed on the PUNCH rather than
+  // the row's creation - which is what the cursor carries for this one collection.
+  return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.clockIn), (r) => r.uuid);
 }
 
 async function openSessionFor(deps: Deps, employeeId: string) {

@@ -17,13 +17,19 @@ import { richExcerpt } from "../domain/richText";
  * name that was already there is not notified twice; omit it for a create/publish/reply, where every
  * mention is new.
  *
- * A mention is a notification, never a grant: the board is readable by every employee, so anyone named can
- * already open the post. Nothing here widens access.
+ * A mention is a notification, never a grant. On the board that costs nothing - every employee can read it.
+ * On a task or a ticket it means a mention can name somebody who cannot open what they were named in: they
+ * get told, they still need access, and that is the honest behaviour. Widening access silently because
+ * somebody typed an `@` would be the alternative, and it is worse.
+ *
+ * `subject` is the wire path of the thing being talked about (`announcements/x`, `cards/x`, `tickets/x`),
+ * `link` the page that opens it, and `type` the notification category (`announcement.mention`,
+ * `board.mention`, `ticket.mention`) so an org can mute mentions per area like every other notification.
  */
 export async function notifyMentions(
   deps: Deps,
   actor: AppUser,
-  opts: { announcementId: string; body?: string | null; previousBody?: string | null; title: string },
+  opts: { subject: string; link: string; type: string; body?: string | null; previousBody?: string | null; title: string },
 ) {
   const tokens = newMentions(opts.body, opts.previousBody);
   if (!tokens.length) return;
@@ -40,11 +46,11 @@ export async function notifyMentions(
     .map((e) => e.uuid);
   if (!live.length) return;
   await notifyMany(deps, live, {
-    type: "announcement.mention",
+    type: opts.type,
     title: "You were mentioned",
     body: richExcerpt(opts.body, 120) || opts.title,
-    link: "announcements",
-    subject: `announcements/${opts.announcementId}`,
+    link: opts.link,
+    subject: opts.subject,
     actorId: actor.employeeId ?? undefined,
   });
 }

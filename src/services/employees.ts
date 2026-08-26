@@ -2,7 +2,7 @@ import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
-import { eq, and, isNull, sql } from "drizzle-orm";
+import { eq, and, isNotNull, isNull, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -31,6 +31,7 @@ export type EmployeeInput = {
   start_date?: string | null; // YYYY-MM-DD
   probation_end_date?: string | null; // YYYY-MM-DD
   epf_enrolled?: boolean;
+  eps_excluded?: boolean;
   national_id?: string | null;
   // bank details are managed via the dedicated :getBankDetails/:setBankDetails methods.
 };
@@ -62,15 +63,17 @@ const addMonths = (ms: number, months: number) => {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
 };
 
-export async function listEmployees(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string) {
+export async function listEmployees(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string, deletedOnly = false) {
   // Visibility was decided in the middleware (scopeFor over the grant); here we only bind it to columns.
   // `q` narrows further via the FTS index - a filter, never a widening (see services/searchFilter.ts).
   const conds = [
     applyScope(scope, schema.employees.code, schema.employees.uuid),
-    showDeleted ? undefined : isNull(schema.employees.deleteTime),
+    // `deletedOnly` is the trash by itself - a "Deleted" view is its own fetch, not a filter over a page of
+    // mostly-live people.
+    deletedOnly ? isNotNull(schema.employees.deleteTime) : showDeleted ? undefined : isNull(schema.employees.deleteTime),
     await searchFilter(deps, "employees", q, schema.employees.uuid),
   ].filter(Boolean);
-  return keysetPage(deps, schema.employees, "employees", and(...(conds as any)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.employees, "employees", and(...(conds as any)), { max: maxPageSize, pageToken });
 }
 
 export async function getEmployee(deps: Deps, actor: AppUser, id: string) {
@@ -157,6 +160,7 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   if (has("start_date")) set.startDate = dateMs(patch.start_date);
   if (has("probation_end_date")) set.probationEndDate = dateMs(patch.probation_end_date);
   if (has("epf_enrolled")) set.epfEnrolled = !!patch.epf_enrolled;
+  if (has("eps_excluded")) set.epsExcluded = !!patch.eps_excluded;
   if (has("national_id")) set.nationalIdEnc = patch.national_id ? await deps.encryptor.encrypt(patch.national_id) : null;
 
   const [updated] = await deps.db.update(schema.employees).set(set).where(eq(schema.employees.uuid, id)).returning();

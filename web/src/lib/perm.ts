@@ -6,8 +6,16 @@ import { createContext, useContext } from "react";
 export function hasCapability(caps: string[], perm: string): boolean {
   if (caps.includes(perm)) return true;
   const action = perm.split(".").pop() ?? "";
-  return caps.includes(`**.${action}`) || caps.includes("**.**");
+  if (caps.includes(`**.${action}`) || caps.includes("**.**")) return true;
+  // A wildcard-verb rule ("all custom methods of this collection", access rule verb:"*") arrives as the
+  // capability `<collection>.**`, so a holder asking about ONE of those verbs has to be answered yes - else
+  // the role that was granted everything sees fewer buttons than a role granted one verb by name. It says
+  // nothing about the read/write/admin ladder, which is a level grant and a different rule.
+  const dot = perm.lastIndexOf(".");
+  if (dot > 0 && !LEVELS.has(action) && caps.includes(`${perm.slice(0, dot)}.**`)) return true;
+  return false;
 }
+const LEVELS = new Set(["read", "write", "admin"]);
 
 // The caller's capability set, provided once at the app root (from me.capabilities) so <Can>/usePermission
 // don't need it prop-drilled.

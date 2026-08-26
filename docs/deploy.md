@@ -12,8 +12,10 @@ dev-bypass rules) are in `docs/deploy-security.md` — follow both.
   - **Free tier:** every data flow fits (DB access is batched for the 50-subrequests-per-invocation budget),
     but the fixed 10ms CPU cap breaks server-side PDF generation (payslips, letters, Form-16, e-sign
     stamping) — those requests will error. Comment out the `[limits]` block in `wrangler.toml` before a
-    free-plan deploy (`[limits]` itself is a paid feature).
-  - **Paid ($5/mo Workers Standard):** everything works; the `[limits]` block applies as written.
+    free-plan deploy (`[limits]` itself is a paid feature), and deploy with `CF_PLAN=free` so the preflight
+    check agrees.
+  - **Paid ($5/mo Workers Standard):** everything works; the `[limits]` block applies as written. This is
+    the default (`CF_PLAN=paid`).
 - A Google Cloud project (any — it only hosts the OAuth client; free) and, in practice, Google Workspace
   for your org domain (sign-in works with any Google account, but the domain allow-list expects org
   addresses, and MFA/device policy is enforced in the Workspace admin console).
@@ -156,11 +158,23 @@ bootstrap/bootstrap.sql`.
 ## 8. Deploy the Worker
 
 ```bash
-npm run deploy    # runs build then `wrangler deploy`
+npm run deploy            # preflight -> verify -> build -> wrangler deploy
+CF_PLAN=free npm run deploy   # same, on the free plan (see Prerequisites)
 ```
 
 This uploads the Worker + static assets and registers the cron triggers (`*/5 * * * *` LRO drain,
 `0 2 * * *` nightly accrual/reminders) from `wrangler.toml`.
+
+The first two steps are gates, not formalities:
+
+- **`npm run preflight`** catches the mistakes a build cannot see — a `REPLACE_WITH_*` placeholder still
+  sitting in the environment being deployed, a `[limits]` block that contradicts `CF_PLAN`, a build about
+  to ship with the eSign *sandbox* roots trusted. Those fail the deploy. It also *warns* about choices that
+  are legitimate but easy to make by accident: no `VITE_VAPID_PUBLIC_KEY` (push ships inert, and since Vite
+  bakes it in at build time no later secret can switch it on), and an empty `PROD_ROOT_PEMS` (every signed
+  document displays amber "validity unknown"). Run it on its own any time: `npm run preflight`.
+- **`npm run verify`** is lint + typecheck + the full test suite. Deploying past a red suite now takes a
+  deliberate `wrangler deploy`.
 
 ## 9. Grant the break-glass super admin
 

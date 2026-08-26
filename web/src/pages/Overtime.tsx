@@ -1,10 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, Ban } from "lucide-react";
 import { create, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useClock, listAllSessions } from "@/lib/clock";
+import { hhmmToMin, localDay, localMinutes, zonedInstant } from "@/lib/attendance";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
+import { useDiscardGuard } from "@/hooks/useDiscardGuard";
 import { formatDate, idOf } from "@/lib/utils";
+import { navigate, navigateTab } from "@/router";
 import type { OvertimeRequest, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -15,6 +19,7 @@ import { withNewBadge } from "@/components/common/NewBadge";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { metaColumns } from "@/components/common/metaColumns";
 import { Field } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { TimeRangeField, fmtDuration } from "@/components/common/TimeRangeField";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Button } from "@/components/ui/button";
@@ -24,8 +29,9 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const upper = (s?: string) => (s ?? "").toUpperCase();
@@ -42,16 +48,24 @@ export default function Overtime({ me }: { me: Me }) {
   const { rows, state, error, reload } = useCollection<OvertimeRequest>("overtime-requests");
   const { rows: employees } = useCollection<Employee>("employees");
   const { toast } = useToast();
+  const confirm = useConfirm();
+  const guardClose = useDiscardGuard();
+  const sched = useClock().sched; // org shift end + timezone, for reading overtime off the punch log
   const canCreate = usePermission("overtime-requests.write");
   const canDecide = usePermission("overtime-requests.approve");
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ employee: "", start_time: "", end_time: "", reason: "" });
   const [month, setMonth] = useState(thisMonth());
-  const [busy, setBusy] = useState(false);
+  const [pickOther, setPickOther] = useState(false); // the form's employee row expanded into the full picker
+  // A range read off the day's punches, offered as a chip: the hours are already recorded, so retyping them
+  // from the punch log is work the form can do.
+  const [fromPunches, setFromPunches] = useState<{ start: string; end: string } | null>(null);
+  const [seedNonce, setSeedNonce] = useState(0); // bumped when the range is filled in programmatically
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
   const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
+  const isSelf = !!me.employee_id && !!form.employee && idOf(form.employee) === me.employee_id;
 
   const pendingTotal = useMemo(() => rows.filter((r) => upper(r.state) === "PENDING").length, [rows]);
   // My approved overtime in the current calendar month, and approved-but-not-yet-paid overall.
@@ -66,6 +80,10 @@ export default function Overtime({ me }: { me: Me }) {
     () => rows.filter((r) => upper(r.state) === "APPROVED" && !r.paid).reduce((s, r) => s + (r.minutes || 0), 0),
     [rows],
   );
+  const myPendingCount = useMemo(
+    () => (me.employee_id ? rows.filter((r) => r.employee && idOf(r.employee) === me.employee_id && upper(r.state) === "PENDING").length : 0),
+    [rows, me.employee_id],
+  );
 
   // Approved overtime per employee for the selected (local) month: minutes summed -> total hours+minutes.
   const monthlyTotals = useMemo(() => {
@@ -77,36 +95,83 @@ export default function Overtime({ me }: { me: Me }) {
     }
     return [...by.entries()].map(([e, mins]) => ({ employee: e, minutes: mins })).sort((a, b) => b.minutes - a.minutes);
   }, [rows, month]);
+  const monthTotalMinutes = monthlyTotals.reduce((s, t) => s + t.minutes, 0);
+  const monthLabel = new Date(`${month}-01T00:00:00`).toLocaleDateString(undefined, { month: "short", year: "numeric" });
 
-  function openCreate() {
+  // `prefill` carries a range worked past the shift end, handed over by the Attendance page's "Log overtime"
+  // on a long day - so the hours are already in the form instead of being re-typed from the punch log.
+  function openCreate(prefill?: unknown) {
+    const p = prefill as { start_time?: string; end_time?: string; reason?: string } | undefined;
     const s = new Date(); s.setHours(18, 0, 0, 0);
     const e = new Date(s.getTime() + 3600000);
-    setForm({ employee: me.employee_id ? `employees/${me.employee_id}` : "", start_time: s.toISOString(), end_time: e.toISOString(), reason: "" });
+    const seed = {
+      employee: me.employee_id ? `employees/${me.employee_id}` : "",
+      start_time: p?.start_time ?? s.toISOString(),
+      end_time: p?.end_time ?? e.toISOString(),
+      reason: p?.reason ?? "",
+    };
+    setForm(seed);
+    setPickOther(false);
+    setFromPunches(null);
     setOpen(true);
   }
 
   const validRange = !!form.start_time && !!form.end_time && +new Date(form.end_time) > +new Date(form.start_time);
 
+  // Requests for the same person whose hours overlap the range being logged. Double-logging the same evening is
+  // the easy mistake here (a shared laptop, a second look at the punch log), and the data to catch it is loaded.
+  const overlapping = useMemo(() => {
+    if (!form.employee || !validRange) return [] as OvertimeRequest[];
+    const s = +new Date(form.start_time), e = +new Date(form.end_time);
+    return rows.filter((r) => {
+      if (!r.employee || idOf(r.employee) !== idOf(form.employee)) return false;
+      if (!["PENDING", "APPROVED"].includes(upper(r.state))) return false;
+      if (!r.start_time || !r.end_time) return false;
+      return +new Date(r.start_time) < e && +new Date(r.end_time) > s;
+    });
+  }, [rows, form.employee, form.start_time, form.end_time, validRange]);
+
+  // The punch-derived suggestion, refreshed whenever the dialog's person or day changes. One lazy read behind an
+  // explicit open, in the shape the Attendance page's "log overtime" already hands over.
+  const formDay = localYmd(form.start_time);
+  useEffect(() => {
+    if (!open || !form.employee || !formDay) { setFromPunches(null); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        // The window is in UTC instants and the day is org-local, so it is widened by a day on each side and
+        // the exact day is settled by localDay below - otherwise a zone behind UTC loses its own evening.
+        const dayMs = 86_400_000;
+        const mid = +new Date(`${formDay}T12:00:00Z`);
+        const sessions = await listAllSessions(`attendance?from=${encodeURIComponent(new Date(mid - dayMs).toISOString())}&to=${encodeURIComponent(new Date(mid + dayMs).toISOString())}`);
+        const tz = sched.timezone;
+        const ends = sessions
+          .filter((s) => s.employee && idOf(s.employee) === idOf(form.employee) && s.clock_out && localDay(s.clock_out, tz) === formDay)
+          .map((s) => s.clock_out!);
+        const last = ends.sort()[ends.length - 1];
+        // Only a departure comfortably past the shift end is overtime worth offering.
+        if (!cancelled) {
+          const past = last && localMinutes(last, tz) > hhmmToMin(sched.shift_end) + 15;
+          setFromPunches(past ? { start: zonedInstant(formDay, sched.shift_end, tz), end: last! } : null);
+        }
+      } catch { if (!cancelled) setFromPunches(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [open, form.employee, formDay, sched.timezone, sched.shift_end]);
+
   async function submit() {
-    setBusy(true);
-    try {
-      await create("overtime-requests", {
-        employee: form.employee || null,
-        start_time: form.start_time,
-        end_time: form.end_time,
-        reason: form.reason.trim() || null,
-      });
-      toast({ title: "Overtime logged", variant: "success" });
-      setOpen(false);
-      reload();
-    } catch (e) {
-      toast({ title: "Couldn't log overtime", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    await create("overtime-requests", {
+      employee: form.employee || null,
+      start_time: form.start_time,
+      end_time: form.end_time,
+      reason: form.reason.trim() || null,
+    });
+    toast({ title: "Overtime logged", variant: "success" });
+    reload();
   }
 
   async function action(r: OvertimeRequest, verb: "approve" | "reject" | "cancel") {
+    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s overtime on ${formatDate(localYmd(r.start_time))}`))) return;
     try {
       await invoke("overtime-requests/" + idOf(r.path), verb, r.etag);
       toast({ title: `Request ${verb === "cancel" ? "cancelled" : verb === "approve" ? "approved" : "rejected"}`, variant: "success" });
@@ -152,10 +217,10 @@ export default function Overtime({ me }: { me: Me }) {
 
   useIntent("new-overtime", openCreate);
 
-  const addBtn = canCreate && <AccessAction collection="overtime-requests" create><Button onClick={openCreate}><Plus className="h-4 w-4" /> Log overtime</Button></AccessAction>;
+  const addBtn = canCreate && <AccessAction collection="overtime-requests" create><Button onClick={() => openCreate()}><Plus className="h-4 w-4" /> Log overtime</Button></AccessAction>;
 
   const renderTable = (search: RequestsHistorySearch, data: OvertimeRequest[], columns: Column<OvertimeRequest>[], tableId: string, emptyTitle: string) => (
-    <DataTable columns={columns} tableId={tableId} rows={data} search={search} getRowId={(r) => r.path} emptyTitle={emptyTitle} accessCollection="overtime-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${localYmd(r.start_time)}`, can: r.access?.can })} />
+    <DataTable columns={columns} tableId={tableId} rows={data} search={search} getRowId={(r) => r.path} emptyTitle={emptyTitle} emptyAction={addBtn} accessCollection="overtime-requests" accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${localYmd(r.start_time)}`, can: r.access?.can })} />
   );
 
   return (
@@ -165,15 +230,20 @@ export default function Overtime({ me }: { me: Me }) {
       {state === "ready" && (
         <SummaryStrip
           items={[
-            { label: "Pending", value: pendingTotal, tone: pendingTotal ? "warning" : "muted" },
-            { label: "My overtime this month", value: fmtDuration(myMonthMinutes), hint: "approved", tone: myMonthMinutes ? "default" : "muted" },
-            { label: "Approved, unpaid", value: fmtDuration(unpaidMinutes), hint: "not yet in a payroll run", tone: unpaidMinutes ? "default" : "muted" },
+            // Pending decisions belong to the Approvals inbox, own requests to the Requests tab, and settled
+            // hours to History - so each metric opens the surface that can actually act on it.
+            { label: "Pending", value: pendingTotal, tone: pendingTotal ? "warning" : "muted", hint: canDecide ? "decide in Approvals" : "awaiting a call", onClick: () => (canDecide ? navigate("approvals") : navigateTab("overtime", "requests")) },
+            ...(myPendingCount ? [{ label: "Your requests in flight", value: myPendingCount, tone: "warning" as const, hint: "open your requests", onClick: () => navigateTab("overtime", "requests") }] : []),
+            { label: "My overtime this month", value: fmtDuration(myMonthMinutes), hint: "approved", tone: myMonthMinutes ? "default" : "muted", onClick: () => navigateTab("overtime", "history") },
+            { label: "Approved, unpaid", value: fmtDuration(unpaidMinutes), hint: "not in a run yet", tone: unpaidMinutes ? "default" : "muted", onClick: () => navigateTab("overtime", "history") },
+            // The month card below is the payroll answer for one month; the metric jumps the reader to it.
+            { label: `Approved in ${monthLabel}`, value: fmtDuration(monthTotalMinutes), tone: monthTotalMinutes ? "primary" : "muted", hint: `${monthlyTotals.length} ${monthlyTotals.length === 1 ? "person" : "people"}`, onClick: () => document.getElementById("overtime-month-card")?.scrollIntoView({ behavior: "smooth", block: "start" }) },
           ]}
         />
       )}
 
       {/* Monthly approved totals (sum of all approved overtime minutes for the month). */}
-      <Card className="mb-4 p-4">
+      <Card id="overtime-month-card" className="mb-4 scroll-mt-24 p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm font-medium">Approved overtime · monthly total</p>
           <Input type="month" value={month} onChange={(e) => setMonth(e.target.value || thisMonth())} className="h-8 w-40" />
@@ -209,28 +279,63 @@ export default function Overtime({ me }: { me: Me }) {
         }
       />
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.employee && validRange) submit(); }}>
-          <DialogHeader><DialogTitle>Log overtime</DialogTitle></DialogHeader>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Log overtime"
+        description="Extra hours worked beyond the normal day. They are approved first, then paid."
+        collection="overtime-requests"
+        guardLabel="overtime entry"
+        form={form}
+        submitLabel="Log overtime"
+        canSubmit={!!form.employee && validRange}
+        whyNot={!form.employee ? "Pick whose overtime this is." : !form.start_time || !form.end_time ? "Set when the extra hours started and ended." : "The end time must be after the start."}
+        onSubmit={submit}
+      >
+          {/* The common case is logging your own hours, so "who" collapses to a line of text with a way out of it.
+              A picker as the first field makes a self-service form read like an admin one. */}
           <Field label="Employee">
-            <Combobox
-              value={form.employee}
-              onValueChange={(v) => setForm({ ...form, employee: v })}
-              placeholder="Select an employee…"
-              searchPlaceholder="Search employees…"
-              options={employees.filter((e) => !e.disabled).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
-            />
+            {isSelf && !pickOther ? (
+              <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2">
+                <span className="inline-flex min-w-0 items-center gap-2 text-sm">
+                  <PhotoAvatar employeeId={me.employee_id ?? ""} name={empName(form.employee)} photo={emp(form.employee)?.photo} className="h-7 w-7" />
+                  <span className="truncate font-medium">{empName(form.employee)}</span>
+                  <Badge variant="muted">You</Badge>
+                </span>
+                <Button type="button" variant="ghost" size="sm" className="h-7 shrink-0 px-2 text-xs" onClick={() => setPickOther(true)}>Someone else</Button>
+              </div>
+            ) : (
+              <Combobox
+                value={form.employee}
+                onValueChange={(v) => setForm({ ...form, employee: v })}
+                placeholder="Select an employee…"
+                searchPlaceholder="Search employees…"
+                options={employees.filter((e) => !e.disabled).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
+              />
+            )}
           </Field>
-          <Field label="When">
-            <TimeRangeField initialStart={form.start_time} initialEnd={form.end_time} onChange={(s, e) => setForm((f) => ({ ...f, start_time: s, end_time: e }))} />
+          <Field label="When" error={!validRange ? "The end time must be after the start." : undefined}>
+            {/* Keyed on the seed counter only: the control owns its own state, so it must remount when the form
+                is filled FOR it (the punch-log chip) but never while someone is editing it. */}
+            <TimeRangeField key={seedNonce} initialStart={form.start_time} initialEnd={form.end_time} onChange={(s, e) => setForm((f) => ({ ...f, start_time: s, end_time: e }))} />
           </Field>
-          <Field label="Reason"><Textarea rows={2} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="What was the extra work?" /></Field>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.employee || !validRange}>Log overtime</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {/* The punch log already knows when they left. Offering it as a chip beats reading it off another page. */}
+          {fromPunches && (fromPunches.start !== form.start_time || fromPunches.end !== form.end_time) && (
+            <button type="button" onClick={() => { setForm((f) => ({ ...f, start_time: fromPunches.start, end_time: fromPunches.end })); setSeedNonce((n) => n + 1); }}
+              className="self-start rounded-full border border-dashed px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary hover:text-primary">
+              From the punch log: <span className="tabular-nums">{localHhmm(fromPunches.start)}-{localHhmm(fromPunches.end)}</span> ({fmtDuration(Math.round((+new Date(fromPunches.end) - +new Date(fromPunches.start)) / 60000))})
+            </button>
+          )}
+          {overlapping.length > 0 && (
+            <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+              These hours overlap {overlapping.length === 1 ? "a request" : `${overlapping.length} requests`} already filed: {overlapping.map((r) => `${localHhmm(r.start_time)}-${localHhmm(r.end_time)} on ${localYmd(r.start_time)}`).join(", ")}.
+            </p>
+          )}
+          <Field label="Reason" hint="Whoever approves this reads it - say what the extra hours were for.">
+            <Textarea rows={2} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="What was the extra work?" />
+          </Field>
+          <p className="text-xs text-muted-foreground">Once approved, the hours are paid in the next payroll run.</p>
+      </WriteDialog>
     </div>
   );
 }

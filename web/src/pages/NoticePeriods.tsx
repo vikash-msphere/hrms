@@ -17,19 +17,21 @@ import { metaColumns } from "@/components/common/metaColumns";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { useKpiFocus } from "@/lib/kpiFocus";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
+import { getSetting } from "@/lib/settingsStore";
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const TYPES = ["resignation", "termination", "retirement", "other"];
@@ -73,31 +75,52 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<NoticePeriod | null>(null);
   const [form, setForm] = useState(EMPTY);
-  const [busy, setBusy] = useState(false);
 
   // Offboarding templates (for the "start offboarding" option), from settings with a default fallback.
   const [templates, setTemplates] = useState<TransitionTemplate[]>(DEFAULT_TRANSITION_TEMPLATES);
   useEffect(() => {
-    get<{ value?: { templates?: TransitionTemplate[] } }>("settings/transition-templates").then((s) => { if (s.value?.templates?.length) setTemplates(s.value.templates); }).catch(() => {});
+    getSetting<{ templates?: TransitionTemplate[] }>("transition-templates").then((s) => { if (s.value?.templates?.length) setTemplates(s.value.templates); }).catch(() => {});
   }, []);
   const offboardingTemplates = templates.filter((t) => t.kind === "offboarding");
+  const chosenTemplate = offboardingTemplates.find((t) => t.id === form.template);
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
   const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
 
+  const isServing = (n: NoticePeriod) => !n.delete_time && n.status === "serving";
+  const isThisMonth = (n: NoticePeriod) => isServing(n) && n.last_working_day.slice(0, 7) === todayStr().slice(0, 7);
+  const isLeavingSoon = (n: NoticePeriod) => isServing(n) && (n.days_remaining ?? 0) >= 0 && (n.days_remaining ?? 0) <= 7;
+  // Still marked serving after their own last working day: the record nobody closed, which leaves a login alive.
+  const isPastExit = (n: NoticePeriod) => isServing(n) && n.last_working_day < todayStr();
+  // On notice with no offboarding checklist started - the exit tasks nobody has kicked off.
+  const isNoOffboarding = (n: NoticePeriod) => isServing(n) && !n.transition;
   const stats = useMemo(() => {
-    const live = rows.filter((n) => !n.delete_time && n.status === "serving");
-    const month = todayStr().slice(0, 7);
-    return { serving: live.length, exitingThisMonth: live.filter((n) => n.last_working_day.slice(0, 7) === month).length };
-  }, [rows]);
+    const live = rows.filter(isServing);
+    return {
+      serving: live.length,
+      exitingThisMonth: rows.filter(isThisMonth).length,
+      leavingSoon: rows.filter(isLeavingSoon).length,
+      pastExit: rows.filter(isPastExit).length,
+      noOffboarding: rows.filter(isNoOffboarding).length,
+    };
+  }, [rows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const kf = useKpiFocus<NoticePeriod, "all" | "serving" | "month" | "soon" | "pastExit" | "noOffboarding">({
+    all: { label: "notice records", match: () => true },
+    serving: { label: "people serving notice", match: isServing },
+    month: { label: "exits this month", match: isThisMonth },
+    soon: { label: "exits in the next week", match: isLeavingSoon },
+    pastExit: { label: "records past their last working day", match: isPastExit },
+    noOffboarding: { label: "exits with no offboarding started", match: isNoOffboarding },
+  });
 
   // Default order: currently serving first (soonest exit at the top), then past records newest-exit first.
-  const sorted = useMemo(() => [...rows].sort((a, b) => {
+  const sorted = useMemo(() => kf.apply([...rows].sort((a, b) => {
     const ga = a.status === "serving" ? 0 : 1;
     const gb = b.status === "serving" ? 0 : 1;
     if (ga !== gb) return ga - gb;
     return ga === 0 ? a.last_working_day.localeCompare(b.last_working_day) : b.last_working_day.localeCompare(a.last_working_day);
-  }), [rows]);
+  })), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function openCreate() { setEditing(null); setForm({ ...EMPTY, notice_date: todayStr() }); setOpen(true); }
   function openEdit(n: NoticePeriod) {
@@ -109,16 +132,12 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
     return { employee: form.employee || null, type: form.type, notice_date: form.notice_date, last_working_day: form.last_working_day, status: form.status, reason: form.reason.trim() || null, notes: form.notes.trim() || null };
   }
   async function submit() {
-    setBusy(true);
-    try {
-      if (editing) { await patch("notice-periods/" + idOf(editing.path), bodyFromForm(), editing.etag); toast({ title: "Notice updated", variant: "success" }); }
-      else {
-        await create("notice-periods", { ...bodyFromForm(), start_offboarding: form.start_offboarding, template: form.start_offboarding ? form.template || null : null });
-        toast({ title: form.start_offboarding ? "Notice recorded · offboarding started" : "Notice recorded", variant: "success" });
-      }
-      setOpen(false); reload();
-    } catch (e) { toast({ title: "Couldn't save notice", description: (e as Error).message, variant: "destructive" }); }
-    finally { setBusy(false); }
+    if (editing) { await patch("notice-periods/" + idOf(editing.path), bodyFromForm(), editing.etag); toast({ title: "Notice updated", variant: "success" }); }
+    else {
+      await create("notice-periods", { ...bodyFromForm(), start_offboarding: form.start_offboarding, template: form.start_offboarding ? form.template || null : null });
+      toast({ title: form.start_offboarding ? "Notice recorded · offboarding started" : "Notice recorded", variant: "success" });
+    }
+    reload();
   }
   async function setStatus(n: NoticePeriod, status: string) {
     // Marking exited terminates the employee + disables their login - confirm first.
@@ -133,6 +152,9 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   const noticeDays = !lwdInvalid && form.notice_date && form.last_working_day
     ? Math.round((new Date(form.last_working_day).getTime() - new Date(form.notice_date).getTime()) / 86400000)
     : null;
+  // A record still "serving" past its own last working day counts down into negative days and keeps the login
+  // alive - almost always a status nobody came back to change.
+  const pastExit = form.status === "serving" && !!form.last_working_day && form.last_working_day < todayStr();
 
   const columns: Column<NoticePeriod>[] = [
     {
@@ -176,8 +198,16 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
 
       <SummaryStrip
         items={[
-          { label: "Currently serving", value: stats.serving, tone: stats.serving > 0 ? "warning" : "muted" },
-          { label: "Exiting this month", value: stats.exitingThisMonth, tone: stats.exitingThisMonth > 0 ? "destructive" : "muted" },
+          { label: "Currently serving", value: stats.serving, tone: stats.serving > 0 ? "warning" : "muted", hint: "working out notice", ...kf.kpi("serving") },
+          { label: "Exiting this month", value: stats.exitingThisMonth, tone: stats.exitingThisMonth > 0 ? "destructive" : "muted", hint: "last day this month", ...kf.kpi("month") },
+          { label: "Last week of notice", value: stats.leavingSoon, tone: stats.leavingSoon > 0 ? "warning" : "muted", hint: stats.leavingSoon ? "hand-over window" : "nobody this week", ...kf.kpi("soon") },
+          ...(stats.noOffboarding
+            ? [{ label: "No offboarding started", value: stats.noOffboarding, tone: "warning" as const, hint: "no exit tasks", ...kf.kpi("noOffboarding") }]
+            : []),
+          ...(stats.pastExit
+            ? [{ label: "Past last working day", value: stats.pastExit, tone: "destructive" as const, hint: "mark them exited", ...kf.kpi("pastExit") }]
+            : []),
+          { label: "All records", value: rows.length, tone: "muted", hint: "past exits included", onClick: () => kf.setFocus(null), active: kf.focus === null },
         ]}
       />
 
@@ -185,13 +215,29 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
         {rows.length === 0 ? (
           <EmptyState icon={LogOut} title="No notice periods" description="Record an employee's notice so you can track their last working day and exit countdown." action={addBtn} />
         ) : (
-          <DataTable columns={columns} tableId="notice-periods" rows={sorted} getRowId={(n) => n.path} rowClassName={(n) => (n.delete_time ? "opacity-60" : undefined)} emptyTitle="No records match" accessCollection="notice-periods" accessTargetOf={(n) => ({ objectPath: n.path, label: empName(n.employee), can: n.access?.can })} />
+          <DataTable columns={columns} tableId="notice-periods" rows={sorted} getRowId={(n) => n.path} rowClassName={(n) => (n.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No records match"} accessCollection="notice-periods" accessTargetOf={(n) => ({ objectPath: n.path, label: empName(n.employee), can: n.access?.can })} />
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && validForm) submit(); }}>
-          <DialogHeader><DialogTitle>{editing ? "Edit notice period" : "Record notice period"}</DialogTitle></DialogHeader>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={editing ? "Edit notice period" : "Record notice period"}
+        description="Starts the exit countdown. On the last working day they're marked exited and their login is disabled; their full & final settlement is computed from that date."
+        collection="notice-periods"
+        objectPath={editing?.path}
+        guardLabel="notice record"
+        form={form}
+        draftKey={editing ? undefined : "notice-period-new"}
+        applyDraft={setForm}
+        onStartOver={() => setForm({ ...EMPTY, notice_date: todayStr() })}
+        submitLabel={editing ? "Save changes" : "Record"}
+        canSubmit={validForm}
+        whyNot={
+          !form.employee ? "Pick whose notice this is." : !form.last_working_day ? "Set their last working day." : lwdInvalid ? "The last working day can't be before the notice date." : undefined
+        }
+        onSubmit={submit}
+      >
           <Field label="Employee">
             <Combobox
               value={form.employee}
@@ -205,7 +251,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
                 .map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
             />
           </Field>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <FieldRow>
             <Field label="Type">
               <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -224,7 +270,17 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
               error={lwdInvalid ? "Before the notice date." : undefined}
               hint={noticeDays != null ? `${noticeDays} day${noticeDays === 1 ? "" : "s"} of notice.` : undefined}
             ><Input type="date" value={form.last_working_day} min={form.notice_date} onChange={(e) => setForm({ ...form, last_working_day: e.target.value })} /></Field>
-          </div>
+          </FieldRow>
+          {noticeDays === 0 && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              Same-day exit: they leave on the day notice is given, so their login is disabled immediately.
+            </p>
+          )}
+          {pastExit && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              That last working day has already passed. Set the status to Exited if they've left - "Serving" keeps them active with a negative countdown.
+            </p>
+          )}
           <Field label="Reason"><Input value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="Optional" /></Field>
           <Field label="Notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Handover, exit interview, settlement…" /></Field>
           {!editing && (
@@ -237,20 +293,24 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
                 </span>
               </label>
               {form.start_offboarding && (
-                <Select value={form.template} onValueChange={(v) => setForm({ ...form, template: v })}>
-                  <SelectTrigger className="h-9"><SelectValue placeholder="Offboarding template (optional)" /></SelectTrigger>
-                  <SelectContent>{offboardingTemplates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}</SelectContent>
-                </Select>
+                <>
+                  <Select value={form.template} onValueChange={(v) => setForm({ ...form, template: v })}>
+                    <SelectTrigger className="h-9"><SelectValue placeholder="Offboarding template (optional)" /></SelectTrigger>
+                    <SelectContent>{offboardingTemplates.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                  {/* What the checklist will actually contain, before it's created - a template name alone says
+                      nothing about how much work lands on whom. */}
+                  <p className="text-xs text-muted-foreground">
+                    {chosenTemplate
+                      ? `${chosenTemplate.tasks.length} task${chosenTemplate.tasks.length === 1 ? "" : "s"}${form.last_working_day ? `, anchored to ${formatDate(form.last_working_day)}` : ""}.`
+                      : "No template: an empty checklist you fill in yourself."}
+                  </p>
+                </>
               )}
             </div>
           )}
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!validForm}>{editing ? "Save changes" : "Record"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </WriteDialog>
     </div>
   );
 }

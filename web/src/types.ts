@@ -37,7 +37,19 @@ export type Application = Wire<"application">;
 
 export type AtsStage = { key: string; label: string; kind: "active" | "hired" | "rejected" };
 export type ScorecardCriterion = { key: string; label: string };
-export type AtsConfig = { stages: AtsStage[]; sources: string[]; rejection_reasons: string[]; scorecard_criteria: ScorecardCriterion[] };
+// Mirrors src/domain/ats.ts. The offer defaults are what the pipeline's "draft the offer" rule fills in, so
+// they are org policy rather than constants inside a rule body.
+export type OfferBandPoint = "mid" | "min" | "max" | "none";
+export type AtsConfig = {
+  stages: AtsStage[];
+  sources: string[];
+  rejection_reasons: string[];
+  scorecard_criteria: ScorecardCriterion[];
+  blind_scorecards: boolean;
+  offer_validity_days: number;
+  join_notice_days: number;
+  offer_band_point: OfferBandPoint;
+};
 export const DEFAULT_ATS_CONFIG: AtsConfig = {
   stages: [
     { key: "applied", label: "Applied", kind: "active" },
@@ -54,6 +66,10 @@ export const DEFAULT_ATS_CONFIG: AtsConfig = {
     { key: "culture", label: "Culture fit" },
     { key: "problem_solving", label: "Problem solving" },
   ],
+  blind_scorecards: false,
+  offer_validity_days: 7,
+  join_notice_days: 30,
+  offer_band_point: "mid",
 };
 
 export type Interview = Wire<"interview">;
@@ -116,6 +132,17 @@ export type Position = Wire<"position">;
 export type Bonus = Wire<"bonus">;
 
 export type Asset = Wire<"asset">;
+
+export type AssetCategory = Wire<"asset-category">;
+
+export type AssetRequest = Wire<"asset-request">;
+
+// One inventory walk-through. Its sightings are stamps on the ASSETS (last_verified_*), not rows here - see
+// src/domain/stocktake.ts.
+export type Stocktake = Wire<"stocktake">;
+export type StocktakeFound = Item<NonNullable<Stocktake["found"]>>;
+export type StocktakeMissing = Item<NonNullable<NonNullable<Stocktake["result"]>["missing"]>>;
+export type StocktakeSighted = Item<NonNullable<NonNullable<Stocktake["result"]>["sighted"]>>;
 
 export type SettlementLine = Item<Settlement["lines"]>;
 export type Settlement = Wire<"settlement">;
@@ -279,7 +306,14 @@ export type ApiKey = Wire<"api-key">;
 
 // `capabilities` is the server-computed, scope-stripped capability set (e.g. "holidays.write",
 // "leave-requests.approve"); UI gating reads it via <Can>/usePermission. The server still enforces.
-export type Me = { email: string; role: string; employee_id: string | null; capabilities: string[] };
+export type Me = {
+  email: string;
+  role: string;
+  employee_id: string | null;
+  capabilities: string[];
+  // Token for the subscribable holiday calendar feed; null unless the org enabled it (see routes/holidayFeed.ts).
+  holiday_feed_token: string | null;
+};
 
 export type IdentityField = Wire<"identity-field">;
 // `fields` $refs identity-field, so re-point the embedded items at the aliased child (see Transition.tasks).

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { ArrowLeft, Mail, Phone, Download, UserCheck, CalendarClock, FileSignature, Briefcase, UserSearch } from "lucide-react";
 import { download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useResource } from "@/hooks/useResource";
 import { formatDate, idOf } from "@/lib/utils";
 import { useMoney } from "@/lib/org";
 import { navigate } from "@/router";
@@ -41,22 +42,47 @@ const meta = (m: Record<string, { label: string; variant: BadgeVariant }>, s: st
 const fmtWhen = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "");
 
 export default function CandidateProfile({ id }: { id: string; me: Me }) {
-  const { rows: candidates, state, error, reload } = useCollection<Candidate>("candidates");
-  const { rows: apps } = useCollection<Application>("applications");
-  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions");
-  const { rows: interviews } = useCollection<Interview>("interviews");
-  const { rows: offers } = useCollection<Offer>("offers");
-  const { rows: employees } = useCollection<Employee>("employees");
-  const { rows: referrals } = useCollection<Referral>("referrals");
+  // ONE candidate's page, so the reads here are narrowed to that candidate rather than pulling a page of each
+  // collection and filtering it in the browser. That was both expensive and quietly wrong: a candidate whose
+  // application sat past the first page of `applications` rendered as having none.
+  const { row: candidate, state, error, reload } = useResource<Candidate>("candidates", id);
+  // The inbound edge decodes `<collection>/<token>` query values, so a filter is passed as a REF, never as a
+  // bare id (a bare token would reach the service undecoded and match nothing).
+  const { rows: apps } = useCollection<Application>("applications", { params: { candidate: `candidates/${id}` } });
   const cfg = useAtsConfig();
   const money = useMoney();
-
-  const candidate = candidates.find((c) => idOf(c.path) === id) ?? null;
 
   const stageLabel = useMemo(() => {
     const m = new Map(cfg.stages.map((s) => [s.key, s.label]));
     return (key: string) => m.get(key) ?? key;
   }, [cfg]);
+
+  // Everything on this page hangs off the candidate's applications, newest first. The list is already narrowed
+  // to this candidate server-side, so there is nothing to filter out here.
+  const myApps = useMemo(
+    () => [...apps].sort((a, b) => (b.applied_time ?? b.create_time ?? "").localeCompare(a.applied_time ?? a.create_time ?? "")),
+    [apps],
+  );
+  const appIds = useMemo(() => new Set(myApps.map((a) => idOf(a.path))), [myApps]);
+  // Interviews and offers hang off an APPLICATION, and the overwhelmingly common case is a candidate with one -
+  // so narrow to it server-side. With several applications there is no one-shot filter for "any of these", so
+  // the page reads the collections and matches; either way it reads nothing at all for a candidate who has not
+  // applied to anything.
+  const soleApp = myApps.length === 1 ? myApps[0]!.path : undefined; // already a `applications/<token>` ref
+  const { rows: interviews } = useCollection<Interview>("interviews", {
+    enabled: myApps.length > 0,
+    params: soleApp ? { application: soleApp } : {},
+  });
+  const { rows: offers } = useCollection<Offer>("offers", {
+    enabled: myApps.length > 0,
+    params: soleApp ? { application: soleApp } : {},
+  });
+  // Role titles for the applications on screen, and names for the interviewers / referrer on them. Read only
+  // when there is something to label.
+  const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: myApps.some((a) => a.requisition) });
+  const { rows: referrals } = useCollection<Referral>("referrals", { enabled: !!candidate?.referral });
+  const needNames = !!candidate?.referral || interviews.some((i) => (i.interviewers ?? []).length > 0);
+  const { rows: employees } = useCollection<Employee>("employees", { enabled: needNames });
   const reqTitle = useMemo(() => {
     const m = new Map(reqs.map((r) => [idOf(r.path), r.title]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Unknown role" : "Unknown role");
@@ -66,12 +92,6 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "");
   }, [employees]);
 
-  // Everything on this page hangs off the candidate's applications, newest first.
-  const myApps = useMemo(
-    () => apps.filter((a) => a.candidate && idOf(a.candidate) === id).sort((a, b) => (b.applied_time ?? b.create_time ?? "").localeCompare(a.applied_time ?? a.create_time ?? "")),
-    [apps, id],
-  );
-  const appIds = useMemo(() => new Set(myApps.map((a) => idOf(a.path))), [myApps]);
   const myInterviews = useMemo(
     () => interviews.filter((i) => i.application && appIds.has(idOf(i.application))).sort((a, b) => (b.scheduled_start_time ?? "").localeCompare(a.scheduled_start_time ?? "")),
     [interviews, appIds],

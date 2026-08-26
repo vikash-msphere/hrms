@@ -9,6 +9,7 @@ import { encodeWireIdsMiddleware } from "./middleware/encodeWireIds";
 import { decodeWireIdsRequest } from "./middleware/decodeWireIds";
 import { makeIdCodec } from "./lib/idCodec";
 import { securityHeaders } from "./middleware/securityHeaders";
+import { bodyLimit } from "./middleware/bodyLimit";
 import { errorHandler } from "./middleware/errorHandler";
 import { requestId } from "./middleware/requestId";
 import { runScheduled } from "./cron";
@@ -88,16 +89,24 @@ import { celebrations } from "./routes/celebrations";
 import { employeePhotosBatch } from "./routes/employeePhotosBatch";
 import { batch } from "./routes/batch";
 import { search } from "./routes/search";
+import { activityCountsRoute } from "./routes/activityCounts";
+import { changes } from "./routes/changes";
 import { dashboardSummaryRoute } from "./routes/dashboardSummary";
+import { peopleAnalyticsRoute } from "./routes/peopleAnalytics";
+import { approvalsSummaryRoute } from "./routes/approvalsSummary";
 import { bankFormats } from "./routes/bankFormats";
 import { payrollDebit } from "./routes/payrollDebit";
 import { compensation } from "./routes/compensation";
 import { compensationReapply } from "./routes/compensationReapply";
 import { esignCallback } from "./routes/esignCallback";
 import { found } from "./routes/found";
+import { holidayFeed } from "./routes/holidayFeed";
 import { positions } from "./routes/positions";
 import { bonuses, bonusAward } from "./routes/bonuses";
-import { assets } from "./routes/assets";
+import { assets, assetBatchCreate } from "./routes/assets";
+import { assetCategories } from "./routes/assetCategories";
+import { assetRequests } from "./routes/assetRequests";
+import { stocktakes } from "./routes/stocktakes";
 import { settlements } from "./routes/settlements";
 import { leaveEncashments } from "./routes/leaveEncashments";
 import { attendance } from "./routes/attendance";
@@ -122,6 +131,10 @@ import { authRoutes } from "./routes/authRoutes";
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
 app.use("*", requestId); // correlation id on every request/response + in error logs
+// Body ceiling on EVERY route, not just /v1: the e-sign webhook below also buffers a JSON body, and a cap that
+// stops at /v1 is not a cap on the worker. Registered here because Hono applies middleware in registration
+// order against the routes declared AFTER it - mounted lower down, it would miss /auth, /found and /esign.
+app.use("*", bodyLimit); // refuse an oversized body from Content-Length, before any handler buffers it
 
 // Unauthenticated health checks for uptime monitors / load balancers (everything under /v1 needs an Access
 // JWT, so there must be something to probe without one). /healthz is pure liveness; /readyz also pings D1.
@@ -147,6 +160,12 @@ app.route("/auth", authRoutes);
 // its own security headers (needs inline-style CSP for the HTML). Needs only Deps for the two reads.
 app.use("/found/*", dbContext);
 app.route("/found", found);
+
+// Subscribable holiday calendar (opt-in via settings/holidays feed_enabled). OUTSIDE /v1: a calendar client
+// has no session. The token is an authenticated wire id under its own "holiday-feed" domain, and the response
+// carries only that employee's days off. Sets its own content/cache headers.
+app.use("/calendar/*", dbContext);
+app.route("/calendar", holidayFeed);
 
 // Security headers on the public webhook responses too (the /v1 middleware below doesn't cover /esign).
 app.use("/esign/*", securityHeaders);
@@ -176,6 +195,10 @@ app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service
 app.route("/v1/dashboard-summary", dashboardSummaryRoute); // aggregated KPI counts: same per-collection gating as search
+app.route("/v1/people-analytics", peopleAnalyticsRoute); // per-person report across the modules: same per-collection gating as search
+app.route("/v1/approvals-summary", approvalsSummaryRoute); // approval queue counts: per-queue `approve` gating, no rows
+app.route("/v1/activity-counts", activityCountsRoute); // "new since I last looked" counts: same gating as search, no rows
+app.route("/v1/changes", changes); // which collections were written to since a moment: lets a client trust its stored copies
 app.route("/v1/employees:upcomingCelebrations", celebrations); // collection custom method, before the employees mount
 app.route("/v1/employees:batchGetPhotos", employeePhotosBatch); // batched photo fetch (per-id scope in the service)
 app.route("/v1/employees", employees);
@@ -251,7 +274,11 @@ app.route("/v1/compensation", compensation);
 app.route("/v1/positions", positions);
 app.route("/v1/bonuses:award", bonusAward); // collection custom method, before the bonuses mount
 app.route("/v1/bonuses", bonuses);
+app.route("/v1/assets:batchCreate", assetBatchCreate); // collection custom method, before the assets mount
 app.route("/v1/assets", assets);
+app.route("/v1/asset-categories", assetCategories);
+app.route("/v1/asset-requests", assetRequests);
+app.route("/v1/stocktakes", stocktakes);
 app.route("/v1/settlements", settlements);
 app.route("/v1/leave-encashments", leaveEncashments);
 app.route("/v1/attendance-regularizations", attendanceRegularizations);
@@ -273,11 +300,47 @@ app.route("/v1/workflow-instances", workflowInstances);
 app.route("/v1/workflow-meta", workflowMeta);
 app.route("/v1/esign-providers", esignProviders); // virtual: non-secret e-sign driver catalog for Settings
 
-app.notFound((c) =>
-  c.body(JSON.stringify({ type: "/errors/not-found", title: "Not Found", status: 404, instance: c.req.path }), 404, {
-    "Content-Type": "application/problem+json",
-  }),
-);
+// A path whose last segment carries a file extension is asking for a FILE, not an app route. Deliberately
+// narrow: SPA routes are slash-separated words, so requiring a dot in the final segment (and no trailing
+// slash) never catches one.
+const LOOKS_LIKE_A_FILE = /\/[^/]+\.[a-z0-9]+$/i;
+
+/** Path prefixes the Worker owns outright, where a miss is a real 404 rather than a client-side route.
+ *
+ *  MUST mirror `run_worker_first` in wrangler.toml - that setting decides which paths reach the Worker
+ *  ahead of the assets, and this decides how a miss among them is answered. test/spaFallback.test.ts pins
+ *  the two together, because a prefix added to one and not the other fails in a way nothing else catches:
+ *  the route starts replying 200 with the app shell instead of its 404. */
+export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar"];
+
+// Everything the asset layer could not serve arrives here, because `not_found_handling` is "none" - the
+// SPA fallback is this function's job rather than the platform's.
+//
+// It has to be, because the platform's version answers EVERY miss with index.html at 200, including a miss
+// for /push-sw.js or /assets/<hash>.js. A browser asking for a script and receiving 200 text/html does not
+// see "missing file"; it sees a script of the wrong type, caches that answer, and keeps failing from cache
+// long after the file is back. That is not hypothetical: `emptyOutDir` empties web/dist at the start of
+// every build, so any fetch landing in that window got HTML, and a service-worker registration poisoned
+// this way stays broken until the browser's cache is cleared by hand.
+//
+// So: a request for a file that does not exist gets an honest 404, and only real app routes fall back to
+// the shell.
+app.notFound(async (c) => {
+  const path = c.req.path;
+  // A miss under a WORKER-OWNED prefix is a genuine 404 - the API, the e-sign callbacks, the unauthenticated
+  // public pages. These are emphatically not SPA routes, and answering them with the shell would turn "this
+  // holiday feed is disabled" or "that token is forged" into a 200 page.
+  const workerOwned = WORKER_OWNED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+  if (workerOwned || LOOKS_LIKE_A_FILE.test(path)) {
+    return c.body(JSON.stringify({ type: "/errors/not-found", title: "Not Found", status: 404, instance: path }), 404, {
+      "Content-Type": "application/problem+json",
+    });
+  }
+  // A client-side route: serve the shell and let the SPA router take it from here. Fetched through the
+  // ASSETS binding so index.html still carries the headers _headers assigns it (CSP, no-cache).
+  const shell = await c.env.ASSETS.fetch(new URL("/index.html", c.req.url));
+  return new Response(shell.body, { status: 200, headers: shell.headers });
+});
 
 // One codec per isolate (memoized) so the HKDF subkeys are derived once, not per request.
 let codec: ReturnType<typeof makeIdCodec> | null = null;

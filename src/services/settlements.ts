@@ -8,27 +8,30 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
 import {
-  currentComp, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals,
+  currentComp, compAsOf, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals,
   assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
 } from "./taxProjection";
 import { encashmentRateConfig } from "./leaveEncashments";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, lopDayUnits, eventCreditByDay } from "../domain/attendance";
-import { esiEmployeeContribution, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
-import { approvedUnpaidReimbursements, markReimbursementsSettled, releaseReimbursementsSettled } from "./reimbursements";
-import { unpaidBonuses, markBonusesSettled, releaseBonusesSettled } from "./bonuses";
-import { approvedUnpaidEncashments, markEncashmentsSettled, releaseEncashmentsSettled } from "./leaveEncashments";
-import { approvedUnpaidOvertime, markOvertimeSettled, releaseOvertimeSettled } from "./overtimeRequests";
-import { markCompArrearsSettled, releaseCompArrearsSettled } from "./compensation";
+import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
+import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
+import { unpaidBonuses, markBonusesSettledStmt, releaseBonusesSettledStmt } from "./bonuses";
+import { approvedUnpaidEncashments, markEncashmentsSettledStmt, releaseEncashmentsSettledStmt } from "./leaveEncashments";
+import { approvedUnpaidOvertime, markOvertimeSettledStmt, releaseOvertimeSettledStmt } from "./overtimeRequests";
+import { markCompArrearsSettledStmt, releaseCompArrearsSettledStmt } from "./compensation";
 import { outstandingLoans, repaidCreditStmt, recomputeRepaidStmt } from "./loans";
 import { getSettingValue } from "./settings";
 import { applyStructure, overtimePay, DEFAULT_OVERTIME_CONFIG, type OvertimeConfig } from "../domain/payroll";
 import { structureLinesById } from "./salaryStructures";
 import {
-  computeSettlement, completedYearsOfService, gratuityAmount, gratuityExemption, leaveEncashmentExemption,
+  computeSettlement, completedYearsOfService, yearsOfService, gratuityAmount, gratuityExemption, leaveEncashmentExemption,
   DEFAULT_GRATUITY_CONFIG, type GratuityConfig, type SettlementLine,
 } from "../domain/settlement";
 import { round2, sum2 } from "../domain/money";
+import { runBatch, chunk, type BatchStmt } from "../lib/dbBatch";
+import { genId } from "../lib/idCodec";
 import { notify } from "./notifications";
+import { refHolidays, refLeaveTypes, refPayComponents, refPayPeriods } from "../lib/refData";
 
 // Full-and-final settlement (FnF). POST computes a snapshot from the employee's compensation, leave balance,
 // pending reimbursements and the exit inputs (settlement date, encashable leave days, notice shortfall), and
@@ -73,26 +76,33 @@ function parseRefs(json: string | null): SettledRefs {
 // Undo everything a previous settlement for this employee consumed, so recomputing one is safe: the payables
 // go back on the queue, the encashed leave days go back on the balance, and the loan repayments it recorded
 // are removed from the ledger (each affected loan's `repaid` is then re-derived from what remains). Mirrors
-// the payroll run's releasePaidByRun - same contract, keyed to a settlement instead of a run.
-async function releaseSettlement(deps: Deps, row: typeof schema.settlements.$inferSelect): Promise<void> {
+// the payroll run's releasePaidByRun - same contract, keyed to a settlement instead of a run. Returns the
+// UNEXECUTED statements so the caller commits the release and the row's deletion in one atomic batch: a
+// half-applied release leaves payables both consumed and unpayable.
+function releaseSettlementStmts(deps: Deps, row: typeof schema.settlements.$inferSelect, at: Date): BatchStmt[] {
   const refs = parseRefs(row.settledJson);
-  await releaseReimbursementsSettled(deps, refs.reimbursements);
-  await releaseBonusesSettled(deps, refs.bonuses);
-  await releaseEncashmentsSettled(deps, refs.encashments);
-  await releaseOvertimeSettled(deps, refs.overtime);
-  await releaseCompArrearsSettled(deps, refs.arrears);
+  const stmts: BatchStmt[] = [];
+  for (const ids of chunk(refs.reimbursements, 90)) stmts.push(releaseReimbursementsSettledStmt(deps, ids));
+  for (const ids of chunk(refs.bonuses, 90)) stmts.push(releaseBonusesSettledStmt(deps, ids));
+  for (const ids of chunk(refs.encashments, 90)) stmts.push(releaseEncashmentsSettledStmt(deps, ids));
+  for (const ids of chunk(refs.overtime, 90)) stmts.push(releaseOvertimeSettledStmt(deps, ids));
+  for (const ids of chunk(refs.arrears, 90)) stmts.push(releaseCompArrearsSettledStmt(deps, ids));
   if (refs.loans.length) {
-    await deps.db.delete(schema.loanRepayments).where(inArray(schema.loanRepayments.uuid, refs.loans.map((l) => l.repaymentId)));
-    const at = new Date();
-    for (const loanId of new Set(refs.loans.map((l) => l.loanId))) await recomputeRepaidStmt(deps, loanId, at);
+    for (const ids of chunk(refs.loans.map((l) => l.repaymentId), 90)) {
+      stmts.push(deps.db.delete(schema.loanRepayments).where(inArray(schema.loanRepayments.uuid, ids)));
+    }
+    // Re-derive each affected loan's running total from the ledger rows that SURVIVE the delete above, in the
+    // same batch: an absolute total computed here in JS would discard any repayment committed in between.
+    for (const loanId of new Set(refs.loans.map((l) => l.loanId))) stmts.push(recomputeRepaidStmt(deps, loanId, at));
   }
   for (const d of refs.leaveDebits) {
     if (!(d.days > 0)) continue;
-    await deps.db
+    stmts.push(deps.db
       .update(schema.leaveBalances)
-      .set({ balanceDays: sql`round(${schema.leaveBalances.balanceDays} + ${d.days}, 2)`, updatedAt: new Date() })
-      .where(eq(schema.leaveBalances.uuid, d.balanceId));
+      .set({ balanceDays: sql`round(${schema.leaveBalances.balanceDays} + ${d.days}, 2)`, updatedAt: at })
+      .where(eq(schema.leaveBalances.uuid, d.balanceId)));
   }
+  return stmts;
 }
 
 // Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
@@ -103,7 +113,7 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
   const startYmd = localDay(fromMs, tz);
   const endYmd = localDay(toMs, tz);
   const holidays = new Set(
-    (await deps.db.select().from(schema.holidays))
+    (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= fromMs && +new Date(h.date) <= toMs)
       .map((h) => localDay(+new Date(h.date), tz)),
   );
@@ -147,30 +157,76 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
   });
 }
 
+// Average monthly basic over the ten months ending with the exit month, priced off the compensation timeline
+// (each month at the row in force at its end, exactly as payroll and the projection price a month). This is
+// what s.10(10AA) means by "average salary"; the last-drawn figure over-exempts after a final-year raise.
+// Months before the employee had any compensation on record are skipped rather than counted as zero.
+async function averageMonthlyBasic(deps: Deps, employeeId: string, asOf: Date): Promise<number> {
+  const rows = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, employeeId));
+  if (!rows.length) return 0;
+  const values: number[] = [];
+  for (let back = 0; back < 10; back++) {
+    const monthEnd = Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth() - back + 1, 0, 23, 59, 59, 999);
+    const row = compAsOf(rows, monthEnd);
+    if (row) values.push(row.basePay);
+  }
+  return values.length ? round2(sum2(values) / values.length) : 0;
+}
+
+// Was this employee already contributing to ESI earlier in the contribution period the exit falls in? Same
+// stickiness the payroll build applies (domain/statutory.ts): eligibility is fixed at the period start, so a
+// mid-period raise past the ceiling does not stop the contribution until the period ends. Without this the FnF
+// re-tested the bare ceiling and silently stopped withholding in the leaver's final month.
+async function esiContributingAtExit(deps: Deps, employeeId: string, exitDate: Date): Promise<boolean> {
+  const cp = esiContributionPeriod(exitDate);
+  const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
+  const runIds = new Set(
+    (await deps.db.select().from(schema.payrollRuns))
+      .filter((r) => r.state === "APPROVED" || r.state === "PUBLISHED")
+      .filter((r) => { const p = periods.get(r.payPeriodId); return !!p && +new Date(p.payDate) >= cp.start && +new Date(p.payDate) < cp.end; })
+      .map((r) => r.uuid),
+  );
+  if (!runIds.size) return false;
+  const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.employeeId, employeeId));
+  return items.some((it) => {
+    if (!runIds.has(it.runId)) return false;
+    try {
+      return (JSON.parse(it.linesJson) as { code?: string }[]).some((l) => l.code === "ESI");
+    } catch {
+      return false;
+    }
+  });
+}
+
 // PF / ESI / PT withheld on the exit payout, from the org's own pay components - the same opt-in components and
 // the same pure statutory maths the payroll build uses, so the two never disagree about a rate or a ceiling.
 async function settlementStatutoryLines(
   deps: Deps,
-  f: { components: typeof schema.payComponents.$inferSelect[]; epfEnrolled: boolean; monthlyGross: number; pfWages: number; esiWages: number },
+  f: { components: typeof schema.payComponents.$inferSelect[]; epfEnrolled: boolean; monthlyGross: number; pfWages: number; esiWages: number; esiSticky: boolean; ptWagePaid: number; ptSlabWage: number; ptYtd: number },
 ): Promise<SettlementLine[]> {
   const out: SettlementLine[] = [];
   const live = f.components.filter((c) => !c.disabled && !c.deleteTime && c.recurring);
   const epfComp = live.find((c) => c.method === "epf" && c.kind === "deduction");
   if (epfComp && f.epfEnrolled && f.pfWages > 0) {
     const epf = round2(Math.min(f.pfWages, epfComp.cap ?? Infinity) * ((epfComp.rate ?? 12) / 100));
-    if (epf > 0) out.push({ name: epfComp.name, kind: "deduction", amount: epf });
+    if (epf > 0) out.push({ code: "EPF", name: epfComp.name, kind: "deduction", amount: epf });
   }
   const esiComp = live.find((c) => c.method === "esi" && c.kind === "deduction");
   if (esiComp && f.esiWages > 0) {
-    // Eligibility on the monthly wage rate (the ceiling test), contribution on the wages actually paid.
-    const eligible = f.monthlyGross > 0 && f.monthlyGross <= (esiComp.cap ?? 21000);
+    // Eligibility on the monthly wage rate (the ceiling test) OR sticky membership from earlier in the
+    // contribution period, exactly as the payroll build decides it; contribution on the wages actually paid.
+    const eligible = (f.monthlyGross > 0 && f.monthlyGross <= (esiComp.cap ?? 21000)) || f.esiSticky;
     const esi = eligible ? esiEmployeeContribution(f.esiWages, esiComp.rate ?? 0.75, Infinity) : 0;
-    if (esi > 0) out.push({ name: esiComp.name, kind: "deduction", amount: esi });
+    if (esi > 0) out.push({ code: "ESI", name: esiComp.name, kind: "deduction", amount: esi });
   }
   const ptComp = live.find((c) => c.method === "pt" && c.kind === "deduction");
-  if (ptComp && f.esiWages > 0) {
-    const pt = professionalTax(f.monthlyGross, await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG));
-    if (pt > 0) out.push({ name: ptComp.name, kind: "deduction", amount: pt });
+  if (ptComp && f.ptWagePaid > 0) {
+    // Same slab rule the run applies: the bracket is the monthly wage rate plus the extra wage this payout
+    // carries, and the year's collection is capped where the state act caps it.
+    const cfg = await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG);
+    const headroom = cfg.annual_cap == null ? Infinity : Math.max(0, round2(cfg.annual_cap - f.ptYtd));
+    const pt = round2(Math.min(professionalTax(f.ptSlabWage, cfg), headroom));
+    if (pt > 0) out.push({ code: "PT", name: ptComp.name, kind: "deduction", amount: pt });
   }
   return out;
 }
@@ -216,14 +272,17 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // it, then price the exit from scratch. Without this a second compute would read empty queues (the first
   // one took them) and understate the payout by everything the first settlement already covered.
   const prior = await deps.db.select().from(schema.settlements).where(eq(schema.settlements.employeeId, employeeId));
-  for (const p of prior) {
-    await releaseSettlement(deps, p);
-    await deps.db.delete(schema.settlements).where(eq(schema.settlements.uuid, p.uuid));
+  if (prior.length) {
+    const releaseAt = new Date();
+    await runBatch(deps.db, [
+      ...prior.flatMap((p) => releaseSettlementStmts(deps, p, releaseAt)),
+      deps.db.delete(schema.settlements).where(inArray(schema.settlements.uuid, prior.map((p) => p.uuid))),
+    ]);
   }
 
   const comp = await currentComp(deps, employeeId);
   if (!comp) throw invalidArgument("the employee has no compensation on record");
-  const components = await deps.db.select().from(schema.payComponents);
+  const components = await refPayComponents(deps);
   // Apply the employee's salary structure (their earning set + rate overrides) before pricing gross, so a
   // structured employee's FnF matches payroll/encashment/tax - unstructured earnings must not inflate it.
   const effective = applyStructure(components, await structureLinesById(deps, comp.structureId));
@@ -236,7 +295,7 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // `encashable` / `disabled` flags a mid-employment cashout enforces apply at exit - summing every balance row
   // cashed out sick and casual leave that the policy says is not encashable at all.
   const encashableTypes = new Set(
-    (await deps.db.select().from(schema.leaveTypes)).filter((t) => t.encashable && !t.disabled && !t.deleteTime).map((t) => t.uuid),
+    (await refLeaveTypes(deps)).filter((t) => t.encashable && !t.disabled && !t.deleteTime).map((t) => t.uuid),
   );
   const encashableBalances = (await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, employeeId)))
     .filter((b) => encashableTypes.has(b.leaveTypeId));
@@ -295,9 +354,14 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
 
   // ---- Exit benefits --------------------------------------------------------------------------------------
   // Statutory gratuity, and the s.10(10AA) exemption on the leave being encashed, both need completed service.
-  const serviceYears = completedYearsOfService(+(emp.startDate ?? settlementDate), settleMs);
+  // TWO service figures, and they are not interchangeable: `servedYears` is the raw elapsed service the
+  // five-year QUALIFYING test is applied to, while `serviceYears` is the s.4(2)-rounded count that sizes the
+  // payout. Gating on the rounded figure paid full gratuity to anyone past four years and six months.
+  const serviceStartMs = +(emp.startDate ?? settlementDate);
+  const servedYears = yearsOfService(serviceStartMs, settleMs);
+  const serviceYears = completedYearsOfService(serviceStartMs, settleMs);
   const gratuityCfg = await getSettingValue<GratuityConfig>(deps, "gratuity", DEFAULT_GRATUITY_CONFIG);
-  const gratuityPay = gratuityAmount(comp.basePay, serviceYears, gratuityCfg);
+  const gratuityPay = gratuityAmount(comp.basePay, serviceYears, gratuityCfg, servedYears);
   // Leave encashment at exit is priced from the SAME settings a mid-employment cashout uses (basis base/gross,
   // per-day divisor), so one concept has exactly one rate. Its exempt slice is s.10(10AA).
   const { basis: encashBasisKind, divisor: encashDivisor } = await encashmentRateConfig(deps);
@@ -313,7 +377,9 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
     leaveDays,
     encashBasis,
     encashDivisor,
-    encashExempt: leaveEncashmentExemption(encashGross, comp.basePay, leaveDays, serviceYears),
+    // s.10(10AA) limbs (c) and (d) are measured on AVERAGE salary of the last ten months, not the last-drawn
+    // figure - a final-year raise would otherwise over-exempt the payout.
+    encashExempt: leaveEncashmentExemption(encashGross, comp.basePay, leaveDays, serviceYears, undefined, await averageMonthlyBasic(deps, employeeId, settlementDate)),
     noticeShortfallDays,
     reimbursements,
     gratuity: gratuityPay > 0 ? { amount: gratuityPay, exempt: gratuityExemption(gratuityPay, comp.basePay, serviceYears, gratuityCfg) } : undefined,
@@ -326,9 +392,24 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // PF and ESI on the wages it pays, PT for the month, and income tax on the chargeable part. Priced in two
   // passes because the tax base is what the first pass computes.
   const pass1 = computeSettlement(facts);
-  const salaryEarned = pass1.lines.find((l) => l.name.startsWith("Salary"))?.amount ?? 0;
+  // Match the final-month salary by its stable CODE. `name` starts with "Salary" for the arrears line the
+  // caller contributes too, so a label match picked that up whenever the final month itself paid nothing - and
+  // then added the arrears into the ESI base a second time below.
+  const salaryEarned = pass1.lines.find((l) => l.code === "SALARY")?.amount ?? 0;
   const arrearsTotal = sum2(arrearsRows.map((c) => c.arrearsAmount));
   const arrearsPfWages = sum2(arrearsRows.map((c) => c.arrearsBaseAmount));
+  // Wage this payout carries on top of the month's salary. It lifts the PT slab (state acts levy PT on the
+  // salary paid for the month) without being ESI wages, which is why the two bases are assembled separately.
+  const ptExtraWage = sum2([
+    arrearsTotal,
+    otAmount,
+    ...bonuses.map((b) => b.amount),
+    ...encashments.map((r) => r.amount),
+    pass1.lines.find((l) => l.code === "ENCASH")?.amount ?? 0,
+  ]);
+  // PT already withheld this financial year, so the annual cap is measured against the whole year, not just
+  // this payout. The leaver's own finalized runs are the only source - they are in no other.
+  const ptPaidThisFy = (await finalizedTotals(deps, fyWindow(settlementDate), undefined, employeeId)).get(employeeId)?.pt ?? 0;
   const statutory = await settlementStatutoryLines(deps, {
     components: effective,
     epfEnrolled: emp.epfEnrolled,
@@ -339,6 +420,12 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
     // ESI wages: the wage actually paid for the month plus arrears and overtime. Leave encashment, gratuity,
     // bonus and reimbursements are not ESI wages.
     esiWages: round2(salaryEarned + arrearsTotal + otAmount),
+    esiSticky: await esiContributingAtExit(deps, employeeId, settlementDate),
+    // PT: charged when the payout carries wage at all, on the monthly bracket lifted by the extra wage it
+    // pays (bonus, arrears, overtime, encashment), and capped at the year's remaining headroom.
+    ptWagePaid: round2(salaryEarned + ptExtraWage),
+    ptSlabWage: round2(monthlyGross + ptExtraWage),
+    ptYtd: ptPaidThisFy,
   });
   const tds = await settlementTds(deps, emp, settlementDate, pass1.totalTaxableEarnings, effective);
   const settlement = computeSettlement({
@@ -347,9 +434,44 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
     extraDeductions: [...statutory, ...(tds > 0 ? [{ name: "Income tax (TDS)", kind: "deduction" as const, amount: tds }] : []), ...extraDeductions],
   });
 
-  const row = (await deps.db
-    .insert(schema.settlements)
-    .values({
+  // ---- Commit -----------------------------------------------------------------------------------------
+  // The FnF is the terminal payout: everything it just priced must LEAVE its source queue, or a later run (or a
+  // recomputed settlement) pays it a second time. Every id it consumes is recorded on the settlement itself
+  // (settledJson) so releaseSettlementStmts can undo exactly this set.
+  //
+  // All of it commits in ONE atomic batch, for the reason the payroll build does: as a sequence of independent
+  // writes, a failure part-way left payables marked settled and leave days debited under a settlement whose
+  // `settledJson` was never written - so the release path had nothing to undo, and the money was both consumed
+  // and unpayable. Ids are generated up front (the settlement row and each loan ledger row) so the refs are
+  // complete before the first statement runs.
+  const at = new Date();
+  const settlementId = genId();
+  const loanWrites = loans.map((l) => ({ repaymentId: genId(), loanId: l.uuid, amount: l.outstanding }));
+  // Encashing the leave balance CONSUMES it: without this the days stay on the books, so a recomputed
+  // settlement (or a rehire) would encash the same days again. Only ENCASHABLE types are debited - they are the
+  // only ones being paid out. An explicit `leave_days` override larger than those balances pays the days HR
+  // asked for but can debit no more than the employee holds.
+  const leaveDebits: { balanceId: string; days: number }[] = [];
+  let toDebit = round2(leaveDays);
+  for (const b of encashableBalances) {
+    if (toDebit <= 0.005 || b.balanceDays <= 0) continue;
+    const take = round2(Math.min(b.balanceDays, toDebit));
+    leaveDebits.push({ balanceId: b.uuid, days: take });
+    toDebit = round2(toDebit - take);
+  }
+  const refs: SettledRefs = {
+    reimbursements: reimbClaims.map((r) => r.uuid),
+    bonuses: bonuses.map((b) => b.uuid),
+    encashments: encashments.map((e2) => e2.uuid),
+    overtime: otAmount > 0 ? overtime.map((o) => o.uuid) : [],
+    arrears: arrearsRows.map((c) => c.uuid),
+    loans: loanWrites,
+    leaveDebits,
+  };
+
+  const stmts: BatchStmt[] = [
+    deps.db.insert(schema.settlements).values({
+      uuid: settlementId,
       code: await allocOwnedCode(deps, schema.settlements, schema.settlements.employeeId, employeeId),
       employeeId,
       settlementDate,
@@ -364,53 +486,29 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
       // from here, since a leaver appears in no payroll run.
       taxableEarnings: settlement.totalTaxableEarnings,
       tds,
-    })
-    .returning())[0]!;
+      settledJson: JSON.stringify(refs),
+    }),
+  ];
+  for (const ids of chunk(refs.reimbursements, 90)) stmts.push(markReimbursementsSettledStmt(deps, ids, at));
+  for (const ids of chunk(refs.bonuses, 90)) stmts.push(markBonusesSettledStmt(deps, ids, at));
+  for (const ids of chunk(refs.encashments, 90)) stmts.push(markEncashmentsSettledStmt(deps, ids, at));
+  for (const ids of chunk(refs.overtime, 90)) stmts.push(markOvertimeSettledStmt(deps, ids, at));
+  for (const ids of chunk(refs.arrears, 90)) stmts.push(markCompArrearsSettledStmt(deps, ids, at));
+  // Loan recovery: the same ledger row a repayment always writes (run-less, like a manual repayment) plus a
+  // RELATIVE credit to `repaid`, so the loan closes and nothing can collect it twice.
+  for (const w of loanWrites) {
+    stmts.push(deps.db.insert(schema.loanRepayments).values({ uuid: w.repaymentId, loanId: w.loanId, runId: null, amount: w.amount, at }));
+    stmts.push(repaidCreditStmt(deps, w.loanId, w.amount, at));
+  }
+  for (const d of leaveDebits) {
+    stmts.push(deps.db
+      .update(schema.leaveBalances)
+      .set({ balanceDays: sql`max(0, round(${schema.leaveBalances.balanceDays} - ${d.days}, 2))`, updatedAt: at })
+      .where(eq(schema.leaveBalances.uuid, d.balanceId)));
+  }
+  await runBatch(deps.db, stmts);
+  const row = (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.uuid, settlementId)).limit(1))[0]!;
 
-  // The FnF is the terminal payout: everything it just priced must LEAVE its source queue, or a later run (or
-  // a recomputed settlement) pays it a second time. Each marker is the no-run variant - paid, but by a
-  // settlement rather than a payroll run - and every id is recorded on the settlement so releaseSettlement can
-  // undo exactly this set.
-  const at = new Date();
-  const refs: SettledRefs = {
-    reimbursements: reimbClaims.map((r) => r.uuid),
-    bonuses: bonuses.map((b) => b.uuid),
-    encashments: encashments.map((e2) => e2.uuid),
-    overtime: otAmount > 0 ? overtime.map((o) => o.uuid) : [],
-    arrears: arrearsRows.map((c) => c.uuid),
-    loans: [],
-    leaveDebits: [],
-  };
-  await markReimbursementsSettled(deps, refs.reimbursements, at);
-  await markBonusesSettled(deps, refs.bonuses, at);
-  await markEncashmentsSettled(deps, refs.encashments, at);
-  await markOvertimeSettled(deps, refs.overtime, at);
-  await markCompArrearsSettled(deps, refs.arrears, at);
-  // Loan recovery: write the same ledger row a repayment always writes (run-less, like a manual repayment) and
-  // advance `repaid` relatively, so the loan closes and nothing can collect it twice.
-  for (const l of loans) {
-    const [rep] = await deps.db.insert(schema.loanRepayments).values({ loanId: l.uuid, runId: null, amount: l.outstanding, at }).returning({ uuid: schema.loanRepayments.uuid });
-    await repaidCreditStmt(deps, l.uuid, l.outstanding, at);
-    refs.loans.push({ repaymentId: rep!.uuid, loanId: l.uuid, amount: l.outstanding });
-  }
-  // Encashing the leave balance CONSUMES it: without this the days stay on the books, so a recomputed
-  // settlement (or a rehire) would encash the same days again.
-  // Only ENCASHABLE types are debited - they are the only ones being paid out. An explicit `leave_days` override
-  // larger than those balances pays the days HR asked for but can debit no more than the employee holds.
-  let toDebit = round2(leaveDays);
-  if (toDebit > 0) {
-    for (const b of encashableBalances) {
-      if (toDebit <= 0.005 || b.balanceDays <= 0) continue;
-      const take = round2(Math.min(b.balanceDays, toDebit));
-      await deps.db
-        .update(schema.leaveBalances)
-        .set({ balanceDays: sql`max(0, round(${schema.leaveBalances.balanceDays} - ${take}, 2))`, updatedAt: at })
-        .where(eq(schema.leaveBalances.uuid, b.uuid));
-      refs.leaveDebits.push({ balanceId: b.uuid, days: take });
-      toDebit = round2(toDebit - take);
-    }
-  }
-  await deps.db.update(schema.settlements).set({ settledJson: JSON.stringify(refs) }).where(eq(schema.settlements.uuid, row.uuid));
   await audit(deps, actor, "settlement.compute", "settlements", row.uuid, { employee: `employees/${employeeId}` });
   // Let the leaver know their full & final settlement has been prepared (visible on their profile).
   if (employeeId !== actor.employeeId)

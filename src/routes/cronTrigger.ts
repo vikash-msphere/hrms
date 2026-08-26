@@ -5,6 +5,7 @@ import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { startCronRun, finishCronRun, KNOWN_CRONS } from "../cron";
 import { invalidArgument, notFound } from "../lib/errors";
+import { jsonBody } from "../http/jsonRequest";
 import { toCronRunResource } from "../http/serialize";
 
 const bodySchema = z.object({ cron: z.string() }).strict();
@@ -15,7 +16,7 @@ const bodySchema = z.object({ cron: z.string() }).strict();
 // resolves this to the custom key `cron-runs.run`, which no role's grant names, so only super_admin
 // reaches it via the `**` wildcard. The same recording (a cron_runs row) happens as a real tick.
 export const cronTrigger = new Hono<AppEnv>().post("/", async (c) => {
-  const parsed = bodySchema.safeParse(await c.req.json().catch(() => ({})));
+  const parsed = bodySchema.safeParse(await jsonBody(c));
   if (!parsed.success) throw invalidArgument("body must be { cron }");
   const { cron } = parsed.data;
   if (!(KNOWN_CRONS as readonly string[]).includes(cron)) throw invalidArgument(`unknown cron "${cron}"`);

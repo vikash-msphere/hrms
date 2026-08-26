@@ -1,4 +1,4 @@
-import { get, patch } from "@/api";
+import { readPref, writePrefDeferred } from "@/lib/prefs";
 
 // Saved per-table layout. Persisted per user via /v1/preferences, with a
 // localStorage cache for instant load and offline tolerance.
@@ -45,16 +45,12 @@ export function loadLocalPrefs(tableId?: string): TablePrefs {
 
 export async function fetchServerPrefs(tableId?: string): Promise<TablePrefs | null> {
   if (!tableId) return null;
-  try {
-    // get() routes through the coalescer, so table-pref reads fold into the page's batch + dedup.
-    const r = await get<{ value?: TablePrefs }>(`preferences/${prefKey(tableId)}`);
-    return r?.value ?? null;
-  } catch {
-    return null; // 404 (none yet) or offline
-  }
+  // Read out of the shared prefs snapshot (lib/prefs.ts): every table on the page, and the shell's own
+  // preferences, come out of ONE request instead of one per table.
+  return (await readPref<TablePrefs>(prefKey(tableId))) ?? null;
 }
 
-const timers: Record<string, ReturnType<typeof setTimeout>> = {};
+const SERVER_SAVE_DEBOUNCE_MS = 5_000;
 export function savePrefs(tableId: string | undefined, p: TablePrefs) {
   if (!tableId) return;
   try {
@@ -62,8 +58,7 @@ export function savePrefs(tableId: string | undefined, p: TablePrefs) {
   } catch {
     /* ignore */
   }
-  clearTimeout(timers[tableId]);
-  timers[tableId] = setTimeout(() => {
-    patch(`preferences/${prefKey(tableId)}`, { value: p }).catch(() => {});
-  }, 700);
+  // The server copy is for other devices, so it rides the shared deferred writer: dragging four columns is one
+  // request at the end, not four along the way (localStorage above already has it for this device).
+  writePrefDeferred(prefKey(tableId), p, SERVER_SAVE_DEBOUNCE_MS);
 }

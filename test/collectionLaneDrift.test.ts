@@ -115,6 +115,17 @@ describe("every collection is built by the factory", () => {
     expect(stranded, "a bespoke purge nothing calls - wire it as overrides.purge, or delete it if the generic purge is enough").toEqual([]);
   });
 
+  // ONE answer to "does this request carry a JSON body". `c.req.json()` parses whatever bytes arrived whatever
+  // the declared content type, while the authz body gate (protected fields, references, owner-on-create,
+  // per-field sub-resource writes) inspects JSON-family types only. A handler that reads the raw body therefore
+  // reads bodies the gate declined to look at - the request talks its way around the gate by relabelling the
+  // same bytes. That disagreement was the second half of the review's critical finding, so routes go through
+  // `jsonBody(c)` (src/http/jsonRequest.ts), which asks the SAME predicate the gate asks.
+  it("reads every route body through jsonBody, never c.req.json()", () => {
+    const raw = entries.filter((e) => /\breq\.json\s*\(/.test(e.src)).map((e) => e.name);
+    expect(raw, "read the body with `await jsonBody(c)` so the handler and the authz body gate agree a body exists").toEqual([]);
+  });
+
   // The spec is typed against its own table: `insert` / `patch` return `SetOf<T>`, so a mistyped column name is
   // a compile error instead of a value that silently never lands. That only holds while the table type reaches
   // the spec. `collectionRoutes<Input>(...)` with one type argument leaves it at the permissive default and
@@ -153,10 +164,12 @@ describe("every collection is built by the factory", () => {
   // pay component belongs. Every seeded role that may read one of these must therefore read it org-wide. This
   // is a claim about the GRANT policy (domain/grants.ts), which is where such a change would be made.
   it("keeps every generic-list catalog readable org-wide, so binding the scope cannot empty it", () => {
-    // Wire names of the collections with no route-level `list` hook. The count is pinned below, so a 16th
-    // joining the generic path fails here rather than silently escaping the check.
+    // Wire names of the collections with no route-level `list` hook. The count is pinned below, so a 17th
+    // joining the generic path fails here rather than silently escaping the check. `expense-budgets` left this
+    // lane for a filtered list (period/status scoping plus a whole-set aggregate), and binds the scope through
+    // the same `applyScope(code)` call the generic list uses.
     const GENERIC_LIST = [
-      "benefit-plans", "compliance-rules", "expense-budgets", "expense-categories", "holidays", "leave-types",
+      "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "holidays", "leave-types",
       "letter-templates", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
       "access-rules", "salary-structures", "shifts", "vendors",
     ];

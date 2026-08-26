@@ -7,7 +7,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { deriveNarrowing } from "../domain/compileGrants";
-import { clearCache } from "../lib/cache";
+import { clearCache, clearCachePrefix } from "../lib/cache";
 
 // An exact per-object read grant on one ticket, byte-identical to what `createAccessRule` produces for a
 // `scope:exact, level:read` user rule (pattern `tickets.<code>.**`).
@@ -42,6 +42,7 @@ export async function grantTicketRead(deps: Deps, ticketCode: string, userUuid: 
     effect: "allow",
   });
   clearCache(`userGrant:${userUuid}`); // bust the member's cached grant so the share takes effect promptly
+  clearCachePrefix("objRules:"); // the share IS a per-object rule: drop the cached per-caller slices too
 }
 
 export async function revokeTicketRead(deps: Deps, ticketCode: string, userUuid: string) {
@@ -53,6 +54,7 @@ export async function revokeTicketRead(deps: Deps, ticketCode: string, userUuid:
     eq(schema.accessRules.effect, "allow"),
   ));
   clearCache(`userGrant:${userUuid}`);
+  clearCachePrefix("objRules:");
 }
 
 // Share a ticket (read) with each of the given employees' user accounts.

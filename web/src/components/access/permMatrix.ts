@@ -44,7 +44,7 @@ export const COLLECTION_GROUPS: { label: string; collections: string[] }[] = [
   { label: "Engagement", collections: ["announcements", "suggestions", "events", "kudos"] },
   { label: "Recruiting", collections: ["job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers", "referrals"] },
   { label: "Onboarding & compliance", collections: ["transitions", "transition-tasks", "background-checks", "notice-periods", "org-documents", "personal-documents", "document-acknowledgements", "letter-templates", "compliance-events", "compliance-rules"] },
-  { label: "Support & ops", collections: ["tickets", "ticket-checklists", "assets", "approval-delegations", "automations", "operations", "settings"] },
+  { label: "Support & ops", collections: ["tickets", "ticket-checklists", "assets", "asset-categories", "asset-requests", "stocktakes", "approval-delegations", "automations", "operations", "settings"] },
   { label: "Capabilities", collections: ["activity", "export"] },
 ];
 export const BASE_COLLECTIONS = COLLECTION_GROUPS.flatMap((g) => g.collections);

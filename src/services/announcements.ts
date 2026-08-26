@@ -9,16 +9,23 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
-import { runBatch, chunk } from "../lib/dbBatch";
+import { searchFilter } from "./searchFilter";
+import { runBatch, insertBatches } from "../lib/dbBatch";
 import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
-import { notify, notifyAudience } from "./notifications";
+import { notify, notifyAudience, audienceEmployeeIds, type Audience } from "./notifications";
+import { renderEmail, loadEmailBrand } from "../lib/emailLayout";
 import { emitEvent } from "./eventBus";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../domain/kudos";
 import { normalizeIllustration, normalizeIllustrationLayout, normalizeRecipientLayout, type RecipientLayout, type IllustrationLayout } from "../domain/illustration";
 import { richExcerpt, richToPlain } from "../domain/richText";
 import { notifyMentions } from "./mentions";
-import { postedTitle } from "../domain/board";
+import { boardPostLink, postedTitle, boardOrderSql, boardOrderValue } from "../domain/board";
+
+// Where a board mention lands and which category it is filed under. Named once because four call sites
+// (publish, scheduled publish, edit, reply) all mean the same thing by it: the post that named you, opened
+// on its own page.
+const announcementMention = (id: string) => ({ link: boardPostLink(id), subject: `announcements/${id}`, type: "announcement.mention" }) as const;
 
 export type AnnouncementInput = {
   title?: string;
@@ -49,8 +56,30 @@ export type AnnouncementInput = {
   recipient_layout?: RecipientLayout | null; // kudos only: where the giver dragged the recipient block
   title_align?: "left" | "center" | "right" | null;
   body_valign?: "top" | "middle" | "bottom" | null;
+  // Who gets NOTIFIED: everyone (the default), one department, or nobody. An audience, not a permission - the
+  // board stays readable by whoever can read the board on all three.
+  audience_scope?: "everyone" | "department" | "none";
+  audience_department?: string | null; // required by, and only meaningful for, audience_scope: "department"
+  // Send it as email to that same audience when it goes live. Off unless asked for; refused with
+  // audience_scope: "none", because an email is a notification.
+  email_audience?: boolean;
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
+
+/**
+ * Resolve the notification audience from a write, refusing the two combinations that would be a lie.
+ *
+ * "One department" without a department would silently notify the whole company, and an email under "notify
+ * nobody" would be the loudest notification of all. Both are rejected rather than quietly corrected: the caller
+ * asked for something specific, and guessing which half they meant is how a post ends up in 300 inboxes.
+ */
+function resolveAudience(input: { audience_scope?: "everyone" | "department" | "none"; audience_department?: string | null; email_audience?: boolean }) {
+  const scope = input.audience_scope ?? (input.audience_department ? "department" : "everyone");
+  const deptId = scope === "department" ? idFromPath(input.audience_department) ?? null : null;
+  if (scope === "department" && !deptId) throw invalidArgument("audience_department is required when the audience is one department");
+  if (scope === "none" && input.email_audience) throw invalidArgument("an email is a notification: turn the audience back on, or don't email it");
+  return { audienceScope: scope, audienceDepartmentId: deptId, emailAudience: scope === "none" ? false : !!input.email_audience };
+}
 
 // The rows a caller may see on the board, as SQL. Visibility was DECIDED in the middleware (scopeFor over the
 // grant plus the manifest's state rule); this only binds it to columns: the caller's scope, minus soft-deleted,
@@ -76,8 +105,27 @@ export function readersVisibleTo(
   return !!can?.includes("update");
 }
 
-export async function listAnnouncements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  return keysetPage(deps, schema.announcements, "announcements", visibleWhere(scope, showDeleted), { max: maxPageSize, pageToken });
+export async function listAnnouncements(
+  deps: Deps,
+  scope: ListScope,
+  maxPageSize: number,
+  pageToken?: string,
+  showDeleted = false,
+  q?: string,
+) {
+  // Server-side text filter (FTS over title, body, category, kind). It ANDs onto the visibility above and can
+  // never widen it, so an author still finds their own drafts and nobody else starts seeing them.
+  const textMatch = await searchFilter(deps, "announcements", q, schema.announcements.uuid);
+  const visible = visibleWhere(scope, showDeleted);
+  const where = textMatch ? and(visible, textMatch) : visible;
+  // Paged in the board's OWN order (pinned first, then when the post went live), not by when the row was
+  // written: a feed that pages on one key and is read in another can put an "older" page's post at the top of
+  // the board and hide a pinned post behind the cursor. See domain/board.ts - the web mirrors this key.
+  return keysetPage(deps, schema.announcements, "announcements", where, {
+    max: maxPageSize,
+    pageToken,
+    order: { expr: boardOrderSql(schema.announcements), value: boardOrderValue },
+  });
 }
 
 // One row by id. Not exported: the collection factory's generic get answers the item read (services/crud.ts);
@@ -120,6 +168,15 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   // A draft: stored, not broadcast, not on anyone else's board until `:publish` (by hand, or by the cron once
   // its `publish_time` arrives). Kudos are never drafted - recognition is sent, not staged.
   const published = isKudos ? true : input.published !== false;
+  // `publish_time` is a DRAFT's schedule, nothing else. A post going out NOW is placed on the board by when it
+  // was written (the feed reads a missing publish_time as exactly that), so accepting one here would be a
+  // backdate: the post lands mid-feed, or ahead of posts that came after it. Both spellings are refused rather
+  // than quietly ignored, so an author finds out where their post will be BEFORE it goes out. See
+  // domain/board.ts for the order this protects.
+  if (publishTime) {
+    if (published) throw invalidArgument("publish_time is only for a draft - a post going out now is dated when it was written");
+    if (isNaN(+publishTime) || +publishTime <= +deps.clock.now()) throw invalidArgument("a scheduled publish time must be in the future");
+  }
   const pollClosesAt = kind === "poll" && input.closes_time ? new Date(input.closes_time) : null;
   // Recognition points are resolved server-side from the configured level (never trusted from the client), so
   // a giver can't inflate their recognition. Blank/unknown level => 0 points.
@@ -129,24 +186,78 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   const code = authorId ? await allocOwnedCode(deps, schema.announcements, schema.announcements.authorEmployeeId, authorId) : await allocFlatCode(deps, schema.announcements);
   const row = (await deps.db
     .insert(schema.announcements)
-    .values({ code, ...(id ? { id } : {}), kind, published, title: isKudos ? "" : input.title!, body: isKudos ? message : (input.body ?? ""), bodyText: richToPlain(isKudos ? message : input.body), titleAlign: input.title_align ?? null, bodyValign: input.body_valign ?? null, authorEmployeeId: authorId, publishTime, pollMultiple: kind === "poll" ? !!input.multiple : false, pollClosesAt, recipientEmployeeId: recipientId ?? null, recipientDepartmentId: recipientDeptId ?? null, value: isKudos ? (input.value?.trim() || null) : null, category: isKudos ? (input.category?.trim() || null) : null, level, points, illustration: normalizeIllustration(input.illustration), illustrationLayout: normalizeIllustrationLayout(input.illustration_layout), recipientLayout: isKudos ? normalizeRecipientLayout(input.recipient_layout) : null })
+    .values({ code, ...(id ? { id } : {}), kind, published, title: isKudos ? "" : input.title!, body: isKudos ? message : (input.body ?? ""), bodyText: richToPlain(isKudos ? message : input.body), titleAlign: input.title_align ?? null, bodyValign: input.body_valign ?? null, authorEmployeeId: authorId, publishTime, pollMultiple: kind === "poll" ? !!input.multiple : false, pollClosesAt, recipientEmployeeId: recipientId ?? null, recipientDepartmentId: recipientDeptId ?? null, ...(isKudos ? {} : resolveAudience(input)), value: isKudos ? (input.value?.trim() || null) : null, category: isKudos ? (input.category?.trim() || null) : null, level, points, illustration: normalizeIllustration(input.illustration), illustrationLayout: normalizeIllustrationLayout(input.illustration_layout), recipientLayout: isKudos ? normalizeRecipientLayout(input.recipient_layout) : null })
     .returning())[0]!;
   if (kind === "poll") {
     await deps.db.insert(schema.announcementPollOptions).values(options.map((label, i) => ({ announcementId: row.uuid, label, position: i })));
   }
   await audit(deps, actor, `${kind}.create`, "announcements", row.uuid, undefined, row);
-  // Tell the recognized party (the board is the link target): one recipient, or every member of the
-  // department (fanned out, excluding the giver if they're in it).
-  if (isKudos && recipientId) await notify(deps, { recipient: recipientId, type: "kudos.received", title: "You received kudos", body: richExcerpt(message, 200), link: "announcements", subject: `announcements/${row.uuid}`, actorId: authorId });
-  else if (isKudos && recipientDeptId) await notifyAudience(deps, { kind: "department", department: recipientDeptId }, { type: "kudos.received", title: "Your team received kudos", body: richExcerpt(message, 200), link: "announcements", subject: `announcements/${row.uuid}`, actorId: authorId }, authorId);
+  // Tell the recognized party (the kudos post itself is the link target): one recipient, or every member of
+  // the department (fanned out, excluding the giver if they're in it).
+  if (isKudos && recipientId) await notify(deps, { recipient: recipientId, type: "kudos.received", title: "You received kudos", body: richExcerpt(message, 200), link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}`, actorId: authorId });
+  else if (isKudos && recipientDeptId) await notifyAudience(deps, { kind: "department", department: recipientDeptId }, { type: "kudos.received", title: "Your team received kudos", body: richExcerpt(message, 200), link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}`, actorId: authorId }, authorId);
   // A plain board post (announcement / post / poll) notifies everyone (bar the author), so it surfaces in the
   // bell and lights the "New" marker on its card - the same recognition-board treatment, for every post type.
   // A draft notifies nobody: its broadcast happens once, when it is published.
-  else if (published) await notifyAudience(deps, { kind: "everyone" }, { type: "announcement.posted", title: postedTitle(kind), body: input.title!, link: "announcements", subject: `announcements/${row.uuid}` }, authorId);
+  // A post aimed at one department tells that department, not the company: the board still carries it, but 300
+  // people do not get a bell for something that says "Engineering" on the front. And "notify nobody" sends
+  // nothing at all - the post is on the board for whoever goes looking, which is the whole point of it.
+  else if (published && audienceOf(row)) await notifyAudience(deps, audienceOf(row)!, { type: "announcement.posted", title: postedTitle(kind), body: input.title!, link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}` }, authorId);
+  if (published) await emailAnnouncement(deps, row);
   // Anyone the body names hears about it directly, on top of whatever broadcast this kind does - being named
   // is addressed at you, which a company-wide "new post" is not. A draft stays silent until it is published.
-  if (published) await notifyMentions(deps, actor, { announcementId: row.uuid, body: row.body, title: row.title });
+  if (published) await notifyMentions(deps, actor, { ...announcementMention(row.uuid), body: row.body, title: row.title });
   return row;
+}
+
+/**
+ * Who a post notifies: everybody, one department, or nobody. `null` means nobody - the caller skips the
+ * broadcast entirely rather than sending it to an audience of zero, which would still cost the reads.
+ */
+const audienceOf = (row: { audienceScope?: string | null; audienceDepartmentId?: string | null }): Audience | null => {
+  if (row.audienceScope === "none") return null;
+  if (row.audienceScope === "department" && row.audienceDepartmentId) return { kind: "department", department: row.audienceDepartmentId };
+  return { kind: "everyone" };
+};
+
+/**
+ * Send a published post to its audience as email, once.
+ *
+ * The board reaches whoever opens the board. Some announcements have to reach people who will not - a policy
+ * change, an office closure, a payday notice - and the engine could already email an audience from a workflow
+ * rule, so the only thing missing was a checkbox on the post itself.
+ *
+ * `emailed_at` is the guard: publishing a post twice (a manual publish racing the scheduler tick) sends one
+ * email, not two. Failures are per-recipient and non-fatal - a bad address must not stop the other 200 - and the
+ * post stays published either way, because the board is the record and email is a copy of it.
+ */
+export async function emailAnnouncement(deps: Deps, row: typeof schema.announcements.$inferSelect): Promise<number> {
+  if (!row.emailAudience || row.emailedAt || row.kind === "kudos") return 0;
+  // "Notify nobody" means nobody: an email is the loudest notification there is, so it cannot outlive the
+  // decision not to send one. The write path refuses the combination; this is the belt to that braces.
+  if (!audienceOf(row)) return 0;
+  const claimed = await deps.db
+    .update(schema.announcements)
+    .set({ emailedAt: new Date(deps.clock.now()) })
+    .where(and(eq(schema.announcements.uuid, row.uuid), isNull(schema.announcements.emailedAt)))
+    .returning();
+  if (!claimed.length) return 0; // somebody else's publish already sent it
+  const ids = await audienceEmployeeIds(deps, audienceOf(row)!);
+  if (!ids.length) return 0;
+  const html = renderEmail(
+    { heading: row.title, preheader: richExcerpt(row.body, 140), bodyHtml: row.body },
+    await loadEmailBrand(deps),
+  );
+  let sent = 0;
+  const CHUNK = 90; // D1 binds ~100 params per statement
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const emps = await deps.db.select({ workEmail: schema.employees.workEmail }).from(schema.employees).where(inArray(schema.employees.uuid, ids.slice(i, i + CHUNK)));
+    for (const e of emps) {
+      if (!e.workEmail) continue;
+      try { await deps.email.send(e.workEmail, row.title, html); sent++; } catch (err) { console.error("[announcements] email send failed (non-fatal)", err); }
+    }
+  }
+  return sent;
 }
 
 // The other half of scheduling: a draft whose `publish_time` has arrived goes live on the next 5-minute tick.
@@ -174,16 +285,20 @@ export async function publishDueAnnouncements(deps: Deps): Promise<number> {
       .returning();
     if (!claimed.length) continue;
     await audit(deps, "system", `${row.kind}.publish`, "announcements", row.uuid, { scheduled: true }, claimed[0]!);
-    await notifyAudience(
-      deps,
-      { kind: "everyone" },
-      { type: "announcement.posted", title: postedTitle(row.kind), body: row.title, link: "announcements", subject: `announcements/${row.uuid}` },
-      row.authorEmployeeId,
-    );
+    const audience = audienceOf(row);
+    if (audience)
+      await notifyAudience(
+        deps,
+        audience,
+        { type: "announcement.posted", title: postedTitle(row.kind), body: row.title, link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}` },
+        row.authorEmployeeId,
+      );
+    // A scheduled post emails when it goes live, not when it was written.
+    await emailAnnouncement(deps, claimed[0]!);
     await emitEvent(deps, null, "announcement.published", { subject: `announcements/${row.uuid}`, payload: { title: row.title } });
     // A scheduled post's mentions land when it does. The "actor" is the post's own author, not the tick: it
     // is their words that named someone, and naming yourself still notifies nobody.
-    await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { announcementId: row.uuid, body: row.body, title: row.title });
+    await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { ...announcementMention(row.uuid), body: row.body, title: row.title });
     published++;
   }
   return published;
@@ -216,7 +331,20 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
     }
     set.authorEmployeeId = nextAuthorId;
   }
-  if (has("publish_time")) set.publishTime = patch.publish_time ? new Date(patch.publish_time) : null;
+  // The schedule stays editable while the post is a DRAFT, and only then - the same rule the audience fields
+  // below follow, for the same reason: a live post has already gone out, and its date is what the board sorts
+  // and prints. Moving it would relocate the post in everyone's feed after they read it. Still future-only,
+  // so a draft can't be scheduled into the past to bury it. A no-op patch (the value the row already has, or
+  // clearing an absent one) passes: the composer omits the field on a live post, so only a real change is
+  // ever refused.
+  if (has("publish_time")) {
+    const next = patch.publish_time ? new Date(patch.publish_time) : null;
+    if (+(next ?? 0) !== +(row.publishTime ?? 0)) {
+      if (row.published) throw invalidArgument("a published post's publish time can't be changed");
+      if (next && (isNaN(+next) || +next <= +deps.clock.now())) throw invalidArgument("a scheduled publish time must be in the future");
+      set.publishTime = next;
+    }
+  }
   // A poll's deadline can be moved, set, or cleared - this is how a poll is closed early (set to now) or
   // reopened (cleared). Options and the single/multi mode stay fixed at creation.
   if (has("closes_time") && row.kind === "poll") set.pollClosesAt = patch.closes_time ? new Date(patch.closes_time) : null;
@@ -229,6 +357,18 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   if (has("recipient_layout") && row.kind === "kudos") set.recipientLayout = normalizeRecipientLayout(patch.recipient_layout);
   if (has("title_align")) set.titleAlign = patch.title_align ?? null;
   if (has("body_valign")) set.bodyValign = patch.body_valign ?? null;
+  // Audience and the email decision stay editable while the post is a DRAFT, and only then: both are about who
+  // hears about it, and a live post has already told them. Kudos have a recipient, not an audience.
+  //
+  // Resolved against the row plus the patch, so changing one of the three fields cannot leave an incoherent
+  // combination behind ("one department" with the department cleared, an email with the audience turned off).
+  if (row.kind !== "kudos" && !row.published && (has("audience_scope") || has("audience_department") || has("email_audience"))) {
+    Object.assign(set, resolveAudience({
+      audience_scope: has("audience_scope") ? patch.audience_scope : (row.audienceScope as "everyone" | "department" | "none"),
+      audience_department: has("audience_department") ? patch.audience_department : (row.audienceDepartmentId ? `departments/${row.audienceDepartmentId}` : null),
+      email_audience: has("email_audience") ? patch.email_audience : row.emailAudience,
+    }));
+  }
   // Recognition meta belongs to a kudos row only; on any other kind these are meaningless, so they are ignored
   // rather than stored. `points` is re-derived from the new level exactly as it was at creation - never taken from
   // the client - so correcting a level moves the leaderboard honestly and a blank/unknown level scores 0.
@@ -245,7 +385,7 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set), updated);
   // An edit notifies the people it NEWLY names (the old body is the baseline, so nobody hears about the same
   // mention twice). A draft stays silent - publishing is what tells anyone anything about it.
-  if (updated.published) await notifyMentions(deps, actor, { announcementId: id, body: updated.body, previousBody: row.body, title: updated.title });
+  if (updated.published) await notifyMentions(deps, actor, { ...announcementMention(id), body: updated.body, previousBody: row.body, title: updated.title });
   return updated;
 }
 
@@ -303,11 +443,9 @@ export async function markAllAnnouncementsRead(deps: Deps, actor: AppUser, scope
   );
   const missing = visible.filter((a) => !already.has(a.uuid));
   if (!missing.length) return { marked: 0 };
-  // Two bound params per row (announcement + employee), so ~8 rows a statement stays clear of D1's 100.
-  await runBatch(
-    deps.db,
-    chunk(missing, 8).map((rows) => deps.db.insert(schema.announcementReads).values(rows.map((a) => ({ announcementId: a.uuid, employeeId: me })))),
-  );
+  // Split under D1's bound-parameter cap, measured rather than guessed (see insertBatches).
+  const reads = missing.map((a) => ({ announcementId: a.uuid, employeeId: me }));
+  await runBatch(deps.db, insertBatches(reads, (rows) => deps.db.insert(schema.announcementReads).values(rows)));
   // No audit line, for the same reason markAnnouncementRead writes none: a read receipt is the caller's own
   // state, not an accountability event (see NO_AUDIT_VERBS).
   return { marked: missing.length };
@@ -384,9 +522,9 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   await audit(deps, actor, "announcement.reply", "announcements", id);
   // Notify the post's author that someone replied (skip replying to your own post).
   if (row.authorEmployeeId && row.authorEmployeeId !== actor.employeeId)
-    await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: "announcements", subject: `announcements/${id}`, actorId: actor.employeeId });
+    await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: boardPostLink(id), subject: `announcements/${id}`, actorId: actor.employeeId });
   // Someone named in the reply hears about it too - that is how a thread pulls in the person who can answer.
-  await notifyMentions(deps, actor, { announcementId: id, body: text, title: row.title });
+  await notifyMentions(deps, actor, { ...announcementMention(id), body: text, title: row.title });
   return row;
 }
 

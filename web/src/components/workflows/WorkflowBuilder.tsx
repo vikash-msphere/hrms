@@ -15,7 +15,7 @@ const DEFAULT_SCHEDULE: Schedule = { freq: "weekly", day: 1, scope: "once" };
 
 // The no-code builder body: name, trigger, condition, actions - a view over the same AutomationDraft the API
 // takes. A "JSON" toggle flips condition+actions to a raw editor (the power-user escape hatch) and back.
-export function WorkflowBuilder({ draft, onChange, meta }: { draft: AutomationDraft; onChange: (d: AutomationDraft) => void; meta: WorkflowMeta | null }) {
+export function WorkflowBuilder({ draft, onChange, meta, nameError }: { draft: AutomationDraft; onChange: (d: AutomationDraft) => void; meta: WorkflowMeta | null; nameError?: string }) {
   const [json, setJson] = useState(false);
   const [jsonText, setJsonText] = useState("");
   const [jsonErr, setJsonErr] = useState<string | null>(null);
@@ -36,9 +36,13 @@ export function WorkflowBuilder({ draft, onChange, meta }: { draft: AutomationDr
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Name"><Input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. Welcome new hires" /></Field>
-        <Field label="Description"><Input value={draft.description ?? ""} onChange={(e) => set({ description: e.target.value })} placeholder="What this does" /></Field>
+      {/* One column on a phone: two free-text fields side by side leave ~160px each, which is not enough
+          to read back a rule name like "Welcome new hires" while typing it. */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        {/* `field` on both: inside WriteDialog's AccessScope this gives each one its manage-access icon, and a
+            400 the server pins to `name` lands here rather than only above the form. */}
+        <Field label="Name" field="name" error={nameError} hint="How this rule reads in the list and in the run log."><Input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. Welcome new hires" /></Field>
+        <Field label="Description" field="description"><Input value={draft.description ?? ""} onChange={(e) => set({ description: e.target.value })} placeholder="What this does" /></Field>
       </div>
 
       <Step n={1} title="When this happens" desc="the event - or schedule - that starts the rule">

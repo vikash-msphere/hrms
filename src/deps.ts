@@ -14,13 +14,18 @@ import { makeDispatch, type Dispatch } from "./services/internalDispatch";
 export type DB = ReturnType<typeof drizzle<typeof schema>>;
 // `webhook` is optional: automation egress is OFF unless an operator wires a sender (allowlisted destinations).
 // `dispatch` runs an automation `apiCall` action through the app's own middleware as the system principal.
-// `automationBudget` bounds the TOTAL automation dispatches per originating request. It is a mutable counter
+// `automationBudget` bounds the TOTAL automation dispatches per originating action - a request, or one cron
+// subtask (which re-arms it via automationEngine.withDispatchBudget; without that the nightly tick's single
+// Deps made 50 the budget for the whole night). `dropped` counts what the ceiling refused, so a caller can
+// report it instead of leaving it in the logs. It is a mutable counter
 // shared across the request's Deps; because an automation `apiCall` re-dispatches through the app reusing this
 // same Deps (env.__sharedCtx.deps), a rule whose action re-triggers its own event cannot loop unbounded.
+// `refCache` memoizes the small reference tables for ONE request (lib/refData.ts); it is set by the request
+// middleware, so Deps built outside a request read those tables fresh every time.
 // `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
 // the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
 // reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
-export type Deps = { db: DB; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number }; trace?: string };
+export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string };
 
 // Route the request's reads to the nearest D1 read replica when the runtime supports Sessions
 // (production); fall back to the plain binding where it doesn't (miniflare, the local/test runtime,

@@ -13,7 +13,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { getSettingValue } from "./settings";
-import { DEFAULT_TRANSITION_TEMPLATES, type TaskAssignee } from "../domain/transitions";
+import { DEFAULT_TRANSITION_TEMPLATES, type TaskAssignee, type TransitionTemplate } from "../domain/transitions";
 import { notify } from "./notifications";
 
 export type TransitionInput = {
@@ -89,6 +89,26 @@ async function spawnBackgroundCheck(deps: Deps, transitionId: string, subjectId:
   return row.uuid;
 }
 
+// Look a template up by id in settings/transition-templates (falling back to the shipped defaults). A create
+// tolerates a miss (an automation naming a template HR has since renamed still opens the process, empty
+// rather than not at all); an update, which exists to fill that empty checklist, insists on a real one.
+async function findTemplate(deps: Deps, templateId: string) {
+  return (await getSettingValue(deps, "transition-templates", DEFAULT_TRANSITION_TEMPLATES)).templates.find((t) => t.id === templateId);
+}
+
+// Write a template's tasks onto a transition. Used by a create that chose one, and by an update that fills a
+// checklist that was opened empty (a hire whose onboarding was started before anyone picked a template).
+async function instantiateTemplate(deps: Deps, actor: AppUser, tpl: TransitionTemplate, transitionId: string, subjectId: string, managerId: string | null, anchorMs: number) {
+  let i = 0;
+  for (const t of tpl.tasks) {
+    const assigneeId = resolveAssignee(t.assignee, subjectId, managerId, actor.employeeId ?? null);
+    const dueDate = !Number.isNaN(anchorMs) && t.due_offset_days != null ? new Date(anchorMs + t.due_offset_days * DAY) : null;
+    // A bg_check task opens a background-verification check for the subject and links the task to it.
+    const bgId = t.bg_check ? await spawnBackgroundCheck(deps, transitionId, subjectId, t.bg_check) : null;
+    await insertTask(deps, transitionId, subjectId, assigneeId, t.title, t.description ?? null, dueDate, i++, bgId, t.doc_type ?? null, actor.employeeId ?? null);
+  }
+}
+
 export async function createTransition(deps: Deps, actor: AppUser, input: TransitionInput, id?: string) {
   const subjectId = idFromPath(input.employee);
   if (!subjectId) throw invalidArgument("employee is required");
@@ -98,9 +118,7 @@ export async function createTransition(deps: Deps, actor: AppUser, input: Transi
   if (!subject) throw notFound("employee not found");
   const anchorMs = input.anchor_date ? dayMs(input.anchor_date) : NaN;
 
-  const tpl = input.template
-    ? (await getSettingValue(deps, "transition-templates", DEFAULT_TRANSITION_TEMPLATES)).templates.find((t) => t.id === input.template)
-    : undefined;
+  const tpl = input.template ? await findTemplate(deps, input.template) : undefined;
   const name = input.name?.trim() || tpl?.name || (kind === "onboarding" ? "Onboarding" : "Offboarding");
 
   const row = (await deps.db.insert(schema.transitions).values({
@@ -112,16 +130,7 @@ export async function createTransition(deps: Deps, actor: AppUser, input: Transi
     anchorDate: Number.isNaN(anchorMs) ? null : new Date(anchorMs),
   }).returning())[0]!;
 
-  if (tpl) {
-    let i = 0;
-    for (const t of tpl.tasks) {
-      const assigneeId = resolveAssignee(t.assignee, subjectId, subject.managerId ?? null, actor.employeeId ?? null);
-      const dueDate = !Number.isNaN(anchorMs) && t.due_offset_days != null ? new Date(anchorMs + t.due_offset_days * DAY) : null;
-      // A bg_check task opens a background-verification check for the subject and links the task to it.
-      const bgId = t.bg_check ? await spawnBackgroundCheck(deps, row.uuid, subjectId, t.bg_check) : null;
-      await insertTask(deps, row.uuid, subjectId, assigneeId, t.title, t.description ?? null, dueDate, i++, bgId, t.doc_type ?? null, actor.employeeId ?? null);
-    }
-  }
+  if (tpl) await instantiateTemplate(deps, actor, tpl, row.uuid, subjectId, subject.managerId ?? null, anchorMs);
   await audit(deps, actor, `transition.create.${kind}`, "transitions", row.uuid, undefined, row);
   // Welcome/goodbye the subject: one summary notification (their individual tasks are surfaced in-app).
   if (subjectId !== actor.employeeId)
@@ -140,7 +149,25 @@ export async function updateTransition(deps: Deps, actor: AppUser, id: string, p
     if (patch.anchor_date && Number.isNaN(dayMs(patch.anchor_date))) throw invalidArgument("anchor_date is invalid");
     set.anchorDate = patch.anchor_date ? new Date(dayMs(patch.anchor_date)) : null;
   }
+  // Choosing a template after the fact: a process opened without one (the hire hand-off, an automation whose
+  // template id no longer exists) has an empty checklist, and this is how it gets filled - once. Re-applying
+  // onto tasks that already exist would double the checklist, so that is refused rather than merged.
+  let tpl: TransitionTemplate | undefined;
+  if (patch.template) {
+    if (row.state !== "ACTIVE") throw failedPrecondition("only an active process can be given a checklist");
+    const existing = (await deps.db.select({ uuid: schema.transitionTasks.uuid }).from(schema.transitionTasks).where(eq(schema.transitionTasks.transitionId, id)).limit(1))[0];
+    if (existing) throw failedPrecondition("this process already has a checklist - add tasks individually instead");
+    tpl = await findTemplate(deps, patch.template);
+    if (!tpl) throw invalidArgument("template not found");
+    if (tpl.kind !== row.kind) throw invalidArgument(`that template is for ${tpl.kind}, not ${row.kind}`);
+    // A process opened without a template carries the generic name; the chosen template renames it.
+    if (!has("name") && (row.name === "Onboarding" || row.name === "Offboarding")) set.name = tpl.name;
+  }
   const updated = (await deps.db.update(schema.transitions).set(set).where(eq(schema.transitions.uuid, id)).returning())[0]!;
+  if (tpl) {
+    const subject = (await deps.db.select({ managerId: schema.employees.managerId }).from(schema.employees).where(eq(schema.employees.uuid, row.employeeId)).limit(1))[0];
+    await instantiateTemplate(deps, actor, tpl, id, row.employeeId, subject?.managerId ?? null, updated.anchorDate ? +new Date(updated.anchorDate) : NaN);
+  }
   await audit(deps, actor, "transition.update", "transitions", id, diffMeta(row, updated, set), updated);
   return updated;
 }

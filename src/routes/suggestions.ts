@@ -1,7 +1,8 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
+import { jsonBody } from "../http/jsonRequest";
+import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, mergeSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
 import { toSuggestionResource } from "../http/serialize";
 import { invalidArgument } from "../lib/errors";
 
@@ -14,6 +15,7 @@ const writeSchema = z
   })
   .strict();
 const respondSchema = z.object({ status: z.string().max(64).optional(), response: z.string().max(10_000).nullable().optional() }).strict();
+const mergeSchema = z.object({ into: z.string().min(1) }).strict();
 
 // The suggestion box. The create carries anonymity (the submitter is stored but hidden from readers), HR
 // triages with :respond, and everyone else moves the count with :upvote / :downvote.
@@ -43,12 +45,13 @@ export const suggestions = collectionRoutes<SuggestionInput, typeof schema.sugge
   verbs: {
     respond: {
       run: async (deps, user, id, _body, c) => {
-        const parsed = respondSchema.safeParse(await c.req.json().catch(() => ({})));
+        const parsed = respondSchema.safeParse(await jsonBody(c));
         if (!parsed.success) throw invalidArgument("body must be { status?, response? }");
         return respondSuggestion(deps, user, id, parsed.data);
       },
     },
     upvote: { run: (deps, user, id) => voteSuggestion(deps, user, id, 1) },
     downvote: { run: (deps, user, id) => voteSuggestion(deps, user, id, -1) },
+    merge: { schema: mergeSchema, run: (deps, user, id, body) => mergeSuggestion(deps, user, id, body.into) },
   },
 });

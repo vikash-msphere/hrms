@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
+import { contentDisposition } from "../http/contentDisposition";
 import { signLetter } from "../services/letterSign";
+import { remindAckPending } from "../services/documentAck";
 import { refreshEsign } from "../services/esign/callback";
 import type { makeDocumentService } from "../services/documentService";
 
@@ -21,11 +23,16 @@ const writeSchema = z.object({
     .object({ page: z.number(), x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number() })
     .nullable()
     .optional(),
-  published: z.boolean().optional(),
-  // org-documents only: who the document is for.
-  audience: z.enum(["everyone", "department", "role"]).nullable().optional(),
-  audience_ref: z.string().nullable().optional(),
-  audience_refs: z.array(z.string()).optional(),
+  published: z.boolean().optional(), // create as draft (false) instead of the published default
+  // org-documents only: who to notify on publish (everyone / a department / specific employees). If the doc
+  // requires acknowledgement, the notification is an action item ("review & sign").
+  notify_audience: z
+    .object({
+      kind: z.enum(["everyone", "department", "employees", "none"]),
+      department: z.string().nullable().optional(),
+      employees: z.array(z.string()).optional(),
+    })
+    .optional(),
 }).strict();
 
 type Svc = ReturnType<typeof makeDocumentService>;
@@ -58,23 +65,28 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
     verbs: {
       // The signatory name comes from the employee's legal name on file (not the request) - see the service.
       acknowledge: { run: (deps, user, id) => svc.acknowledge(deps, user, id) },
+      // Chase the outstanding signatures on a policy: everyone still pending, or one person (org-documents
+      // only; the service rejects a document that doesn't require acknowledgement).
+      remindAck: {
+        schema: z.object({ employee: z.string().nullable().optional() }).strict(),
+        run: (deps, user, id, body) => remindAckPending(deps, user, id, body),
+      },
       // In-place e-signature of a generated letter/contract (personal-documents only; owner-only in service).
       sign: { run: (deps, user, id) => signLetter(deps, user, id) },
       // Poll the e-sign vendor for a pending document's status and apply it (fallback to the webhook).
       refreshEsign: { run: (deps, user, id) => refreshEsign(deps, user, id) },
       upload: {
+        // An oversized body is already refused from its declared length by middleware/bodyLimit.ts, before this
+        // (or any other buffering route) reads it; the service's own byte assertion covers a chunked body.
         run: async (deps, user, id, _body, c) =>
           svc.upload(deps, user, id, await c.req.arrayBuffer(), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
       },
       download: {
         raw: async (c, id) => {
           const { bytes, fileName } = await svc.download(c.get("deps"), c.get("user"), id);
-          // Name the attachment (quotes/backslashes stripped so the header can't be broken out of). Generated
-          // rows carry no uploaded name, so the service derives one from the title + content type - always
-          // with an extension.
-          const safeName = fileName.replace(/["\\\r\n]/g, "");
-          const disposition = `attachment; filename="${safeName.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
-          return c.body(bytes, 200, { "Content-Type": "application/octet-stream", "Content-Disposition": disposition });
+          // Generated rows carry no uploaded name, so the service derives one from the title + content type -
+          // always with an extension. Header quoting is http/contentDisposition.ts's business.
+          return c.body(bytes, 200, { "Content-Type": "application/octet-stream", "Content-Disposition": contentDisposition("attachment", fileName) });
         },
       },
     },

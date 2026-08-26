@@ -38,8 +38,10 @@ export function ConditionBuilder({ meta, triggerType, value, onChange }: { meta:
           <span className="text-muted-foreground">of these</span>
         </div>
       )}
+      {/* field / operator / value / remove. The two selects alone are 288px of stated width, so on a
+          phone the row wraps into two lines rather than squeezing four controls into 328px. */}
       {rows.map((r, i) => (
-        <div key={i} className="flex items-center gap-1.5">
+        <div key={i} className="flex flex-wrap items-center gap-1.5">
           <Select value={r.field} onValueChange={(v) => setRow(i, { field: v })}>
             <SelectTrigger className="h-9 w-40"><SelectValue /></SelectTrigger>
             <SelectContent>{fields.map((f) => <SelectItem key={f.name} value={f.name}>{f.name}</SelectItem>)}</SelectContent>
@@ -51,7 +53,7 @@ export function ConditionBuilder({ meta, triggerType, value, onChange }: { meta:
           {!NO_VALUE.includes(r.op) && (
             <Input className="h-9 flex-1" value={String(r.value ?? "")} onChange={(e) => setRow(i, { value: coerce(e.target.value) })} placeholder="value" />
           )}
-          <Button type="button" variant="ghost" size="icon" onClick={() => delRow(i)}><X className="h-4 w-4" /></Button>
+          <Button type="button" variant="ghost" size="icon" aria-label="Remove this condition" onClick={() => delRow(i)}><X className="h-4 w-4" /></Button>
         </div>
       ))}
       <Button type="button" variant="outline" size="sm" onClick={addRow}><Plus className="mr-1 h-4 w-4" /> Add condition</Button>

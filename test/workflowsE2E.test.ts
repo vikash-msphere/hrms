@@ -48,7 +48,8 @@ beforeAll(async () => {
 const TABLES = [
   schema.ticketTodos, schema.tickets, schema.notifications, schema.transitions, schema.checkIns, schema.goals,
   schema.bonuses, schema.workflowInstances, schema.jobs, schema.automationRuns, schema.eventLog,
-  schema.automations, schema.jobRequisitions, schema.overtimeRequests, schema.backgroundChecks, schema.users, schema.employees, schema.roles,
+  schema.automations, schema.jobRequisitions, schema.overtimeRequests, schema.backgroundChecks,
+  schema.assetRequests, schema.assets, schema.assetCategories, schema.users, schema.employees, schema.roles,
 ];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
@@ -156,17 +157,19 @@ describe("workflows e2e: condition gate + apiCall PATCH (close requisition)", ()
     await deps.db.insert(schema.jobRequisitions).values({ uuid, code: `jr-${genId().slice(0, 4)}`, title: "Engineer", status: "open" });
     return uuid;
   }
+  // Keyed on `application.hired`, not `offer.accepted`: a team that hires straight off the pipeline board never
+  // writes an offer down, and their requisition has to close too.
   it("marks the requisition filled when openings <= 1", async () => {
     const req = await seedReq();
     await seedRule("Close the requisition when filled");
-    await emitEvent(deps, actor, "offer.accepted", { subject: `offers/${genId()}`, payload: { requisitionId: req, openings: 1 } });
+    await emitEvent(deps, actor, "application.hired", { subject: `applications/${genId()}`, payload: { requisitionId: req, openings: 1 } });
     const row = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, req)))[0]!;
     expect(row.status).toBe("filled");
   });
   it("leaves it open when openings > 1 (condition fails)", async () => {
     const req = await seedReq();
     await seedRule("Close the requisition when filled");
-    await emitEvent(deps, actor, "offer.accepted", { subject: `offers/${genId()}`, payload: { requisitionId: req, openings: 3 } });
+    await emitEvent(deps, actor, "application.hired", { subject: `applications/${genId()}`, payload: { requisitionId: req, openings: 3 } });
     const row = (await deps.db.select().from(schema.jobRequisitions).where(eq(schema.jobRequisitions.uuid, req)))[0]!;
     expect(row.status).toBe("open");
   });
@@ -278,5 +281,106 @@ describe("workflows e2e: condition gate on a real field (extended-leave coverage
 
     await emitEvent(deps, actor, "leave.approved", { subject: `leave-requests/${genId()}`, employeeId: emp, payload: { days: 7 } });
     expect((await notifsFor(mgr)).length).toBe(1);
+  });
+});
+
+// The asset-request fulfilment chain is the most connected rule shipped: it creates a record in another module,
+// remembers that record's path across a durable suspend, and then acts on it again when the hand-over happens.
+// If templating over the results bag, `waitFor` correlation, or a verb call on a captured path ever break, an
+// approved request would quietly stop being chased - so all three are asserted here against the real engine.
+describe("workflows e2e: asset request -> hand-over ticket -> auto-resolve", () => {
+  it("opens an IT ticket on approval, then resolves it when the asset is handed over", async () => {
+    const mgr = await seedEmployee({ code: "04-970" });
+    const emp = await seedEmployee({ code: "04-971", managerId: mgr });
+    await seedRule("Asset request approved: open the hand-over ticket, then chase it");
+    const request = `asset-requests/${genId()}`;
+
+    await emitEvent(deps, actor, "assetRequest.approved", { subject: request, employeeId: emp, payload: { categoryId: genId() } });
+
+    const tickets = await ticketsFor(emp);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.category).toBe("it");
+    expect(tickets[0]!.state).toBe("OPEN");
+    // The requester is told which ticket carries their kit - the path came back from the create call.
+    const told = await notifsFor(emp);
+    expect(told.length).toBe(1);
+    expect(told[0]!.body).toContain("tickets/");
+    // The chain is suspended, waiting for the hand-over rather than polling for it.
+    const waiting = await deps.db.select().from(schema.workflowInstances);
+    expect(waiting.length).toBe(1);
+    expect(waiting[0]!.status).toBe("waiting");
+    expect(waiting[0]!.awaitedTypes ?? "").toContain("assetRequest.issued");
+
+    // Handing the asset over resumes the chain: the ticket resolves itself and the holder is told to scan.
+    await emitEvent(deps, actor, "assetRequest.issued", { subject: request, employeeId: emp, payload: { categoryId: genId(), assetId: genId() } });
+
+    const resumed = await deps.db.select().from(schema.workflowInstances);
+    expect(resumed[0]!.status).toBe("done");
+    const resolved = await ticketsFor(emp);
+    expect(resolved.length).toBe(1); // resolved, not a second ticket
+    expect(resolved[0]!.state).toBe("RESOLVED");
+    // Three messages by now: the rule's "approved", the rule's "scan the tag", and the ticket service's own
+    // "your ticket was resolved" (the resolve went through the real endpoint, so its side effects happened too).
+    const after = await notifsFor(emp);
+    expect(after.length).toBe(3);
+    expect(after.some((n) => n.title === "Your kit is ready")).toBe(true);
+  });
+
+  it("stays suspended when somebody else's request is issued (correlation is per employee)", async () => {
+    const emp = await seedEmployee({ code: "04-972" });
+    const other = await seedEmployee({ code: "04-973" });
+    await seedRule("Asset request approved: open the hand-over ticket, then chase it");
+
+    await emitEvent(deps, actor, "assetRequest.approved", { subject: `asset-requests/${genId()}`, employeeId: emp, payload: { categoryId: genId() } });
+    await emitEvent(deps, actor, "assetRequest.issued", { subject: `asset-requests/${genId()}`, employeeId: other, payload: { categoryId: genId() } });
+
+    const insts = await deps.db.select().from(schema.workflowInstances);
+    expect(insts[0]!.status).toBe("waiting"); // the other person's hand-over is not this request's
+    expect((await ticketsFor(emp))[0]!.state).toBe("OPEN");
+  });
+});
+
+describe("workflows e2e: damaged-on-receipt raises a ticket (condition on the scan's own report)", () => {
+  it("ignores a good condition and raises a high-priority ticket for a damaged one", async () => {
+    const emp = await seedEmployee({ code: "04-974" });
+    await seedRule("Asset arrived damaged: raise it with IT");
+    const asset = `assets/${genId()}`;
+
+    await emitEvent(deps, actor, "asset.acknowledged", { subject: asset, employeeId: emp, payload: { assetTag: "MS-LAP-001", condition: "good", scanned: true, waitedDays: 1 } });
+    expect((await ticketsFor(emp)).length).toBe(0);
+
+    await emitEvent(deps, actor, "asset.acknowledged", { subject: asset, employeeId: emp, payload: { assetTag: "MS-LAP-001", condition: "damaged", scanned: true, waitedDays: 1 } });
+    const tickets = await ticketsFor(emp);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.priority).toBe("high");
+    // The tag names the physical thing - a ticket that can't say which laptop is useless to whoever picks it up.
+    expect(tickets[0]!.subject).toContain("MS-LAP-001");
+    expect(tickets[0]!.description).toContain("damaged");
+  });
+});
+
+describe("workflows e2e: offboarding reclaim ticket counts the kit from the inventory itself", () => {
+  it("reads what the leaver still holds and puts that number in the ticket", async () => {
+    const leaver = await seedEmployee({ code: "04-975" });
+    const category = genId();
+    await deps.db.insert(schema.assetCategories).values({ uuid: category, code: "01", name: "Laptop", tagCode: "LAP" });
+    for (const tag of ["MS-LAP-001", "MS-LAP-002"]) {
+      await deps.db.insert(schema.assets).values({ uuid: genId(), code: `as-${genId().slice(0, 4)}`, assetTag: tag, name: "MacBook", categoryId: category, assignedTo: leaver, status: "assigned" });
+    }
+    await seedRule("Offboarding closed: reclaim whatever kit is still on their record");
+
+    await emitEvent(deps, actor, "transition.completed", { subject: `transitions/${genId()}`, employeeId: leaver, payload: { kind: "offboarding" } });
+
+    const tickets = await ticketsFor(leaver);
+    expect(tickets.length).toBe(1);
+    expect(tickets[0]!.subject).toContain("2 asset(s)"); // the GET's own answer, templated in
+    expect(tickets[0]!.priority).toBe("high");
+  });
+
+  it("does nothing for an onboarding transition (the condition gates on kind)", async () => {
+    const emp = await seedEmployee({ code: "04-976" });
+    await seedRule("Offboarding closed: reclaim whatever kit is still on their record");
+    await emitEvent(deps, actor, "transition.completed", { subject: `transitions/${genId()}`, employeeId: emp, payload: { kind: "onboarding" } });
+    expect((await ticketsFor(emp)).length).toBe(0);
   });
 });

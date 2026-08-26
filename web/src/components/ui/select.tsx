@@ -14,14 +14,23 @@ const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-9 w-full items-center justify-between rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      // coarse:min-h-10 mirrors the phone floor index.css puts on native inputs, so a form's selects and its
+      // text fields end up the same height on touch. `min-h` rather than `h` so a caller who deliberately
+      // sized a dense trigger keeps its layout and only gains the target.
+      // `min-w-0` for the same reason as ui/input.tsx: the trigger's label is a flex child of this box
+      // and the box is usually a flex child of a filter row, so without a zeroed floor the row's width
+      // is the sum of every option label it might show. `truncate` on the label so the shrink degrades
+      // into an ellipsis rather than the text sliding out under the chevron.
+      "flex h-9 w-full min-w-0 items-center justify-between gap-1 rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 coarse:min-h-10 [&>span]:line-clamp-1 [&>span]:truncate [&>span]:text-left",
       className
     )}
     {...props}
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="h-4 w-4 opacity-50" />
+      {/* shrink-0: the chevron is the affordance that says "this is a select". When the trigger is
+          squeezed it is the label that gives, never the marker. */}
+      <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ));
@@ -35,7 +44,10 @@ const SelectContent = React.forwardRef<
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
-        "relative z-50 max-h-72 min-w-[8rem] overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        // The height ceiling is whatever Radix measured as available to the trigger, capped at 18rem - so a
+        // long list on a short phone screen scrolls inside the popup instead of being clipped by the viewport,
+        // and a trigger near the bottom of the screen still opens upward with its full list reachable.
+        "relative z-50 max-h-[min(18rem,var(--radix-select-content-available-height))] min-w-[8rem] overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
         position === "popper" && "data-[side=bottom]:translate-y-1 data-[side=top]:-translate-y-1",
         className
       )}
@@ -43,7 +55,12 @@ const SelectContent = React.forwardRef<
       {...props}
     >
       <SelectPrimitive.Viewport
-        className={cn("p-1", position === "popper" && "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]")}
+        // max-w keeps a long option label from pushing the popup off a narrow screen; it wraps or ellipsises
+        // inside instead (see SelectItem).
+        className={cn(
+          "max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain p-1",
+          position === "popper" && "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]",
+        )}
       >
         {children}
       </SelectPrimitive.Viewport>

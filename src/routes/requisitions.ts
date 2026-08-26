@@ -14,6 +14,7 @@ const writeSchema = z
     employment_type: z.string().nullable().optional(),
     openings: z.number().int().positive().nullable().optional(),
     description: z.string().nullable().optional(),
+    pay_grade: z.string().nullable().optional(),
     status: z.string().nullable().optional(),
     opened_date: z.string().nullable().optional(),
     closed_date: z.string().nullable().optional(),

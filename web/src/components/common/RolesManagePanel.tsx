@@ -12,7 +12,10 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/common/Field";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { AccessAction } from "@/components/access/AccessAction";
+import { cloneAccessRules } from "@/components/access/cloneRules";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { SubjectPermissionsDialog } from "@/components/access/SubjectPermissionsDialog";
 import { useToast } from "@/components/ui/use-toast";
@@ -20,6 +23,11 @@ import { useConfirm } from "@/components/common/confirm";
 
 type Role = { path: string; name: string; label: string; protected: boolean; etag?: string };
 const NAME_RE = /^[a-z][a-z0-9_]{1,40}$/; // mirrors the server (lower_snake, 2-41 chars)
+// "Finance Lead" -> "finance_lead": the identifier nearly always is the display name, so it is derived
+// rather than asked for twice, and stops being derived the moment somebody types one by hand.
+const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 41);
+// "Start from" sentinel: a role built from scratch rather than copied.
+const NO_CLONE = "__none__";
 
 // Manage the role catalog (definitions). A new role starts with NO permissions (deny-all); grant access to
 // it from the Permissions tab. Assigning users to a role is the Users tab. Deletion is guarded server-side
@@ -30,12 +38,13 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const canWrite = usePermission("roles.write");
   const canManagePerms = usePermission("access-rules.write");
   const { toast } = useToast();
-  const [busy, setBusy] = useState(false);
   const confirm = useConfirm();
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Role | null>(null);
-  const [form, setForm] = useState({ name: "", label: "", protected: false });
+  // `touchedName` is form state rather than a ref so the discard guard sees the same object it always did;
+  // it only records whether the identifier was typed by hand, which stops the display name overwriting it.
+  const [form, setForm] = useState({ name: "", label: "", protected: false, touchedName: false, cloneFrom: NO_CLONE });
   const [permRole, setPermRole] = useState<Role | null>(null);
 
   const userCount = useMemo(() => {
@@ -46,16 +55,20 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
 
   function openCreate() {
     setEditing(null);
-    setForm({ name: "", label: "", protected: false });
+    setForm({ name: "", label: "", protected: false, touchedName: false, cloneFrom: NO_CLONE });
     setOpen(true);
   }
   function openEdit(r: Role) {
     setEditing(r);
-    setForm({ name: r.name, label: r.label, protected: r.protected });
+    setForm({ name: r.name, label: r.label, protected: r.protected, touchedName: true, cloneFrom: NO_CLONE });
     setOpen(true);
   }
 
   const nameValid = editing ? true : NAME_RE.test(form.name.trim());
+  // Both clashes are worth catching here rather than at the server's 409: an identifier collision fails the
+  // save, and a duplicate display name succeeds and then leaves two identical-looking roles in every picker.
+  const duplicateName = !editing && !!form.name.trim() && roles.some((r) => r.name === form.name.trim());
+  const duplicateLabel = !!form.label.trim() && roles.some((r) => r.path !== editing?.path && (r.label ?? "").trim().toLowerCase() === form.label.trim().toLowerCase());
 
   const columns: Column<Role>[] = [
     {
@@ -70,7 +83,7 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
         (canWrite || canManagePerms) ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100">
+              <Button variant="ghost" size="icon" aria-label="Role actions" className="h-8 w-8 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 coarse:h-9 coarse:w-9">
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -89,23 +102,28 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     },
   ];
 
+  // Throws to fail: WriteDialog pins the message in the form and keeps what was typed.
   async function submit() {
-    setBusy(true);
-    try {
-      if (editing) {
-        await patch("roles/" + editing.name, { label: form.label.trim(), protected: form.protected }, editing.etag);
-        toast({ title: "Role updated", variant: "success" });
+    if (editing) {
+      await patch("roles/" + editing.name, { label: form.label.trim(), protected: form.protected }, editing.etag);
+      toast({ title: "Role updated", variant: "success" });
+    } else {
+      const name = form.name.trim();
+      const label = form.label.trim() || name;
+      await create("roles", { name, label, protected: form.protected });
+      // Copied through the same create API as any other grant, so the four-eyes queue and the audit trail
+      // apply to every one of them. Additive - the new role has nothing to overwrite.
+      if (form.cloneFrom !== NO_CLONE) {
+        const { added, skipped } = await cloneAccessRules({ kind: "role", subject: form.cloneFrom }, { kind: "role", subject: name });
+        toast({ title: `Role created · ${added} rules copied${skipped ? ` · ${skipped} skipped` : ""}`, variant: "success" });
       } else {
-        await create("roles", { name: form.name.trim(), label: form.label.trim() || form.name.trim(), protected: form.protected });
         toast({ title: "Role created", variant: "success" });
       }
-      setOpen(false);
-      reload();
-    } catch (e) {
-      toast({ title: "Couldn't save role", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
+      // A role with no permissions is inert, so hand over its permissions dialog instead of dropping the
+      // reader back on a table row that does nothing. This is the step that used to get forgotten.
+      if (canManagePerms) setPermRole({ path: "roles/" + name, name, label, protected: form.protected });
     }
+    reload();
   }
 
   async function del(r: Role) {
@@ -128,7 +146,7 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
 
   return (
     <Card>
-      <CardContent className="pt-6">
+      <CardContent className="pt-4 sm:pt-6">
         <DataTable
           columns={columns}
           tableId="roles"
@@ -142,33 +160,101 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
         <p className="mt-3 text-xs text-muted-foreground">A new role starts with no permissions - grant access to it in the Permissions tab, then assign users in the Users tab.</p>
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{editing ? "Edit role" : "New role"}</DialogTitle>
-          </DialogHeader>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={editing ? "Edit role" : "New role"}
+        description={
+          editing
+            ? "The display name is what people see; the identifier is what rules are written against and never changes."
+            : "A role is a named bundle of permissions. It starts with none - nobody gains anything until you grant it access."
+        }
+        collection="roles"
+        objectPath={editing?.path}
+        guardLabel="role"
+        form={form}
+        submitLabel={editing ? "Save changes" : "Create"}
+        canSubmit={editing ? !!form.label.trim() : nameValid && !duplicateName}
+        // Every blocker at once: a new role can be short of an identifier AND a name, and finding that out one
+        // press at a time is the slowest way to fill in two fields.
+        whyNot={[
+          !editing && !form.name.trim() && "Give the role an identifier.",
+          !editing && !!form.name.trim() && !nameValid && "The identifier must be lower_snake_case, 2-41 characters, starting with a letter.",
+          !editing && duplicateName && "A role with that identifier already exists.",
+          editing && !form.label.trim() && "Give the role a display name.",
+        ]}
+        onSubmit={submit}
+        submitAccess={editing ? undefined : (b) => <AccessAction collection="roles" create label="New role">{b}</AccessAction>}
+        footerStart={
+          editing ? (
+            <span className="truncate text-xs text-muted-foreground">
+              {(userCount.get(editing.name) ?? 0) === 0 ? "Nobody holds this role yet." : `${userCount.get(editing.name)} ${userCount.get(editing.name) === 1 ? "person holds" : "people hold"} this role.`}
+            </span>
+          ) : undefined
+        }
+      >
           {editing ? (
-            <Field label="Identifier">
+            <Field label="Identifier" hint="Fixed: access rules are written against it.">
               <Input value={form.name} disabled className="font-mono" />
             </Field>
           ) : (
-            <Field label="Identifier" hint="Lower_snake_case (a-z, 0-9, _), 2-41 chars. Immutable once created.">
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. finance_lead" autoFocus className="font-mono" />
+            <Field
+              label="Identifier"
+              field="name"
+              hint="Lower_snake_case (a-z, 0-9, _), 2-41 chars. Immutable once created."
+              error={
+                duplicateName ? "A role with this identifier already exists."
+                : form.name.trim() && !nameValid ? "Lower_snake_case only: start with a letter, then letters, digits or underscores."
+                : undefined
+              }
+            >
+              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value, touchedName: true })} placeholder="e.g. finance_lead" autoFocus className="font-mono" />
             </Field>
           )}
-          <Field label="Display name">
-            <Input value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} placeholder="e.g. Finance Lead" />
+          {/* Typing the display name fills the identifier while nobody has touched it, so the common case is
+              one field: "Finance Lead" becomes `finance_lead`. */}
+          <Field label="Display name" field="label" error={duplicateLabel ? "Another role is already called that - the two are indistinguishable in every picker." : undefined}>
+            <Input
+              value={form.label}
+              onChange={(e) => {
+                const label = e.target.value;
+                setForm((f) => ({ ...f, label, name: !editing && !f.touchedName ? slugify(label) : f.name }));
+              }}
+              placeholder="e.g. Finance Lead"
+              autoFocus={!!editing}
+            />
           </Field>
-          <div className="flex items-center gap-2">
-            <Checkbox id="role-protected" checked={form.protected} onCheckedChange={(v) => setForm({ ...form, protected: v === true })} />
-            <Label htmlFor="role-protected">Protected (cannot be deleted)</Label>
+          <div className="flex items-start gap-2">
+            <Checkbox id="role-protected" className="mt-0.5" checked={form.protected} onCheckedChange={(v) => setForm({ ...form, protected: v === true })} />
+            <Label htmlFor="role-protected" className="font-normal leading-snug">
+              Protected
+              <span className="block text-xs text-muted-foreground">Nobody can delete this role, including you. Use it for the roles the org's access model is built on.</span>
+            </Label>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={editing ? !form.label.trim() : !nameValid}>{editing ? "Save changes" : "Create"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {/* Most new roles are a near-copy of an existing one ("Finance Lead is Manager plus payroll"), and
+              building that by hand across sixty collections is why a fresh role sits unused. Copying is
+              additive and goes through the same grant API, so the audit trail and any four-eyes queue apply. */}
+          {!editing && canManagePerms && roles.length > 0 && (
+            <Field label="Start from" hint="Copies that role's permissions into the new one. You can change them straight afterwards.">
+              <Select value={form.cloneFrom} onValueChange={(v) => setForm({ ...form, cloneFrom: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_CLONE}>Nothing - start with no permissions</SelectItem>
+                  {roles.map((r) => (
+                    <SelectItem key={r.name} value={r.name}>{r.label || r.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          {!editing && (
+            <p className="rounded-md border border-primary/20 bg-primary/5 p-2.5 text-xs text-muted-foreground">
+              {form.cloneFrom === NO_CLONE
+                ? "The new role can do nothing until it is granted access. Saving opens its permissions straight away, so it doesn't get created and forgotten."
+                : `The new role starts with everything ${roles.find((r) => r.name === form.cloneFrom)?.label ?? form.cloneFrom} can do. Saving opens its permissions so you can take away what it shouldn't have.`}
+            </p>
+          )}
+      </WriteDialog>
 
       <SubjectPermissionsDialog
         open={!!permRole}

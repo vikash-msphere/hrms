@@ -8,7 +8,9 @@ import { useToast } from "@/components/ui/use-toast";
 export function CopyEmail({ email, className, children }: { email: string; className?: string; children?: React.ReactNode }) {
   const { toast } = useToast();
   return (
-    <span className={cn("group/email inline-flex min-w-0 items-center gap-1", className)}>
+    // max-w-full so the shrink-to-fit inline box can never out-size its container: an address is long enough
+    // to spill out of a narrow cell (a hover card's value column, a card footer) if it is allowed to.
+    <span className={cn("group/email inline-flex min-w-0 max-w-full items-center gap-1", className)}>
       {children ?? <span className="truncate">{email}</span>}
       <button
         type="button"

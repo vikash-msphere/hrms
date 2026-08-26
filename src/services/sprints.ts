@@ -6,7 +6,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
@@ -25,14 +25,8 @@ const dateOrNull = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:0
 export async function listSprints(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false) {
   let rows = await deps.db.select().from(schema.sprints);
   if (boardId) rows = rows.filter((r) => r.boardId === boardId);
-  const all = visibleByDelete(rows, showDeleted).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) < cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
+  const all = visibleByDelete(rows, showDeleted);
+  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
   return { items: slice, nextPageToken };
 }
 

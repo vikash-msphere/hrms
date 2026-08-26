@@ -1,10 +1,12 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
+import { contentDisposition } from "../http/contentDisposition";
 import {
   listTickets, getTicketWithComments, createTicket,
   transitionTicket, assignTicket, routeTicket, setTicketPriority, commentTicket,
   addTodos, toggleTodo, removeTodo,
+  attachToTicket, detachFromTicket, readTicketAttachment,
   type TicketInput,
 } from "../services/tickets";
 import { toTicketResource } from "../http/serialize";
@@ -29,6 +31,7 @@ const commentSchema = z.object({ body: z.string() }).strict();
 const addTodosSchema = z.object({ texts: z.array(z.string()) }).strict();
 const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).strict();
 const removeTodoSchema = z.object({ todo: z.string() }).strict();
+const detachSchema = z.object({ key: z.string() }).strict();
 
 // Helpdesk tickets. A ticket is never edited or deleted through the API - it moves through its state machine
 // and accumulates comments - so there is no PATCH and, despite the table's delete_time (which exists for the
@@ -62,5 +65,19 @@ export const tickets = collectionRoutes<TicketInput, typeof schema.tickets>({
     addTodos: { schema: addTodosSchema, run: (deps, user, id, body) => addTodos(deps, user, id, body.texts) },
     toggleTodo: { schema: toggleTodoSchema, run: (deps, user, id, body) => toggleTodo(deps, user, id, body.todo, body.done) },
     removeTodo: { schema: removeTodoSchema, run: (deps, user, id, body) => removeTodo(deps, user, id, body.todo) },
+    // Attachments. The bytes arrive as the raw body (same contract as a document upload) with the name and
+    // type in the query, so nothing has to be base64'd through JSON.
+    attach: {
+      run: async (deps, user, id, _body, c) =>
+        attachToTicket(deps, user, id, await c.req.arrayBuffer(), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
+    },
+    detach: { schema: detachSchema, run: (deps, user, id, body) => detachFromTicket(deps, user, id, body.key) },
+    attachment: {
+      raw: async (c, id) => {
+        const { bytes, fileName } = await readTicketAttachment(c.get("deps"), c.get("user"), id, c.req.query("key"));
+        // Always a download, never rendered inline: an attachment on a ticket is whatever a stranger uploaded.
+        return c.body(bytes, 200, { "Content-Type": "application/octet-stream", "Content-Disposition": contentDisposition("attachment", fileName) });
+      },
+    },
   },
 });

@@ -31,7 +31,7 @@ export async function listOvertimeRequests(deps: Deps, scope: ListScope, maxPage
   const textMatch = await searchFilter(deps, "overtime-requests", q, schema.overtimeRequests.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.overtimeRequests.state, stateFilter as typeof schema.overtimeRequests.$inferSelect.state));
-  return keysetPage<typeof schema.overtimeRequests.$inferSelect>(deps, schema.overtimeRequests, "overtime-requests", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage<typeof schema.overtimeRequests.$inferSelect>(deps, schema.overtimeRequests, "overtime-requests", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 
 async function getOvertimeRequest(deps: Deps, _actor: AppUser, id: string) {
@@ -110,13 +110,12 @@ export function markOvertimePaidByRun(deps: Deps, ids: string[], runId: string, 
     .where(and(inArray(schema.overtimeRequests.uuid, ids), eq(schema.overtimeRequests.state, "APPROVED"), isNull(schema.overtimeRequests.paidRunId)));
 }
 // Paid by a full-and-final settlement rather than a run, and the release a recomputed settlement uses.
-export async function markOvertimeSettled(deps: Deps, ids: string[], at: Date) {
-  if (!ids.length) return;
-  await deps.db.update(schema.overtimeRequests).set({ paidAt: at }).where(and(inArray(schema.overtimeRequests.uuid, ids), isNull(schema.overtimeRequests.paidRunId)));
+// Unexecuted statement, so the FnF commits it in the same atomic batch as the settlement (see reimbursements).
+export function markOvertimeSettledStmt(deps: Deps, ids: string[], at: Date) {
+  return deps.db.update(schema.overtimeRequests).set({ paidAt: at }).where(and(inArray(schema.overtimeRequests.uuid, ids), isNull(schema.overtimeRequests.paidRunId)));
 }
-export async function releaseOvertimeSettled(deps: Deps, ids: string[]) {
-  if (!ids.length) return;
-  await deps.db.update(schema.overtimeRequests).set({ paidAt: null }).where(and(inArray(schema.overtimeRequests.uuid, ids), isNull(schema.overtimeRequests.paidRunId)));
+export function releaseOvertimeSettledStmt(deps: Deps, ids: string[]) {
+  return deps.db.update(schema.overtimeRequests).set({ paidAt: null }).where(and(inArray(schema.overtimeRequests.uuid, ids), isNull(schema.overtimeRequests.paidRunId)));
 }
 export function resetOvertimePaidByRun(deps: Deps, runId: string) {
   return deps.db.update(schema.overtimeRequests).set({ paidRunId: null, paidAt: null }).where(eq(schema.overtimeRequests.paidRunId, runId));

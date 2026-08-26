@@ -25,13 +25,20 @@ export function StateBadges({ row, publishable }: { row: StateRow; publishable?:
 }
 
 /** The unified "State" column: shows Active/Disabled/Locked/Draft/Deleted, filterable.
- *  Deleted rows are hidden by default (filter for "Deleted" to see the trash). */
-export function stateColumn<T extends StateRow>(opts?: { publishable?: boolean }): Column<T> {
+ *
+ *  Deleted rows are hidden by default (filter for "Deleted" to see the trash), which assumes the page FETCHED
+ *  them - the usual `useCollection(..., { showDeleted: true })` on a small catalog. A page that instead loads
+ *  the trash only when asked (because its list paginates, and deleted rows would eat the page budget) passes
+ *  `hideDeleted: false`: holding the value back a second time would make its own toggle look broken. */
+export function stateColumn<T extends StateRow>(opts?: { publishable?: boolean; hideDeleted?: boolean; filterOptions?: string[] }): Column<T> {
   return {
     id: "state",
     header: "State",
     filter: "select",
-    hideValueByDefault: "Deleted",
+    ...(opts?.hideDeleted === false ? {} : { hideValueByDefault: "Deleted" }),
+    // Values to offer even when nothing loaded carries them - "Deleted" on a page that fetches the trash only
+    // once it is picked.
+    ...(opts?.filterOptions ? { filterOptions: opts.filterOptions } : {}),
     accessor: (r) => primaryState(r),
     cell: (r) => <StateBadges row={r} publishable={opts?.publishable} />,
   };

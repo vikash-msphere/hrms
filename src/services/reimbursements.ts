@@ -32,7 +32,7 @@ export async function listReimbursements(deps: Deps, scope: ListScope, maxPageSi
   const textMatch = await searchFilter(deps, "reimbursements", q, schema.reimbursements.uuid);
   if (textMatch) conds.push(textMatch);
   if (stateFilter) conds.push(eq(schema.reimbursements.state, stateFilter as typeof schema.reimbursements.$inferSelect.state));
-  return keysetPage(deps, schema.reimbursements, "reimbursements", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.reimbursements, "reimbursements", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 export async function getReimbursement(deps: Deps, _actor: AppUser, id: string) {
@@ -134,9 +134,8 @@ export async function createApprovedReimbursementForExpense(
 
 // Undo markReimbursementsSettled for a recomputed settlement. Restricted to the ids that settlement recorded
 // and to rows with no run, so a claim genuinely paid out of band (payReimbursement) is never re-queued.
-export async function releaseReimbursementsSettled(deps: Deps, ids: string[]) {
-  if (!ids.length) return;
-  await deps.db
+export function releaseReimbursementsSettledStmt(deps: Deps, ids: string[]) {
+  return deps.db
     .update(schema.reimbursements)
     .set({ state: "APPROVED", paidAt: null, updatedAt: new Date() })
     .where(and(inArray(schema.reimbursements.uuid, ids), eq(schema.reimbursements.state, "PAID"), isNull(schema.reimbursements.paidRunId)));
@@ -191,9 +190,10 @@ export function markReimbursementsPaidByRun(deps: Deps, ids: string[], runId: st
 // Mark approved claims settled by a FnF settlement (terminal payout, no payroll run). Reuses the PAID marker
 // like separate-mode :pay - state=PAID with paidRunId left null - so the claims drop out of the payroll payout
 // queue (state=APPROVED AND paidRunId IS NULL) and a run for a still-active leaver can't pay them a second time.
-export async function markReimbursementsSettled(deps: Deps, ids: string[], at: Date) {
-  if (!ids.length) return;
-  await deps.db
+// Returns the UNEXECUTED statement so the FnF can commit it in the same atomic batch as the settlement that
+// consumes the claim (thenable - a direct await still executes). Callers guard on a non-empty id list.
+export function markReimbursementsSettledStmt(deps: Deps, ids: string[], at: Date) {
+  return deps.db
     .update(schema.reimbursements)
     .set({ state: "PAID", paidAt: at, updatedAt: at })
     .where(inArray(schema.reimbursements.uuid, ids));

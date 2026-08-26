@@ -141,8 +141,8 @@ describe("cashfree acknowledge (real service path) creates a pending ack + copy"
 
     // Real service path (regression: this used to 500 on a FOREIGN KEY violation - the ack was inserted with
     // signedDocId pointing at a copy row that did not exist yet).
-    const res = await orgSvc.acknowledge(deps, actorFor(emp), docId) as { esignUrl?: string };
-    expect(res.esignUrl).toBe("https://vendor.example/sign/abc");
+    const res = await orgSvc.acknowledge(deps, actorFor(emp), docId) as { esignUri?: string };
+    expect(res.esignUri).toBe("https://vendor.example/sign/abc");
 
     const ack = (await deps.db.select().from(schema.documentAcknowledgements).where(eq(schema.documentAcknowledgements.documentId, docId)))[0]!;
     expect(ack).toBeTruthy();

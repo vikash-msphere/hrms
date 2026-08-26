@@ -72,7 +72,7 @@ export function IconPicker({ value, onChange, className }: { value?: string; onC
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-64 p-2" align="start">
-        <Input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search icons…" className="mb-2 h-8" />
+        <Input type="search" autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search icons…" className="mb-2 h-8" />
         <div className="grid grid-cols-7 gap-1">
           {list.map((n) => {
             const Icon = ICON_MAP[n];

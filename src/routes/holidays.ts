@@ -4,7 +4,14 @@ import { holidaySpec } from "../services/holidays";
 import { toHolidayResource } from "../http/serialize";
 
 const writeSchema = z
-  .object({ display_name: z.string().min(1).optional(), date: z.string().optional(), kind: z.enum(["fixed", "optional"]).optional() })
+  .object({
+    display_name: z.string().min(1).optional(),
+    date: z.string().optional(),
+    kind: z.enum(["fixed", "optional"]).optional(),
+    // null/"" = company-wide; a value scopes the holiday to employees whose current position location matches.
+    location: z.string().nullish(),
+    half_day: z.boolean().optional(),
+  })
   .strict();
 
 // Lifecycle + restore are config.write. (Selecting an optional holiday is POST /holiday-selections.)

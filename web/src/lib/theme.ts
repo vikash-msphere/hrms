@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { get, patch, ApiError } from "@/api";
+import { readPref, writePref } from "@/lib/prefs";
 
-// Theme preference. The server (per-user `preferences/theme` row) is the cross-device source of truth;
+// Theme preference. The server (per-user `preferences/theme` row, read through the shared prefs snapshot in
+// lib/prefs.ts) is the cross-device source of truth;
 // localStorage is a no-flash cache read by the inline script in index.html on first paint. On login we
 // pull the server row (syncThemeFromServer) and it wins if it differs; on every change we push it back.
 // Keep the storage key in step with that inline script.
@@ -18,7 +19,7 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function persistToServer(theme: Theme) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    patch(`preferences/${PREF_KEY}`, { value: { theme } }).catch(() => {});
+    void writePref(PREF_KEY, { theme });
   }, 400);
 }
 
@@ -27,23 +28,18 @@ let synced = false;
 export async function syncThemeFromServer() {
   if (synced) return;
   synced = true;
-  try {
-    const r = await get<{ value?: { theme?: unknown } }>(`preferences/${PREF_KEY}`);
-    const t = r?.value?.theme;
-    if (isTheme(t)) {
-      if (t !== getStoredTheme()) {
-        localStorage.setItem(STORAGE_KEY, t);
-        applyResolved(resolveTheme(t), true);
-        window.dispatchEvent(new Event("themechange"));
-      }
-      return;
+  const stored = await readPref<{ theme?: unknown }>(PREF_KEY);
+  const t = stored?.theme;
+  if (isTheme(t)) {
+    if (t !== getStoredTheme()) {
+      localStorage.setItem(STORAGE_KEY, t);
+      applyResolved(resolveTheme(t), true);
+      window.dispatchEvent(new Event("themechange"));
     }
-    // Row exists but malformed: seed it from this browser's cache.
-    persistToServer(getStoredTheme());
-  } catch (e) {
-    // No row yet -> seed the server from this browser so other devices pick it up. Other errors: ignore.
-    if (e instanceof ApiError && e.status === 404) persistToServer(getStoredTheme());
+    return;
   }
+  // No row yet (or a malformed one) -> seed the server from this browser so other devices pick it up.
+  persistToServer(getStoredTheme());
 }
 
 const mql = () => window.matchMedia("(prefers-color-scheme: dark)");

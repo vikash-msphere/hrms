@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { SignBox } from "@/types";
+import { openPdf } from "@/lib/pdfjs";
 
 // Fixed-size signature box, in PDF points (bottom-left origin). HR only chooses the position (by clicking)
 // and page; the box size is constant, so there is no drag/resize.
@@ -29,11 +30,7 @@ export function PdfSignaturePlacer({ src, value, onChange }: { src: File | Blob 
     (async () => {
       try {
         setLoading(true);
-        const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerSrc = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
-        const data = typeof src === "string" ? undefined : new Uint8Array(await src.arrayBuffer());
-        const task = pdfjs.getDocument(typeof src === "string" ? { url: src } : { data: data! });
-        loaded = await task.promise;
+        loaded = await openPdf(typeof src === "string" ? src : new Uint8Array(await src.arrayBuffer()));
         if (cancelled) { loaded.destroy?.(); return; }
         setDoc(loaded);
         setNumPages(loaded.numPages);
@@ -104,9 +101,9 @@ export function PdfSignaturePlacer({ src, value, onChange }: { src: File | Blob 
         <span>{value && value.page === page ? "Signature placed here" : "Click on the page to place the signature box"}</span>
         {numPages > 1 && (
           <div className="flex items-center gap-1">
-            <Button type="button" variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}><ChevronLeft className="h-4 w-4" /></Button>
+            <Button type="button" variant="outline" size="icon" aria-label="Previous page" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}><ChevronLeft className="h-4 w-4" /></Button>
             <span className="tabular-nums">{page} / {numPages}</span>
-            <Button type="button" variant="outline" size="icon" className="h-7 w-7" disabled={page >= numPages} onClick={() => setPage((p) => Math.min(numPages, p + 1))}><ChevronRight className="h-4 w-4" /></Button>
+            <Button type="button" variant="outline" size="icon" aria-label="Next page" className="h-7 w-7" disabled={page >= numPages} onClick={() => setPage((p) => Math.min(numPages, p + 1))}><ChevronRight className="h-4 w-4" /></Button>
           </div>
         )}
       </div>

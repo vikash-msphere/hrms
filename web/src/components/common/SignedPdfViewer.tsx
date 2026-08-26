@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronLeft, ChevronRight, Loader2, CheckCircle2, XCircle, HelpCircle, ShieldQuestion } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { verifyPdfSignatures, type SignatureResult, type SignatureValidity } from "@/lib/pdfSignature";
+import { openPdf } from "@/lib/pdfjs";
 
 // In-app PDF viewer that draws the digital-signature validity stamp (green tick / red cross / amber ?) as a
 // DOM overlay over the signature widget - exactly what Adobe/eMudhra viewers do, but client-side. The PDF
@@ -53,11 +54,8 @@ export function SignedPdfViewer({ bytes }: { bytes: Uint8Array }) {
     (async () => {
       try {
         setLoading(true);
-        const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerSrc = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
         // pdf.js transfers/detaches the buffer it renders; verify on a copy so both see intact bytes.
-        const forRender = bytes.slice();
-        loaded = await pdfjs.getDocument({ data: forRender }).promise;
+        loaded = await openPdf(bytes.slice());
         if (cancelled) { loaded.destroy?.(); return; }
         setDoc(loaded);
         setNumPages(loaded.numPages);
@@ -145,9 +143,9 @@ export function SignedPdfViewer({ bytes }: { bytes: Uint8Array }) {
         </div>
         {numPages > 1 && (
           <div className="flex items-center gap-1">
-            <Button type="button" variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}><ChevronLeft className="h-4 w-4" /></Button>
+            <Button type="button" variant="outline" size="icon" aria-label="Previous page" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}><ChevronLeft className="h-4 w-4" /></Button>
             <span className="tabular-nums">{page} / {numPages}</span>
-            <Button type="button" variant="outline" size="icon" className="h-7 w-7" disabled={page >= numPages} onClick={() => setPage((p) => Math.min(numPages, p + 1))}><ChevronRight className="h-4 w-4" /></Button>
+            <Button type="button" variant="outline" size="icon" aria-label="Next page" className="h-7 w-7" disabled={page >= numPages} onClick={() => setPage((p) => Math.min(numPages, p + 1))}><ChevronRight className="h-4 w-4" /></Button>
           </div>
         )}
       </div>

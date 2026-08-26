@@ -12,6 +12,10 @@ const writeSchema = z.object({
   notes: z.string().nullable().optional(),
   action_items: z.array(actionItem).optional(),
   cadence: z.enum(["weekly", "biweekly", "monthly"]).nullable().optional(),
+  // Whose note this is and whether the pulse may be set are decided by the caller's identity, not by the body
+  // (services/checkIns.ts) - so there is deliberately no "side" field to spoof here.
+  private_note: z.string().max(4000).nullable().optional(),
+  pulse: z.number().int().min(1).max(5).nullable().optional(),
 }).strict();
 
 // 1:1 check-ins. Plain CRUD plus soft delete/restore, all of it the shared lane; the list is the one part that

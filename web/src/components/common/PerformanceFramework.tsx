@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
+import { getSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 
@@ -22,7 +23,7 @@ export function PerformanceFramework() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { competencies?: Competency[]; scale?: RatingLevel[] } }>("settings/performance")
+    getSetting<{ competencies?: Competency[]; scale?: RatingLevel[] }>("performance")
       .then((s) => {
         if (s.value?.competencies?.length) setCompetencies(s.value.competencies);
         if (s.value?.scale?.length) setScale(s.value.scale);

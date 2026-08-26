@@ -33,6 +33,9 @@ export type AppUser = {
 export type Bindings = {
   DB: D1Database;
   DOCS: R2Bucket;
+  // The built SPA in web/dist. Bound so the Worker can decide the SPA fallback itself instead of letting the
+  // asset layer answer every miss with index.html - see the notFound handler in src/index.ts.
+  ASSETS: Fetcher;
   // Auth is one of two modes, selected by configuration (see routes/authRoutes.ts):
   //  - Access mode (default): Cloudflare Access fronts the app; CF_ACCESS_* are required.
   //  - Google mode: GOOGLE_CLIENT_ID set -> the Worker runs its own Google-OIDC sign-in (no per-seat Access
@@ -88,6 +91,20 @@ export type Variables = {
   // Same idea for GET /v1/dashboard-summary: per-collection list scopes for the KPI aggregates, decided by
   // the middleware; the summary service only binds them to COUNT/SUM queries.
   summaryScopes: Map<string, import("./domain/access").ListScope>;
+  // Same idea for GET /v1/people-analytics: per-collection list scopes for the per-person measures (leave,
+  // punctuality, tasks, goals, reviews, ...), decided by the middleware; the analytics service only binds them
+  // to grouped aggregates. A collection missing from the map contributes no column to the report.
+  analyticsScopes: Map<string, import("./domain/access").ListScope>;
+  // GET /v1/approvals-summary: per-queue APPROVE scopes (not list scopes - the badge counts what the caller may
+  // decide on), decided by the middleware. A queue the caller holds the verb in at no scope is absent.
+  approvalScopes: Map<string, import("./domain/access").ListScope>;
+  // GET /v1/changes: which collections this caller may LIST at all. Names only - the answer is a set of
+  // collection names, not rows - so this is the boolean half of searchScopes, decided the same way and costing
+  // no read. A collection the caller cannot list is never named in the answer.
+  listableCollections: Set<string>;
+  // Whether that same caller may read the prior-employer verification queue (`tax-verifications.read`). It is a
+  // virtual capability with no table, so it rides a boolean rather than a scope.
+  taxVerificationsReadable: boolean;
   // The grant the middleware decided this request with: the role grant merged with any per-object exceptions
   // for the resolved item (item paths) - set so a handler can compute a share-accurate `access.can` hint
   // without re-loading. Absent on collection/non-item paths (the role grant alone applies).

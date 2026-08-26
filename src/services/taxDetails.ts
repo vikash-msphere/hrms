@@ -75,11 +75,12 @@ function toView(p: TaxProjection, decl: TaxDeclarations): Omit<Wire<"tax">, "pat
 }
 
 // The HR/payroll verification queue: every employee whose prior-employer declaration is DECLARED (awaiting a
-// decision). Scans employees and decrypts each tax blob - HR-gated + not a hot path (the Approvals inbox loads
-// it), so no denormalized status column is needed. Returns the declared figures so a verifier can decide inline.
+// decision). The plaintext `taxVerificationStatus` column picks the queue out in SQL, so only the rows that
+// ARE awaiting a decision get decrypted (the figures live in the blob and the verifier decides on them
+// inline). This is the rows endpoint - the badge counts the same predicate without reading the blobs at all.
 export type PendingTaxVerification = { employee: string; employee_name: string; prior_employer_income: number; prior_employer_tds: number };
 export async function listPendingTaxVerifications(deps: Deps): Promise<PendingTaxVerification[]> {
-  const emps = await deps.db.select().from(schema.employees);
+  const emps = await deps.db.select().from(schema.employees).where(eq(schema.employees.taxVerificationStatus, "DECLARED"));
   const out: PendingTaxVerification[] = [];
   for (const e of emps) {
     if (e.deleteTime || !e.taxDetailsEnc) continue;
@@ -150,7 +151,14 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
     };
   }
   const enc = await deps.encryptor.encrypt(JSON.stringify(next));
-  await deps.db.update(schema.employees).set({ taxDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
+  // The plaintext status rides the same write as the blob (see schema.employees.taxVerificationStatus): it is
+  // what makes the verification queue countable without decrypting anything. A declaration with no figures on
+  // it isn't in any queue, so it clears the column rather than parking it in DECLARED forever.
+  const declared = next.priorEmployerIncome != null || next.priorEmployerTds != null;
+  await deps.db
+    .update(schema.employees)
+    .set({ taxDetailsEnc: enc, taxVerificationStatus: declared ? next.status ?? "DECLARED" : null, updatedAt: new Date() })
+    .where(eq(schema.employees.uuid, emp.uuid));
   await audit(deps, actor, `employee.tax_details.${event}`, "employees", emp.uuid);
   // Tell the subject employee when HR/payroll acts on their declaration (verify makes it apply to withholding;
   // reject asks them to re-declare). Not on a plain (re)declaration - that's the employee's own action.

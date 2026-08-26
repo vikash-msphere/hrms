@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { UserCheck, Plus, Check, Pencil, Trash2, RotateCcw, ShieldX, Play, AlertTriangle } from "lucide-react";
+import { UserCheck, Plus, Check, Link2, Pencil, Trash2, RotateCcw, ShieldX, Play, AlertTriangle } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
@@ -15,17 +15,21 @@ import { metaColumns } from "@/components/common/metaColumns";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { ProofField, fileProof } from "@/components/common/ProofField";
+import { Checkbox } from "@/components/ui/checkbox";
+import { setRouteRecord, recordUrl } from "@/router";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { useKpiFocus } from "@/lib/kpiFocus";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { useToast } from "@/components/ui/use-toast";
 import { humanize } from "@/lib/utils";
 
@@ -38,8 +42,17 @@ const STATUSES = [
   { value: "failed", label: "Failed" },
 ];
 const statusLabel = (s: string) => STATUSES.find((x) => x.value === s)?.label ?? s;
-const NONE = "__none__";
-const EMPTY = { employee: "", check_type: "identity", status: "pending", vendor: "", reference_no: "", initiated_date: "", completed_date: "", notes: "" };
+// Reaching one of these ends the check, which is what dates the completion.
+const OUTCOMES = ["clear", "discrepancy", "failed"];
+const EMPTY = { employee: "", check_type: "identity", status: "pending", vendor: "", reference_no: "", initiated_date: "", completed_date: "", notes: "", document: "" };
+// What a new joiner's verification normally consists of. Four dialog trips for one hire is not a workflow.
+const STANDARD_SET = ["identity", "address", "education", "employment"];
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+// A check still with the vendor. Past this many days open it is the one to chase - the table flags the same age.
+const STALE_DAYS = 14;
+const isOpenCheck = (c: BackgroundCheck) => !c.delete_time && (c.status === "pending" || c.status === "in_progress");
+const isStaleCheck = (c: BackgroundCheck) =>
+  isOpenCheck(c) && !!c.initiated_date && (Date.now() - new Date(c.initiated_date).getTime()) / 86400000 > STALE_DAYS;
 
 function StatusBadge({ s }: { s: string }) {
   if (s === "clear") return <Badge variant="success" className="gap-1"><Check className="h-3 w-3" /> Clear</Badge>;
@@ -62,7 +75,10 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<BackgroundCheck | null>(null);
   const [form, setForm] = useState(EMPTY);
-  const [busy, setBusy] = useState(false);
+  // The vendor's report staged for upload on save (the linked one lives in `form.document`).
+  const [proof, setProof] = useState<File | null>(null);
+  // Order the whole standard set for a new joiner rather than one check at a time.
+  const [standardSet, setStandardSet] = useState(false);
 
   const empById = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
   const emp = (p?: string) => (p ? empById.get(idOf(p)) : undefined);
@@ -71,41 +87,96 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
   const stats = useMemo(() => {
     const live = rows.filter((c) => !c.delete_time);
     return {
-      open: live.filter((c) => c.status === "pending" || c.status === "in_progress").length,
+      open: live.filter(isOpenCheck).length,
       discrepancy: live.filter((c) => c.status === "discrepancy" || c.status === "failed").length,
       clear: live.filter((c) => c.status === "clear").length,
+      // Open past the point a vendor should have answered: the queue worth chasing today, not just the queue.
+      stale: live.filter(isStaleCheck).length,
+      // Nobody has told the vendor to start yet - the delay is ours, not theirs.
+      notStarted: live.filter((c) => c.status === "pending").length,
     };
   }, [rows]);
 
-  function openCreate() { setEditing(null); setForm({ ...EMPTY, initiated_date: new Date().toISOString().slice(0, 10) }); setOpen(true); }
+  // Clicking a metric narrows the table to exactly the rows it counted.
+  const kf = useKpiFocus<BackgroundCheck, "open" | "adverse" | "clear" | "stale" | "notStarted">({
+    open: { label: "open checks", match: isOpenCheck },
+    adverse: { label: "adverse outcomes", match: (c) => c.status === "discrepancy" || c.status === "failed" },
+    clear: { label: "cleared checks", match: (c) => c.status === "clear" },
+    stale: { label: `checks open past ${STALE_DAYS} days`, match: isStaleCheck },
+    notStarted: { label: "checks not started", match: (c) => c.status === "pending" },
+  });
+  const shown = useMemo(() => kf.apply(rows), [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function openCreate() { setEditing(null); setForm({ ...EMPTY, initiated_date: todayStr() }); setProof(null); setStandardSet(false); setOpen(true); }
   function openEdit(c: BackgroundCheck) {
     setEditing(c);
     setForm({
       employee: c.employee ? `employees/${idOf(c.employee)}` : "", check_type: c.check_type, status: c.status,
       vendor: c.vendor ?? "", reference_no: c.reference_no ?? "", initiated_date: c.initiated_date ?? "",
-      completed_date: c.completed_date ?? "", notes: c.notes ?? "",
+      completed_date: c.completed_date ?? "", notes: c.notes ?? "", document: c.document ?? "",
     });
+    setProof(null);
+    setStandardSet(false);
     setOpen(true);
+    // A check under discussion gets pasted into a thread; `useDeepOpen` above reads this back.
+    setRouteRecord(idOf(c.path));
   }
-  function bodyFromForm() {
+  function closeDialog() { setOpen(false); setRouteRecord(null); }
+  function copyLink(c: BackgroundCheck) {
+    navigator.clipboard.writeText(recordUrl("background-checks", idOf(c.path))).then(
+      () => toast({ title: "Link copied", description: "Anyone who can see this check can open it." }),
+      () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
+    );
+  }
+  function bodyFromForm(checkType: string, document: string | null) {
     return {
-      employee: form.employee, check_type: form.check_type, status: form.status,
+      employee: form.employee, check_type: checkType, status: form.status,
       vendor: form.vendor.trim() || null, reference_no: form.reference_no.trim() || null,
       initiated_date: form.initiated_date || null, completed_date: form.completed_date || null, notes: form.notes.trim() || null,
+      document,
     };
   }
   async function submit() {
-    setBusy(true);
-    try {
-      if (editing) { await patch("background-checks/" + idOf(editing.path), bodyFromForm(), editing.etag); toast({ title: "Check updated", variant: "success" }); }
-      else { await create("background-checks", bodyFromForm()); toast({ title: "Check added", variant: "success" }); }
-      setOpen(false); reload();
-    } catch (e) { toast({ title: "Couldn't save check", description: (e as Error).message, variant: "destructive" }); }
-    finally { setBusy(false); }
+    // The vendor's report lands on the employee's own document shelf first, then the check links it.
+    const document = proof
+      ? await fileProof({
+          file: proof,
+          title: `${humanize(form.check_type)} verification${form.vendor.trim() ? ` - ${form.vendor.trim()}` : ""}`,
+          employee: form.employee,
+        })
+      : form.document || null;
+    if (editing) {
+      await patch("background-checks/" + idOf(editing.path), bodyFromForm(form.check_type, document), editing.etag);
+      toast({ title: "Check updated", variant: "success" });
+    } else if (standardSet) {
+      // One vendor, one initiation date, four checks: what actually gets ordered for a new joiner.
+      for (const t of STANDARD_SET) await create("background-checks", bodyFromForm(t, t === form.check_type ? document : null));
+      toast({ title: `${STANDARD_SET.length} checks added`, description: STANDARD_SET.map(humanize).join(", "), variant: "success" });
+    } else {
+      await create("background-checks", bodyFromForm(form.check_type, document));
+      toast({ title: "Check added", variant: "success" });
+    }
+    setProof(null);
+    setRouteRecord(null);
+    reload();
   }
   // One validity check shared by the Enter shortcut and the submit button, so they can't disagree.
   const dateConflict = !!form.initiated_date && !!form.completed_date && form.completed_date < form.initiated_date;
   const canSubmit = !!form.employee && !dateConflict;
+  // The same check ordered twice on one person is two vendor invoices for one answer. Warn, never block: a
+  // re-run after a discrepancy is legitimate.
+  const openClash = useMemo(() => {
+    if (!form.employee) return null;
+    return rows.find((c) =>
+      !c.delete_time && c.path !== editing?.path &&
+      c.employee && idOf(c.employee) === idOf(form.employee) &&
+      c.check_type === form.check_type &&
+      (c.status === "pending" || c.status === "in_progress")) ?? null;
+  }, [rows, form.employee, form.check_type, editing?.path]);
+  // Turnaround, shown while the dates are being typed rather than only in the table afterwards.
+  const turnaround = form.initiated_date && form.completed_date && !dateConflict
+    ? Math.round((Date.parse(`${form.completed_date}T00:00:00`) - Date.parse(`${form.initiated_date}T00:00:00`)) / 86400000)
+    : null;
 
   async function setStatus(c: BackgroundCheck, status: string) {
     try { await patch("background-checks/" + idOf(c.path), { status }, c.etag); toast({ title: `Marked ${statusLabel(status).toLowerCase()}`, variant: "success" }); reload(); }
@@ -182,9 +253,11 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
 
       <SummaryStrip
         items={[
-          { label: "Open", value: stats.open, hint: "Pending or in progress", tone: stats.open > 0 ? "warning" : "muted" },
-          { label: "Discrepancy / failed", value: stats.discrepancy, tone: stats.discrepancy > 0 ? "destructive" : "muted" },
-          { label: "Clear", value: stats.clear, tone: stats.clear > 0 ? "success" : "muted" },
+          { label: "Open", value: stats.open, hint: "in progress", tone: stats.open > 0 ? "warning" : "muted", ...kf.kpi("open") },
+          { label: "Not started", value: stats.notStarted, hint: stats.notStarted ? "nobody ordered these" : "all ordered", tone: stats.notStarted > 0 ? "warning" : "muted", ...kf.kpi("notStarted") },
+          { label: `Open over ${STALE_DAYS}d`, value: stats.stale, icon: AlertTriangle, hint: stats.stale ? "chase the vendor" : "none overdue", tone: stats.stale > 0 ? "destructive" : "muted", ...kf.kpi("stale") },
+          { label: "Discrepancy / failed", value: stats.discrepancy, tone: stats.discrepancy > 0 ? "destructive" : "muted", hint: stats.discrepancy ? "needs a decision" : "none adverse", ...kf.kpi("adverse") },
+          { label: "Clear", value: stats.clear, tone: stats.clear > 0 ? "success" : "muted", hint: "verified, no issues", ...kf.kpi("clear") },
         ]}
       />
 
@@ -192,13 +265,38 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
         {rows.length === 0 ? (
           <EmptyState icon={UserCheck} title="No background checks" description="Record verification checks (identity, address, education, employment, criminal) and track each to a clear or discrepancy outcome." action={addBtn} />
         ) : (
-          <DataTable columns={columns} tableId="background-checks" rows={rows} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle="No checks match" accessCollection="background-checks" accessTargetOf={(c) => ({ objectPath: c.path, label: `${empName(c.employee)} · ${humanize(c.check_type)}`, can: c.access?.can })} />
+          <DataTable columns={columns} tableId="background-checks" rows={shown} getRowId={(c) => c.path} rowClassName={(c) => (c.delete_time ? "opacity-60" : undefined)} emptyTitle={kf.activeLabel ? `No ${kf.activeLabel}` : "No checks match"} accessCollection="background-checks" accessTargetOf={(c) => ({ objectPath: c.path, label: `${empName(c.employee)} · ${humanize(c.check_type)}`, can: c.access?.can })} />
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && canSubmit) submit(); }}>
-          <DialogHeader><DialogTitle>{editing ? "Edit background check" : "Add background check"}</DialogTitle></DialogHeader>
+      <WriteDialog
+        open={open}
+        onClose={closeDialog}
+        title={editing ? "Edit background check" : "Add background check"}
+        description={
+          OUTCOMES.includes(form.status)
+            ? form.status === "clear"
+              ? "Recording a clear outcome closes this check - it drops out of the open count."
+              : "An adverse outcome is what HR follows up on; the notes are the record of what was found."
+            : "One verification per employee, tracked from initiated to its outcome. Open checks are counted until they land."
+        }
+        collection="background-checks"
+        objectPath={editing?.path}
+        guardLabel="background check"
+        form={{ ...form, proof: proof ? `${proof.name}:${proof.size}` : null, standardSet }}
+        draftKey={editing ? undefined : "background-check"}
+        applyDraft={editing ? undefined : (d) => setForm({ ...EMPTY, ...d } as typeof form)}
+        onStartOver={editing ? undefined : () => setForm({ ...EMPTY, initiated_date: todayStr() })}
+        submitLabel={editing ? "Save changes" : standardSet ? `Add ${STANDARD_SET.length} checks` : "Add check"}
+        canSubmit={canSubmit}
+        whyNot={!form.employee ? "Pick whose check this is." : "The completed date is before the initiated date."}
+        onSubmit={submit}
+        footerStart={editing && (
+          <Button type="button" variant="ghost" size="sm" onClick={() => copyLink(editing)}>
+            <Link2 className="h-4 w-4" /> Copy link
+          </Button>
+        )}
+      >
           <Field label="Employee">
             <Combobox
               value={form.employee}
@@ -208,15 +306,44 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
               options={employees.filter((e) => !e.disabled).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
             />
           </Field>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Check type">
-              <Select value={form.check_type} onValueChange={(v) => setForm({ ...form, check_type: v })}>
+          {openClash && (
+            <p className="-mt-1 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+              <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+              A {humanize(openClash.check_type).toLowerCase()} check for {empName(openClash.employee)} is already {statusLabel(openClash.status).toLowerCase()}
+              {openClash.vendor ? ` with ${openClash.vendor}` : ""} - ordering it again means paying for the same answer twice.
+            </p>
+          )}
+          {!editing && (
+            <label className="flex items-start gap-2 rounded-lg border p-3">
+              <Checkbox checked={standardSet} onCheckedChange={(v) => setStandardSet(v === true)} className="mt-0.5" />
+              <span>
+                <span className="text-sm font-medium">Order the standard set</span>
+                <span className="block text-xs text-muted-foreground">
+                  {standardSet
+                    ? `${STANDARD_SET.map(humanize).join(", ")} - four checks with this vendor and initiation date.`
+                    : "A new joiner usually needs identity, address, education and employment verified."}
+                </span>
+              </span>
+            </label>
+          )}
+          <FieldRow>
+            <Field label="Check type" hint={standardSet ? "The set covers this and three more." : undefined}>
+              <Select value={form.check_type} onValueChange={(v) => setForm({ ...form, check_type: v })} disabled={standardSet}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{TYPES.map((t) => <SelectItem key={t} value={t}>{humanize(t)}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-            <Field label="Status">
-              <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })}>
+            <Field label="Status" hint={OUTCOMES.includes(form.status) ? "An outcome closes the check." : "Still open - it keeps showing in the open count."}>
+              {/* Reaching an outcome dates the completion (and going back to open clears it), which is what the
+                  Completed field used to only promise. */}
+              <Select
+                value={form.status}
+                onValueChange={(v) => setForm({
+                  ...form,
+                  status: v,
+                  completed_date: OUTCOMES.includes(v) ? (form.completed_date || todayStr()) : "",
+                })}
+              >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{STATUSES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}</SelectContent>
               </Select>
@@ -224,16 +351,36 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
             <Field label="Vendor / agency"><Input value={form.vendor} onChange={(e) => setForm({ ...form, vendor: e.target.value })} placeholder="Name of the verification agency" /></Field>
             <Field label="Reference no." hint="Vendor case ref."><Input value={form.reference_no} onChange={(e) => setForm({ ...form, reference_no: e.target.value })} placeholder="Optional" /></Field>
             <Field label="Initiated"><Input type="date" value={form.initiated_date} onChange={(e) => setForm({ ...form, initiated_date: e.target.value })} /></Field>
-            <Field label="Completed" hint="Auto-set when an outcome is reached." error={dateConflict ? "Completed is before the initiated date." : undefined}><Input type="date" value={form.completed_date} min={form.initiated_date || undefined} onChange={(e) => setForm({ ...form, completed_date: e.target.value })} /></Field>
-          </div>
-          <Field label="Notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Findings, discrepancies, follow-ups…" /></Field>
+            <Field
+              label="Completed"
+              hint={turnaround != null ? `${turnaround} ${turnaround === 1 ? "day" : "days"} turnaround.` : "Set when an outcome is chosen above."}
+              error={dateConflict ? "Completed is before the initiated date." : undefined}
+            >
+              <Input type="date" value={form.completed_date} min={form.initiated_date || undefined} onChange={(e) => setForm({ ...form, completed_date: e.target.value })} />
+            </Field>
+          </FieldRow>
+          <Field
+            label="Notes"
+            hint={form.status === "discrepancy" || form.status === "failed" ? "What was found, and what happens next." : undefined}
+          >
+            <Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Findings, discrepancies, follow-ups…" />
+          </Field>
+          {/* The vendor's report. Notes summarise a finding; a dispute is settled against the document. */}
+          {!standardSet && (
+            <ProofField
+              label="Vendor report"
+              collection="personal-documents"
+              hint={form.employee ? "Filed as this employee's own document." : "Pick the employee first - the report is filed under them."}
+              documentPath={form.document || null}
+              fileName={`${humanize(form.check_type)} verification.pdf`}
+              file={proof}
+              onFile={setProof}
+              onUnlink={() => setForm({ ...form, document: "" })}
+              dropHint="PDF or image of the vendor's report."
+            />
+          )}
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!canSubmit}>{editing ? "Save changes" : "Add check"}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </WriteDialog>
     </div>
   );
 }

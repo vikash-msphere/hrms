@@ -66,6 +66,12 @@ For collection `employees` (schema key `employee`), all paths under `/v1`:
 | Delete | `DELETE /v1/employees/{employee_id}` | — | `204` | `DeleteEmployee` |
 
 - **List is always paginated** (`max_page_size` + `page_token` → `results` + `next_page_token`). Never an unbounded array.
+- **A page is a window on the newest rows.** Lists page on `(created_at, uuid)`, newest first, so the first page
+  holds the most recent records and `next_page_token` walks backwards through time. The few lists read forwards
+  (a joiner's task checklist, a feedback thread, a checklist template) say so at the call site. A collection that
+  presents rows in some other order (by level, by tax section, by worked day) still **pages** on the cursor's own
+  key and re-sorts only the page it got back - sorting the whole set by one key and seeking by another drops rows
+  between pages.
 - **Update is JSON Merge Patch**: content type `application/merge-patch+json`. A field present = set; explicit `null` = clear; absent = unchanged. **No `updateMask` query parameter.**
 
 ## 5. Custom methods (`:verb`)

@@ -5,6 +5,7 @@ import { computeAccrual, roundToIncrement } from "../domain/leave";
 import { allocOwnedCode } from "./codeAlloc";
 import { getSettingValue } from "./settings";
 import { runBatch, type BatchStmt } from "../lib/dbBatch";
+import { refLeaveTypes } from "../lib/refData";
 
 // How accrued balances are rounded (settings/leave_accrual). "half" keeps balances in 0.5-day steps (the
 // default - prorated joining months otherwise produce values like 2.41); "day" = whole days; "none" = exact.
@@ -23,7 +24,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   const inc = await accrualIncrement(deps);
   let credited = 0;
   const employees = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
-  const leaveTypes = (await deps.db.select().from(schema.leaveTypes)).filter((lt) => !onlyLeaveTypeId || lt.uuid === onlyLeaveTypeId);
+  const leaveTypes = (await refLeaveTypes(deps)).filter((lt) => !onlyLeaveTypeId || lt.uuid === onlyLeaveTypeId);
   // One read for every balance row, keyed (employee, type) - the nightly walk over employees x types is then
   // pure lookups, instead of one query per pair (which alone could blow the per-invocation subrequest budget).
   const balances = await deps.db.select().from(schema.leaveBalances);

@@ -10,7 +10,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
@@ -65,15 +65,9 @@ export function makeDocumentService(cfg: Cfg) {
 
   async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser) {
     const where = applyScope(scope, table.code, ownerCol);
-    const all = visibleByDelete(await deps.db.select().from(table).where(where), showDeleted).sort(
-      (a: any, b: any) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-    );
-    const cur = decodeCursor(pageToken);
-    const start = cur ? all.findIndex((e: any) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-    const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-    const last = slice[slice.length - 1];
-    const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-    return { items: await decorateAck(deps, actor, slice), nextPageToken };
+    const all = visibleByDelete(await deps.db.select().from(table).where(where), showDeleted);
+    const page = paginate(all, maxPageSize, pageToken, (r: any) => +new Date(r.createdAt), (r: any) => r.uuid);
+    return { items: await decorateAck(deps, actor, page.items), nextPageToken: page.nextPageToken };
   }
 
   async function get(deps: Deps, actor: AppUser, id: string) {
@@ -102,6 +96,8 @@ export function makeDocumentService(cfg: Cfg) {
       validateAckConfig(true, input.ack_method, input.sign_anchor);
       base.ackMethod = input.ack_method;
       base.signAnchorJson = JSON.stringify(input.sign_anchor);
+      // When this version started asking for signatures - the clock the chase-up reminders age off.
+      base.ackVersionTime = new Date();
     }
     // Published by default (the column default); the uploader can create it as a draft instead.
     if (input.published !== undefined) base.published = !!input.published;
@@ -173,7 +169,9 @@ export function makeDocumentService(cfg: Cfg) {
       if (willRequire) validateAckConfig(true, method, anchor);
       if (has("ack_method")) set.ackMethod = willRequire ? patch.ack_method : null;
       if (has("sign_anchor")) set.signAnchorJson = willRequire && patch.sign_anchor ? JSON.stringify(patch.sign_anchor) : null;
-      if (has("requires_ack") && !patch.requires_ack) { set.ackMethod = null; set.signAnchorJson = null; }
+      if (has("requires_ack") && !patch.requires_ack) { set.ackMethod = null; set.signAnchorJson = null; set.ackVersionTime = null; }
+      // Switching acknowledgement ON starts the chase-up clock; a row that already required it keeps its own.
+      if (has("requires_ack") && patch.requires_ack && !row.requiresAck) set.ackVersionTime = new Date();
     }
     const updated = (await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning() as any[])[0]!;
     await audit(deps, actor, `${singular}.update`, collection, id, undefined, updated);
@@ -198,7 +196,7 @@ export function makeDocumentService(cfg: Cfg) {
     await deps.docs.put(row.r2Key, bytes, ct);
     const set: Record<string, unknown> = { sizeBytes: bytes.byteLength, contentType: ct, fileName: opts.fileName ?? row.fileName ?? null, updatedAt: new Date() };
     // Replacing the file of a document that requires acknowledgement is a NEW version: bump so everyone re-signs.
-    if (acknowledgeable && row.requiresAck) set.ackVersion = (row.ackVersion ?? 1) + 1;
+    if (acknowledgeable && row.requiresAck) { set.ackVersion = (row.ackVersion ?? 1) + 1; set.ackVersionTime = new Date(); }
     const updated = (await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning() as any[])[0]!;
     await audit(deps, actor, `${singular}.upload`, collection, id, { size_bytes: bytes.byteLength });
     return updated;
@@ -209,7 +207,7 @@ export function makeDocumentService(cfg: Cfg) {
   //    signed copy, and complete the ack synchronously.
   //  - "cashfree": create a per-employee copy + an Aadhaar e-sign request; the ack stays PENDING and is
   //    finalized by the e-sign webhook/poll (applyEsignEvent) when the copy is signed. Returns the signing link.
-  // Idempotent per (doc, employee, version). Returns the document decorated with ackedVersion (+ esignUrl for a
+  // Idempotent per (doc, employee, version). Returns the document decorated with ackedVersion (+ esignUri for a
   // pending Aadhaar ack) so the UI reflects state immediately.
   async function acknowledge(deps: Deps, actor: AppUser, id: string) {
     if (!acknowledgeable) throw invalidArgument("this document type cannot be acknowledged");
@@ -235,7 +233,7 @@ export function makeDocumentService(cfg: Cfg) {
     if (existing) {
       if (existing.acknowledgedTime) return { ...row, ackedVersion: version };
       const copy = existing.signedDocId ? (await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, existing.signedDocId)).limit(1))[0] : undefined;
-      return { ...row, ackedVersion: 0, esignUrl: copy?.esignUrl ?? undefined };
+      return { ...row, ackedVersion: 0, esignUri: copy?.esignUri ?? undefined };
     }
 
     const orgBuf = await deps.docs.get(row.r2Key);
@@ -309,10 +307,10 @@ export function makeDocumentService(cfg: Cfg) {
       throw failedPrecondition(`Aadhaar e-sign request failed: ${(e as Error).message ?? "unknown error"}`);
     }
     await deps.db.update(schema.personalDocuments)
-      .set({ esignRequestId: res.providerRef, esignStatus: res.status, esignUrl: res.signUrl ?? null, esignSentAt: new Date() })
+      .set({ esignRequestId: res.providerRef, esignStatus: res.status, esignUri: res.signUrl ?? null, esignSentAt: new Date() })
       .where(eq(schema.personalDocuments.uuid, copyId));
     await audit(deps, actor, "document.acknowledge", collection, id, { version, method, pending: true });
-    return { ...row, ackedVersion: 0, esignUrl: res.signUrl ?? undefined };
+    return { ...row, ackedVersion: 0, esignUri: res.signUrl ?? undefined };
   }
 
   async function download(deps: Deps, _actor: AppUser, id: string) {

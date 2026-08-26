@@ -1,10 +1,13 @@
 /// <reference types="vite/client" />
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { sealSession, openSession } from "../src/lib/session";
 import { app } from "../src/index";
 import { makeDeps } from "../src/deps";
+import * as schema from "../src/db/schema";
+import { genId } from "../src/lib/idCodec";
 import type { Bindings } from "../src/env";
 
 // Direct Google sign-in mode: the stateless session codec, and the /auth routes' behavior in both auth
@@ -98,6 +101,87 @@ describe("/auth routes (Google mode)", () => {
     const forged = await sealSession({ email: "root@example.com", iat: now, exp: now + 60_000 }, OTHER_KEY);
     const bad = await app.request("/v1/users/me", { headers: { "X-Requested-By": "hrms-spa", cookie: `hrms_session=${forged}` } }, e);
     expect(bad.status).toBe(401);
+  });
+});
+
+// A stateless cookie is verified by signature alone, so deleting the browser's copy does not stop the token:
+// one lifted off a lost laptop stayed good for the rest of its 12 hours, and the only server-side answers were
+// disabling the person or rotating AUTH_SESSION_KEY (which signs out the whole company).
+//
+// `users.sessions_valid_from` is the cut-off that fixes it, checked in the auth middleware against the `iat`
+// the cookie carries - on the user row auth ALREADY reads every request to check `status`, so it costs nothing.
+describe("Google mode: signing out actually revokes the session", () => {
+  const migrations = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+  const b = env as unknown as Bindings;
+  const KEY32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  const EMAIL = "revoke@example.com";
+
+  beforeAll(async () => {
+    (b as unknown as Record<string, unknown>).FIELD_ENCRYPTION_KEY = KEY32;
+    (b as unknown as Record<string, unknown>).WIRE_ID_KEY = KEY32;
+    const sql = Object.keys(migrations).sort().map((k) => migrations[k]).join("\n");
+    for (const stmt of sql.split("--> statement-breakpoint")) {
+      const s = stmt.trim();
+      if (s) await b.DB.prepare(s).run().catch(() => {}); // tables may already exist from another suite
+    }
+  });
+
+  beforeEach(async () => {
+    const deps = makeDeps({ ...googleEnv() } as unknown as Bindings);
+    await deps.db.delete(schema.users).where(eq(schema.users.email, EMAIL));
+    await deps.db.insert(schema.roles).values([{ name: "employee", label: "Employee" }]).onConflictDoNothing();
+    await deps.db.insert(schema.users).values({ uuid: genId(), code: `u-${genId().slice(0, 5)}`, email: EMAIL, role: "employee", status: "active" });
+  });
+
+  const asUser = (token: string) =>
+    app.request("/v1/users/me", { headers: { "X-Requested-By": "hrms-spa", cookie: `hrms_session=${token}` } }, googleEnv());
+
+  // The assertion is deliberately "401 or not 401", not a 200: this user holds no grants, so authz answers 403.
+  // That is exactly what isolates the session check - a 403 proves the cookie was ACCEPTED and the request got
+  // past authentication, which is the only thing under test here.
+  it("accepts a live session, then refuses that same cookie once the user signs out", async () => {
+    const now = Date.now();
+    const token = await sealSession({ email: EMAIL, iat: now, exp: now + 60_000 }, KEY);
+    expect((await asUser(token)).status).not.toBe(401);
+
+    const out = await app.request(
+      "/auth/logout",
+      { method: "POST", headers: { "X-Requested-By": "hrms-spa", cookie: `hrms_session=${token}` } },
+      googleEnv(),
+    );
+    expect(out.status).toBe(200);
+
+    // Same unexpired, correctly-signed cookie. Signature-only verification would still admit it.
+    expect((await asUser(token)).status).toBe(401);
+  });
+
+  it("lets the user straight back in: a session minted after the cut-off is fine", async () => {
+    const now = Date.now();
+    const old = await sealSession({ email: EMAIL, iat: now - 10_000, exp: now + 60_000 }, KEY);
+    await app.request("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa", cookie: `hrms_session=${old}` } }, googleEnv());
+    expect((await asUser(old)).status).toBe(401);
+
+    // Signing in again issues a fresh `iat`, which is at or after the stamp.
+    const fresh = await sealSession({ email: EMAIL, iat: Date.now() + 1000, exp: Date.now() + 60_000 }, KEY);
+    expect((await asUser(fresh)).status).not.toBe(401);
+  });
+
+  it("revokes every device, which is what a token with no per-device identity can honestly promise", async () => {
+    const now = Date.now();
+    const laptop = await sealSession({ email: EMAIL, iat: now - 5_000, exp: now + 60_000 }, KEY);
+    const phone = await sealSession({ email: EMAIL, iat: now - 4_000, exp: now + 60_000 }, KEY);
+    await app.request("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa", cookie: `hrms_session=${phone}` } }, googleEnv());
+    expect((await asUser(laptop)).status).toBe(401);
+    expect((await asUser(phone)).status).toBe(401);
+  });
+
+  it("leaves a logout with no session cookie as a pure cookie-clear (no write, nobody revoked)", async () => {
+    const now = Date.now();
+    const token = await sealSession({ email: EMAIL, iat: now, exp: now + 60_000 }, KEY);
+    const out = await app.request("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa" } }, googleEnv());
+    expect(out.status).toBe(200);
+    // Nothing was stamped, so an unrelated live session is untouched.
+    expect((await asUser(token)).status).not.toBe(401);
   });
 });
 

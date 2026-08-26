@@ -3,6 +3,8 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
+import { contentDisposition } from "../http/contentDisposition";
+import { jsonBody } from "../http/jsonRequest";
 import { listRuns, listRunItems, getRun, withStaleness, createRun, buildRunItems, transition, publishRun, deleteRun, previewRunItemPayslip } from "../services/payroll";
 import { idFromPath } from "../services/documentsCommon";
 import { buildBankFile } from "../services/bankFile";
@@ -37,7 +39,7 @@ const runs = collectionRoutes<{ pay_period: string }, typeof schema.payrollRuns>
   verbs: {
     build: {
       run: async (deps, user, id, _body, c) => {
-        const parsed = buildSchema.safeParse(await c.req.json().catch(() => ({})));
+        const parsed = buildSchema.safeParse(await jsonBody(c));
         if (!parsed.success) throw invalidArgument("invalid build body");
         return withStaleness(deps, await buildRunItems(deps, user, id, (parsed.data.one_offs ?? {}) as any, c.req.header("If-Match")));
       },
@@ -53,7 +55,7 @@ const runs = collectionRoutes<{ pay_period: string }, typeof schema.payrollRuns>
         const { bytes, fileName } = await buildBankFile(c.get("deps"), id, c.req.query("bank") ?? "");
         return c.body(bytes as unknown as ArrayBuffer, 200, {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          "Content-Disposition": `attachment; filename="${fileName}"`,
+          "Content-Disposition": contentDisposition("attachment", fileName),
         });
       },
     },
@@ -61,12 +63,12 @@ const runs = collectionRoutes<{ pay_period: string }, typeof schema.payrollRuns>
     // (another employee's full pay breakdown), so the authz middleware audits it as a sensitive read.
     previewPayslip: {
       raw: async (c, id) => {
-        const body = (await c.req.json().catch(() => ({}))) as { employee?: string };
+        const body = await jsonBody<{ employee?: string }>(c);
         const employeeId = idFromPath(body.employee ?? c.req.query("employee"));
         if (!employeeId) throw invalidArgument("employee is required");
         const { bytes, fileName } = await previewRunItemPayslip(c.get("deps"), id, employeeId);
         const pdf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-        return c.body(pdf, 200, { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${fileName}"` });
+        return c.body(pdf, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
       },
     },
     statutoryReport: {
@@ -74,12 +76,12 @@ const runs = collectionRoutes<{ pay_period: string }, typeof schema.payrollRuns>
         const deps = c.get("deps");
         if (c.req.query("format") === "ecr") {
           const { text, fileName } = await buildPfEcr(deps, id);
-          return c.body(text, 200, { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": `attachment; filename="${fileName}"` });
+          return c.body(text, 200, { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": contentDisposition("attachment", fileName) });
         }
         const { bytes, fileName } = await buildStatutoryReport(deps, id);
         return c.body(bytes as unknown as ArrayBuffer, 200, {
           "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          "Content-Disposition": `attachment; filename="${fileName}"`,
+          "Content-Disposition": contentDisposition("attachment", fileName),
         });
       },
     },

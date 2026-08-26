@@ -197,8 +197,21 @@ describe("the ceiling", () => {
     const scoped = await mintKey(owner, { collections: ["holidays"], maxLevel: "read", verbs: [] });
     expect((await call("/v1/search?q=test", scoped)).status).toBe(403);
     expect((await call("/v1/batch:run", scoped, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requests: [] }) })).status).toBe(403);
+    expect((await call("/v1/activity-counts?tabs=holidays:0", scoped)).status).toBe(403);
+    expect((await call(`/v1/changes?since=${Date.now() - 60_000}`, scoped)).status).toBe(403);
     const broad = await mintKey(owner, { collections: "*", maxLevel: "read", verbs: "*" });
     expect((await call("/v1/search?q=test", broad)).status).toBe(200);
+    // The tab-badge counts are the same shape of transport: the envelope is open to an authenticated caller,
+    // and what it may count is decided per collection inside (searchScopes).
+    const counts = await call("/v1/activity-counts?tabs=holidays:0", broad);
+    expect(counts.status).toBe(200);
+    expect(typeof ((await counts.json()) as { counts?: unknown }).counts).toBe("object");
+    // Same for the change feed, which answers with collection NAMES gated by the same list decision.
+    const changed = await call(`/v1/changes?since=${Date.now() - 60_000}`, broad);
+    expect(changed.status).toBe(200);
+    const body = (await changed.json()) as { now?: number; collections?: string[] };
+    expect(typeof body.now).toBe("number");
+    expect(Array.isArray(body.collections)).toBe(true);
   });
 });
 
@@ -283,6 +296,170 @@ describe("the collection", () => {
     expect(got.secret).toBeUndefined();
     expect(got.hash).toBeUndefined();
     expect(JSON.stringify(await (await asHuman("/v1/api-keys")).json())).not.toContain(body.secret);
+  });
+
+  it("carries an optional description, and omits it when there isn't one", async () => {
+    await seedOwner();
+    // A credential outlives whoever minted it, so what it is for has to live on the record rather than in
+    // somebody's memory - it is what the revoke decision is actually made on.
+    const withDesc = (await (
+      await asHuman("/v1/api-keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ display_name: "Warehouse", description: "  Nightly headcount pull. Ask Priya.  " }),
+      })
+    ).json()) as Record<string, unknown>;
+    // Trimmed on the way in, and readable on the way back out. Re-read by the INTERNAL id: this suite drives
+    // `app` directly, and the inbound wire-id decode lives in the worker's fetch above it.
+    expect(withDesc.description).toBe("Nightly headcount pull. Ask Priya.");
+    const row = (await deps.db.select().from(schema.apiKeys))[0]!;
+    expect(row.description).toBe("Nightly headcount pull. Ask Priya.");
+    const reread = (await (await asHuman(`/v1/api-keys/${row.uuid}`)).json()) as Record<string, unknown>;
+    expect(reread.description).toBe("Nightly headcount pull. Ask Priya.");
+
+    // Optional means absent, not empty string: a key without one carries no field at all.
+    const without = (await (
+      await asHuman("/v1/api-keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ display_name: "No description" }),
+      })
+    ).json()) as Record<string, unknown>;
+    expect(without.description).toBeUndefined();
+  });
+
+  it("renames a key, and refuses to edit its authority", async () => {
+    const owner = await seedOwner();
+    await mintKey(owner, WRITE_HOLIDAYS);
+    const row = (await deps.db.select().from(schema.apiKeys))[0]!;
+
+    // The labels are the mistakes worth fixing: a key is named once and read for years.
+    const edited = await asHuman(`/v1/api-keys/${row.uuid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ display_name: "Warehouse sync", description: "Nightly headcount pull." }),
+    });
+    expect(edited.status).toBe(200);
+    const body = (await edited.json()) as Record<string, unknown>;
+    expect(body.display_name).toBe("Warehouse sync");
+    expect(body.description).toBe("Nightly headcount pull.");
+    // A PATCH of one field leaves the other alone.
+    await asHuman(`/v1/api-keys/${row.uuid}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ description: null }) });
+    const after = (await deps.db.select().from(schema.apiKeys))[0]!;
+    expect(after.name).toBe("Warehouse sync");
+    expect(after.description).toBeNull();
+
+    // What the key can DO is not editable: changing authority means minting a new secret and revoking this
+    // one, which is the whole reason rotation exists. The scope on the row is untouched either way.
+    for (const forbidden of [{ scope: { collections: "*", max_level: "admin", verbs: "*" } }, { expire_time: "2099-01-01T00:00:00Z" }, { owner: `users/${owner}` }]) {
+      const res = await asHuman(`/v1/api-keys/${row.uuid}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(forbidden) });
+      expect(res.status).toBe(400);
+    }
+    const untouched = (await deps.db.select().from(schema.apiKeys))[0]!;
+    expect(JSON.parse(untouched.scopeJson)).toEqual(scopeToWire(WRITE_HOLIDAYS));
+    expect(untouched.expiresAt).toBeNull();
+
+    // Revocation closes the record. The row is kept so the audit trail can still resolve the credential that
+    // did something, and renaming it afterwards would rewrite the label those rows are read by.
+    expect((await asHuman(`/v1/api-keys/${row.uuid}:revoke`, { method: "POST" })).status).toBe(200);
+    const afterRevoke = await asHuman(`/v1/api-keys/${row.uuid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ display_name: "Renamed after death" }),
+    });
+    expect(afterRevoke.status).toBe(409);
+    expect((await deps.db.select().from(schema.apiKeys))[0]!.name).toBe("Warehouse sync");
+  });
+
+  it("attributes what a key DID to the key, not just to the human it acts as", async () => {
+    const owner = await seedOwner();
+    const token = await mintKey(owner, WRITE_HOLIDAYS);
+    const key = (await deps.db.select().from(schema.apiKeys))[0]!;
+
+    // A write through the key, and the same write through the browser session it impersonates.
+    expect((await call("/v1/holidays", token, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ display_name: "By the key", date: "2099-03-01", kind: "fixed" }),
+    })).status).toBe(200);
+    expect((await asHuman("/v1/holidays", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ display_name: "By the human", date: "2099-03-02", kind: "fixed" }),
+    })).status).toBe(200);
+
+    const rows = await deps.db.select().from(schema.auditLog).where(like(schema.auditLog.action, "holiday.%"));
+    const byKey = rows.filter((r) => r.apiKeyId === key.uuid);
+    const byHuman = rows.filter((r) => r.apiKeyId === null);
+    expect(byKey).toHaveLength(1);
+    expect(byHuman).toHaveLength(1);
+    // Both rows name the SAME human, which is exactly why the key column has to exist: without it the two are
+    // indistinguishable, and "is it safe to revoke this?" has no answer.
+    expect(byKey[0]!.actorEmail).toBe(byHuman[0]!.actorEmail);
+    // The key's point-in-time name rides along for display, so a renamed or deleted key still reads sensibly.
+    expect(JSON.parse(byKey[0]!.meta ?? "{}").via_api_key).toMatchObject({ prefix: key.prefix });
+
+    // And the feed can be narrowed to that one credential.
+    const feed = (await (await asHuman(`/v1/activity?api_key=api-keys/${key.uuid}`)).json()) as { results: { action: string }[] };
+    expect(feed.results.map((r) => r.action)).toEqual(["holiday.create"]);
+  });
+
+  it("searches the whole collection server-side, not just the page the client holds", async () => {
+    const owner = await seedOwner();
+    await mintKey(owner, READ_ALL, { name: "Warehouse sync", description: "Nightly headcount pull." });
+    await mintKey(owner, READ_ALL, { name: "CI deploy" });
+    const deleted = (await deps.db.select().from(schema.apiKeys))[0]!;
+
+    const hits = async (q: string) =>
+      ((await (await asHuman(`/v1/api-keys?q=${encodeURIComponent(q)}`)).json()) as { results: { display_name: string }[] }).results.map((r) => r.display_name);
+
+    expect(await hits("warehouse")).toEqual(["Warehouse sync"]); // name, case-insensitive
+    expect(await hits("headcount")).toEqual(["Warehouse sync"]); // description too - what it's FOR is how it's found
+    expect(await hits("deploy")).toEqual(["CI deploy"]);
+    expect(await hits("nothing here")).toEqual([]);
+
+    // A search still respects the soft-delete default, so a deleted key does not reappear through the box.
+    await asHuman(`/v1/api-keys/${deleted.uuid}`, { method: "DELETE" });
+    expect(await hits("warehouse")).toEqual([]);
+    const withDeleted = (await (await asHuman("/v1/api-keys?q=warehouse&show_deleted=true")).json()) as { results: unknown[] };
+    expect(withDeleted.results).toHaveLength(1);
+  });
+
+  it("deletes softly: the row survives for the trail, but the credential stops working", async () => {
+    const owner = await seedOwner();
+    const token = await mintKey(owner, READ_ALL);
+    const key = (await deps.db.select().from(schema.apiKeys))[0]!;
+    expect((await call("/v1/holidays", token)).status).toBe(200); // the control
+
+    expect((await asHuman(`/v1/api-keys/${key.uuid}`, { method: "DELETE" })).status).toBe(204);
+    // The row is kept: the audit trail resolves a credential by its id, so destroying it would orphan every
+    // line this key ever wrote.
+    const [after] = await deps.db.select().from(schema.apiKeys);
+    expect(after!.deleteTime).not.toBeNull();
+    // But deleted means GONE - a deleted key that still authenticated would make DELETE a cosmetic act.
+    expect((await call("/v1/holidays", token)).status).toBe(401);
+    // And it drops out of the list unless the caller asks for deleted rows.
+    const live = (await (await asHuman("/v1/api-keys")).json()) as { results: unknown[] };
+    expect(live.results).toHaveLength(0);
+    const withDeleted = (await (await asHuman("/v1/api-keys?show_deleted=true")).json()) as { results: unknown[] };
+    expect(withDeleted.results).toHaveLength(1);
+    // `only` is the trash BY ITSELF - what makes a "Deleted" view its own fetch instead of a client-side
+    // filter over a page of mostly-live rows, which on a list past one page would show an empty trash. Here a
+    // live key exists alongside the deleted one, so the two modes must not agree.
+    await mintKey(owner, READ_ALL, { name: "Still live" });
+    const names = async (qs: string) =>
+      ((await (await asHuman(`/v1/api-keys${qs}`)).json()) as { results: { display_name: string }[] }).results.map((r) => r.display_name);
+    expect(await names("?deleted_only=true")).toEqual([key.name]);
+    expect(await names("")).toEqual(["Still live"]);
+    expect((await names("?show_deleted=true")).sort()).toEqual([key.name, "Still live"].sort());
+
+    // Restore brings the credential back, which is the whole point of the delete being soft.
+    expect((await asHuman(`/v1/api-keys/${key.uuid}:restore`, { method: "POST" })).status).toBe(200);
+    expect((await call("/v1/holidays", token)).status).toBe(200);
+
+    // `?force` is still the way to destroy one for good.
+    expect((await asHuman(`/v1/api-keys/${key.uuid}?force=true`, { method: "DELETE" })).status).toBe(204);
+    expect((await deps.db.select().from(schema.apiKeys)).map((r) => r.uuid)).not.toContain(key.uuid);
   });
 
   it("revoke stops the credential on the very next request", async () => {

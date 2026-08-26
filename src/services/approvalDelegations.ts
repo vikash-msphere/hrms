@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { has, type CrudSpec, type SetOf } from "./crud";
 
@@ -36,14 +36,8 @@ export async function listApprovalDelegations(deps: Deps, scope: ListScope, maxP
   const conds = [applyScope(scope, schema.approvalDelegations.code, schema.approvalDelegations.delegatorId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.approvalDelegations.delegatorId, empId));
-  const all = (await deps.db.select().from(schema.approvalDelegations).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+  const all = await deps.db.select().from(schema.approvalDelegations).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
 }
 
 // Reject overlapping delegations to the same delegate, so the window stays unambiguous.

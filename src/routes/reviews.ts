@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
+import { contentDisposition } from "../http/contentDisposition";
 import { listReviews, submitSelf, submitManager, acknowledgeReview, skipReviewStage, nudgeReview, renderReviewPdf } from "../services/reviews";
 import { nominateFeedback, feedbackForReviews } from "../services/reviewFeedback";
 import { toReviewResource } from "../http/serialize";
@@ -63,7 +64,7 @@ export const reviews = collectionRoutes({
       raw: async (c, id) => {
         const { bytes, fileName } = await renderReviewPdf(c.get("deps"), c.get("user"), id);
         // pdf-lib returns a Uint8Array over an ArrayBufferLike; hand Hono a plain ArrayBuffer copy.
-        return c.body(bytes.slice().buffer, 200, { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${fileName}"` });
+        return c.body(bytes.slice().buffer, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
       },
     },
   },

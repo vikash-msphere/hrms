@@ -1,27 +1,31 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   KanbanSquare, Plus, BarChart3, Ban, X, ChevronUp, ChevronDown, ChevronsUp, ChevronLeft, ChevronRight,
   AlertTriangle, Trash2, Flag, Target, Search, Tag, Info, MessageSquare, CalendarDays, History, Building2, ListChecks, AlignLeft,
-  MoreHorizontal, List as ListIcon, UserRound, FileText, ExternalLink,
+  MoreHorizontal, List as ListIcon, UserRound, FileText, ExternalLink, Link2, SquareKanban, Pencil, Eye,
 } from "lucide-react";
 import { create, get, invoke, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { useRefetchOnFocus } from "@/hooks/useRefetchOnFocus";
-import { useRoute, setQueryParam } from "@/router";
+import { useRoute, setQueryParam, setRouteRecord, recordUrl } from "@/router";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from "@/components/ui/dropdown-menu";
-import { idOf, cn } from "@/lib/utils";
+import { idOf, cn, initials } from "@/lib/utils";
 import { useCanSeeActivity } from "@/lib/perm";
 import type { Me, Board, BoardMode, Card as CardT, CardComment, CardTodo, TicketChecklist, BoardColumn, WipScope, SwimlaneMode, Employee, Goal, Department, BoardMetrics, Sprint } from "@/types";
 import type { Wire } from "@/wire";
 import { resourceRoute } from "@/lib/resourceRoute";
+import { Chart } from "@/components/common/Chart";
+import { stackSeries } from "@/lib/chartTheme";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SettingsButton } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
+import { StatsSkeleton } from "@/components/common/Skeletons";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useIntent } from "@/lib/intent";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
 import { StatCard } from "@/components/common/StatCard";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +34,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -39,9 +44,12 @@ import type { Label as BoardLabel } from "@/types";
 import { RichTextToolbar } from "@/components/common/RichTextToolbar";
 import { RichText } from "@/lib/richText";
 import { AccessAction } from "@/components/access/AccessAction";
-import { AccessScope } from "@/components/access/AccessScope";
 import { AccessTarget } from "@/components/access/AccessTarget";
-import { ActivityFeed } from "@/components/common/ActivityFeed";
+import { ActivitySection } from "@/components/common/ActivitySection";
+import { MakeTaskDialog } from "@/components/common/MakeTaskDialog";
+import { isConflict } from "@/lib/formError";
+import { timeAgo } from "@/lib/activity";
+import { useMentions } from "@/components/common/MentionPicker";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { TruncationNotice } from "@/components/common/TruncationNotice";
@@ -56,7 +64,13 @@ function useFillHeight() {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const recompute = () => setHeight(Math.max(240, window.innerHeight - el.getBoundingClientRect().top - 16));
+    const recompute = () => {
+      // Below `md` the fixed bottom nav (plus the home indicator under it) covers the last ~5rem of the
+      // viewport, so a board sized to `innerHeight` would put its bottom cards - and the drop zone at the end
+      // of a column - underneath the navigation. Stop above it instead.
+      const bottomChrome = window.matchMedia("(min-width: 768px)").matches ? 16 : 88;
+      setHeight(Math.max(240, window.innerHeight - el.getBoundingClientRect().top - bottomChrome));
+    };
     recompute();
     window.addEventListener("resize", recompute);
     return () => window.removeEventListener("resize", recompute);
@@ -64,11 +78,58 @@ function useFillHeight() {
   return { ref, height };
 }
 
+// Which task is open, in one place for all three views (kanban, list, scrum).
+//
+// Opening writes the id into the hash path, so the task on screen has a URL to paste at somebody: the inbound
+// half of that contract (`useDeepOpen`, `#/boards/<cardId>` from the activity feed and notifications) has
+// always existed, while nothing ever wrote it, which is why no task in this app has been linkable.
+function useOpenCard(openId: string | undefined, cards: CardT[]) {
+  const [editing, setEditing] = useState<CardT | null>(null);
+  const openCard = useCallback((c: CardT) => { setEditing(c); setRouteRecord(idOf(c.path)); }, []);
+  const closeCard = useCallback(() => { setEditing(null); setRouteRecord(null); }, []);
+  useDeepOpen(openId, cards, openCard);
+  return { editing, openCard, closeCard };
+}
+
 const NONE = "__none"; // lane key for cards with no assignee/goal/class/swimlane
 const PRIORITY_LANES = [ // fixed swimlanes for swimlane_mode = "priority", severity high→low
   { key: "urgent", label: "Urgent" }, { key: "high", label: "High" }, { key: "medium", label: "Medium" }, { key: "low", label: "Low" },
 ];
 const NO_DEPT = "__nodept"; // CardDialog: explicit "no department" (distinct from "" = use the org default)
+
+// One-tap answers for the two slowest controls in the task dialog. Fibonacci-ish points because that is what
+// the estimate scale is for ("bigger than a 3, smaller than an 8"), and the dates people actually pick.
+const POINT_PRESETS = [1, 2, 3, 5, 8, 13];
+const shiftDay = (n: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const DUE_PRESETS: { label: string; value: () => string }[] = [
+  { label: "Today", value: () => shiftDay(0) },
+  { label: "Tomorrow", value: () => shiftDay(1) },
+  // Next Monday, which is where "later this week" work really lands.
+  { label: "Next Mon", value: () => shiftDay(((8 - new Date().getDay()) % 7) || 7) },
+  { label: "+1 week", value: () => shiftDay(7) },
+];
+
+// A small toggle pill for the preset rows. Not a Button: these sit under a field in threes and fours, and a
+// row of outline buttons reads as four competing actions rather than one set of choices.
+function Chip({ active, onClick, children }: { active?: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={!!active}
+      onClick={onClick}
+      className={cn(
+        "rounded-full border px-2 py-0.5 text-xs transition-colors",
+        active ? "border-primary bg-primary/10 font-medium text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
 const RANK_STEP = 1024;
 const PRIORITIES: CardT["priority"][] = ["low", "medium", "high", "urgent"];
 const PRIORITY_TONE: Record<string, string> = {
@@ -209,7 +270,7 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
     <div className="mb-3 flex flex-wrap items-center gap-2">
       <div className="relative">
         <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input value={filter.q} onChange={(e) => filter.setQ(e.target.value)} placeholder="Search tasks…" className="h-8 w-52 pl-7" />
+        <Input type="search" value={filter.q} onChange={(e) => filter.setQ(e.target.value)} placeholder="Search tasks…" className="h-8 w-52 pl-7" />
       </div>
       {avatarStrip.length > 1 && (
         <div className="flex items-center -space-x-1.5">
@@ -368,15 +429,17 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
                 <TabsContent value="board">
                   {board.mode === "scrum" ? <ScrumView key={board.path} board={board} me={me} openId={openId} /> : <BoardView key={board.path} board={board} me={me} openId={openId} />}
                 </TabsContent>
-                <TabsContent value="list"><BoardListTab key={board.path} board={board} /></TabsContent>
-                <TabsContent value="analytics"><AnalyticsTab board={board} /></TabsContent>
+                <TabsContent value="list"><BoardListTab key={board.path} board={board} me={me} /></TabsContent>
+                {/* The flow numbers are read off delivered cards, so each one can hand the reader the cards
+                    themselves - the List tab is where they can be sorted and filtered. */}
+                <TabsContent value="analytics"><AnalyticsTab board={board} onOpenCards={() => setTab("list")} /></TabsContent>
               </Tabs>
             )}
           </>
         )}
       </DataState>
 
-      {newBoard && <NewBoardDialog onClose={() => setNewBoard(false)} onSaved={(id) => { setNewBoard(false); setSelectedId(id); reload(); }} />}
+      {newBoard && <NewBoardDialog existing={boards} onClose={() => setNewBoard(false)} onSaved={(id) => { setSelectedId(id); reload(); }} />}
     </div>
   );
 }
@@ -385,12 +448,8 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
 
 function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: string }) {
   const { rows: allCards, setRows, reload } = useCollection<CardT>("cards");
-  const { rows: employees } = useCollection<Employee>("employees");
-  const { rows: goals } = useCollection<Goal>("goals");
-  const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
   const boardId = idOf(board.path);
-  const [editing, setEditing] = useState<CardT | null>(null);
   const [addTo, setAddTo] = useState<string | null>(null); // column key for the full "add card" dialog
   const [quick, setQuick] = useState<string | null>(null); // column key with the inline title composer open
   // "+ New → Create a task" quick action: open the full composer on this board's first column.
@@ -413,7 +472,15 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   });
 
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
-  useDeepOpen(openId, cards, setEditing);
+  const { editing, openCard, closeCard } = useOpenCard(openId, cards);
+  // The three REFERENCE lists a board draws labels from, read only once the cards prove they are needed. A
+  // grid whose cards carry no goal never names a goal, so the goals list is not worth a page of rows; the same
+  // holds for assignees and departments. The card composer is the exception - it must offer everyone, every
+  // goal and every department regardless of what this board currently uses - so an open dialog pulls them in.
+  const composing = !!addTo || !!editing;
+  const { rows: employees } = useCollection<Employee>("employees", { enabled: composing || board.swimlane_mode === "assignee" || cards.some((c) => c.assignee) });
+  const { rows: goals } = useCollection<Goal>("goals", { enabled: composing || board.swimlane_mode === "goal" || cards.some((c) => c.goal) });
+  const { rows: departments } = useCollection<Department>("departments", { enabled: composing || board.swimlane_mode === "department" || cards.some((c) => c.department) });
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "");
@@ -558,7 +625,14 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     <TooltipProvider delayDuration={150}>
       <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} deptName={deptName} />
 
-      <div ref={fillRef} style={{ height: fillH }} className="flex items-stretch gap-3 overflow-x-auto">
+      {/* Swipe-a-column-at-a-time on a phone. Without snapping, dragging a board sideways leaves you parked
+          between two columns reading half of each; with it, every swipe settles on a column edge. Snapping is
+          switched off from `sm` up, where several columns are on screen at once and free scrolling is right. */}
+      <div
+        ref={fillRef}
+        style={{ height: fillH }}
+        className="scroll-shadow-x flex snap-x snap-mandatory items-stretch gap-3 overflow-x-auto sm:snap-none"
+      >
         {cols.map((col) => {
           const count = countByCol.get(col.key) ?? 0;
           const perAssignee = col.limitScope === "assignee";
@@ -590,17 +664,22 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             );
           }
           return (
-            <div key={col.key} className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20">
+            // 86vw on a phone: the column all but fills the screen, with a sliver of the next one showing so
+            // it is obvious the board continues. A fixed 288px column on a 390px screen reads as a mistake.
+            <div key={col.key} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="truncate text-sm font-medium">{col.label}</span>
-                  {col.commitment && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
-                  {col.delivery && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
-                  {col.policy && <Tooltip><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
+                  {/* tapToOpen: these three say the only thing that says it - what the flag means, and the
+                      column's written policy. The triggers do nothing else, so the tap is free to explain. */}
+                  {col.commitment && <Tooltip tapToOpen><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
+                  {col.delivery && <Tooltip tapToOpen><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
+                  {col.policy && <Tooltip tapToOpen><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   {wipOffenders.map(([id, n]) => (
-                    <Tooltip key={id}>
+                    // tapToOpen: a ringed avatar is the whole warning; who it is and why it is ringed is here.
+                    <Tooltip key={id} tapToOpen>
                       <TooltipTrigger asChild>
                         <span className="rounded-full ring-2 ring-destructive"><PhotoAvatar employeeId={id} name={empName(`employees/${id}`)} className="h-5 w-5 text-[9px]" /></span>
                       </TooltipTrigger>
@@ -611,9 +690,9 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                     {count}{col.wipLimit != null ? (perAssignee ? ` (≤${col.wipLimit}/ea)` : ` / ${col.wipLimit}`) : ""}
                   </Badge>
                   <AccessAction collection="cards" create label="Add a task">
-                    <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => setQuick((k) => (k === col.key ? null : col.key))}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
+                    <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={`Add a task to ${col.label}`} className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuick((k) => (k === col.key ? null : col.key))}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
                   </AccessAction>
-                  <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => toggleCollapse(col.key)}><ChevronLeft className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Collapse</TooltipContent></Tooltip>
+                  <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={`Collapse ${col.label}`} className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => toggleCollapse(col.key)}><ChevronLeft className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Collapse</TooltipContent></Tooltip>
                 </div>
               </div>
 
@@ -654,7 +733,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                           }}
                         >
                           <span className={`pointer-events-none absolute inset-x-1 -top-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:t` ? "" : "hidden"}`} />
-                          <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
+                          <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
                           <span className={`pointer-events-none absolute inset-x-1 -bottom-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:b` ? "" : "hidden"}`} />
                         </div>
                       ))}
@@ -672,7 +751,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       </div>
 
       {addTo && <CardDialog board={board} column={addTo} employees={employees} goals={goals} departments={departments} onClose={() => setAddTo(null)} onSaved={() => { setAddTo(null); reload(); }} />}
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} onOpenCard={(c) => setEditing(c)} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
     </TooltipProvider>
   );
 }
@@ -687,11 +766,19 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
   const ageDays = card.update_time ? Math.floor((Date.now() - new Date(card.update_time).getTime()) / 86400e3) : 0;
   const stale = ageDays >= STALE_AFTER_DAYS && !card.deliver_time;
   return (
+    // Opening a card is the board's primary action and was pointer-only: the tile was a plain draggable div,
+    // so a keyboard could not reach a single card on the board. `role="button"` + a tab stop + Enter/Space
+    // gives it the same route in that the drag has always had a menu path for. The key handler ignores
+    // events from inside the tile so the row-actions menu and the access key keep their own keys.
     <div
       draggable
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${card.title}`}
       onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", card.path); onDragStart(); }}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
       onClick={onClick}
-      className="group relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
+      className="group relative cursor-grab overflow-hidden rounded-lg border bg-card p-2.5 shadow-sm transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
     >
       {card.blocked && <span className="absolute inset-y-0 left-0 w-1 bg-destructive" aria-hidden />}
       <div className="absolute right-1 top-1 z-10 flex items-center" onClick={(e) => e.stopPropagation()}>
@@ -761,7 +848,9 @@ function CardActionsMenu({ card, meId, columns, sprintExtras, onMove, onAssignMe
           variant="ghost"
           size="icon"
           aria-label="Task actions"
-          className="h-6 w-6 text-muted-foreground opacity-0 focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100"
+          // The touch case is handled centrally now (index.css forces every `group-hover:opacity-100` control
+          // visible on a coarse pointer), so this no longer needs its own media query.
+          className="h-6 w-6 text-muted-foreground opacity-0 focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
         >
           <MoreHorizontal className="h-4 w-4" />
         </Button>
@@ -842,7 +931,7 @@ function QuickAddCard({ board, column, onClose, onCreated }: { board: Board; col
 
 // ---- Create / edit a card -----------------------------------------------------------------------------------
 
-function CardDialog({ board, card, column, employees, goals, departments, boardCards = [], onOpenCard, onClose, onSaved }: {
+function CardDialog({ board, card, column, employees, goals, departments, boardCards = [], onOpenCard, meId, onClose, onSaved }: {
   board: Board;
   card?: CardT;
   column?: string;
@@ -851,6 +940,8 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   departments: Department[];
   boardCards?: CardT[];
   onOpenCard?: (c: CardT) => void;
+  /** The caller, for "assign to me". */
+  meId?: string | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -890,10 +981,127 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     return (id: string) => m.get(id) ?? "Document";
   }, [orgDocs]);
   const [curColumn, setCurColumn] = useState(card?.column_key ?? column ?? board.columns[0]?.key ?? "");
-  const [showActivity, setShowActivity] = useState(false);
-  const canCardActivity = useCanSeeActivity("cards"); // gates the card Activity affordance (server ANDs with card read)
+  // The server's version of this card after a lost save race, so the reader can see what they are about to
+  // overwrite instead of guessing.
+  const [conflict, setConflict] = useState<CardT | null>(null);
+  const [promote, setPromote] = useState<string | null>(null); // checklist item being turned into its own task
   const canEdit = !editing || (card!.access?.can ?? []).includes("update");
   const descRef = useRef<HTMLTextAreaElement>(null); // the formatting bar edits this textarea's source
+  // A task's description is read far more often than it is rewritten, so an editor opens it RENDERED and steps
+  // into the source only when they mean to change it - the markup ("**blocked** on ~~QA~~") is for writing, not
+  // for reading. A task with no description yet has nothing to read, so that one opens in the editor.
+  const [descEdit, setDescEdit] = useState(!(card?.description ?? "").trim());
+  // Switching INTO the editor puts the caret at the end of the text, so the switch lands where writing
+  // continues. Only on a switch: on a new task the dialog opens in the editor already, and focus there belongs
+  // to the title (the field that has to be filled in), not to the description.
+  const descSwitched = useRef(false);
+  useEffect(() => {
+    if (!descEdit || !descSwitched.current) return;
+    const el = descRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [descEdit]);
+  const commentRef = useRef<HTMLTextAreaElement>(null);
+  const mentions = useMentions({ value: commentText, onChange: setCommentText, textareaRef: commentRef, employees });
+
+  // The saved-on-Save half of the dialog, as one value: what the discard guard compares and what a new task's
+  // draft stashes. Deliberately excludes the checklist, comments, status and block state - those are verbs that
+  // already took effect, so counting them as unsaved edits would prompt to "discard" work that is on the server.
+  const form = useMemo(
+    () => ({ title, description, priority, assignee, department, goal, swimlane, size, due, labels, docs, initialTodos }),
+    [title, description, priority, assignee, department, goal, swimlane, size, due, labels, docs, initialTodos],
+  );
+  function applyForm(f: typeof form) {
+    setTitle(f.title); setDescription(f.description); setPriority(f.priority); setAssignee(f.assignee);
+    setDepartment(f.department); setGoal(f.goal); setSwimlane(f.swimlane); setSize(f.size); setDue(f.due);
+    setLabels(f.labels ?? []); setDocs(f.docs ?? []); setInitialTodos(f.initialTodos ?? []);
+  }
+  const blank = { title: "", description: "", priority: "medium" as CardT["priority"], assignee: "", department: "", goal: "", swimlane: "", size: "", due: "", labels: [], docs: [], initialTodos: [] };
+
+  // Unsaved field edits, against the values this dialog opened with. Only used to gate walking to the next
+  // task: the dialog is remounted per card, so a step sideways would take the edits with it.
+  const opened = useRef(JSON.stringify(form));
+  const dirty = JSON.stringify(form) !== opened.current;
+
+  // Triage without closing. The queue is whatever the view handed over - already filtered and in the order it
+  // draws - so "next" here means the next task on screen, not the next row in some other ordering.
+  const queue = useMemo(() => boardCards.filter((c) => !c.delete_time), [boardCards]);
+  const qIndex = card ? queue.findIndex((c) => idOf(c.path) === idOf(card.path)) : -1;
+  const step = (delta: number) => {
+    const next = queue[qIndex + delta];
+    if (next && onOpenCard) onOpenCard(next);
+  };
+  const canStep = (delta: number) => !!onOpenCard && qIndex >= 0 && !!queue[qIndex + delta] && !dirty;
+
+  // j / k walk the queue, the way every issue tracker does. Ignored while a field has focus, so typing "j" in
+  // a title stays a letter.
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+      if (e.key === "j" && canStep(1)) { e.preventDefault(); step(1); }
+      if (e.key === "k" && canStep(-1)) { e.preventDefault(); step(-1); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // Deliberately re-bound each render: the handler closes over the queue position and the dirty flag, and a
+    // stale copy of either would step to the wrong task or step away from unsaved edits.
+  });
+
+  function copyLink() {
+    if (!card) return;
+    navigator.clipboard.writeText(recordUrl("boards", idOf(card.path))).then(
+      () => toast({ title: "Link copied", description: `Anyone who can see ${taskKey(card)} can open it.` }),
+      () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
+    );
+  }
+
+  const colLabel = (key?: string) => board.columns.find((c) => c.key === key)?.label ?? key ?? "the first column";
+
+  // What the other party actually changed, named in the reader's words. Compared against the version this
+  // dialog opened with, not against the form - "you both edited the title" is the useful sentence.
+  const conflictFields = useMemo(() => {
+    if (!conflict || !card) return [];
+    const pairs: [string, unknown, unknown][] = [
+      ["the title", conflict.title, card.title],
+      ["the description", conflict.description ?? "", card.description ?? ""],
+      ["the status", conflict.column_key, card.column_key],
+      ["the assignee", conflict.assignee ?? "", card.assignee ?? ""],
+      ["the priority", conflict.priority, card.priority],
+      ["the due date", conflict.due_date ?? "", card.due_date ?? ""],
+      ["the points", conflict.size ?? "", card.size ?? ""],
+      ["the labels", (conflict.labels ?? []).join(","), (card.labels ?? []).join(",")],
+    ];
+    return pairs.filter(([, next, prev]) => next !== prev).map(([label]) => label);
+  }, [conflict, card]);
+
+  // Duplicate guard: the same title already on this board. A warning, never a block - two tasks can legitimately
+  // share a name, but far more often it means somebody is filing work that already exists.
+  const dupCard = useMemo(() => {
+    const t = title.trim().toLowerCase();
+    if (t.length < 3) return null;
+    const selfId = card ? idOf(card.path) : "";
+    return boardCards.find((c) => !c.delete_time && idOf(c.path) !== selfId && (c.title ?? "").trim().toLowerCase() === t) ?? null;
+  }, [boardCards, title, card]);
+
+  // WIP consequence, shown before the column fills rather than after: what this task's column already holds
+  // against the limit configured for it (column-wide or per assignee).
+  const wipNote = useMemo(() => {
+    if (!boardCards.length) return null;
+    const col = board.columns.find((c) => c.key === curColumn);
+    if (!col || col.wipLimit == null) return null;
+    const selfId = card ? idOf(card.path) : "";
+    const inCol = boardCards.filter((c) => !c.delete_time && c.column_key === curColumn && idOf(c.path) !== selfId);
+    if (col.limitScope === "assignee") {
+      if (!assignee) return null;
+      const held = inCol.filter((c) => c.assignee && idOf(c.assignee) === assignee).length;
+      return held + 1 > col.wipLimit ? `${col.label} already holds ${held} of this assignee's tasks - the limit is ${col.wipLimit} each.` : null;
+    }
+    return inCol.length + 1 > col.wipLimit ? `${col.label} already holds ${inCol.length} tasks - its WIP limit is ${col.wipLimit}.` : null;
+  }, [boardCards, board.columns, curColumn, assignee, card]);
 
   // Comments arrive only on the item Get (not the list), so load them when opening an existing card.
   useEffect(() => {
@@ -943,9 +1151,8 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   // NO_DEPT = explicitly "no department" (sends null); "" = leave to the org default (omit the key on create).
   const deptOptions = [{ value: NO_DEPT, label: "No department" }, ...departments.map((d) => ({ value: idOf(d.path), label: d.display_name }))];
 
+  // Throws to fail: WriteDialog owns the busy state and pins the message inside the form.
   async function save() {
-    if (!title.trim()) return;
-    setBusy(true);
     const body: Record<string, unknown> = {
       title: title.trim(),
       description: description.trim() || null,
@@ -963,13 +1170,18 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     try {
       if (editing) await patch<CardT>(`cards/${idOf(card!.path)}`, body, etag);
       else await create<CardT>("cards", { board: board.path, column_key: column, ...body, ...(initialTodos.length ? { initial_todos: initialTodos } : {}) });
-      toast({ title: editing ? "Task saved" : "Task added", variant: "success" });
-      onSaved();
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
+      // Lost race: somebody saved this task while it was open here. Take their version's etag so the next
+      // press goes through, and say what happened - the raw "etag mismatch" told nobody anything, and the
+      // edits in the form are still worth keeping.
+      if (isConflict(e) && editing) {
+        const fresh = await get<CardT>(`cards/${idOf(card!.path)}`).catch(() => null);
+        if (fresh) { setEtag(fresh.etag); setConflict(fresh); }
+        throw new Error("Somebody else changed this task while you had it open. What they changed is listed below - press Save again to overwrite it.");
+      }
+      throw e;
     }
+    toast({ title: editing ? "Task saved" : "Task added", variant: "success" });
   }
 
   async function act(verb: string, body?: Record<string, unknown>) {
@@ -995,51 +1207,154 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   }
 
   // Change status (column) via the move verb without closing; invoke() invalidates the cards cache so the board
-  // updates live behind the dialog.
-  async function moveStatus(toCol: string) {
+  // updates live behind the dialog. Applied on pick, so it comes with an undo: a mis-tapped status is one
+  // wrong list away, and hunting the board for the task you just moved is worse than the mistake.
+  async function moveStatus(toCol: string, undoing = false) {
+    const from = curColumn;
     setBusy(true);
-    try { await invoke(`cards/${idOf(card!.path)}`, "move", undefined, { to_column: toCol }); setCurColumn(toCol); }
-    catch (e) { toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" }); }
-    finally { setBusy(false); }
+    try {
+      await invoke(`cards/${idOf(card!.path)}`, "move", undefined, { to_column: toCol });
+      setCurColumn(toCol);
+      toast({
+        title: undoing ? `Back in ${colLabel(toCol)}` : `Moved to ${colLabel(toCol)}`,
+        ...(undoing || !from ? {} : { action: { label: "Undo", onClick: () => void moveStatus(from, true) }, duration: 8000 }),
+      });
+    } catch (e) {
+      toast({ title: "Couldn't move", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
   }
 
   const can = card?.access?.can ?? [];
+  // Ticking a checklist item is its own verb; the boxes still RENDER without it (see the checklist below), so
+  // this is the one place a permission legitimately reaches a `disabled`.
+  const canTickTodos = can.includes("toggleTodo");
   return (
     <>
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl">
-        <AccessScope collection="cards" objectPath={card?.path}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            {editing && <span className="font-mono text-xs text-muted-foreground">{taskKey(card!)}</span>}
-            <span>{editing ? "Task" : "New task"}</span>
-          </DialogTitle>
-        </DialogHeader>
+    <WriteDialog
+      open
+      onClose={onClose}
+      className="max-w-2xl lg:max-w-3xl"
+      title={
+        <span className="flex items-center gap-2 pr-8">
+          {/* The key is the thing people quote to each other, so it is also the copy-link button. */}
+          {editing && (
+            <button type="button" onClick={copyLink} title="Copy a link to this task" className="inline-flex items-center gap-1 rounded font-mono text-xs text-muted-foreground transition-colors hover:text-foreground">
+              {taskKey(card!)} <Link2 className="h-3 w-3" />
+            </button>
+          )}
+          <span>{editing ? "Task" : "New task"}</span>
+          {/* Walk the queue the view handed over, so a triage pass is one dialog instead of twelve. */}
+          {editing && queue.length > 1 && qIndex >= 0 && (
+            <span className="ml-auto flex items-center gap-0.5 text-xs font-normal text-muted-foreground">
+              <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!canStep(-1)} onClick={() => step(-1)} aria-label="Previous task" title={dirty ? "Save or discard your changes first" : "Previous task (k)"}><ChevronLeft className="h-4 w-4" /></Button>
+              <span className="tabular-nums">{qIndex + 1}/{queue.length}</span>
+              <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!canStep(1)} onClick={() => step(1)} aria-label="Next task" title={dirty ? "Save or discard your changes first" : "Next task (j)"}><ChevronRight className="h-4 w-4" /></Button>
+            </span>
+          )}
+        </span>
+      }
+      /* The dialog mixes two clocks: the verbs below (status, checklist, comments, block) hit the server as they
+         are used, while the fields save together. Saying so is the difference between "did that stick?" and not. */
+      description={editing
+        ? "Status, checklist, comments and blockers apply as you use them. The fields save together."
+        : `Lands in ${colLabel(column)} on ${board.name}. Whoever you assign gets a notification.`}
+      collection="cards"
+      objectPath={card?.path}
+      guardLabel="task"
+      form={form}
+      draftKey={editing ? undefined : `card:${idOf(board.path)}:${column ?? ""}`}
+      applyDraft={applyForm}
+      onStartOver={editing ? undefined : () => applyForm(blank)}
+      submitLabel={editing ? "Save changes" : "Add task"}
+      canSubmit={!!title.trim() && canEdit}
+      whyNot={!canEdit ? "You don't have access to change this task." : "Give the task a title."}
+      onSubmit={save}
+      onSaved={onSaved}
+      cancelLabel={editing ? "Close" : "Cancel"}
+      submitAccess={(b) => (editing ? <AccessAction label="Edit task" can={can}>{b}</AccessAction> : <AccessAction create label="Create a task">{b}</AccessAction>)}
+      footerStart={editing ? (
+        <AccessAction label="Delete task" verb="delete" can={can}>
+          <Button variant="ghost" size="sm" className="text-destructive" onClick={del} loading={busy}><Trash2 className="h-4 w-4" /> Delete</Button>
+        </AccessAction>
+      ) : undefined}
+    >
         <Field label="Title">
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing?" disabled={!canEdit} />
+          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="What needs doing?" disabled={!canEdit} autoFocus={!editing} />
         </Field>
+        {dupCard && (
+          <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{taskKey(dupCard)} on this board already has this title, in {colLabel(dupCard.column_key)}. Add it anyway if it really is separate work.</span>
+          </p>
+        )}
+        {conflict && conflictFields.length > 0 && (
+          <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>Somebody else changed {conflictFields.join(", ")} since you opened this. Save again to overwrite their version, or close without saving to keep it.</span>
+          </p>
+        )}
         {/* Markdown-lite source in a plain textarea (same contract as board posts): the bar transforms the
-            text, storage is exactly what's shown, and richToPlain-free rendering via <RichText>. Readers who
-            can't edit get the rendered description, not a disabled box of markup. */}
-        <Field label="Description">
+            text, storage is exactly what's shown, and richToPlain-free rendering via <RichText>. Nobody is shown
+            markup they didn't ask for: a reader who can't edit gets the rendered description rather than a
+            disabled box of it, and an editor gets the same rendering until they switch into the editor. */}
+        <Field
+          label="Description"
+          /* The view switch rides the label row, where it reads as part of the field's heading and doesn't push
+             the fields below it down. Editors only: a reader who can't edit has nothing to switch to. */
+          action={canEdit ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs text-muted-foreground"
+              onClick={() => { descSwitched.current = true; setDescEdit((v) => !v); }}
+            >
+              {descEdit ? <><Eye className="h-3.5 w-3.5" /> Preview</> : <><Pencil className="h-3.5 w-3.5" /> Edit</>}
+            </Button>
+          ) : undefined}
+        >
           {canEdit ? (
-            <div>
-              <RichTextToolbar textareaRef={descRef} value={description} onChange={setDescription} />
-              <Textarea ref={descRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="rounded-t-none" />
-            </div>
+            descEdit ? (
+              <div>
+                <RichTextToolbar textareaRef={descRef} value={description} onChange={setDescription} />
+                <Textarea ref={descRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="rounded-t-none" />
+              </div>
+            ) : (
+              /* The rendered description doubles as the way into the editor: clicking the words you want to
+                 change is what a reader reaches for before hunting for a control. Keyboard reaches it the same
+                 way, and the Edit control in the label row says so for anyone who doesn't guess. */
+              <div
+                role="button"
+                tabIndex={0}
+                title="Click to edit"
+                onClick={() => { descSwitched.current = true; setDescEdit(true); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); descSwitched.current = true; setDescEdit(true); } }}
+                className="min-h-[5.5rem] cursor-text rounded-md border bg-background px-3 py-2 text-left transition-colors hover:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {description.trim()
+                  ? <RichText source={description} className="space-y-1.5 text-sm" />
+                  : <span className="text-sm text-muted-foreground">No description yet.</span>}
+              </div>
+            )
           ) : description ? (
             <RichText source={description} className="space-y-1.5 text-sm" />
           ) : (
             <p className="text-sm text-muted-foreground">No description.</p>
           )}
         </Field>
-        {/* Two-column field grid. When an odd number of fields is visible (Status is edit-only; Labels/Swimlane
-            are board-conditional), the lone trailing field spans both columns so no half-width orphan is left. */}
-        <div className="grid grid-cols-2 gap-x-3 gap-y-2 [&>*:last-child:nth-child(odd)]:col-span-2">
+        {/* Two-column field grid from `sm` up, one column on a phone - a pair of comboboxes side by side on a
+            390px screen leaves neither readable. When an odd number of fields is visible (Status is edit-only;
+            Labels/Swimlane are board-conditional), the lone trailing field spans both columns so no half-width
+            orphan is left. */}
+        <div className="grid gap-x-3 gap-y-2 sm:grid-cols-2 sm:[&>*:last-child:nth-child(odd)]:col-span-2">
           {/* Workflow + owner */}
           {editing && (
             <Field label="Status">
-              <AccessAction verb="move" label="Who can move tasks">
+              {/* Which column the task sits in is a fact worth reading even for someone who cannot move it, so
+                  this one keeps its icon and its disabled state instead of disappearing. */}
+              <AccessAction verb="move" can={can} manageOnly label="Who can move tasks">
                 <Select value={curColumn} onValueChange={moveStatus} disabled={busy || !(card!.access?.can ?? []).includes("move")}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>{board.columns.map((c) => <SelectItem key={c.key} value={c.key}>{c.label}</SelectItem>)}</SelectContent>
@@ -1047,31 +1362,64 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               </AccessAction>
             </Field>
           )}
+          {/* Every field below is disabled for a reader without `update`: Title, Due and Points already were,
+              so the rest looked editable right up to a Save they could never press. */}
           <Field label="Assignee">
-            <Combobox value={assignee} onValueChange={setAssignee} options={empOptions} placeholder="Unassigned" />
+            <div className="flex items-center gap-1.5">
+              <div className="min-w-0 flex-1"><Combobox value={assignee} onValueChange={setAssignee} options={empOptions} placeholder="Unassigned" disabled={!canEdit} /></div>
+              {/* One tap for the overwhelmingly common case, which the board tile menu already had and the
+                  dialog - where people actually are when they decide to pick it up - did not. */}
+              {canEdit && meId && assignee !== meId && (
+                <Button type="button" variant="outline" size="sm" className="h-9 shrink-0 px-2 text-xs" onClick={() => setAssignee(meId)} title="Assign this task to me">
+                  <UserRound className="h-3.5 w-3.5" /> Me
+                </Button>
+              )}
+            </div>
           </Field>
           <Field label="Department">
-            <Combobox value={department} onValueChange={setDepartment} options={deptOptions} placeholder="Org default department" />
+            <Combobox value={department} onValueChange={setDepartment} options={deptOptions} placeholder="Org default department" disabled={!canEdit} />
           </Field>
           {/* Urgency + deadline */}
           <Field label="Priority">
-            <Select value={priority} onValueChange={(v) => setPriority(v as CardT["priority"])}>
+            <Select value={priority} onValueChange={(v) => setPriority(v as CardT["priority"])} disabled={!canEdit}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>{PRIORITIES.map((p) => <SelectItem key={p} value={p} className="capitalize">{p}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
+          {/* Date and size both get one-tap answers: on a phone, a date picker and a number spinner are the
+              two slowest controls in the dialog, and the values people pick are almost always these. */}
           <Field label="Due date">
-            <Input type="date" value={due} onChange={(e) => setDue(e.target.value)} disabled={!canEdit} />
+            <div className="space-y-1.5">
+              <Input type="date" value={due} onChange={(e) => setDue(e.target.value)} disabled={!canEdit} />
+              {canEdit && (
+                <div className="flex flex-wrap gap-1">
+                  {DUE_PRESETS.map((p) => (
+                    <Chip key={p.label} active={due === p.value()} onClick={() => setDue(p.value())}>{p.label}</Chip>
+                  ))}
+                  {due && <Chip onClick={() => setDue("")}>Clear</Chip>}
+                </div>
+              )}
+            </div>
           </Field>
           {/* Estimate + tags */}
-          <Field label="Points">
-            <Input type="number" value={size} onChange={(e) => setSize(e.target.value)} disabled={!canEdit} />
+          <Field label="Points" info={board.mode === "scrum" ? "Story points. What the sprint burndown and the velocity chart are measured in." : "Rough size, for the analytics tab. Not a schedule."}>
+            <div className="space-y-1.5">
+              <Input type="number" min="0" value={size} onChange={(e) => setSize(e.target.value)} disabled={!canEdit} />
+              {canEdit && (
+                <div className="flex flex-wrap gap-1">
+                  {POINT_PRESETS.map((p) => (
+                    <Chip key={p} active={size === String(p)} onClick={() => setSize(String(p))}>{p}</Chip>
+                  ))}
+                  {size && <Chip onClick={() => setSize("")}>Clear</Chip>}
+                </div>
+              )}
+            </div>
           </Field>
           {board.labels.length > 0 && (
             <Field label="Labels">
               <Popover>
                 <PopoverTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-9 w-full justify-start font-normal">
+                  <Button variant="outline" size="sm" className="h-9 w-full justify-start font-normal" disabled={!canEdit}>
                     {labels.length ? <span className="flex flex-wrap gap-1"><LabelChips keys={labels} catalog={board.labels} max={4} /></span> : <span className="text-muted-foreground">None</span>}
                   </Button>
                 </PopoverTrigger>
@@ -1088,11 +1436,11 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           )}
           {/* Linkage */}
           <Field label="Linked goal">
-            <Combobox value={goal} onValueChange={setGoal} options={goalOptions} placeholder="No goal" />
+            <Combobox value={goal} onValueChange={setGoal} options={goalOptions} placeholder="No goal" disabled={!canEdit} />
           </Field>
           {board.swimlane_mode === "custom" && (
             <Field label="Swimlane">
-              <Select value={swimlane || NONE} onValueChange={(v) => setSwimlane(v === NONE ? "" : v)}>
+              <Select value={swimlane || NONE} onValueChange={(v) => setSwimlane(v === NONE ? "" : v)} disabled={!canEdit}>
                 <SelectTrigger><SelectValue placeholder={board.no_lane_label || "Ungrouped"} /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NONE}>{board.no_lane_label || "Ungrouped"}</SelectItem>
@@ -1102,6 +1450,13 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             </Field>
           )}
         </div>
+
+        {wipNote && (
+          <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{wipNote} Finishing something there beats starting this.</span>
+          </p>
+        )}
 
         {/* Linked documents: references into the org library (specs, policies) - the card owns no files.
             Saved with the card (part of the PATCH/create body), like every other field. */}
@@ -1140,7 +1495,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 
         {editing && (
           <div className="space-y-2 border-t pt-3">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="flex items-center gap-1.5 text-sm font-medium">
                 <ListChecks className="h-4 w-4" /> Checklist
                 {todos.length > 0 && <span className="text-xs font-normal text-muted-foreground">{todoDone}/{todos.length} done</span>}
@@ -1156,16 +1511,27 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               <div className="space-y-1.5">
                 {todos.map((t) => (
                   <div key={t.id} className="group flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
-                    <Checkbox checked={t.done} disabled={busy || !can.includes("toggleTodo")} onCheckedChange={(v) => todoAct("toggleTodo", { todo: t.id, done: !!v })} />
+                    {/* Read-only for a reader who cannot tick: the box is the item's STATE, so it stays on
+                        screen showing what is done rather than vanishing with the ability to change it. */}
+                    <Checkbox checked={t.done} disabled={busy || !canTickTodos} onCheckedChange={(v) => todoAct("toggleTodo", { todo: t.id, done: !!v })} />
                     <span className={cn("flex-1", t.done && "text-muted-foreground line-through")}>{t.text}</span>
-                    {can.includes("removeTodo") && <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100" disabled={busy} onClick={() => todoAct("removeTodo", { todo: t.id })} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></Button>}
+                    {!t.done && (
+                      <AccessAction collection="cards" create label="Create a task">
+                        <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" onClick={() => setPromote(t.text)} aria-label="Make this its own task" title="Too big for a tick-box: make it its own task">
+                          <SquareKanban className="h-3.5 w-3.5" />
+                        </Button>
+                      </AccessAction>
+                    )}
+                    {can.includes("removeTodo") && <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" disabled={busy} onClick={() => todoAct("removeTodo", { todo: t.id })} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></Button>}
                   </div>
                 ))}
               </div>
             )}
             {can.includes("addTodos") && (
               <div className="flex items-center gap-2">
-                <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && newTodo.trim()) { e.preventDefault(); todoAct("addTodos", { texts: [newTodo.trim()] }); setNewTodo(""); } }} />
+                {/* Enter always stops here: unswallowed it reaches the dialog's Enter-submits handler and saves
+                    the whole task while the reader is still building its checklist. */}
+                <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (newTodo.trim()) { todoAct("addTodos", { texts: [newTodo.trim()] }); setNewTodo(""); } }} />
                 <Button size="sm" variant="outline" loading={busy} disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (v) { todoAct("addTodos", { texts: [v] }); setNewTodo(""); } }}><Plus className="h-4 w-4" /> Add</Button>
               </div>
             )}
@@ -1174,7 +1540,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 
         {!editing && (
           <div className="space-y-2 border-t pt-3">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="flex items-center gap-1.5 text-sm font-medium">
                 <ListChecks className="h-4 w-4" /> Checklist
                 {initialTodos.length > 0 && <span className="text-xs font-normal text-muted-foreground">{initialTodos.length} item{initialTodos.length === 1 ? "" : "s"}</span>}
@@ -1191,13 +1557,13 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 {initialTodos.map((t, i) => (
                   <div key={i} className="group flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm">
                     <span className="flex-1">{t}</span>
-                    <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100" onClick={() => setInitialTodos((s) => s.filter((_, j) => j !== i))} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></Button>
+                    <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" onClick={() => setInitialTodos((s) => s.filter((_, j) => j !== i))} aria-label="Remove"><Trash2 className="h-3.5 w-3.5" /></Button>
                   </div>
                 ))}
               </div>
             )}
             <div className="flex items-center gap-2">
-              <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && newTodo.trim()) { e.preventDefault(); setInitialTodos((s) => [...s, newTodo.trim()]); setNewTodo(""); } }} />
+              <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (newTodo.trim()) { setInitialTodos((s) => [...s, newTodo.trim()]); setNewTodo(""); } }} />
               <Button size="sm" variant="outline" disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (v) { setInitialTodos((s) => [...s, v]); setNewTodo(""); } }}><Plus className="h-4 w-4" /> Add</Button>
             </div>
           </div>
@@ -1205,24 +1571,52 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 
         {editing && (
           <div className="space-y-2 border-t pt-3">
-            <p className="text-sm font-medium">Comments</p>
+            <p className="flex items-center gap-1.5 text-sm font-medium">
+              <MessageSquare className="h-4 w-4" /> Comments
+              {comments.length > 0 && <span className="text-xs font-normal text-muted-foreground">{comments.length}</span>}
+            </p>
+            {/* A thread reads as a conversation or it doesn't get read: who said it (face), when in words, and
+                the same markdown-lite the description gets - including @mention chips. */}
             {comments.length > 0 ? (
-              <ul className="max-h-48 space-y-2 overflow-y-auto">
+              <ul className="max-h-56 space-y-2 overflow-y-auto">
                 {comments.map((cm, i) => (
-                  <li key={i} className="rounded-md bg-muted/40 p-2 text-sm">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-xs font-medium">{commenterName(cm)}</span>
-                      {cm.create_time && <span className="text-[11px] text-muted-foreground">{new Date(cm.create_time).toLocaleString()}</span>}
+                  <li key={i} className="flex gap-2">
+                    {cm.author
+                      ? <PhotoAvatar employeeId={idOf(cm.author)} name={commenterName(cm)} className="mt-0.5 h-7 w-7 shrink-0 text-[10px]" />
+                      : <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-muted-foreground">{initials(commenterName(cm))}</span>}
+                    <div className="min-w-0 flex-1 rounded-md bg-muted/40 p-2 text-sm">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-xs font-medium">{commenterName(cm)}</span>
+                        {cm.create_time && <span className="text-[11px] text-muted-foreground" title={new Date(cm.create_time).toLocaleString()}>{timeAgo(cm.create_time)}</span>}
+                      </div>
+                      <RichText source={cm.body ?? ""} className="space-y-1.5 leading-snug" />
                     </div>
-                    <p className="whitespace-pre-wrap leading-snug">{cm.body}</p>
                   </li>
                 ))}
               </ul>
             ) : <p className="text-xs text-muted-foreground">No comments yet.</p>}
             {can.includes("comment") && (
               <div className="flex items-start gap-2">
-                <Textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} rows={2} placeholder="Add a comment…" className="flex-1" />
-                <AccessAction verb="comment" label="Who can comment"><Button size="sm" onClick={addComment} loading={busy} disabled={!commentText.trim()}>Comment</Button></AccessAction>
+                {/* Cmd/Ctrl+Enter posts the comment. Without this it reaches the dialog and saves the task
+                    instead, which is never what someone mid-sentence in a comment box meant. `@` offers the
+                    directory, and the mention menu gets first refusal on the keys it uses. */}
+                <div className="relative flex-1">
+                  <Textarea
+                    ref={commentRef}
+                    value={commentText}
+                    onChange={(e) => { setCommentText(e.target.value); mentions.sync(); }}
+                    rows={2}
+                    placeholder="Add a comment… @ to mention, Ctrl+Enter to post"
+                    onKeyUp={mentions.sync}
+                    onClick={mentions.sync}
+                    onKeyDown={(e) => {
+                      if (mentions.onKeyDown(e)) return;
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addComment(); }
+                    }}
+                  />
+                  {mentions.menu}
+                </div>
+                <AccessAction verb="comment" can={can} label="Who can comment"><Button size="sm" onClick={addComment} loading={busy} disabled={!commentText.trim()}>Comment</Button></AccessAction>
               </div>
             )}
           </div>
@@ -1245,14 +1639,14 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                     </span>
                   );
                 })()}
-                {can.includes("unblock") && <AccessAction verb="unblock" label="Who can unblock"><Button size="sm" variant="outline" onClick={() => act("unblock")} loading={busy}>Unblock</Button></AccessAction>}
+                <AccessAction verb="unblock" can={can} label="Who can unblock"><Button size="sm" variant="outline" onClick={() => act("unblock")} loading={busy}>Unblock</Button></AccessAction>
               </div>
             ) : (
               can.includes("block") && (
                 <div className="flex items-center gap-2">
                   <div className="flex-1"><Combobox value={blockedBy} onValueChange={setBlockedBy} options={boardCards.filter((x) => idOf(x.path) !== idOf(card!.path)).map((x) => ({ value: idOf(x.path), label: `${taskKey(x)} ${x.title}` }))} placeholder="Blocked by a task…" /></div>
                   <Input value={blockReason} onChange={(e) => setBlockReason(e.target.value)} placeholder="Note (optional)…" className="flex-1" />
-                  <AccessAction verb="block" label="Who can block"><Button variant="outline" className="shrink-0" onClick={() => act("block", { blocked_by: blockedBy ? `cards/${blockedBy}` : undefined, reason: blockReason || undefined })} loading={busy} disabled={!blockedBy && !blockReason}><Ban className="h-3.5 w-3.5" /> Block</Button></AccessAction>
+                  <AccessAction verb="block" can={can} label="Who can block"><Button variant="outline" className="shrink-0" onClick={() => act("block", { blocked_by: blockedBy ? `cards/${blockedBy}` : undefined, reason: blockReason || undefined })} loading={busy} disabled={!blockedBy && !blockReason}><Ban className="h-3.5 w-3.5" /> Block</Button></AccessAction>
                 </div>
               )
             )}
@@ -1272,32 +1666,19 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
           </div>
         )}
 
-        <DialogFooter className="sm:justify-between">
-          <div className="flex gap-1">
-            {editing && canCardActivity && <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => setShowActivity(true)}><History className="h-4 w-4" /> Activity</Button>}
-            {editing && (
-              <AccessAction label="Delete task" can={can}>
-                <Button variant="ghost" size="sm" className="text-destructive" onClick={del} loading={busy} disabled={!can.includes("delete")}><Trash2 className="h-4 w-4" /> Delete</Button>
-              </AccessAction>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={onClose}>Close</Button>
-            {editing
-              ? <AccessAction label="Edit task" can={can}><Button onClick={save} loading={busy} disabled={!title.trim() || !canEdit}>Save</Button></AccessAction>
-              : <AccessAction create label="Create a task"><Button onClick={save} loading={busy} disabled={!title.trim()}>Add task</Button></AccessAction>}
-          </div>
-        </DialogFooter>
-        </AccessScope>
-      </DialogContent>
-    </Dialog>
-    {editing && showActivity && (
-      <Dialog open onOpenChange={(o) => !o && setShowActivity(false)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader><DialogTitle className="flex items-center gap-2"><History className="h-4 w-4" /> Activity · {taskKey(card!)}</DialogTitle></DialogHeader>
-          <ActivityFeed resource={card!.path} />
-        </DialogContent>
-      </Dialog>
+        {/* Activity as a disclosure in the dialog, like every other detail dialog in the app - it used to open
+            a SECOND dialog on top of this one. Still lazy: the audit query runs on the first click, not on open. */}
+        {editing && <ActivitySection resource={card!.path} className="border-t pt-3" />}
+    </WriteDialog>
+    {/* Checklist item that turned out to be real work: files it as its own task on this board. */}
+    {promote !== null && (
+      <MakeTaskDialog
+        text={promote}
+        source={editing ? `From ${taskKey(card!)}: ${card!.title}` : undefined}
+        defaultBoard={board.path}
+        onClose={() => setPromote(null)}
+        onCreated={(c) => toast({ title: `${c.key ?? "Task"} created`, description: "It's on the board's first column.", variant: "success" })}
+      />
     )}
     </>
   );
@@ -1305,64 +1686,115 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 
 // ---- New board --------------------------------------------------------------------------------------------
 
-function NewBoardDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (id: string) => void }) {
+// The key a board's tasks will carry, worked out before it is created rather than discovered afterwards.
+// Mirrors normalizePrefix/derivePrefix in src/domain/boards.ts - the server still decides, this only shows it.
+function previewPrefix(name: string, prefix: string): string {
+  const normalize = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  const typed = normalize(prefix);
+  if (typed) return typed;
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const initials = words.map((w) => w[0]).join("");
+  const base = initials.length >= 2 ? initials : name.replace(/[^A-Za-z0-9]/g, "").slice(0, 3);
+  return normalize(base) || "TASK";
+}
+
+const BLANK_BOARD = { mode: "kanban" as BoardMode, name: "", prefix: "", description: "", copyFrom: "" };
+
+function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onClose: () => void; onSaved: (id: string) => void }) {
   const { toast } = useToast();
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [prefix, setPrefix] = useState("");
-  const [mode, setMode] = useState<BoardMode>("kanban");
-  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState(BLANK_BOARD);
+  const set = (patch: Partial<typeof BLANK_BOARD>) => setForm((f) => ({ ...f, ...patch }));
+
+  const dupName = useMemo(() => {
+    const n = form.name.trim().toLowerCase();
+    return n ? existing.find((b) => !b.delete_time && b.name.trim().toLowerCase() === n) ?? null : null;
+  }, [existing, form.name]);
+
+  // The board being copied from, when one is picked: a team that already runs a board wants THAT shape - its
+  // columns, WIP limits, policies, labels and swimlanes - not the default flow plus twenty minutes in Configure.
+  const source = form.copyFrom ? existing.find((b) => b.path === form.copyFrom) ?? null : null;
 
   async function save() {
-    if (!name.trim()) return;
-    setBusy(true);
-    const cleanPrefix = prefix.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-    try {
-      const b = await create<Board>("boards", { name: name.trim(), description: description.trim() || null, mode, ...(cleanPrefix ? { task_prefix: cleanPrefix } : {}) });
-      toast({ title: "Board created", variant: "success" });
-      onSaved(idOf(b.path));
-    } catch (e) {
-      toast({ title: "Couldn't create", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    const prefix = previewPrefix(form.name, form.prefix);
+    const b = await create<Board>("boards", {
+      name: form.name.trim(),
+      description: form.description.trim() || null,
+      mode: source ? source.mode : form.mode,
+      ...(form.prefix.trim() ? { task_prefix: prefix } : {}),
+      // Structure only. Cards, sprints and who the board is shared with are deliberately not copied: the first
+      // is somebody else's work, and the last would hand a new team an access list nobody asked for.
+      ...(source ? { columns: source.columns, labels: source.labels, swimlane_mode: source.swimlane_mode, swimlanes: source.swimlanes } : {}),
+    });
+    toast({ title: "Board created", variant: "success" });
+    onSaved(idOf(b.path));
   }
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (!busy && name.trim()) save(); }}>
-        <DialogHeader><DialogTitle>New board</DialogTitle></DialogHeader>
-        <Field label="Method" hint="Kanban = continuous flow. Scrum = time-boxed sprints (backlog, sprint board, burndown & velocity).">
-          <Select value={mode} onValueChange={(v) => setMode(v as BoardMode)}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="kanban">Kanban (continuous flow)</SelectItem>
-              <SelectItem value="scrum">Scrum (sprints)</SelectItem>
-            </SelectContent>
-          </Select>
+    <WriteDialog
+      open
+      onClose={onClose}
+      title="New board"
+      description="A board is one team's work, as columns it moves across. Only you can see it until you share it."
+      collection="boards"
+      guardLabel="board"
+      form={form}
+      submitLabel="Create board"
+      canSubmit={!!form.name.trim()}
+      whyNot="Give the board a name."
+      onSubmit={save}
+      submitAccess={(b) => <AccessAction collection="boards" create label="Create a board">{b}</AccessAction>}
+    >
+      {existing.length > 0 && (
+        <Field label="Start from" hint={source ? `Copies ${source.columns.length} columns with their WIP limits and policies, plus ${source.labels.length} labels. No cards.` : "The standard flow, which you can reshape afterwards."}>
+          <Combobox
+            value={form.copyFrom}
+            onValueChange={(v) => set({ copyFrom: v })}
+            options={[{ value: "", label: "The default flow" }, ...existing.filter((b) => !b.delete_time).map((b) => ({ value: b.path, label: `${b.name} (copy its setup)` }))]}
+            placeholder="The default flow"
+          />
         </Field>
-        <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Platform team" /></Field>
-        <Field label="Task key prefix" hint="For task keys like MS-12. Blank auto-derives from the name.">
-          <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} placeholder="auto (e.g. MS)" className="w-40 uppercase" maxLength={6} />
-        </Field>
-        <Field label="Description"><Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} /></Field>
-        <p className="text-xs text-muted-foreground">Starts with a standard backlog → ready → in progress → review → done flow. Reshape it with Configure.</p>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} loading={busy} disabled={!name.trim()}>Create board</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      )}
+      <Field label="Method" hint={source ? `Follows ${source.name}: ${source.mode === "scrum" ? "sprints" : "continuous flow"}.` : form.mode === "scrum" ? "Time-boxed sprints: a product backlog, a sprint board, burndown and velocity." : "Continuous flow: cards move when they're ready, with WIP limits holding the pace."}>
+        <Select value={source ? source.mode : form.mode} onValueChange={(v) => set({ mode: v as BoardMode })} disabled={!!source}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="kanban">Kanban (continuous flow)</SelectItem>
+            <SelectItem value="scrum">Scrum (sprints)</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+      <Field label="Name"><Input value={form.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. Platform team" autoFocus /></Field>
+      {dupName && (
+        <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>A board called “{dupName.name}” already exists. Two boards with one name are hard to tell apart in the picker.</span>
+        </p>
+      )}
+      <Field
+        label="Task key prefix"
+        hint={form.name.trim() ? `Tasks will be keyed ${previewPrefix(form.name, form.prefix)}-1, ${previewPrefix(form.name, form.prefix)}-2, …` : "For task keys like MS-12. Blank auto-derives from the name."}
+      >
+        <Input value={form.prefix} onChange={(e) => set({ prefix: e.target.value })} placeholder="auto (e.g. MS)" className="w-40 uppercase" maxLength={6} />
+      </Field>
+      <Field label="Description (optional)"><Textarea value={form.description} onChange={(e) => set({ description: e.target.value })} rows={2} placeholder="What this board covers, so the right work lands on it." /></Field>
+      <p className="text-xs text-muted-foreground">
+        {source
+          ? `Starts as a copy of ${source.name}'s board setup, with no cards on it. Reshape it with Configure.`
+          : form.mode === "scrum"
+            ? "Starts with a to do → in progress → review → done sprint flow, with the product backlog alongside it. Reshape it with Configure."
+            : "Starts with a standard backlog → ready → in progress → review → done flow. Reshape it with Configure."}
+      </p>
+    </WriteDialog>
   );
 }
 
 
 // ---- Analytics: cumulative flow diagram + lead/cycle time + throughput --------------------------------------
 
-const SERIES = ["#2a78d6", "#1baf7a", "#eda100", "#008300", "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]; // validated categorical order
-const SERIES_DARK = ["#3987e5", "#199e70", "#c98500", "#008300", "#9085e9", "#e66767", "#d55181", "#d95926"];
+// The categorical palette this board's flow bands used to keep to itself now lives in lib/chartTheme.ts, where
+// every chart in the app draws from it - a column called "In review" is the same hue here as anywhere else.
 
-function AnalyticsTab({ board }: { board: Board }) {
+function AnalyticsTab({ board, onOpenCards }: { board: Board; onOpenCards?: () => void }) {
   const { toast } = useToast();
   const [days, setDays] = useState(30);
   const [metrics, setMetrics] = useState<BoardMetrics | null>(null);
@@ -1380,16 +1812,17 @@ function AnalyticsTab({ board }: { board: Board }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board.path, days]);
 
-  if (loading && !metrics) return <p className="py-10 text-center text-sm text-muted-foreground">Loading analytics…</p>;
+  // Four figures over two charts - the shape the analytics tab settles into.
+  if (loading && !metrics) return <div className="space-y-5"><StatsSkeleton count={4} /><Skeleton className="h-48 w-full rounded-xl" /></div>;
   if (!metrics) return null;
 
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatCard label="Lead time (p50)" value={`${metrics.lead_time.p50}d`} icon={Flag} hint={`p85 ${metrics.lead_time.p85}d · ${metrics.lead_time.count} delivered`} tone="primary" />
-        <StatCard label="Cycle time (p50)" value={`${metrics.cycle_time.p50}d`} icon={BarChart3} hint={`p85 ${metrics.cycle_time.p85}d`} tone="primary" />
-        <StatCard label="Throughput" value={`${metrics.throughput.per_week}/wk`} icon={KanbanSquare} hint={`${metrics.throughput.delivered} in ${days}d`} tone="success" />
-        <StatCard label="Avg cycle time" value={`${metrics.cycle_time.avg}d`} icon={BarChart3} tone="muted" />
+        <StatCard label="Lead time (p50)" value={`${metrics.lead_time.p50}d`} icon={Flag} hint={`p85 ${metrics.lead_time.p85}d`} tone="primary" onClick={onOpenCards} />
+        <StatCard label="Cycle time (p50)" value={`${metrics.cycle_time.p50}d`} icon={BarChart3} hint={`p85 ${metrics.cycle_time.p85}d`} tone="primary" onClick={onOpenCards} />
+        <StatCard label="Throughput" value={`${metrics.throughput.per_week}/wk`} icon={KanbanSquare} hint={`${metrics.throughput.delivered} in ${days}d`} tone="success" onClick={onOpenCards} />
+        <StatCard label="Avg cycle time" value={`${metrics.cycle_time.avg}d`} icon={BarChart3} hint={`over ${metrics.cycle_time.count} cards`} tone="muted" onClick={onOpenCards} />
       </div>
 
       <div className="rounded-lg border p-4">
@@ -1411,81 +1844,25 @@ function AnalyticsTab({ board }: { board: Board }) {
   );
 }
 
-// Stacked-area cumulative flow diagram. Columns are stacked in board order (delivery on top), each a fixed
-// categorical hue. Theme-aware via a scoped style block; a legend names every band (identity never color-alone).
+// Cumulative flow: one area band per board column, stacked in board order, over the chosen window. The
+// stacking is arithmetic (lib/chartTheme.ts#stackSeries) because a band's top edge is the running total; the
+// drawing, the axis, the tooltip and the legend belong to the shared Chart primitive.
 function CfdChart({ metrics }: { metrics: BoardMetrics }) {
-  const W = 720, H = 260, PAD_L = 36, PAD_B = 28, PAD_T = 8, PAD_R = 8;
   const { cfd, columns } = metrics;
-  const [hover, setHover] = useState<number | null>(null);
-  if (cfd.length === 0 || columns.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No flow data yet — create and move some tasks.</p>;
-
-  const plotW = W - PAD_L - PAD_R, plotH = H - PAD_T - PAD_B;
-  const maxTotal = Math.max(1, ...cfd.map((d) => columns.reduce((s, c) => s + (d.counts[c.key] ?? 0), 0)));
-  const x = (i: number) => PAD_L + (cfd.length === 1 ? plotW / 2 : (i / (cfd.length - 1)) * plotW);
-  const y = (v: number) => PAD_T + plotH - (v / maxTotal) * plotH;
-
-  // Build stacked bands bottom-up (first column at the bottom).
-  const bands = columns.map((col, ci) => {
-    const pts = cfd.map((d, i) => {
-      const below = columns.slice(0, ci).reduce((s, c) => s + (d.counts[c.key] ?? 0), 0);
-      const top = below + (d.counts[col.key] ?? 0);
-      return { i, below, top };
-    });
-    const topLine = pts.map((p) => `${x(p.i)},${y(p.top)}`).join(" ");
-    const botLine = pts.slice().reverse().map((p) => `${x(p.i)},${y(p.below)}`).join(" ");
-    return { key: col.key, label: col.label, ci, poly: `${topLine} ${botLine}` };
-  });
-
-  const yTicks = [0, Math.ceil(maxTotal / 2), maxTotal];
-  const xTickIdx = cfd.length <= 1 ? [0] : [0, Math.floor((cfd.length - 1) / 2), cfd.length - 1];
-  const hoverDay = hover != null ? cfd[hover] : null;
-
+  // Drawn back-to-front: the last dataset frappe paints sits on top, and a stacked area reads correctly only
+  // when the tallest (fullest) band is painted first.
+  const stacked = useMemo(() => stackSeries(columns.map((c) => cfd.map((d) => d.counts[c.key] ?? 0))), [cfd, columns]);
   return (
-    <div className="cfd-viz">
-      <style>{`
-        .cfd-viz { --ink:#52514e; --grid:#e6e6e3; ${SERIES.map((c, i) => `--s${i}:${c};`).join("")} }
-        .dark .cfd-viz, :root[data-theme="dark"] .cfd-viz { --ink:#c3c2b7; --grid:#333330; ${SERIES_DARK.map((c, i) => `--s${i}:${c};`).join("")} }
-        @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .cfd-viz { --ink:#c3c2b7; --grid:#333330; ${SERIES_DARK.map((c, i) => `--s${i}:${c};`).join("")} } }
-      `}</style>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Cumulative flow diagram"
-        onMouseMove={(e) => {
-          const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
-          const px = ((e.clientX - rect.left) / rect.width) * W;
-          const i = Math.round(((px - PAD_L) / plotW) * (cfd.length - 1));
-          setHover(Math.max(0, Math.min(cfd.length - 1, i)));
-        }}
-        onMouseLeave={() => setHover(null)}
-      >
-        {yTicks.map((t) => (
-          <g key={t}>
-            <line x1={PAD_L} x2={W - PAD_R} y1={y(t)} y2={y(t)} stroke="var(--grid)" strokeWidth={1} />
-            <text x={PAD_L - 6} y={y(t) + 3} textAnchor="end" fontSize={10} fill="var(--ink)">{t}</text>
-          </g>
-        ))}
-        {bands.map((b) => (
-          <polygon key={b.key} points={b.poly} fill={`var(--s${b.ci % 8})`} stroke="var(--grid)" strokeWidth={0.5} opacity={0.9} />
-        ))}
-        {xTickIdx.map((i) => (
-          <text key={i} x={x(i)} y={H - 8} textAnchor="middle" fontSize={10} fill="var(--ink)">{cfd[i]!.date.slice(5)}</text>
-        ))}
-        {hover != null && <line x1={x(hover)} x2={x(hover)} y1={PAD_T} y2={PAD_T + plotH} stroke="var(--ink)" strokeWidth={1} strokeDasharray="3 3" />}
-      </svg>
-
-      {hoverDay && (
-        <div className="mt-1 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">{hoverDay.date}</span>
-          {columns.map((c) => ` · ${c.label} ${hoverDay.counts[c.key] ?? 0}`).join("")}
-        </div>
-      )}
-
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-        {columns.map((c, i) => (
-          <span key={c.key} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: `var(--s${i % 8})` }} /> {c.label}
-          </span>
-        ))}
-      </div>
-    </div>
+    <Chart
+      type="line"
+      height={260}
+      labels={cfd.map((d) => d.date.slice(5))}
+      datasets={columns.map((c, i) => ({ name: c.label, values: stacked[i] ?? [] })).reverse()}
+      areaFill
+      hideDots
+      ariaLabel="Cumulative flow: how many tasks sat in each column on each day"
+      emptyText="No flow data yet - create and move some tasks."
+    />
   );
 }
 
@@ -1493,14 +1870,16 @@ function CfdChart({ metrics }: { metrics: BoardMetrics }) {
 // Everything DataTable brings comes free: sort, per-column filters, column chooser, CSV/Excel export, saved
 // views, URL state, mobile cards, and cursor-following "Load more". Row click opens the same task dialog.
 
-function BoardListTab({ board }: { board: Board }) {
+function BoardListTab({ board, me }: { board: Board; me: Me }) {
   const { rows: allCards, reload, hasMore, loadMore } = useCollection<CardT>("cards");
-  const { rows: employees } = useCollection<Employee>("employees");
-  const { rows: goals } = useCollection<Goal>("goals");
-  const { rows: departments } = useCollection<Department>("departments");
   const boardId = idOf(board.path);
-  const [editing, setEditing] = useState<CardT | null>(null);
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
+  const { editing, openCard, closeCard } = useOpenCard(undefined, cards);
+  // The list shows one name column (Assignee); goals and departments are the task dialog's pickers, so they
+  // are read when a row is actually opened. Same rule as the board grid.
+  const { rows: employees } = useCollection<Employee>("employees", { enabled: !!editing || cards.some((c) => c.assignee) });
+  const { rows: goals } = useCollection<Goal>("goals", { enabled: !!editing });
+  const { rows: departments } = useCollection<Department>("departments", { enabled: !!editing });
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Someone" : "");
@@ -1526,7 +1905,7 @@ function BoardListTab({ board }: { board: Board }) {
         columns={columns}
         rows={cards}
         getRowId={(c) => c.path}
-        onRowClick={setEditing}
+        onRowClick={openCard}
         tableId="board-list"
         accessCollection="cards"
         accessTargetOf={(c) => ({ objectPath: c.path, can: c.access?.can, label: "Manage task access" })}
@@ -1535,7 +1914,7 @@ function BoardListTab({ board }: { board: Board }) {
         emptyTitle="No tasks on this board"
         emptyDescription="Tasks you add on the Board tab show up here as a sortable, exportable list."
       />
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} onOpenCard={(c) => setEditing(c)} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
     </TooltipProvider>
   );
 }
@@ -1545,9 +1924,6 @@ function BoardListTab({ board }: { board: Board }) {
 function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: string }) {
   const { rows: allCards, setRows, reload } = useCollection<CardT>("cards");
   const { rows: allSprints, reload: reloadSprints } = useCollection<Sprint>("sprints");
-  const { rows: employees } = useCollection<Employee>("employees");
-  const { rows: goals } = useCollection<Goal>("goals");
-  const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
   const confirm = useConfirm();
   const boardId = idOf(board.path);
@@ -1556,7 +1932,6 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [overZone, setOverZone] = useState<string | null>(null);
   const pendingRank = useRef<number | null>(null); // backlog insertion rank from the hovered gap
   const [lineAt, setLineAt] = useState<string | null>(null); // `${cardPath}:t|b` — backlog insertion line
-  const [editing, setEditing] = useState<CardT | null>(null);
   useRefetchOnFocus(() => { reload(); reloadSprints(); });
   const [addBacklog, setAddBacklog] = useState(false);
   const [quickBacklog, setQuickBacklog] = useState(false); // inline title composer on the backlog column
@@ -1566,7 +1941,12 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const [busy, setBusy] = useState(false);
 
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
-  useDeepOpen(openId, cards, setEditing);
+  const { editing, openCard, closeCard } = useOpenCard(openId, cards);
+  // Reference lists on the same rule as the board grid: read when the cards or the composer actually need them.
+  const composing = addBacklog || !!editing;
+  const { rows: employees } = useCollection<Employee>("employees", { enabled: composing || cards.some((c) => c.assignee) });
+  const { rows: goals } = useCollection<Goal>("goals", { enabled: composing || cards.some((c) => c.goal) });
+  const { rows: departments } = useCollection<Department>("departments", { enabled: composing || cards.some((c) => c.department) });
   const sprints = useMemo(
     () => allSprints.filter((s) => s.board && idOf(s.board) === boardId && !s.delete_time).sort((a, b) => (a.create_time ?? "").localeCompare(b.create_time ?? "")),
     [allSprints, boardId],
@@ -1740,10 +2120,17 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
 
       <BoardToolbar filter={filter} board={board} cards={cards} empName={empName} deptName={deptName} />
 
-      <div ref={fillRef} style={{ height: fillH }} className="flex items-stretch gap-3 overflow-x-auto">
+      {/* Swipe-a-column-at-a-time on a phone. Without snapping, dragging a board sideways leaves you parked
+          between two columns reading half of each; with it, every swipe settles on a column edge. Snapping is
+          switched off from `sm` up, where several columns are on screen at once and free scrolling is right. */}
+      <div
+        ref={fillRef}
+        style={{ height: fillH }}
+        className="scroll-shadow-x flex snap-x snap-mandatory items-stretch gap-3 overflow-x-auto sm:snap-none"
+      >
         {/* Product backlog */}
         <div
-          className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20"
+          className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none"
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; pendingRank.current = null; setOverZone("backlog"); setLineAt(null); }}
           onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) { setOverZone((p) => (p === "backlog" ? null : p)); setLineAt(null); } }}
           onDrop={(e) => { e.preventDefault(); const r = pendingRank.current ?? undefined; pendingRank.current = null; setLineAt(null); void dropOnBacklog(r); }}
@@ -1754,7 +2141,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
               <Badge variant="secondary">{backlog.length}</Badge>
             </div>
             <AccessAction collection="cards" create label="Add a task">
-              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => setQuickBacklog((v) => !v)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
+              <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Add a task to the backlog" className="h-6 w-6 text-muted-foreground coarse:h-9 coarse:w-9" onClick={() => setQuickBacklog((v) => !v)}><Plus className="h-4 w-4" /></Button></TooltipTrigger><TooltipContent>Add task</TooltipContent></Tooltip>
             </AccessAction>
           </div>
           <div className={zoneCls("backlog")}>
@@ -1776,7 +2163,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   }}
                 >
                   <span className={`pointer-events-none absolute inset-x-1 -top-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:t` ? "" : "hidden"}`} />
-                  <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
+                  <CardTile card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
                   <span className={`pointer-events-none absolute inset-x-1 -bottom-1 z-10 h-0.5 rounded bg-primary ${lineAt === `${c.path}:b` ? "" : "hidden"}`} />
                 </div>
               ));
@@ -1790,13 +2177,15 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             const items = sprintCards.filter((c) => c.column_key === col.key && filter.match(c)).sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
             const zid = `col:${col.key}`;
             return (
-              <div key={col.key} className="flex min-h-0 w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/20">
+              // 86vw on a phone: the column all but fills the screen, with a sliver of the next one showing so
+            // it is obvious the board continues. A fixed 288px column on a 390px screen reads as a mistake.
+            <div key={col.key} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
                 <div className="flex items-center justify-between border-b px-3 py-2">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-sm font-medium">{col.label}</span>
-                    {col.commitment && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
-                    {col.delivery && <Tooltip><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
-                    {col.policy && <Tooltip><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
+                    {col.commitment && <Tooltip tapToOpen><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-primary" /></TooltipTrigger><TooltipContent>Commitment point — lead time starts here</TooltipContent></Tooltip>}
+                    {col.delivery && <Tooltip tapToOpen><TooltipTrigger asChild><Flag className="h-3.5 w-3.5 text-success" /></TooltipTrigger><TooltipContent>Delivery point — work is done here</TooltipContent></Tooltip>}
+                    {col.policy && <Tooltip tapToOpen><TooltipTrigger asChild><span className="cursor-help text-xs text-muted-foreground">ⓘ</span></TooltipTrigger><TooltipContent className="max-w-xs">{col.policy}</TooltipContent></Tooltip>}
                   </div>
                   {(() => {
                     const perAssignee = col.limitScope === "assignee";
@@ -1832,7 +2221,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
                   onDrop={(e) => { e.preventDefault(); void dropOnColumn(col.key); }}
                 >
                   {items.map((c) => (
-                    <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => setEditing(c)} />
+                    <CardTile key={c.path} card={c} assignee={assigneeOf(c)} catalog={board.labels} goalName={c.goal ? goalTitle(c.goal) : undefined} blockerKey={blockerKeyOf(c)} deptLabel={c.department ? deptName(c.department) : undefined} menu={tileMenu(c)} onDragStart={() => { dragId.current = idOf(c.path); }} onClick={() => openCard(c)} />
                   ))}
                 </div>
               </div>
@@ -1859,51 +2248,118 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         </div>
       )}
 
-      {newSprint && <NewSprintDialog board={board} onClose={() => setNewSprint(false)} onSaved={(id) => { setNewSprint(false); setSelId(id); reloadSprints(); }} />}
+      {newSprint && <NewSprintDialog board={board} sprints={sprints} cards={cards} onClose={() => setNewSprint(false)} onSaved={(id) => { setSelId(id); reloadSprints(); }} />}
       {addBacklog && <CardDialog board={board} column={board.columns[0]?.key} employees={employees} goals={goals} departments={departments} onClose={() => setAddBacklog(false)} onSaved={() => { setAddBacklog(false); reload(); }} />}
-      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} onOpenCard={(c) => setEditing(c)} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); }} />}
+      {editing && <CardDialog key={editing.path} board={board} card={editing} employees={employees} goals={goals} departments={departments} boardCards={cards} meId={me.employee_id} onOpenCard={openCard} onClose={closeCard} onSaved={() => { closeCard(); reload(); }} />}
     </TooltipProvider>
   );
 }
 
-function NewSprintDialog({ board, onClose, onSaved }: { board: Board; onClose: () => void; onSaved: (id: string) => void }) {
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+const addDays = (iso: string, n: number) => isoDay(new Date(new Date(`${iso}T00:00:00`).getTime() + n * 86400e3));
+// Working days inclusive of both ends, Mon-Fri. Holidays are a separate collection and deliberately not
+// consulted here: this is the length of the box, not a capacity promise.
+function workingDays(start: string, end: string): number {
+  let n = 0;
+  for (let t = new Date(`${start}T00:00:00`); t <= new Date(`${end}T00:00:00`); t = new Date(t.getTime() + 86400e3)) {
+    const d = t.getDay();
+    if (d !== 0 && d !== 6) n++;
+  }
+  return n;
+}
+
+// The next "Sprint N" for a board, so nobody has to scroll the picker to find out where the numbering got to.
+function nextSprintName(sprints: Sprint[]): string {
+  const highest = sprints.reduce((max, s) => {
+    const m = /(\d+)\s*$/.exec(s.name ?? "");
+    return m ? Math.max(max, Number(m[1])) : max;
+  }, 0);
+  return `Sprint ${highest + 1}`;
+}
+
+function NewSprintDialog({ board, sprints, cards, onClose, onSaved }: { board: Board; sprints: Sprint[]; cards: CardT[]; onClose: () => void; onSaved: (id: string) => void }) {
   const { toast } = useToast();
-  const [name, setName] = useState("");
-  const [goal, setGoal] = useState("");
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
-  const [busy, setBusy] = useState(false);
+  // Pre-filled with the obvious sprint: the next number, starting today, two weeks long. The discard guard
+  // snapshots this as the baseline, so a dialog opened and closed untouched still closes silently.
+  const [form, setForm] = useState(() => {
+    const start = isoDay(new Date());
+    return { name: nextSprintName(sprints), goal: "", start, end: addDays(start, 13) };
+  });
+  const set = (patch: Partial<typeof form>) => setForm((f) => ({ ...f, ...patch }));
+
+  const badRange = !!form.start && !!form.end && form.end < form.start;
+  const span = !badRange && form.start && form.end
+    ? { days: Math.round((new Date(`${form.end}T00:00:00`).getTime() - new Date(`${form.start}T00:00:00`).getTime()) / 86400e3) + 1, working: workingDays(form.start, form.end) }
+    : null;
+
+  // What this board has actually delivered, so the box is planned against evidence rather than optimism. Same
+  // measure as the velocity chart: points on cards that reached the delivery column inside that sprint.
+  const velocity = useMemo(() => {
+    const done = sprints.filter((s) => s.state === "completed").slice(-3);
+    return done.map((s) => ({
+      name: s.name,
+      points: cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(s.path) && c.deliver_time).reduce((sum, c) => sum + (c.size ?? 0), 0),
+    }));
+  }, [sprints, cards]);
+  const avgVelocity = velocity.length ? Math.round(velocity.reduce((s, v) => s + v.points, 0) / velocity.length) : null;
+
+  // A sprint overlapping a live one is usually a mistyped date, not a plan - the board can only run one at a time.
+  const clash = useMemo(() => {
+    if (badRange || !form.start || !form.end) return null;
+    return sprints.find((s) => s.state !== "completed" && !s.delete_time && s.start_date && s.end_date && s.start_date <= form.end && s.end_date >= form.start) ?? null;
+  }, [sprints, form.start, form.end, badRange]);
 
   async function save() {
-    if (!name.trim()) return;
-    setBusy(true);
-    try {
-      const s = await create<Sprint>("sprints", { board: board.path, name: name.trim(), goal: goal.trim() || null, start_date: start || null, end_date: end || null });
-      toast({ title: "Sprint created", variant: "success" });
-      onSaved(idOf(s.path));
-    } catch (e) {
-      toast({ title: "Couldn't create", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    const s = await create<Sprint>("sprints", {
+      board: board.path,
+      name: form.name.trim(),
+      goal: form.goal.trim() || null,
+      start_date: form.start || null,
+      end_date: form.end || null,
+    });
+    toast({ title: "Sprint created", variant: "success" });
+    onSaved(idOf(s.path));
   }
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (!busy && name.trim()) save(); }}>
-        <DialogHeader><DialogTitle>New sprint</DialogTitle></DialogHeader>
-        <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Sprint 12" /></Field>
-        <Field label="Sprint goal"><Textarea value={goal} onChange={(e) => setGoal(e.target.value)} rows={2} placeholder="What this sprint aims to achieve." /></Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Start date"><Input type="date" value={start} onChange={(e) => setStart(e.target.value)} /></Field>
-          <Field label="End date"><Input type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></Field>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} loading={busy} disabled={!name.trim()}>Create sprint</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <WriteDialog
+      open
+      onClose={onClose}
+      title="New sprint"
+      description="Created in planning: pull backlog items in first, then press Start sprint to begin the box and the burndown."
+      collection="sprints"
+      guardLabel="sprint"
+      form={form}
+      submitLabel="Create sprint"
+      canSubmit={!!form.name.trim() && !badRange}
+      whyNot={!form.name.trim() ? "Give the sprint a name." : "The sprint ends before it starts."}
+      onSubmit={save}
+      submitAccess={(b) => <AccessAction collection="sprints" create label="Create a sprint">{b}</AccessAction>}
+    >
+      <Field label="Name"><Input value={form.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. Sprint 12" autoFocus /></Field>
+      <Field label="Sprint goal (optional)" hint="Shown above the sprint board, so the team can tell whether a task belongs in this box.">
+        <Textarea value={form.goal} onChange={(e) => set({ goal: e.target.value })} rows={2} placeholder="What this sprint aims to achieve." />
+      </Field>
+      <FieldRow>
+        <Field label="Start date"><Input type="date" value={form.start} onChange={(e) => set({ start: e.target.value })} /></Field>
+        <Field label="End date" eager error={badRange ? "The end date is before the start date." : undefined}>
+          <Input type="date" value={form.end} min={form.start || undefined} onChange={(e) => set({ end: e.target.value })} />
+        </Field>
+      </FieldRow>
+      {span && <p className="text-xs text-muted-foreground">{span.days} days, {span.working} working.</p>}
+      {avgVelocity != null && (
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          The last {velocity.length === 1 ? "sprint" : `${velocity.length} sprints`} delivered {velocity.map((v) => v.points).join(", ")} points
+          {velocity.length > 1 ? ` (about ${avgVelocity} a sprint)` : ""}. Pull in around that much, not everything on the backlog.
+        </p>
+      )}
+      {clash && (
+        <p className="flex items-start gap-1.5 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{clash.name} ({clash.state}) already covers {clash.start_date} to {clash.end_date}. A board runs one sprint at a time.</span>
+        </p>
+      )}
+    </WriteDialog>
   );
 }
 
@@ -1922,31 +2378,23 @@ function BurndownChart({ sprint, cards }: { sprint: Sprint; cards: CardT[] }) {
     const delivered = cards.reduce((s, c) => s + (c.deliver_time && new Date(c.deliver_time).getTime() <= dayEnd ? (c.size ?? 0) : 0), 0);
     actual.push(total - delivered);
   }
-  const W = 340, H = 180, PL = 28, PB = 20, PT = 8, PR = 8;
-  const plotW = W - PL - PR, plotH = H - PT - PB;
-  const now = Date.now();
-  const x = (i: number) => PL + (i / days) * plotW;
-  const y = (v: number) => PT + plotH - (v / total) * plotH;
-  const ideal = `${x(0)},${y(total)} ${x(days)},${y(0)}`;
-  // Only draw the actual line up to today (don't project the future).
-  const todayIdx = Math.max(0, Math.min(days, Math.floor((now - start) / DAY)));
-  const actualLine = actual.slice(0, todayIdx + 1).map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  // The actual line stops at today: a burndown that carries on past the present is a forecast pretending to
+  // be a record. The ideal line runs the whole sprint, because that IS the plan.
+  const todayIdx = Math.max(0, Math.min(days, Math.floor((Date.now() - start) / DAY)));
+  const labels = Array.from({ length: days + 1 }, (_, i) => new Date(start + i * DAY).toISOString().slice(5, 10));
   return (
-    <div className="viz-b">
-      <style>{`.viz-b{--ink:#52514e;--grid:#e6e6e3;--a:#2a78d6;--i:#94a3b8}.dark .viz-b,:root[data-theme="dark"] .viz-b{--ink:#c3c2b7;--grid:#333330;--a:#3987e5;--i:#64748b}@media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .viz-b{--ink:#c3c2b7;--grid:#333330;--a:#3987e5;--i:#64748b}}`}</style>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Sprint burndown">
-        <line x1={PL} x2={W - PR} y1={y(0)} y2={y(0)} stroke="var(--grid)" />
-        <line x1={PL} x2={W - PR} y1={y(total)} y2={y(total)} stroke="var(--grid)" />
-        <text x={PL - 5} y={y(total) + 3} textAnchor="end" fontSize={9} fill="var(--ink)">{total}</text>
-        <text x={PL - 5} y={y(0) + 3} textAnchor="end" fontSize={9} fill="var(--ink)">0</text>
-        <polyline points={ideal} fill="none" stroke="var(--i)" strokeWidth={1.5} strokeDasharray="4 3" />
-        <polyline points={actualLine} fill="none" stroke="var(--a)" strokeWidth={2} />
-      </svg>
-      <div className="mt-2 flex gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1.5"><span className="inline-block h-0.5 w-4" style={{ background: "var(--a)" }} /> Remaining</span>
-        <span className="flex items-center gap-1.5"><span className="inline-block h-0.5 w-4 border-t border-dashed" style={{ borderColor: "var(--i)" }} /> Ideal</span>
-      </div>
-    </div>
+    <Chart
+      type="line"
+      height={200}
+      labels={labels}
+      datasets={[
+        { name: "Remaining", values: actual.slice(0, todayIdx + 1) },
+        { name: "Ideal", values: labels.map((_, i) => Math.round((total * (days - i)) / days)) },
+      ]}
+      format={(v) => `${v} pts`}
+      hideDots
+      ariaLabel="Sprint burndown: story points still to deliver on each day, against the ideal line"
+    />
   );
 }
 
@@ -1954,20 +2402,19 @@ function BurndownChart({ sprint, cards }: { sprint: Sprint; cards: CardT[] }) {
 function VelocityChart({ sprints, cards }: { sprints: Sprint[]; cards: CardT[] }) {
   const done = sprints.filter((s) => s.state === "completed");
   const data = done.map((s) => ({ name: s.name, points: cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(s.path)).reduce((x, c) => x + (c.size ?? 0), 0) }));
-  if (data.length === 0) return <p className="py-6 text-center text-sm text-muted-foreground">Complete a sprint to start tracking velocity.</p>;
-  const max = Math.max(1, ...data.map((d) => d.points));
+  // The average is the point of a velocity chart - it is what the next sprint gets planned against - so it
+  // rides along as a marker rather than being left for the reader to eyeball across the bars.
+  const avg = data.length ? Math.round(data.reduce((s, d) => s + d.points, 0) / data.length) : 0;
   return (
-    <div className="viz-v">
-      <style>{`.viz-v{--bar:#1baf7a;--ink:#52514e}.dark .viz-v,:root[data-theme="dark"] .viz-v{--bar:#199e70;--ink:#c3c2b7}@media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .viz-v{--bar:#199e70;--ink:#c3c2b7}}`}</style>
-      <div className="flex h-[180px] items-end gap-2">
-        {data.map((d, i) => (
-          <div key={i} className="flex flex-1 flex-col items-center gap-1">
-            <span className="text-[10px] tabular-nums text-muted-foreground">{d.points}</span>
-            <div className="w-full rounded-t" style={{ height: `${(d.points / max) * 140}px`, background: "var(--bar)", minHeight: 2 }} />
-            <span className="w-full truncate text-center text-[10px] text-muted-foreground" title={d.name}>{d.name}</span>
-          </div>
-        ))}
-      </div>
-    </div>
+    <Chart
+      type="bar"
+      height={200}
+      labels={data.map((d) => d.name)}
+      datasets={[{ name: "Delivered", values: data.map((d) => d.points) }]}
+      markers={avg > 0 ? [{ label: `Average ${avg}`, value: avg }] : undefined}
+      format={(v) => `${v} pts`}
+      ariaLabel="Story points delivered in each completed sprint"
+      emptyText="Complete a sprint to start tracking velocity."
+    />
   );
 }

@@ -16,14 +16,17 @@ describe("computeSettlement", () => {
       noticeShortfallDays: 5,
       reimbursements: 4000,
     });
-    const perDay = 90000 / 30; // 3000
+    const perDay = 90000 / 30; // 3000, the ENCASHMENT rate (basis = basePay)
+    const grossPerDay = 150000 / 30; // 5000, the SALARY rate
     expect(s.lines.find((l) => l.name.startsWith("Salary"))?.amount).toBe(75000); // 150000 * 15/30
     expect(s.lines.find((l) => l.name.startsWith("Leave"))?.amount).toBe(perDay * 10); // 30000
     expect(s.lines.find((l) => l.name === "Pending reimbursements")?.amount).toBe(4000);
-    expect(s.lines.find((l) => l.name.startsWith("Notice"))?.amount).toBe(perDay * 5); // 15000
+    // Notice recovery is the pay the unserved days would have earned, so it is priced on monthly GROSS - the
+    // same wage the final-month salary above is - not on the bare basic.
+    expect(s.lines.find((l) => l.name.startsWith("Notice"))?.amount).toBe(grossPerDay * 5); // 25000
     expect(s.totalEarnings).toBe(75000 + 30000 + 4000);
-    expect(s.totalDeductions).toBe(15000);
-    expect(s.net).toBe(75000 + 30000 + 4000 - 15000); // 94000
+    expect(s.totalDeductions).toBe(25000);
+    expect(s.net).toBe(75000 + 30000 + 4000 - 25000); // 84000
   });
 
   it("omits zero lines (no leave, no notice shortfall, no reimbursements)", () => {

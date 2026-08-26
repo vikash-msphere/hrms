@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import { get } from "@/api";
 import { APP_NAME } from "./brand";
 import { formatMoney } from "./utils";
+import { getSetting } from "@/lib/settingsStore";
 
 // Organization branding (name + logo), stored as a single `settings/organization` JSON row (logo is a small
 // data URL, so no binary/R2 plumbing). Loaded once at the app root and shared so the sidebar brand, the tax
@@ -111,7 +112,7 @@ const Ctx = createContext<{ org: OrgSettings; reload: () => void }>({ org: DEFAU
 export function OrgProvider({ children }: { children: React.ReactNode }) {
   const [org, setOrg] = useState<OrgSettings>(DEFAULT_ORG);
   const reload = useCallback(() => {
-    get<{ value?: Partial<OrgSettings> }>("settings/organization")
+    getSetting<Partial<OrgSettings>>("organization")
       .then((s) => setOrg({ ...DEFAULT_ORG, ...(s.value ?? {}) }))
       .catch(() => setOrg(DEFAULT_ORG)); // no row yet -> defaults
   }, []);

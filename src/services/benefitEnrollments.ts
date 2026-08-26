@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
@@ -65,14 +65,8 @@ export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPa
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.benefitEnrollments.employeeId, empId));
   const all = (await deps.db.select().from(schema.benefitEnrollments).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((e) => showDeleted || !e.deleteTime)
-    .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+    .filter((e) => showDeleted || !e.deleteTime);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
 }
 
 // An enrollment is owned by its employee (the code embeds the owner, so own/dept/all scoping works), and the

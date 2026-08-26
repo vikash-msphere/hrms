@@ -1,6 +1,7 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
+import { jsonBody } from "../http/jsonRequest";
 import {
   listAutomations, createAutomation, updateAutomation, deleteAutomation, setAutomationEnabled, testAutomation,
   type AutomationInput,
@@ -48,7 +49,7 @@ export const automations = collectionRoutes<AutomationInput, typeof schema.autom
     // not the rule, so it owns its response.
     test: {
       raw: async (c, id) => {
-        const body = (await c.req.json().catch(() => ({}))) as { employee_id?: string; payload?: Record<string, unknown> };
+        const body = await jsonBody<{ employee_id?: string; payload?: Record<string, unknown> }>(c);
         return c.json(await testAutomation(c.get("deps"), c.get("user"), id, { employeeId: body.employee_id, payload: body.payload }) as object);
       },
     },

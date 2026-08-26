@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useCollection } from "@/hooks/useCollection";
+import { useCollection, type LoadState } from "@/hooks/useCollection";
 import { patch, invoke, get, type ListResponse } from "@/api";
 import { idOf } from "@/lib/utils";
 import { usePermission } from "@/lib/perm";
@@ -80,6 +80,9 @@ type NotificationsState = {
   // Recency-based, NOT read-based: a row stays "New" for a day even after the unread badge is cleared on view.
   newSubjects: Set<string>;
   available: boolean;
+  // The feed's own load state. Without it a consumer cannot tell "you have no notifications" from "the
+  // notifications have not arrived yet", and the page said the first while the second was true.
+  state: LoadState;
 
   // Currently-snoozed rows (wake time still in the future) - NOT part of the live feed, so lazily fetched
   // (a separate `?snoozed=true` read) the first time the Snoozed view is opened. `loadSnoozed` is idempotent.
@@ -117,7 +120,9 @@ type BusMsg =
 
 const noop = async () => {};
 const EMPTY: NotificationsState = {
-  notifications: [], unread: 0, unreadByPage: {}, newSubjects: new Set(), available: false,
+  // "ready" outside a provider: there is nothing loading, so a consumer of the default should render its
+  // zero state rather than wait forever for a feed that is never coming.
+  notifications: [], unread: 0, unreadByPage: {}, newSubjects: new Set(), available: false, state: "ready",
   snoozed: [], snoozedLoaded: false, loadSnoozed: () => {}, snoozedCount: 0,
   markRead: noop, markUnread: noop, markAllRead: noop, dismiss: noop, snooze: noop, unsnooze: noop, reload: () => {},
 };
@@ -380,8 +385,8 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   // fall back to the count that rode along on the feed read.
   const snoozedCount = snoozedLoaded ? snoozed.length : (metaSnoozedCount ?? 0);
   const value = useMemo<NotificationsState>(
-    () => ({ notifications: rows, unread, unreadByPage, newSubjects, available, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload }),
-    [rows, unread, unreadByPage, newSubjects, available, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload],
+    () => ({ notifications: rows, unread, unreadByPage, newSubjects, available, state, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload }),
+    [rows, unread, unreadByPage, newSubjects, available, state, snoozed, snoozedLoaded, loadSnoozed, snoozedCount, markRead, markUnread, markAllRead, dismiss, snooze, unsnooze, reload],
   );
   return <NotificationsContext.Provider value={value}>{children}</NotificationsContext.Provider>;
 }

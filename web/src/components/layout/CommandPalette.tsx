@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2, KeyRound } from "lucide-react";
+import { Search, CornerDownLeft, ArrowUp, ArrowDown, User, Loader2, KeyRound, X } from "lucide-react";
+import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { NAV, itemVisible, navPerm } from "@/nav";
 import { SETTINGS_REGISTRY } from "@/settings/registry";
@@ -136,6 +137,8 @@ export function CommandPalette({
   const [active, setActive] = useState(0);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
+  // How much of the screen the on-screen keyboard covers, so the panel can stop above it (phone only).
+  const keyboard = useKeyboardInset();
   const listRef = useRef<HTMLDivElement>(null);
   const { org } = useOrg();
   const quickCfg = org.quick_actions;
@@ -152,10 +155,16 @@ export function CommandPalette({
     }
     return built;
   }, [me, quickCfg, am.available, am.enabled, am.toggle]);
-  // Directory is server-scoped to who the caller may see, so people results never leak hidden employees. It is
-  // already cached for the rest of the app, so matching it locally gives instant people hits while the
-  // cross-collection search is still in flight; identical server hits are deduped below.
-  const { rows: employees } = useCollection<Employee>("employees");
+  // Directory is server-scoped to who the caller may see, so people results never leak hidden employees.
+  // Matching it locally gives instant people hits while the cross-collection search is still in flight;
+  // identical server hits are deduped below. Read only once the palette has been OPENED: the shell mounts on
+  // every page, so fetching it eagerly put a directory read on pages that never touch the directory (and
+  // pages that DO show people load the same cached rows themselves). `opened` latches, so reopening is free.
+  const [opened, setOpened] = useState(false);
+  useEffect(() => {
+    if (open) setOpened(true);
+  }, [open]);
+  const { rows: employees } = useCollection<Employee>("employees", { enabled: opened });
 
   // Global ⌘K / Ctrl+K to open from anywhere.
   useEffect(() => {
@@ -351,21 +360,48 @@ export function CommandPalette({
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
-          className="fixed left-1/2 top-[15vh] z-50 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 overflow-hidden rounded-xl border bg-card shadow-2xl duration-150 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+          style={keyboard ? ({ "--kb": `${keyboard}px` } as React.CSSProperties) : undefined}
+          className={cn(
+            // Phone: docked to the top edge, full width, giving up height to the on-screen keyboard - which
+            // is always open here, because the palette exists to be typed into. A centred 15vh panel would
+            // put its results behind the keys.
+            "fixed inset-x-0 top-0 z-50 flex max-h-[calc(100dvh-var(--kb,0px))] flex-col overflow-hidden border-b bg-card shadow-2xl duration-150 standalone:pt-safe-t",
+            "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:slide-in-from-top-4",
+            // sm and up: the familiar centred command palette, unchanged.
+            "sm:inset-x-auto sm:left-1/2 sm:top-[15vh] sm:max-h-none sm:w-[calc(100%-2rem)] sm:max-w-xl sm:-translate-x-1/2 sm:rounded-xl sm:border sm:data-[state=open]:zoom-in-95 sm:data-[state=open]:slide-in-from-top-0",
+          )}
         >
           <DialogPrimitive.Title className="sr-only">Search everything</DialogPrimitive.Title>
-          <div className="flex items-center gap-3 border-b px-4">
+          <div className="flex shrink-0 items-center gap-3 border-b px-4">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
             <input
               value={query}
               onChange={(e) => { setQuery(e.target.value); setActive(0); }}
               onKeyDown={onInputKey}
               placeholder="Search people, records, pages and settings…"
-              className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              // Names, codes and page titles - not prose. Left to itself a phone capitalises the first letter
+              // and autocorrects the rest, which is how "Anaya" becomes "Anya" and the search finds nothing.
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="go"
+              // text-base on a phone: at 14px iOS zooms the page on focus and leaves it zoomed, so the
+              // results you were about to read are off screen. (index.css enforces the same floor globally;
+              // stated here too because this is the one input in the app that is always focused on open.)
+              className="h-12 w-full bg-transparent text-base outline-none placeholder:text-muted-foreground sm:text-sm"
             />
             {searching && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
+            {/* Esc closes it on a keyboard; a phone has no Esc, and the hint row that says so is hidden. */}
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              aria-label="Close search"
+              className="-mr-2 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent sm:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
-          <div ref={listRef} className="max-h-[55vh] overflow-y-auto p-2">
+          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2 sm:max-h-[55vh] sm:flex-none">
             {flat.length === 0 ? (
               <p className="px-3 py-8 text-center text-sm text-muted-foreground">
                 {searching
@@ -408,7 +444,8 @@ export function CommandPalette({
               ))
             )}
           </div>
-          <div className="flex items-center gap-4 border-t px-4 py-2 text-[11px] text-muted-foreground">
+          {/* Keyboard hints, for devices with a keyboard. On a phone the row is three lies and a wasted line. */}
+          <div className="hidden shrink-0 items-center gap-4 border-t px-4 py-2 text-[11px] text-muted-foreground sm:flex">
             <span className="flex items-center gap-1">
               <ArrowUp className="h-3 w-3" />
               <ArrowDown className="h-3 w-3" /> navigate

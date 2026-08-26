@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { makeDocumentService } from "../services/documentService";
+import { jsonBody } from "../http/jsonRequest";
 import { toPersonalDocumentResource } from "../http/serialize";
 import { assembleForm16 } from "../services/form16";
 import { idFromPath } from "../services/documentsCommon";
@@ -18,7 +19,7 @@ const svc = makeDocumentService({ table: schema.personalDocuments, collection: "
 const bodySchema = z.object({ employee: z.string(), financial_year: z.string().optional() }).strict();
 
 export const form16Generate = new Hono<AppEnv>().post("/", async (c) => {
-  const parsed = bodySchema.safeParse(await c.req.json().catch(() => ({})));
+  const parsed = bodySchema.safeParse(await jsonBody(c));
   if (!parsed.success) throw invalidArgument("body must be { employee, financial_year? }");
   const employeeId = idFromPath(parsed.data.employee);
   if (!employeeId) throw invalidArgument("employee is required");

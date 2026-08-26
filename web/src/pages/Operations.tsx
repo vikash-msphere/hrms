@@ -125,7 +125,9 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
       {/* Scheduled tasks (crons) */}
       <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-muted-foreground"><CalendarClock className="h-4 w-4" /> Scheduled tasks</h2>
       <DataState state={crons.state} error={crons.error} onRetry={crons.reload} rows={2}>
-        <div className="mb-8 grid gap-4 md:grid-cols-2">
+        {/* A third column from `xl`: these are short status cards, not forms - two of them across a 1440px
+            screen leaves half the width empty and pushes the job table below the fold for no reason. */}
+        <div className="mb-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {CRONS.map((c) => {
             const last = latestByCron.get(c.cron);
             const next = nextRun(c.cron, now);
@@ -180,8 +182,11 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
           <EmptyState icon={Activity} title="No jobs yet" description="Background jobs (such as payslip generation) appear here once started." />
         ) : (
           <Card>
-            <CardContent className="p-0">
-              <table className="w-full text-sm">
+            <CardContent className="p-0 sm:p-0">
+              {/* Six columns including free-text results - three times what a phone holds, so below `sm` each
+                  job becomes a labelled block and the table proper starts at 640px. */}
+              <div className="scroll-shadow-x overflow-x-auto [--scroll-ground:hsl(var(--card))]">
+              <table className="table-stack w-full text-sm sm:min-w-[40rem]">
                 <thead>
                   <tr className="border-b text-left text-muted-foreground">
                     <th className="px-4 py-2.5 font-medium">Job</th>
@@ -201,10 +206,10 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
                     return (
                       <tr key={j.path} className="border-b last:border-0">
                         <td className="px-4 py-2.5 font-medium">{md.kind ? humanize(md.kind.replace(/\./g, " ")) : "-"}</td>
-                        <td className="px-4 py-2.5">{md.status ? <StatusBadge state={md.status} /> : "-"}</td>
-                        <td className="px-4 py-2.5 text-muted-foreground" title={absUtc(md.create_time)}>{rel(md.create_time)}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{md.attempts ?? 0}</td>
-                        <td className={`px-4 py-2.5 text-xs ${j.error ? "text-destructive" : "text-muted-foreground"}`}>{result || "-"}</td>
+                        <td data-label="Status" className="px-4 py-2.5">{md.status ? <StatusBadge state={md.status} /> : "-"}</td>
+                        <td data-label="Started" className="px-4 py-2.5 text-muted-foreground" title={absUtc(md.create_time)}>{rel(md.create_time)}</td>
+                        <td data-label="Attempts" className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{md.attempts ?? 0}</td>
+                        <td data-label="Result" className={`px-4 py-2.5 text-xs ${j.error ? "text-destructive" : "text-muted-foreground"}`}>{result || "-"}</td>
                         <td className="px-4 py-2.5 text-right">
                           {runnable && (
                             <AccessAction collection="operations" objectPath={`operations/${id}`} verb="run" label="Run job">
@@ -219,6 +224,7 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
                   })}
                 </tbody>
               </table>
+              </div>
             </CardContent>
           </Card>
         )}

@@ -68,28 +68,51 @@ export function childSeg(code: string, parentCode: string | null): string | null
   return code.slice(parentCode.length + 1).split("-")[0] ?? null;
 }
 
+// `count` consecutive child codes in ONE pass, for a create that makes many rows at once (twenty identical
+// adapters received in a box). Calling nextChildCode in a loop cannot do this: it only ever sees the siblings
+// it was handed, so every call would return the same leaf. Same allocation rules as the single form - max+1,
+// sequential, never reused - so a run is contiguous and interleaves correctly with earlier singles.
+export function nextChildCodes(siblingCodes: (string | null | undefined)[], parentCode: string | null, minWidth: number, count: number): string[] {
+  let max = maxSeg(childSegsOf(siblingCodes, parentCode));
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) out.push(compose(parentCode, padSeg(++max, minWidth)));
+  return out;
+}
+
 // Compose the next child code under `parentCode` (null = top-level/flat), given the codes of the
 // existing siblings in that scope. Unifies flat allocation (parentCode null) and hierarchical
 // allocation. Pure: the caller fetches the sibling codes; this picks the next free leaf and composes.
 export function nextChildCode(siblingCodes: (string | null | undefined)[], parentCode: string | null, minWidth: number): string {
-  const segs: string[] = [];
-  for (const c of siblingCodes) {
-    if (!c) continue;
-    const seg = childSeg(c, parentCode);
-    if (seg) segs.push(seg);
-  }
-  return compose(parentCode, nextSeg(segs, minWidth));
+  return nextChildCodes(siblingCodes, parentCode, minWidth, 1)[0]!;
 }
 
 // Allocate the next own-segment within a scope, given the sibling segments already in use.
 // Sequential (max+1, never reused even across gaps), base32, left-padded to `minWidth`, and spilling to
 // a wider segment once the width is exhausted. Raising `minWidth` later does not rewrite existing codes.
 export function nextSeg(existingSegs: string[], minWidth: number): string {
+  return padSeg(maxSeg(existingSegs) + 1, minWidth);
+}
+
+function childSegsOf(siblingCodes: (string | null | undefined)[], parentCode: string | null): string[] {
+  const segs: string[] = [];
+  for (const c of siblingCodes) {
+    if (!c) continue;
+    const seg = childSeg(c, parentCode);
+    if (seg) segs.push(seg);
+  }
+  return segs;
+}
+
+function maxSeg(segs: string[]): number {
   let max = -1;
-  for (const s of existingSegs) {
+  for (const s of segs) {
     const v = decodeBase32(s);
     if (v > max) max = v;
   }
-  const next = encodeBase32(max + 1);
-  return next.length >= minWidth ? next : "0".repeat(minWidth - next.length) + next;
+  return max;
+}
+
+function padSeg(value: number, minWidth: number): string {
+  const seg = encodeBase32(value);
+  return seg.length >= minWidth ? seg : "0".repeat(minWidth - seg.length) + seg;
 }

@@ -20,7 +20,7 @@ describe("REFERENCES manifest", () => {
 describe("PROTECTED_FIELDS manifest", () => {
   it("guards the escalation-sensitive fields", () => {
     expect(protectedFieldsOf("users")).toContain("role");
-    expect(protectedFieldsOf("employees")).toEqual(["department", "manager", "epf_enrolled", "employee_number"]);
+    expect(protectedFieldsOf("employees")).toEqual(["department", "manager", "epf_enrolled", "eps_excluded", "employee_number"]);
     expect(protectedFieldsOf("compensation")).toContain("annual_ctc"); // the authoritative pay figure (base_pay is derived/readOnly)
     expect(protectedFieldsOf("holidays")).toEqual([]); // unguarded resource
   });

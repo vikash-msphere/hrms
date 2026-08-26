@@ -12,11 +12,15 @@ export const REFERENCES: Record<string, Record<string, RefField>> = {
   "holiday-selections": { holiday: { collection: "holidays", level: "read" } },
   "payroll-runs": { pay_period: { collection: "pay-periods", level: "read" } },
   reimbursements: { category: { collection: "reimbursement-categories", level: "read" } },
+  // `stocktake` rides on :verify - filing a sighting against a count you cannot even read would be recording
+  // into somebody else's report.
+  assets: { category: { collection: "asset-categories", level: "read" }, stocktake: { collection: "stocktakes", level: "read" } },
+  "asset-requests": { category: { collection: "asset-categories", level: "read" } },
   "benefit-enrollments": { plan: { collection: "benefit-plans", level: "read" } },
   "shift-assignments": { shift: { collection: "shifts", level: "read" } },
   "time-entries": { project: { collection: "projects", level: "read" } },
   referrals: { department: { collection: "departments", level: "read" }, hired_employee: { collection: "employees", level: "read" } },
-  "job-requisitions": { department: { collection: "departments", level: "read" }, hiring_manager: { collection: "employees", level: "read" } },
+  "job-requisitions": { department: { collection: "departments", level: "read" }, hiring_manager: { collection: "employees", level: "read" }, pay_grade: { collection: "pay-grades", level: "read" } },
   candidates: { referral: { collection: "referrals", level: "read" } },
   applications: { candidate: { collection: "candidates", level: "read" }, requisition: { collection: "job-requisitions", level: "read" }, referral: { collection: "referrals", level: "read" } },
   interviews: { application: { collection: "applications", level: "read" } },
@@ -36,7 +40,7 @@ export const REFERENCES: Record<string, Record<string, RefField>> = {
 // mass-assignment / self-escalation and is the hook for finer per-field control later.
 export const PROTECTED_FIELDS: Record<string, string[]> = {
   users: ["role", "status", "employee"], // role/status escalation; employee relink = identity change
-  employees: ["department", "manager", "epf_enrolled", "employee_number"], // re-parent (re-scoping) + EPF enrolment + human ID — payroll/HR only, never self-writable
+  employees: ["department", "manager", "epf_enrolled", "eps_excluded", "employee_number"], // re-parent (re-scoping) + EPF/EPS membership + human ID — payroll/HR only, never self-writable
   compensation: ["annual_ctc", "currency_code", "pay_grade", "salary_structure"], // pay amounts (annual_ctc drives the whole split) — payroll only, never self
 };
 
@@ -91,6 +95,7 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   "attendance-regularizations": { employee: { collection: "employees" } },
   "overtime-requests": { employee: { collection: "employees" } },
   "remote-work-requests": { employee: { collection: "employees" } },
+  "asset-requests": { employee: { collection: "employees" } },
   "notice-periods": { employee: { collection: "employees" } },
   // The board author owns their row: kudos are author(giver)-owned, and a generic post's author owns it too, so
   // an author can self-scope edit/soft-delete their own item (kudos folded into announcements as kind="kudos").
@@ -160,6 +165,7 @@ export const SUPPORTED_SCOPES: Record<string, ScopeTier[]> = {
   "attendance-regularizations": ["self", "dept", "all"],
   "overtime-requests": ["self", "dept", "all"],
   "remote-work-requests": ["self", "dept", "all"],
+  "asset-requests": ["self", "dept", "all"],
   "notice-periods": ["self", "dept", "all"],
   announcements: ["self", "dept", "all"], // author-owned (giver for kudos); self = own posts/kudos
   suggestions: ["self", "dept", "all"],

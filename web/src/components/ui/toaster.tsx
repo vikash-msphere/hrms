@@ -8,6 +8,7 @@ import {
   ToastViewport,
 } from "./toast";
 import { useToast } from "./use-toast";
+import { useMedia } from "@/hooks/useMedia";
 
 const ICONS = {
   success: <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-success" />,
@@ -17,8 +18,11 @@ const ICONS = {
 
 export function Toaster() {
   const { toasts } = useToast();
+  // Swipe a toast away along the axis it can leave by: down on a phone, where the stack spans the width and
+  // there is no side to flick it off, right on a wider screen, where it sits in the corner.
+  const phone = useMedia("(max-width: 767px)");
   return (
-    <ToastProvider swipeDirection="right">
+    <ToastProvider swipeDirection={phone ? "down" : "right"}>
       {toasts.map(({ id, title, description, variant, action, duration: _duration, ...props }) => (
         <Toast key={id} variant={variant} {...props}>
           {ICONS[(variant as keyof typeof ICONS) ?? "default"] ?? ICONS.default}
@@ -32,7 +36,9 @@ export function Toaster() {
                   action.onClick();
                   props.onOpenChange?.(false);
                 }}
-                className="mt-1 w-fit rounded-md border px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent"
+                // Undo lives here (see lib/*, the undo toasts): it is the most time-pressured button in the
+                // app, so it gets a real target rather than a 26px chip.
+                className="mt-1.5 w-fit rounded-md border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent coarse:min-h-9 coarse:px-4 coarse:text-sm"
               >
                 {action.label}
               </button>

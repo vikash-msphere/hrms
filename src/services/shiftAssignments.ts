@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
@@ -26,14 +26,12 @@ export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPage
   if (from && !Number.isNaN(dayMs(from))) conds.push(gte(schema.shiftAssignments.date, new Date(dayMs(from))));
   if (to && !Number.isNaN(dayMs(to))) conds.push(lte(schema.shiftAssignments.date, new Date(dayMs(to) + 86_399_999)));
   const all = (await deps.db.select().from(schema.shiftAssignments).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((a) => showDeleted || !a.deleteTime)
-    .sort((a, b) => +new Date(a.date) - +new Date(b.date) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+    .filter((a) => showDeleted || !a.deleteTime);
+  // Paged on `createdAt`, which is what the cursor carries - sorting the whole roster by DATE and seeking on
+  // `createdAt` were two different orders, so a shift added out of date order could fall between two pages.
+  // The roster reads forwards through the week, so the page comes back in date order.
+  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return { ...page, items: page.items.sort((a, b) => +new Date(a.date) - +new Date(b.date) || a.uuid.localeCompare(b.uuid)) };
 }
 
 // One employee rostered onto one shift on one day. Owned by that employee (the code embeds the owner, so

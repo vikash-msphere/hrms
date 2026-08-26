@@ -41,15 +41,17 @@ export function validateStateMachine(sm: StateMachine): string[] {
   return errors;
 }
 
-// Support tickets workflow (settings key "ticket-workflow"). Mirrors the former inline TRANSITIONS map exactly,
-// so making it data-driven is behaviour-preserving until an admin edits it.
+// Support tickets workflow (settings key "ticket-workflow"). The web mirrors this table in
+// web/src/lib/ticketWorkflow.ts to render the status picker; test/ticketWorkflowDrift.test.ts pins the two.
 export const DEFAULT_TICKET_WORKFLOW: StateMachine = {
   states: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "CANCELLED"],
   initial: "OPEN",
   transitions: [
     { verb: "start", from: ["OPEN"], to: "IN_PROGRESS" },
     { verb: "resolve", from: ["OPEN", "IN_PROGRESS"], to: "RESOLVED" },
-    { verb: "close", from: ["RESOLVED"], to: "CLOSED" },
+    // Closable straight from the queue, not only after a resolve: a duplicate or a ticket handled outside the
+    // tool has nothing to "resolve", and the status picker offers every column as a one-move destination.
+    { verb: "close", from: ["OPEN", "IN_PROGRESS", "RESOLVED"], to: "CLOSED" },
     { verb: "reopen", from: ["RESOLVED", "CLOSED"], to: "OPEN" },
     { verb: "cancel", from: ["OPEN", "IN_PROGRESS"], to: "CANCELLED" },
   ],

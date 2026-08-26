@@ -14,7 +14,7 @@ export async function listLeaveBalances(deps: Deps, scope: ListScope, maxPageSiz
   const conds = [applyScope(scope, schema.leaveBalances.code, schema.leaveBalances.employeeId)];
   const empFilter = idFromPath(employee);
   if (empFilter) conds.push(eq(schema.leaveBalances.employeeId, empFilter));
-  return keysetPage(deps, schema.leaveBalances, "leave-balances", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.leaveBalances, "leave-balances", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 // Balances are produced by the accrual cron, never written through the API, and never deleted - so the spec

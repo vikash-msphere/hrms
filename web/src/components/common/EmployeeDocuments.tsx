@@ -57,8 +57,11 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
             {docs.map((d) => {
               const isForm16 = d.document_type === "FORM16";
               const superseded = isForm16 && !d.official && !!d.financial_year && officialFys.has(d.financial_year);
+              // The status badges and Download together want ~300px, which is a whole phone screen next to a
+              // document name. Below `sm` they take a line of their own under the name instead of squeezing
+              // it to nothing.
               return (
-              <div key={d.path} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+              <div key={d.path} className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground">
                     <FileText className="h-4 w-4" />
@@ -71,7 +74,7 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
                     </p>
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 pl-12 sm:shrink-0 sm:pl-0">
                   {isForm16 ? (
                     d.official ? (
                       <Badge variant="success">Official · TRACES</Badge>
@@ -92,7 +95,7 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
                     )
                   ) : null}
                   {d.size_bytes ? (
-                    <AccessAction collection={d.path.split("/")[0]} objectPath={d.path} verb="download" label="Download">
+                    <AccessAction collection={d.path.split("/")[0]} objectPath={d.path} can={d.access?.can} verb="download" label="Download">
                       <Button variant="outline" size="sm" onClick={() => onDownload(d)}>
                         <Download className="h-4 w-4" /> Download
                       </Button>

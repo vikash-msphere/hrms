@@ -11,14 +11,15 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 
-import { createRun, buildRunItems, transition, deleteRun, listRunItems, getRun, runStaleness, previewRunItemPayslip } from "../src/services/payroll";
+import { createRun, buildRunItems, transition, deleteRun, listRunItems, getRun, runStaleness, previewRunItemPayslip, publishRun } from "../src/services/payroll";
 import { createLoan, approveLoan, disburseLoan, recordLoanRepayment, repaidCreditStmt, resetLoanRepaymentStmts } from "../src/services/loans";
 import { recordBonus, unpaidBonuses } from "../src/services/bonuses";
 import { computeAndStoreEncashment, approveEncashment, cancelEncashment, approvedUnpaidEncashments } from "../src/services/leaveEncashments";
 import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement } from "../src/services/reimbursements";
 import { computeAndStoreSettlement } from "../src/services/settlements";
 import { createSalaryStructure } from "../src/services/salaryStructures";
-import { reviseCompensation, reapplySplitCurrent, splitStatus } from "../src/services/compensation";
+import { reviseCompensation, reapplySplitCurrent, splitStatus, listCompensation, decorateCompensation } from "../src/services/compensation";
+import { toCompensationResource } from "../src/http/serialize";
 import { createPayComponent, updatePayComponent } from "../src/services/payComponents";
 import { createPayPeriod } from "../src/services/payPeriods";
 import { getTaxDetails, setTaxDetails, listPendingTaxVerifications } from "../src/services/taxDetails";
@@ -47,7 +48,7 @@ beforeAll(async () => {
 const TABLES = [
   schema.loanRepayments, schema.payrollRunItems, schema.payslips, schema.payrollRuns, schema.payPeriods,
   schema.loans, schema.bonuses, schema.leaveEncashments, schema.leaveBalances, schema.leaveRequests, schema.leaveTypes,
-  schema.reimbursements, schema.settlements, schema.compensation, schema.salaryStructures, schema.payComponents,
+  schema.reimbursements, schema.settlements, schema.compensation, schema.salaryStructures, schema.payGrades, schema.payComponents,
   schema.taxDeclarations,
   schema.offers, schema.applications, schema.candidates, schema.jobRequisitions,
   schema.transitions, schema.jobs, schema.notifications, schema.eventLog, schema.automationRuns, schema.workflowInstances,
@@ -383,6 +384,40 @@ describe("payroll: one committed run per pay period", () => {
     // Built, but nobody has compensation on record -> zero items. Still refused.
     await buildRunItems(deps, actor, run.uuid);
     await expect(transition(deps, actor, run.uuid, "APPROVED")).rejects.toThrow(/no payslip items/);
+  });
+
+  it("publishes a run exactly once, however many times :publish is called", async () => {
+    // Publish is not idempotent in its effects: it notifies every employee in the run, emits
+    // `payroll.published` (so every rule on it fires) and enqueues a payslip-generation job. So "refused the
+    // second time" is not a nicety - a second pass means everyone gets a duplicate "Payslip available" and a
+    // duplicate payslip batch is queued.
+    //
+    // SCOPE, stated honestly: this pins the sequential answer, which `canTransition` gives once the state has
+    // moved. It does NOT reach the guarded state predicate on the write itself - that only matters when two
+    // callers read APPROVED before either writes, and this harness serialises the two calls (D1 resolves the
+    // first chain before the second's read returns), so the interleaving cannot be staged here. The predicate
+    // is the backstop for that case and is unverified by this test.
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    await transition(deps, actor, run.uuid, "REVIEW");
+    await transition(deps, actor, run.uuid, "APPROVED");
+
+    const outcomes = await Promise.allSettled([publishRun(deps, actor, run.uuid), publishRun(deps, actor, run.uuid)]);
+    expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((o) => o.status === "rejected")).toHaveLength(1);
+
+    await expect(publishRun(deps, actor, run.uuid)).rejects.toThrow(/must be APPROVED|already been published/);
+
+    // One payslip job, not two.
+    const jobs = await deps.db.select().from(schema.jobs).where(eq(schema.jobs.kind, "payslip.generateRun"));
+    expect(jobs).toHaveLength(1);
+    // One "payslip available" notice per employee in the run, not two.
+    const notes = await deps.db.select().from(schema.notifications).where(eq(schema.notifications.recipientId, emp));
+    expect(notes.filter((n) => n.type === "payslip.published")).toHaveLength(1);
   });
 });
 
@@ -1283,5 +1318,59 @@ describe("tax: a VERIFIED declaration reduces withholding (money-audit C2)", () 
     expect(await declare("80CCD(2)", 50000, "DECLARED")).toBe(before);
     // Verified 80CCD(2) (the employer's NPS contribution) survives the new regime and cuts the tax.
     expect(await declare("80CCD(2)", 100000, "VERIFIED")).toBeLessThan(before);
+  });
+});
+
+describe("compensation: a self-service read is priced by the server and carries no grade or band", () => {
+  it("gives the caller's own row its CTC build-up while withholding the grade/band", async () => {
+    const emp = await seedEmployee({ epfEnrolled: true });
+    const actor = await seedActor(emp);
+    const gradeId = genId();
+    await deps.db.insert(schema.payGrades).values({ uuid: gradeId, code: short("pg"), name: "L4", bandMin: 600000, bandMid: 1200000, bandMax: 2000000, currency: "INR" });
+    await seedComponent({ name: "HRA", method: "percent_base", rate: 40 });
+    await seedComponent({ name: "Employer PF", kind: "employer_contribution", method: "epf", rate: 12, cap: 15000 });
+    // 50000 basic + 40% HRA + 5000 plug = 75000 gross, + employer PF 12% of the 15000 ceiling = 76800/month.
+    await seedComp(emp, { basePay: 50000, specialAllowance: 5000, ctcAnnual: 921600, payGradeId: gradeId });
+
+    // The two scopes the middleware hands down: payroll reads everyone, an employee only ever their own row
+    // (what My Profile's tab gets once an org grants compensation.read to its people).
+    const orgWide = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true } as const;
+    const ownOnly = { breadth: "own", deptCode: null, ownerId: emp, seeRestricted: true } as const;
+    const rows = await listCompensation(deps, orgWide, emp);
+
+    const [asPayroll] = await decorateCompensation(deps, actor, rows, orgWide);
+    const [asSelf] = await decorateCompensation(deps, actor, await listCompensation(deps, ownOnly, emp), ownOnly);
+
+    // Payroll keeps the ladder context; the employee gets the pay, not where it sits against the band.
+    expect(toCompensationResource(asPayroll).pay_grade_name).toBe("L4");
+    expect(toCompensationResource(asPayroll).band_status).toBe("in_band");
+    const mine = toCompensationResource(asSelf);
+    expect(mine.pay_grade_name).toBeUndefined();
+    expect(mine.band_status).toBeUndefined();
+    expect(mine.compa_ratio).toBeUndefined();
+    expect(mine.pay_grade).toBeUndefined();
+
+    // ...and the build-up is priced server-side, so the employee needs neither the component catalog nor the
+    // salary structure to see what makes up the CTC.
+    expect(mine.ctc_monthly).toBe(76800);
+    expect(mine.breakdown?.map((l) => [l.name, l.monthly])).toEqual([
+      ["Basic", 50000], ["HRA", 20000], ["Special Allowance", 5000], ["Employer PF", 1800],
+    ]);
+    expect(mine.breakdown?.every((l) => l.annual === l.monthly * 12)).toBe(true);
+  });
+
+  it("skips the build-up on an org-wide list (it would cost a catalog read per employee)", async () => {
+    const a = await seedEmployee();
+    const b = await seedEmployee();
+    const actor = await seedActor(a);
+    await seedComponent({ name: "HRA", method: "percent_base", rate: 40 });
+    await seedComp(a, { basePay: 30000, ctcAnnual: 504000 });
+    await seedComp(b, { basePay: 40000, ctcAnnual: 672000 });
+
+    const orgWide = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true } as const;
+    const rows = await listCompensation(deps, orgWide);
+    const decorated = await decorateCompensation(deps, actor, rows, orgWide);
+    expect(decorated).toHaveLength(2);
+    expect(decorated.every((r) => toCompensationResource(r).breakdown === undefined)).toBe(true);
   });
 });

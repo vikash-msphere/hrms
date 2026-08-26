@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-type ConfirmOptions = {
+export type ConfirmOptions = {
   title: string;
   description?: string;
   confirmLabel?: string;
@@ -18,7 +18,7 @@ type ConfirmOptions = {
   destructive?: boolean;
 };
 
-type ConfirmFn = (opts: ConfirmOptions) => Promise<boolean>;
+export type ConfirmFn = (opts: ConfirmOptions) => Promise<boolean>;
 
 const ConfirmContext = React.createContext<ConfirmFn | null>(null);
 
@@ -44,7 +44,10 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
       {children}
       <Dialog open={!!opts} onOpenChange={(o) => !o && close(false)}>
         <DialogContent
-          className="max-w-md"
+          // Above every other dialog: a confirmation is nearly always asked BY an open dialog (discard these
+          // changes, delete this row), and portals paint in mount order, which would put this one behind.
+          className="z-[60] max-w-md"
+          overlayClassName="z-[60]"
           // Enter confirms from anywhere in the dialog (Esc cancels via the dialog default), so a confirmation
           // is a single keystroke. preventDefault stops a focused button's own Enter-activation double-firing.
           onKeyDown={(e) => {

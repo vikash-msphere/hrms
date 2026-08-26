@@ -1,6 +1,6 @@
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 // FSM + LRO resource template. Uses the verified pure domain logic in domain/payroll.ts.
-import { and, eq, inArray, gt, sql } from "drizzle-orm";
+import { and, eq, ne, isNull, inArray, gt, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -9,7 +9,7 @@ import { audit } from "../lib/audit";
 import { notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { notFound, failedPrecondition, aborted } from "../lib/errors";
-import { computeRunItem, canTransition, isEditable, applyStructure, overtimePay, employerCostLines, pfWagesOf, DEFAULT_OVERTIME_CONFIG, DEFAULT_CTC_CONFIG, type Line, type RunState, type OvertimeConfig, type CtcConfig } from "../domain/payroll";
+import { computeRunItem, canTransition, isEditable, applyStructure, overtimePay, employerCostLines, componentLineCode, pfWagesOf, DEFAULT_OVERTIME_CONFIG, DEFAULT_CTC_CONFIG, type Line, type RunState, type OvertimeConfig, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { decimalsFor, roundMoney, type CurrencyDecimals } from "../domain/currency";
 import { loanPerquisiteMonthly, DEFAULT_LOAN_PERQUISITE_CONFIG, type LoanPerquisiteConfig } from "../domain/loans";
@@ -21,7 +21,7 @@ import { reimbursementPayoutMode, approvedUnpaidReimbursementsAll, resetReimburs
 import { approvedUnpaidEncashmentsAll, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
 import { unpaidBonusesAll, markBonusesPaidByRun, resetBonusesPaidByRun } from "./bonuses";
 import { dueLoanInstallmentsAll, outstandingLoansAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
-import { runBatch, runBatchChecked, chunk, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
+import { runBatch, runBatchChecked, chunk, insertBatches, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
@@ -30,7 +30,8 @@ import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } fr
 import { renderPayslipPdf } from "../lib/pdf";
 import { payslipTemplateOrDefault, type PayslipTemplate } from "../domain/payslipTemplate";
 import { etagOf } from "../http/serialize";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
+import { refDepartments, refHolidays, refPayComponents, refPayPeriods } from "../lib/refData";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
 async function userDisplayNames(deps: Deps, ids: (string | null | undefined)[]): Promise<Map<string, string>> {
@@ -107,16 +108,8 @@ export async function listRunItems(deps: Deps, runId: string) {
 }
 
 export async function listRuns(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
-  const all = (await deps.db.select().from(schema.payrollRuns).where(applyScope(scope, schema.payrollRuns.code, schema.payrollRuns.code))).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
+  const all = await deps.db.select().from(schema.payrollRuns).where(applyScope(scope, schema.payrollRuns.code, schema.payrollRuns.code));
+  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
   return { items: await withNames(deps, slice), nextPageToken };
 }
 function assertEtag(row: { updatedAt: Date }, ifMatch?: string) {
@@ -144,7 +137,7 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   const endYmd = periodEndYmd < todayYmd ? periodEndYmd : todayYmd;
 
   const holidays = new Set(
-    (await deps.db.select().from(schema.holidays))
+    (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= startMs && +new Date(h.date) <= endMs)
       .map((h) => localDay(+new Date(h.date), tz)),
   );
@@ -222,9 +215,14 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // silently drop those people from payroll the day anything starts setting it. deleteEmployee only stamps
   // `deleteTime` (status stays as-is), so filtering on status alone would keep paying a deleted employee -
   // salary, statutory contributions and all. (Leavers are out of runs deliberately: the FnF is their payout.)
-  const employees = (await deps.db.select().from(schema.employees)).filter((e) => !e.deleteTime && e.status !== "terminated");
+  // Filtered in SQL, not read-all-then-filter: D1 bills rows read, and a build on a large org otherwise pays
+  // for every leaver and every soft-deleted row it is about to discard.
+  const employees = await deps.db
+    .select()
+    .from(schema.employees)
+    .where(and(isNull(schema.employees.deleteTime), ne(schema.employees.status, "terminated")));
   // Apply every component that's enabled (not disabled) and not soft-deleted.
-  const components = (await deps.db.select().from(schema.payComponents)).filter((c) => !c.disabled && !c.deleteTime);
+  const components = (await refPayComponents(deps)).filter((c) => !c.disabled && !c.deleteTime);
   // Salary structures (lines by id), loaded once: an employee with an assigned structure gets only that
   // structure's earning components (with its rate overrides); deductions/statutory lines always apply.
   const structById = await allStructureLines(deps);
@@ -236,7 +234,14 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const period = (await deps.db.select().from(schema.payPeriods).where(eq(schema.payPeriods.uuid, run.payPeriodId)).limit(1))[0];
   const fy = fyWindow(period?.payDate ?? new Date());
   const cfg = tds ? await loadTaxConfig(deps) : null;
-  const paidTotals = tds ? await finalizedTotals(deps, fy, runId) : new Map();
+  // Employee-side Professional Tax (kind "deduction"); the slab table is settings data. Resolved here rather
+  // than beside the other statutory lookups below because an `annual_cap` needs the year's PT already
+  // collected, which is the same finalized-run read the TDS projection makes.
+  const ptComp = components.find((c) => c.method === "pt" && c.kind === "deduction" && c.recurring);
+  const ptCfg = ptComp ? await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG) : null;
+  // The FY's finalized runs: deducted-to-date for TDS, and PT-to-date when the state caps the year. Read once,
+  // and only when something actually needs it - it is the app's hottest read path on D1.
+  const paidTotals = tds || ptCfg?.annual_cap != null ? await finalizedTotals(deps, fy, runId) : new Map();
   // Prices any compensation row's monthly gross, so the months still to be earned this FY can each be valued
   // at the salary in force in THAT month rather than at this period's rate.
   const grossFor = compGrossPricer(components, structById);
@@ -304,8 +309,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const prorationBasis = att.proration_basis ?? "calendar_days";
   const periodStartYmd = period ? localDay(+new Date(period.periodStart), tz) : "";
   const periodEndYmd = period ? localDay(+new Date(period.periodEnd), tz) : "";
+  // Half-day and location-scoped holidays are counted here as ordinary company holidays on purpose: this set
+  // only ever EXCUSES a day (LOP, and the working-days proration basis), so the lenient reading can never dock
+  // someone for a day the office may have been shut. Leave charging, where the distinction changes what an
+  // employee spends, is precise about both (services/leaveRequests.ts).
   const holidaySet = !period ? new Set<string>() : lop?.holidays ?? new Set(
-    (await deps.db.select().from(schema.holidays))
+    (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= +new Date(period.periodStart) && +new Date(h.date) <= +new Date(period.periodEnd))
       .map((h) => localDay(+new Date(h.date), tz)),
   );
@@ -325,10 +334,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // Statutory deductions on the regular monthly gross (computed per employee below, after earnings): ESI (% of
   // gross up to an eligibility ceiling) and Professional Tax (a state slab). Each is an opt-in single component;
   // PT slabs come from settings. Loaded once.
-  // Employee-side ESI/PT (kind "deduction"); the employer-contribution ESI row (same method) is costed below.
+  // Employee-side ESI (kind "deduction"); the employer-contribution ESI row (same method) is costed below.
+  // The PT component + its slab table are resolved earlier, with the finalized-run read its annual cap needs.
   const esiComp = components.find((c) => c.method === "esi" && c.kind === "deduction" && c.recurring);
-  const ptComp = components.find((c) => c.method === "pt" && c.kind === "deduction" && c.recurring);
-  const ptCfg = ptComp ? await getSettingValue<PtConfig>(deps, "professional-tax", DEFAULT_PT_CONFIG) : null;
 
 
   // ESI is "sticky" within a contribution period (Apr-Sep / Oct-Mar): a worker eligible at the period start
@@ -337,7 +345,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const esiContributing = new Set<string>();
   if (esiComp && period) {
     const cp = esiContributionPeriod(period.payDate);
-    const periodsById = new Map((await deps.db.select().from(schema.payPeriods)).map((p) => [p.uuid, p]));
+    const periodsById = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
     const priorRunIds = new Set(
       (await deps.db.select().from(schema.payrollRuns))
         .filter((r) => (r.state === "APPROVED" || r.state === "PUBLISHED") && r.uuid !== runId)
@@ -390,7 +398,10 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         co.method === "fixed" ? (co.rate ?? 0) * (co.kind === "earning" ? factor : 1)
         : co.method === "percent_base" ? base * ((co.rate ?? 0) / 100)
         : 0;
-      if (amount) lines.push({ code: co.name, name: co.name, kind: co.kind, amount: round2(amount) });
+      // The code is derived from the name, never the raw name: it is matched by exact code downstream, so a
+      // component HR happens to call "PT" or "LOP" must not land in the statutory register or be re-read as a
+      // loss-of-pay line. The displayed `name` is untouched.
+      if (amount) lines.push({ code: componentLineCode(co.name), name: co.name, kind: co.kind, amount: round2(amount) });
     }
     // The regular monthly wage (base + recurring earnings), BEFORE loss of pay and before any one-off, bonus or
     // encashment: statutory ELIGIBILITY (the ESI ceiling) and the PT slab key off the steady wage rate, not off a
@@ -400,16 +411,23 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // high-wage mid-period joiner drops under the ESI ceiling and is wrongly charged ESI, or falls into a lower PT
     // slab. factor is 1 for a full-period employee, so fullMonthlyBase == regularGross then (no-op).
     const fullMonthlyBase = factor > 0 ? round2(regularGross / factor) : regularGross;
+    // The per-day rate an absence is priced at, from the same wage + divisor policy the automatic docking below
+    // uses. Hoisted because a MANUAL loss of pay arrives as a rupee amount and still has to state its day-units
+    // (the PF/ESI registers report non-contributing days, not rupees).
+    const lopWage = (att.lop_wage_basis ?? "gross") === "basic" ? comp.basePay : fullMonthlyBase;
+    const lopDailyRate = lopAmount(lopWage, 1, att.lop_basis ?? "working_days", lop?.workingDaysInPeriod ?? 30);
 
     // One-off inputs the caller passed for this employee (manual adjustments, statutory deduction inputs, a
     // manually keyed loss of pay). A manual LOP arrives as a deduction line coded "LOP"; it is normalised to a
     // NEGATIVE EARNING for exactly the reason the automatic one is (below): docked pay must leave gross and every
-    // statutory/tax base, not sit beside them as a deduction.
+    // statutory/tax base, not sit beside them as a deduction. Its day-units are derived from the same daily rate
+    // so the statutory register can count it as non-contributing days.
     let manualLop = 0;
     for (const l of oneOffs[e.uuid] ?? []) {
       if (l.kind === "deduction" && l.code === "LOP" && l.amount > 0) {
         manualLop = round2(manualLop + l.amount);
-        lines.push({ ...l, kind: "earning", amount: round2(-l.amount) });
+        const units = lopDailyRate > 0 ? round2(l.amount / lopDailyRate) : 0;
+        lines.push({ ...l, kind: "earning", amount: round2(-l.amount), units });
       } else {
         lines.push(l);
       }
@@ -433,15 +451,19 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         halfDayMinutes: att.half_day_minutes ?? 240,
       });
       // Never dock more than the period's regular wage (a full-month absence zeroes the salary, it doesn't turn
-      // it negative - which a prorated part-month at the full daily rate could otherwise do).
-      const amt = Math.min(lopAmount(comp.basePay, dayUnits, att.lop_basis ?? "working_days", lop.workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
+      // it negative - which a prorated part-month at the full daily rate could otherwise do). `lopWage` is the
+      // FULL monthly regular gross by default (basic + every recurring allowance + the Special Allowance plug),
+      // because an unworked day earned none of them. Rounded ONCE from the unrounded per-day rate.
+      const amt = Math.min(lopAmount(lopWage, dayUnits, att.lop_basis ?? "working_days", lop.workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
       // Loss of pay is a NEGATIVE EARNING, not a deduction: it is wage the employee never earned, so it has to
       // leave gross, the income-tax base AND the PF/ESI bases together. As a deduction line it left every one of
       // those bases at the undocked wage, so a docked month withheld income tax, ESI and PT on pay that was never
       // made - and the inflated taxableGross then skewed the whole year's projection and Form 16.
       if (amt > 0) {
         autoLop = amt;
-        lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "earning", amount: round2(-amt) });
+        // `units` carries the day count as DATA: the statutory register reports non-contributing (NCP) days and
+        // must not have to parse them back out of a display label.
+        lines.push({ code: "LOP", name: `Loss of pay (${dayUnits}d)`, kind: "earning", amount: round2(-amt), units: dayUnits });
       }
     }
     const lopTotal = round2(autoLop + manualLop);
@@ -518,8 +540,10 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const epfComp = effective.find((c) => c.method === "epf" && c.kind === "deduction" && c.recurring);
     if (epfComp && e.epfEnrolled) {
       const epf = round2(Math.min(pfWages, epfComp.cap ?? Infinity) * ((epfComp.rate ?? 12) / 100));
-      // The stable "EPF" code is what the statutory report + ECR find the member's contribution by.
-      if (epf > 0) lines.push({ code: "EPF", name: epfComp.name, kind: "deduction", amount: epf });
+      // The stable "EPF" code is what the statutory report + ECR find the member's contribution by, and `basis`
+      // states the PF wages it was priced on - the register must report the wage, not a figure reverse-derived
+      // from a rounded contribution (which returns the ceiling instead of the real wage whenever one applies).
+      if (epf > 0) lines.push({ code: "EPF", name: epfComp.name, kind: "deduction", amount: epf, basis: pfWages });
     }
     // ESI eligibility for this employee this period. Decided once: the employee's own deduction and the
     // employer's share (below) must never disagree about whether this worker is in ESI.
@@ -530,12 +554,26 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       // contribution period (sticky - a mid-period raise past the ceiling doesn't stop ESI till period end).
       esiEligible = (fullMonthlyBase > 0 && fullMonthlyBase <= ceiling) || esiContributing.has(e.uuid);
       const esi = esiEligible && esiWages > 0 ? esiEmployeeContribution(esiWages, esiComp.rate ?? 0.75, Infinity) : 0;
-      if (esi > 0) lines.push({ code: "ESI", name: esiComp.name, kind: "deduction", amount: esi });
+      // ESIC rounds both shares UP to the rupee, so dividing the contribution back out overstates the wage;
+      // `basis` carries the wage the contribution was actually computed on.
+      if (esi > 0) lines.push({ code: "ESI", name: esiComp.name, kind: "deduction", amount: esi, basis: esiWages });
     }
     if (ptComp && ptCfg) {
-      // PT is a monthly slab on the wage bracket. A month with no wage at all (fully docked) attracts none.
-      const pt = esiWages > 0 || regularGross <= 0 ? professionalTax(fullMonthlyBase, ptCfg) : 0;
-      if (pt > 0) lines.push({ code: "PT", name: ptComp.name, kind: "deduction", amount: pt });
+      // PT is a monthly slab on the wage BRACKET, and state PT acts levy it on the salary/wage paid for the
+      // month - so a bonus, arrears or overtime month can push the employee into a higher slab. The bracket is
+      // the full monthly wage rate (unprorated, so a mid-month joiner isn't dropped into a lower slab) plus the
+      // extra wage this month actually pays. A month that pays no wage at all attracts nothing.
+      const extraWagePaid = round2(arrearsTotal + otAmt + encashTotal + empBonuses.reduce((s, b) => s + b.amount, 0));
+      const wagePaid = round2(Math.max(0, regularGross - lopTotal) + extraWagePaid);
+      const slabWage = round2(fullMonthlyBase + extraWagePaid);
+      // Most state acts cap the year's PT (₹2,500 under Article 276(2)). `annual_cap` is config, and the year's
+      // collection so far comes from this FY's finalized runs, so the last months of a high-wage year stop
+      // charging instead of over-collecting.
+      const cap = ptCfg.annual_cap ?? null;
+      const ytd = paidTotals.get(e.uuid)?.pt ?? 0;
+      const headroom = cap == null ? Infinity : Math.max(0, round2(cap - ytd));
+      const pt = wagePaid > 0 ? Math.min(professionalTax(slabWage, ptCfg), headroom) : 0;
+      if (pt > 0) lines.push({ code: "PT", name: ptComp.name, kind: "deduction", amount: round2(pt) });
     }
 
     // Interest concession on an employer loan: taxable VALUE, never paid in cash (Rule 3(7)(i)). A perquisite
@@ -604,7 +642,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // payslip, the run review and the statutory report can state the employer cost - and whether employer PF is
     // inside CTC or over and above it - from the run's own frozen figures.
     for (const ec of employerCostLines(base, esiWages, effective, e.epfEnrolled, esiEligible, pfWages)) {
-      lines.push({ code: ec.code, name: ec.name, kind: "employer_contribution", amount: ec.monthly, ...(ec.aboveCtc ? { aboveCtc: true } : {}) });
+      lines.push({ code: ec.code, name: ec.name, kind: "employer_contribution", amount: ec.monthly, basis: ec.basis, ...(ec.aboveCtc ? { aboveCtc: true } : {}) });
     }
 
     // Settle the net to the precision the money is actually paid at (whole rupees for INR by default) with an
@@ -645,7 +683,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const stmts: (BatchStmt | CheckedStmt)[] = [
     ...marks,
     ...loanWrites.stmts,
-    ...chunk(itemRows, 8).map((rows) => deps.db.insert(schema.payrollRunItems).values(rows)),
+    ...insertBatches(itemRows, (rows) => deps.db.insert(schema.payrollRunItems).values(rows)),
     // Stamp the build time: any income-affecting input touched after this makes the run stale (see runStaleness).
     deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: now, updatedAt: now }).where(eq(schema.payrollRuns.uuid, runId)),
   ];
@@ -704,8 +742,6 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   }
   // Each source: does any row's updatedAt post-date the build? `updatedAt` also bumps on create + soft-delete
   // + enable/disable, so joiners, removals and toggles are all covered by the same comparison.
-  const changedSince = async (table: { updatedAt: unknown }): Promise<boolean> =>
-    (await deps.db.select({ x: sql`1` }).from(table as never).where(gt(table.updatedAt as never, builtAt)).limit(1)).length > 0;
   const sources: { label: string; table: { updatedAt: unknown } }[] = [
     { label: "Employee records (joiners, tax verifications, EPF, status)", table: schema.employees },
     { label: "Compensation revisions", table: schema.compensation },
@@ -731,8 +767,15 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
     sources.push({ label: "Approved leave (loss-of-pay)", table: schema.leaveRequests });
     sources.push({ label: "Attendance punches (loss-of-pay)", table: schema.attendanceSessions });
   }
-  const changes: string[] = [];
-  for (const s of sources) if (await changedSince(s.table)) changes.push(s.label);
+  // All fourteen questions in ONE statement, as fourteen correlated EXISTS columns. Asked one at a time this was
+  // a dozen-plus round trips on every read of an editable run - i.e. on the run page's own refresh - for what is
+  // a single row of booleans. Each subquery still stops at its first newer row (the LIMIT rides inside EXISTS).
+  // Bound as epoch millis, not as a Date: these columns are `timestamp_ms`, and outside a column-aware
+  // comparison there is nothing to tell the driver which encoding this parameter wants.
+  const since = +builtAt;
+  const probes = sources.map((s, i) => sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${since} limit 1) as "c${sql.raw(String(i))}"`);
+  const [row] = await deps.db.all<Record<string, number>>(sql`select ${sql.join(probes, sql`, `)}`);
+  const changes = sources.filter((_, i) => !!row?.[`c${i}`]).map((s) => s.label);
   return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}) };
 }
 
@@ -770,14 +813,22 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
   // constraint. Translate it to the same clean precondition error instead of a raw 500.
   let updated;
   try {
-    [updated] = await deps.db.update(schema.payrollRuns).set(set).where(eq(schema.payrollRuns.uuid, runId)).returning();
+    // Guarded on the state that was READ, so the transition is exactly-once: two people approving the same run
+    // at once produce one decision and one audit row, instead of both writing `approvedBy` over each other.
+    [updated] = await deps.db
+      .update(schema.payrollRuns)
+      .set(set)
+      .where(and(eq(schema.payrollRuns.uuid, runId), eq(schema.payrollRuns.state, run.state)))
+      .returning();
   } catch (e) {
     if (to === "APPROVED" && String((e as Error)?.message ?? "").toLowerCase().includes("unique"))
       throw failedPrecondition("another run for this pay period is already approved; delete it before approving this one");
     throw e;
   }
+  // Zero rows means the state moved between the read above and this write, so somebody else's decision won.
+  if (!updated) throw failedPrecondition(`this run is no longer ${run.state} - reload it and try again`);
   await audit(deps, actor, `payroll.${to.toLowerCase()}`, "payroll-runs", runId);
-  return (await withNames(deps, [updated!]))[0]!;
+  return (await withNames(deps, [updated]))[0]!;
 }
 
 // Release EVERY payout kind a build may have marked paid by this run, back to approved-unpaid. Each reset
@@ -824,7 +875,17 @@ export async function publishRun(deps: Deps, actor: AppUser, runId: string, ifMa
   const run = await getRun(deps, runId);
   assertEtag(run, ifMatch);
   if (!canTransition(run.state as RunState, "PUBLISHED")) throw failedPrecondition("run must be APPROVED before publish");
-  await deps.db.update(schema.payrollRuns).set({ state: "PUBLISHED", updatedAt: new Date() }).where(eq(schema.payrollRuns.uuid, runId));
+  // GUARDED FLIP, the same shape `transition` leans on the partial unique index for. Two concurrent publishes
+  // both read APPROVED and both pass the check above; without the state predicate both then proceed to notify
+  // every employee in the run, emit `payroll.published` (so every rule on it fires twice) and enqueue a second
+  // payslip job. Whoever's UPDATE reports a row owns the publish; the loser is told it already happened.
+  // `If-Match` would also catch this, but the header is optional on the route - this does not depend on it.
+  const flipped = await deps.db
+    .update(schema.payrollRuns)
+    .set({ state: "PUBLISHED", updatedAt: new Date() })
+    .where(and(eq(schema.payrollRuns.uuid, runId), eq(schema.payrollRuns.state, "APPROVED")))
+    .returning({ uuid: schema.payrollRuns.uuid });
+  if (!flipped.length) throw failedPrecondition("this run has already been published");
   // Tell each employee in the run their payslip is available (payslips generate async right after).
   const runEmps = await deps.db.select({ employeeId: schema.payrollRunItems.employeeId }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
   await notifyMany(deps, runEmps.map((r) => r.employeeId).filter(Boolean) as string[], { type: "payslip.published", title: "Payslip available", body: "Your payslip for this period is ready.", link: "payslips" });
@@ -867,7 +928,7 @@ async function payslipRunContext(deps: Deps, run: typeof schema.payrollRuns.$inf
   const period = (await deps.db.select().from(schema.payPeriods).where(eq(schema.payPeriods.uuid, run.payPeriodId)).limit(1))[0];
   const org = await getSettingValue<{ name?: string; logo?: string; address?: string; default_currency?: string; currency_decimals?: CurrencyDecimals }>(deps, "organization", {});
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
-  const depts = new Map((await deps.db.select().from(schema.departments)).map((d) => [d.uuid, d.name] as const));
+  const depts = new Map((await refDepartments(deps)).map((d) => [d.uuid, d.name] as const));
   const lop = period ? await assembleLop(deps, period, att) : null;
   const currencyCode = org.default_currency || "INR";
   // The design is org config. A blob that fails validation falls back to the stock layout rather than failing

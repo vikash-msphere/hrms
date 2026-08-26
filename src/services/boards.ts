@@ -6,7 +6,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta, fieldDiff } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import {
@@ -38,16 +38,8 @@ const asArgError = <T>(fn: () => T): T => {
 };
 
 export async function listBoards(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.boards), showDeleted).sort(
-    (a, b) => +new Date(b.createdAt) - +new Date(a.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) < cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
+  const all = visibleByDelete(await deps.db.select().from(schema.boards), showDeleted);
+  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
   return { items: slice, nextPageToken };
 }
 

@@ -30,6 +30,7 @@ type UserRow = {
   employeeCode: string | null;
   firstName: string | null;
   lastName: string | null;
+  sessionsValidFrom: Date | number | null;
 };
 
 // The one caller read, shared by every lane: user + their employee `code` (the dept-scope key) in a single
@@ -46,6 +47,7 @@ async function loadUserRow(deps: Deps, where: SQL | undefined): Promise<UserRow 
         employeeCode: schema.employees.code,
         firstName: schema.employees.firstName,
         lastName: schema.employees.lastName,
+        sessionsValidFrom: schema.users.sessionsValidFrom,
       })
       .from(schema.users)
       .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
@@ -165,6 +167,11 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const team = c.env.CF_ACCESS_TEAM_DOMAIN;
 
   let email: string;
+  // When the caller arrived on a session COOKIE, the instant it was issued. Checked against the user's
+  // revocation stamp once the row is loaded below - it cannot be checked here, because the row is what says
+  // whether anything has been revoked, and the email we are about to look them up by is all we have so far.
+  // Null on every other lane (dev bypass, Access JWT, API key): those carry no session to revoke.
+  let sessionIat: number | null = null;
   // LOCAL-ONLY dev bypass. Requires BOTH DEV_FAKE_EMAIL and an explicit, dedicated `ALLOW_DEV_AUTH=true` flag.
   // The flag exists only in `.dev.vars`; production secrets never set it, so a stray `DEV_FAKE_EMAIL` copied
   // into a prod env is HARMLESS on its own - the request falls through to real JWT verification instead of
@@ -180,6 +187,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     const session = token ? await openSession(token, c.env.AUTH_SESSION_KEY!, Date.now()) : null;
     if (!session) throw unauthenticated("not signed in");
     email = session.email.toLowerCase();
+    sessionIat = session.iat;
   } else {
     const token = c.req.header("Cf-Access-Jwt-Assertion");
     if (!token) throw unauthenticated("missing Access token");
@@ -232,9 +240,17 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
       employeeCode: emp?.code ?? null,
       firstName: null,
       lastName: null,
+      sessionsValidFrom: inserted.sessionsValidFrom,
     };
   }
   if (user.status !== "active") throw forbidden("user disabled");
+  // Session revocation. A session cookie issued before the user's cut-off is dead, whatever its `exp` says -
+  // this is what makes "sign out" mean something for a stateless token, and what answers a lost device without
+  // rotating the signing key for everyone. Strictly BEFORE, so a session minted in the same millisecond as the
+  // stamp (sign out, then straight back in) survives; the cut-off is set from the same clock.
+  if (sessionIat !== null && user.sessionsValidFrom !== null && sessionIat < +new Date(user.sessionsValidFrom)) {
+    throw unauthenticated("session was signed out");
+  }
   // The caller's broad authority = their role's grant + their own broad user rules (both cached, warm ~0
   // reads). Users are first-class like roles: a user can hold collection/dept/field-scope access, not only
   // per-object exceptions (those still ride the narrowed lane in authz.ts). The common case (no user rules)

@@ -1,4 +1,4 @@
-import { and, eq, ne, lt, lte, gte, inArray, notInArray, isNull, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, or, eq, ne, lt, lte, gte, inArray, notInArray, isNull, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
@@ -29,6 +29,7 @@ type Ctx = {
   tomorrow: Date; // UTC midnight tomorrow (exclusive end of "today")
   in7: Date; // UTC midnight 7 days out (inclusive window end)
   in30: Date; // UTC midnight 30 days out
+  ago30: Date; // UTC midnight 30 days back (inclusive window start)
   weekStart: Date; // UTC midnight of the current week's Monday
 };
 
@@ -55,6 +56,24 @@ function def(key: string, collection: string, build: (scope: ListScope, ctx: Ctx
 function registry(deps: Deps): AggDef[] {
   const db = deps.db;
   return [
+    // People currently employed within the caller's scope (not left, not soft-deleted); extra = everyone the
+    // scope covers including leavers. The denominator any "N of M are away" line needs: a client counting the
+    // employees it happens to have loaded is counting one 100-row page, not the org.
+    def("headcount", "employees", (scope, c) =>
+      db.select({
+        value: cond(and(eq(t.employees.disabled, false), or(isNull(t.employees.endDate), gte(t.employees.endDate, c.today)))!),
+        extra: count,
+      }).from(t.employees).where(and(...[applyScope(scope, t.employees.code, t.employees.uuid), isNull(t.employees.deleteTime)].filter(Boolean) as SQL[]))),
+    // People who started in the last 30 days. A count, so the dashboard's "new joiners" card no longer needs a
+    // page of the directory to find them - and unlike that page, this one sees the whole org.
+    def("joiners", "employees", (scope, c) =>
+      db.select({ value: count }).from(t.employees).where(and(...[applyScope(scope, t.employees.code, t.employees.uuid), isNull(t.employees.deleteTime), isNotNull(t.employees.startDate), gte(t.employees.startDate, c.ago30), lte(t.employees.startDate, c.today)].filter(Boolean) as SQL[]))),
+    // Probations ending in the next 30 days - the window HR watches for a confirm/extend decision.
+    def("probation_ending", "employees", (scope, c) =>
+      db.select({ value: count }).from(t.employees).where(and(...[applyScope(scope, t.employees.code, t.employees.uuid), isNull(t.employees.deleteTime), isNotNull(t.employees.probationEndDate), gte(t.employees.probationEndDate, c.today), lte(t.employees.probationEndDate, c.in30)].filter(Boolean) as SQL[]))),
+    // Distinct people whose approved leave spans today (leave requests are hard-deleted, so no delete filter).
+    def("on_leave", "leave-requests", (scope, c) =>
+      db.select({ value: sql<number>`count(distinct ${t.leaveRequests.employeeId})` }).from(t.leaveRequests).where(and(...[applyScope(scope, t.leaveRequests.code, t.leaveRequests.employeeId), eq(t.leaveRequests.state, "APPROVED"), lte(t.leaveRequests.startDate, c.today), gte(t.leaveRequests.endDate, c.today)].filter(Boolean) as SQL[]))),
     // Open support tickets (state OPEN).
     def("open_tickets", "tickets", (scope) =>
       db.select({ value: count }).from(t.tickets).where(and(...[applyScope(scope, t.tickets.code, t.tickets.employeeId), isNull(t.tickets.deleteTime), eq(t.tickets.state, "OPEN")].filter(Boolean) as SQL[]))),
@@ -76,6 +95,11 @@ function registry(deps: Deps): AggDef[] {
     // Assets issued to people; extra = whole inventory size.
     def("assets_assigned", "assets", (scope) =>
       db.select({ value: cond(eq(t.assets.status, "assigned")), extra: count }).from(t.assets).where(and(...[applyScope(scope, t.assets.code, t.assets.assignedTo)].filter(Boolean) as SQL[]))),
+    // Custody nobody has proved yet: awaiting a holder's confirmation, extra = awaiting a check-in scan. For an
+    // employee the scope narrows this to their own assets, which is what the dashboard's "confirm it" tile reads
+    // - so the ask costs no extra request beyond the summary the page already fetches.
+    def("assets_pending_scan", "assets", (scope) =>
+      db.select({ value: cond(eq(t.assets.status, "pending_ack")), extra: cond(eq(t.assets.status, "pending_verification")) }).from(t.assets).where(and(...[applyScope(scope, t.assets.code, t.assets.assignedTo)].filter(Boolean) as SQL[]))),
     // Goals in flight; extra = how many slipped past their due date.
     def("goals_active", "goals", (scope, c) =>
       db.select({ value: count, extra: cond(and(isNotNull(t.goals.dueDate), lt(t.goals.dueDate, c.today))!) }).from(t.goals).where(and(...[applyScope(scope, t.goals.code, t.goals.employeeId), isNull(t.goals.deleteTime), inArray(t.goals.status, ["not_started", "in_progress"])].filter(Boolean) as SQL[]))),
@@ -181,6 +205,7 @@ export async function dashboardSummary(
     tomorrow: new Date(today.getTime() + DAY),
     in7: new Date(today.getTime() + 7 * DAY),
     in30: new Date(today.getTime() + 30 * DAY),
+    ago30: new Date(today.getTime() - 30 * DAY),
     weekStart: new Date(today.getTime() - dow * DAY),
   };
   const defs = registry(deps).filter((d) => (requested.size === 0 || requested.has(d.key)) && scopes.has(d.collection));

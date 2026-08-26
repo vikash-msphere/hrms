@@ -23,6 +23,11 @@ type Status = (typeof STATUSES)[number];
 // Roles that hold `suggestions.*.respond` (see grants.ts) - the reviewers who triage the box.
 const SUGGESTION_REVIEWER_ROLES = ["hr_admin", "super_admin"];
 
+// Where a bell about one suggestion lands: that suggestion alone, on its own page (`#/suggestions/<id>/view`),
+// not the box it sits in - a notification is about a specific idea, so the click has to arrive AT it. The
+// leading `suggestions/<id>` is what the outbound wire-id encoder rewrites, so no internal id reaches a client.
+const suggestionLink = (id: string) => `suggestions/${id}/view`;
+
 // Employee ids of the suggestion reviewers to notify about a new submission (excluding the actor).
 async function suggestionReviewerIds(deps: Deps, excludeEmployeeId?: string): Promise<string[]> {
   const users = await deps.db.select({ employeeId: schema.users.employeeId, role: schema.users.role }).from(schema.users);
@@ -86,7 +91,7 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
     type: "suggestion.submitted",
     title: "New suggestion submitted",
     body: row.title,
-    link: "suggestions",
+    link: suggestionLink(row.uuid),
     subject: `suggestions/${row.uuid}`,
     actorId: input.anonymous ? undefined : submitterId,
   });
@@ -118,7 +123,7 @@ export async function respondSuggestion(deps: Deps, actor: AppUser, id: string, 
   const updated = (await deps.db.update(schema.suggestions).set(set).where(eq(schema.suggestions.uuid, id)).returning())[0]!;
   await audit(deps, actor, "suggestion.respond", "suggestions", id, { status: set.status });
   // The submitter owns the suggestion (anonymity hides them from peers, not from themselves), so they get the response.
-  await notify(deps, { recipient: row.submitterId, type: "suggestion.responded", title: "Your suggestion got a response", body: updated.response || `Status: ${updated.status}`, link: "suggestions", subject: `suggestions/${id}`, actorId: actor.employeeId });
+  await notify(deps, { recipient: row.submitterId, type: "suggestion.responded", title: "Your suggestion got a response", body: updated.response || `Status: ${updated.status}`, link: suggestionLink(id), subject: `suggestions/${id}`, actorId: actor.employeeId });
   return updated;
 }
 
@@ -137,6 +142,56 @@ export async function voteSuggestion(deps: Deps, actor: AppUser, id: string, dir
     await deps.db.insert(schema.suggestionVotes).values({ suggestionId: id, employeeId: actor.employeeId, value: dir });
   }
   return row;
+}
+
+/**
+ * The `merge` verb: fold this suggestion into the one it duplicates.
+ *
+ * The same idea asked three times reads as three unpopular ideas: fifteen people wanted it, and no single row
+ * shows more than six. So the votes move to the target - skipping anyone who already voted there, and skipping
+ * the target's own submitter, since nobody may vote for their own - and this row is marked merged and closed.
+ *
+ * The source stays readable rather than being deleted: its submitter wrote those words and is owed the ability
+ * to see where they went. Nothing merges into itself, into something already merged (which would build a
+ * chain), or in a circle.
+ */
+export async function mergeSuggestion(deps: Deps, actor: AppUser, id: string, into?: string | null) {
+  const row = (await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).limit(1))[0];
+  if (!row || row.deleteTime) throw notFound("suggestion not found");
+  const targetId = (into ?? "").split("/").pop();
+  if (!targetId) throw invalidArgument("into is required");
+  if (targetId === id) throw invalidArgument("a suggestion cannot be merged into itself");
+  if (row.mergedIntoId) throw invalidArgument("this suggestion has already been merged");
+  const target = (await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, targetId)).limit(1))[0];
+  if (!target || target.deleteTime) throw invalidArgument("the suggestion to merge into was not found");
+  if (target.mergedIntoId) throw invalidArgument("that suggestion was itself merged into another one - merge into that one instead");
+
+  const [fromVotes, toVotes] = await Promise.all([
+    deps.db.select().from(schema.suggestionVotes).where(eq(schema.suggestionVotes.suggestionId, id)),
+    deps.db.select().from(schema.suggestionVotes).where(eq(schema.suggestionVotes.suggestionId, targetId)),
+  ]);
+  const already = new Set(toVotes.map((v) => v.employeeId));
+  // One vote per person per suggestion is the rule the unique index enforces, so a voter who backed both keeps
+  // the one they already had rather than the merge failing halfway.
+  const moving = fromVotes.filter((v) => !already.has(v.employeeId) && v.employeeId !== target.submitterId);
+  const writes = [
+    ...moving.map((v) => deps.db.update(schema.suggestionVotes).set({ suggestionId: targetId }).where(eq(schema.suggestionVotes.uuid, v.uuid))),
+    // Votes that could not move are dropped with the merge: leaving them on a closed row would keep counting
+    // support for something nobody can act on.
+    ...fromVotes.filter((v) => !moving.includes(v)).map((v) => deps.db.delete(schema.suggestionVotes).where(eq(schema.suggestionVotes.uuid, v.uuid))),
+  ];
+  if (writes.length) await deps.db.batch(writes as [typeof writes[number], ...typeof writes]);
+
+  const updated = (await deps.db
+    .update(schema.suggestions)
+    .set({ mergedIntoId: targetId, status: "declined", response: row.response ?? `Merged into “${target.title}”.`, respondedById: actor.uuid, updatedAt: new Date() })
+    .where(eq(schema.suggestions.uuid, id))
+    .returning())[0]!;
+  await audit(deps, actor, "suggestion.merge", "suggestions", id, { into: targetId, votesMoved: moving.length });
+  // The submitter hears what happened to their words, and where to follow the idea now.
+  if (row.submitterId !== actor.employeeId)
+    await notify(deps, { recipient: row.submitterId, type: "suggestion.merged", title: "Your suggestion was merged", body: `Folded into “${target.title}”, along with your votes.`, link: suggestionLink(targetId), subject: `suggestions/${targetId}`, actorId: actor.employeeId });
+  return updated;
 }
 
 export async function purgeSuggestion(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {

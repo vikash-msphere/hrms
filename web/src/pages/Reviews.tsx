@@ -8,6 +8,7 @@ import { DEFAULT_PERFORMANCE, ratingLabel, type PerformanceFramework } from "@/l
 import type { Department, Employee, Goal, Review, ReviewCycle, ReviewState, ReviewFeedback, Me, Card as KanbanCard } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { Chart, ChartCard } from "@/components/common/Chart";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -24,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/common/confirm";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
 import { useToast } from "@/components/ui/use-toast";
+import { getSetting } from "@/lib/settingsStore";
 
 // The review stage machine, in order. Every card renders it as a trail so "where is this review and
 // who moves it next" reads at a glance.
@@ -71,15 +73,16 @@ export default function Reviews({ me }: { me: Me }) {
   const { rows: employees } = useCollection<Employee>("employees");
   const { rows: departments } = useCollection<Department>("departments");
   const { rows: feedbackReqs, reload: reloadFb } = useCollection<ReviewFeedback>("review-feedback");
-  const { rows: cards } = useCollection<KanbanCard>("cards");
-  const { rows: goals } = useCollection<Goal>("goals");
+  // `cards` and `goals` are read-only EVIDENCE inside an expanded review (what this person delivered, which
+  // goals fell in the cycle). A folded list of review headers shows none of it, so both are read further down,
+  // gated on a card actually being open.
   const { toast } = useToast();
   const confirm = useConfirm();
   const [framework, setFramework] = useState<PerformanceFramework>(DEFAULT_PERFORMANCE);
   const reloadAll = () => { reload(); reloadFb(); };
 
   useEffect(() => {
-    get<{ value?: Partial<PerformanceFramework> }>("settings/performance")
+    getSetting<Partial<PerformanceFramework>>("performance")
       .then((cfg) => { if (cfg.value?.competencies?.length && cfg.value.scale?.length) setFramework({ ...DEFAULT_PERFORMANCE, ...cfg.value }); })
       .catch(() => { /* not configured -> defaults */ });
   }, []);
@@ -99,34 +102,6 @@ export default function Reviews({ me }: { me: Me }) {
     return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
   }, [employees]);
   const mine = (r: Review) => !!r.employee && idOf(r.employee) === me.employee_id;
-  // Cards the reviewee delivered within the cycle's window — read-only evidence on the review (kanban -> perf).
-  const deliveredFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): KanbanCard[] => {
-    if (!empRef) return [];
-    const eid = idOf(empRef);
-    const start = cyc?.period_start ? new Date(cyc.period_start).getTime() : -Infinity;
-    const end = cyc?.period_end ? new Date(cyc.period_end).getTime() + 86_400_000 : Infinity;
-    return cards.filter((c) => {
-      if (!c.employee || idOf(c.employee) !== eid || !c.deliver_time) return false;
-      const t = new Date(c.deliver_time).getTime();
-      return t >= start && t <= end;
-    });
-  }, [cards]);
-  // The reviewee's goals belonging to this cycle's window: due inside it, or completed inside it (perf -> perf).
-  const goalsFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): Goal[] => {
-    if (!empRef) return [];
-    const eid = idOf(empRef);
-    const start = cyc?.period_start ? new Date(cyc.period_start).getTime() : -Infinity;
-    const end = cyc?.period_end ? new Date(cyc.period_end).getTime() + 86_400_000 : Infinity;
-    const inWindow = (iso?: string | null) => {
-      if (!iso) return false;
-      const t = new Date(iso).getTime();
-      return t >= start && t <= end;
-    };
-    return goals.filter(
-      (g) => g.employee && idOf(g.employee) === eid && !g.delete_time &&
-        (inWindow(g.due_date) || (g.status === "completed" && inWindow(g.update_time))),
-    );
-  }, [goals]);
 
   // A review the caller OWNS THE CURRENT STAGE OF reads as "needs you". Holding the verb is not the same
   // thing: a super admin (and anyone granted submitManager broadly) can act on every review in the org, and
@@ -217,9 +192,9 @@ export default function Reviews({ me }: { me: Me }) {
   // List filters: a status chip row plus (when reviews span several cycles) a cycle menu. Managers/HR
   // accumulate reviews fast; everyone else just sees the chips echo the summary strip. Both filters live
   // in the hash query (?filter=&cycle=) so a filtered view survives reload and can be shared.
-  type Filter = "all" | "needs" | "open" | "done";
+  type Filter = "all" | "needs" | "open" | "done" | "overdue";
   const route = useRoute();
-  const isFilter = (v?: string): v is Filter => v === "needs" || v === "open" || v === "done";
+  const isFilter = (v?: string): v is Filter => v === "needs" || v === "open" || v === "done" || v === "overdue";
   const [filter, setFilter] = useState<Filter>(() => (isFilter(route.query.filter) ? route.query.filter : "all"));
   const [cycleFilter, setCycleFilter] = useState(() => route.query.cycle ?? "all");
   const applyFilter = (f: Filter) => { setFilter(f); setQueryParams({ filter: f === "all" ? null : f }); };
@@ -231,12 +206,37 @@ export default function Reviews({ me }: { me: Me }) {
   const inCycle = (r: Review) => cycleFilter === "all" || (!!r.cycle && idOf(r.cycle) === cycleFilter);
   const inScope = reviews.filter(inCycle);
   const waitingOnOthers = (r: Review) => r.state !== "ACKNOWLEDGED" && !needsMe(r);
+  // The current stage's deadline (self vs manager due date) comes from the cycle. Overdue is a cross-cut of the
+  // three buckets rather than a fourth partition - a review can need you AND be late - and it is what HR
+  // chases, so it gets its own chip, metric and card accent.
+  const stageDueOf = (r: Review) => {
+    const cyc = cycleOf(r.cycle);
+    return r.state === "SELF" ? cyc?.self_due_date : r.state === "MANAGER" ? cyc?.manager_due_date : undefined;
+  };
+  const isOverdue = (r: Review) => { const d = stageDueOf(r); return !!d && d < todayStr(); };
   const counts: Record<Filter, number> = {
     all: inScope.length,
     needs: inScope.filter(needsMe).length,
     open: inScope.filter(waitingOnOthers).length,
     done: inScope.filter((r) => r.state === "ACKNOWLEDGED").length,
+    overdue: inScope.filter(isOverdue).length,
   };
+  // The cycle's shape: where its reviews are, and where its ratings landed. Both over `inScope` - the same
+  // reviews the chips count and the list shows, so a filtered page's numbers agree with its pictures.
+  const reviewCharts = useMemo(() => {
+    const stages = STAGES.map((s) => ({ label: s.label, n: inScope.filter((r) => r.state === s.key).length })).filter((s) => s.n > 0);
+    // A rating scale is ordered: the bars run 1..5 whether or not anybody landed on a 2, because a gap in
+    // the middle of a distribution is itself the finding.
+    const shared = inScope.filter((r) => (r.state === "SHARED" || r.state === "ACKNOWLEDGED") && r.overall_rating != null);
+    const max = Math.max(5, ...shared.map((r) => r.overall_rating ?? 0));
+    const scale = Array.from({ length: max }, (_, i) => i + 1);
+    return {
+      total: inScope.length,
+      stages: { labels: stages.map((s) => s.label), values: stages.map((s) => s.n) },
+      ratings: { labels: scale.map(String), values: scale.map((n) => shared.filter((r) => r.overall_rating === n).length) },
+    };
+  }, [inScope]);
+
   const cycleOptions = useMemo(() => {
     const seen = new Map<string, string>();
     for (const r of reviews) {
@@ -250,7 +250,10 @@ export default function Reviews({ me }: { me: Me }) {
     (r) =>
       inCycle(r) &&
       (filter === "all" ||
-        (filter === "needs" ? needsMe(r) : filter === "done" ? r.state === "ACKNOWLEDGED" : waitingOnOthers(r))),
+        (filter === "needs" ? needsMe(r)
+          : filter === "done" ? r.state === "ACKNOWLEDGED"
+          : filter === "overdue" ? isOverdue(r)
+          : waitingOnOthers(r))),
   );
 
   const filterChip = (f: Filter, label: string) => (
@@ -267,13 +270,7 @@ export default function Reviews({ me }: { me: Me }) {
     </button>
   );
 
-  // The current stage's deadline (self vs manager due date) comes from the cycle; overdue is the first
-  // thing HR scans for, so it gets a summary-strip count and a card accent, not just the header text.
-  const stageDueOf = (r: Review) => {
-    const cyc = cycleOf(r.cycle);
-    return r.state === "SELF" ? cyc?.self_due_date : r.state === "MANAGER" ? cyc?.manager_due_date : undefined;
-  };
-  const overdueCount = inScope.filter((r) => { const d = stageDueOf(r); return !!d && d < todayStr(); }).length;
+  const overdueCount = counts.overdue;
 
   // Previous-cycle overall rating per employee, so a shared result reads as a trend, not a lone number.
   // Everything needed is already client-side: order that employee's rated reviews by cycle period start.
@@ -306,6 +303,42 @@ export default function Reviews({ me }: { me: Me }) {
     sorted.length === 1 || (needsMe(r) && (counts.needs <= 3 || r.path === firstNeedsPath));
   const isOpen = (r: Review) => openMap[r.path] ?? defaultOpen(r);
   const setAllOpen = (open: boolean) => setOpenMap(Object.fromEntries(visible.map((r) => [r.path, open])));
+
+  // ---- Evidence, read only once a review is actually open ---------------------------------------------------
+  // The delivered-work and goals panels live inside an expanded review. Reading two whole collections to fill
+  // panels nobody has opened is the page's largest cost by far, so both wait for the first expansion - which,
+  // on a page whose default is a folded list of headers, is often never.
+  const anyOpen = visible.some(isOpen);
+  const { rows: cards } = useCollection<KanbanCard>("cards", { enabled: anyOpen });
+  const { rows: goals } = useCollection<Goal>("goals", { enabled: anyOpen });
+  // Cards the reviewee delivered within the cycle's window — read-only evidence on the review (kanban -> perf).
+  const deliveredFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): KanbanCard[] => {
+    if (!empRef) return [];
+    const eid = idOf(empRef);
+    const start = cyc?.period_start ? new Date(cyc.period_start).getTime() : -Infinity;
+    const end = cyc?.period_end ? new Date(cyc.period_end).getTime() + 86_400_000 : Infinity;
+    return cards.filter((c) => {
+      if (!c.employee || idOf(c.employee) !== eid || !c.deliver_time) return false;
+      const t = new Date(c.deliver_time).getTime();
+      return t >= start && t <= end;
+    });
+  }, [cards]);
+  // The reviewee's goals belonging to this cycle's window: due inside it, or completed inside it (perf -> perf).
+  const goalsFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): Goal[] => {
+    if (!empRef) return [];
+    const eid = idOf(empRef);
+    const start = cyc?.period_start ? new Date(cyc.period_start).getTime() : -Infinity;
+    const end = cyc?.period_end ? new Date(cyc.period_end).getTime() + 86_400_000 : Infinity;
+    const inWindow = (iso?: string | null) => {
+      if (!iso) return false;
+      const t = new Date(iso).getTime();
+      return t >= start && t <= end;
+    };
+    return goals.filter(
+      (g) => g.employee && idOf(g.employee) === eid && !g.delete_time &&
+        (inWindow(g.due_date) || (g.status === "completed" && inWindow(g.update_time))),
+    );
+  }, [goals]);
 
   // Deep link: #/reviews/<id> (notification clicks) opens that card and scrolls it into view.
   useEffect(() => {
@@ -345,15 +378,32 @@ export default function Reviews({ me }: { me: Me }) {
         actions={<PageSettings me={me} host="reviews" />}
       />
 
-      {reviews.length > 0 && (
-        <SummaryStrip
-          items={[
-            { label: "Need you", value: counts.needs, icon: CircleAlert, tone: counts.needs > 0 ? "warning" : "muted" },
-            { label: "Waiting on others", value: counts.open, icon: Hourglass, tone: "primary" },
-            { label: "Completed", value: counts.done, icon: CheckCircle2, tone: counts.done > 0 ? "success" : "muted" },
-            ...(overdueCount > 0 ? [{ label: "Overdue", value: overdueCount, icon: AlarmClock, tone: "destructive" as const }] : []),
-          ]}
-        />
+      {/* Two questions a cycle is run to answer, neither of which a list of reviews shows: how far along is
+          it, and what did it conclude. The distribution is the honest form for the second - an average
+          rating hides whether a team is uniformly fine or split in half. */}
+      {reviewCharts.total > 1 && (
+        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+          <ChartCard title="How far the cycle has got" description="Every review you can see, by the stage it is sitting at.">
+            <Chart
+              type="percentage"
+              height={140}
+              labels={reviewCharts.stages.labels}
+              datasets={[{ name: "Reviews", values: reviewCharts.stages.values }]}
+              ariaLabel="Reviews by stage"
+            />
+          </ChartCard>
+          <ChartCard title="Rating distribution" description="Shared and acknowledged reviews only - a rating nobody has seen yet is not a result.">
+            <Chart
+              type="bar"
+              height={180}
+              labels={reviewCharts.ratings.labels}
+              datasets={[{ name: "Reviews", values: reviewCharts.ratings.values }]}
+              format={(v) => `${v} review${v === 1 ? "" : "s"}`}
+              ariaLabel="How many shared reviews landed on each overall rating"
+              emptyText="No ratings shared yet."
+            />
+          </ChartCard>
+        </div>
       )}
 
       {myRequests.length > 0 && (
@@ -375,6 +425,22 @@ export default function Reviews({ me }: { me: Me }) {
         </div>
       )}
 
+      {reviews.length > 0 && (
+        <SummaryStrip
+          items={[
+            // Each metric drives the same ?filter= the chips below do, so clicking one narrows the list and the
+            // chip row follows along - which is why the strip sits against that list, below the charts.
+            { label: "All reviews", value: counts.all, icon: CheckCircle2, tone: "muted", hint: "this cycle", onClick: () => applyFilter("all"), active: filter === "all" },
+            { label: "Need you", value: counts.needs, icon: CircleAlert, tone: counts.needs > 0 ? "warning" : "muted", hint: counts.needs ? "your next step" : "nothing on you", onClick: () => applyFilter("needs"), active: filter === "needs" },
+            { label: "Waiting on others", value: counts.open, icon: Hourglass, tone: "primary", hint: "not with you", onClick: () => applyFilter("open"), active: filter === "open" },
+            { label: "Completed", value: counts.done, icon: CheckCircle2, tone: counts.done > 0 ? "success" : "muted", hint: "closed out", onClick: () => applyFilter("done"), active: filter === "done" },
+            ...(overdueCount > 0
+              ? [{ label: "Overdue", value: overdueCount, icon: AlarmClock, tone: "destructive" as const, hint: "past the deadline", onClick: () => applyFilter("overdue"), active: filter === "overdue" }]
+              : []),
+          ]}
+        />
+      )}
+
       <DataState state={state} error={error} onRetry={reload}>
         {reviews.length > 1 && (
           <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -382,10 +448,13 @@ export default function Reviews({ me }: { me: Me }) {
             {filterChip("needs", "Needs you")}
             {filterChip("open", "Waiting on others")}
             {filterChip("done", "Completed")}
+            {counts.overdue > 0 && filterChip("overdue", "Overdue")}
+            {/* Sits after a run of filter chips in a wrapping row; `ml-auto` only pushes it right on the
+                line it lands on, so on a phone it simply follows the chips. */}
             <span className="ml-auto flex items-center gap-1">
               {cycleOptions.length > 1 && (
                 <Select value={cycleFilter} onValueChange={applyCycle}>
-                  <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="h-8 w-32 text-xs sm:w-44"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All cycles</SelectItem>
                     {cycleOptions.map(([id, name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}
@@ -699,7 +768,9 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
             </div>
           </div>
         ) : review.state === "SELF" ? (
-          <div className="flex items-center justify-between gap-2">
+          // A sentence of prose beside a button pair: on a phone the prose gets squeezed to a column of
+          // single words. Stacked below `sm`, one row from `sm` up. (Same for the two rows like it below.)
+          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-muted-foreground">{mine ? "Complete your self-assessment to begin." : `Waiting for ${employeeName || "the employee"} to complete their self-assessment.`}</p>
             {waitBtns}
           </div>
@@ -738,7 +809,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           </div>
         )}
         {review.state === "MANAGER" && !can.includes("submitManager") && (
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-muted-foreground">
               {mine
                 ? `${managerName ? `${managerName} is` : "Your manager is"} writing their review. Ratings and feedback stay hidden until they're shared with you - nothing is needed from you right now.`
@@ -814,7 +885,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
               </AccessAction>
             </div>
           ) : (
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-muted-foreground">Shared with {mine ? "you" : employeeName}. Awaiting acknowledgement.</p>
               {!mine && waitBtns}
             </div>

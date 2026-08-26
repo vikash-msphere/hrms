@@ -5,6 +5,8 @@
 // encodeWireIds.ts. A forged/foreign/malformed token does not decode and is left as-is, so it simply
 // fails downstream (not found / invalid), never resolving to another object.
 import { ENCODABLE } from "./encodeWireIds";
+import { isJsonBody } from "../http/jsonRequest";
+import { MAX_DOCUMENT_BYTES } from "../services/documentsCommon";
 import type { IdCodec } from "../lib/idCodec";
 
 const TOKEN = "[0-9a-hj-km-np-tv-z]{26}"; // a wire token (encrypted 8-byte id -> 26 base32 chars)
@@ -36,11 +38,19 @@ async function decodePathname(pathname: string, codec: IdCodec): Promise<string>
 // burn CPU before any handler runs. Real request bodies nest only a few levels; anything past this is hostile.
 const MAX_DEPTH = 40;
 
+// Bound the BREADTH too, which depth alone does not. Every distinct token found here costs two WebCrypto
+// operations (an AES-CTR pass and an HMAC, see lib/idCodec.ts), and this runs at the outer edge - before auth.
+// So a flat array of unique token-shaped strings was an unauthenticated way to buy a large multiple of the
+// request's own size in crypto work. The largest real body is the bulk asset create, whose own schema caps it
+// at 200 records, so anything past this is not a request the app has a route for; the surplus is simply left
+// undecoded and fails downstream, exactly as a forged token does.
+const MAX_REFS = 2000;
+
 // Decode every `<collection>/<token>` ref string in a JSON body to `<collection>/<internal-id>`.
 async function decodeBodyRefs<T>(body: T, codec: IdCodec): Promise<T> {
   const refs = new Set<string>();
   const collect = (n: unknown, depth: number) => {
-    if (depth > MAX_DEPTH) return;
+    if (depth > MAX_DEPTH || refs.size >= MAX_REFS) return;
     if (typeof n === "string") {
       const m = BODY_REF_RE.exec(n);
       if (m && ENCODABLE.has(m[1]!)) refs.add(n);
@@ -98,11 +108,19 @@ export async function decodeWireIdsRequest(request: Request, codec: IdCodec): Pr
 
   // Decode refs in any JSON-family body: application/json AND structured-suffix types like
   // application/merge-patch+json (the Update content type). Without the `+json` arm, refs in a PATCH body
-  // (e.g. department managers, ticket-category assignees) would reach services as raw wire tokens.
-  const contentType = request.headers.get("content-type") || "";
-  const isJson = contentType.includes("application/json") || contentType.includes("+json");
+  // (e.g. department managers, ticket-category assignees) would reach services as raw wire tokens. The
+  // predicate is shared with the authz body gate (http/jsonRequest.ts) so the two can never disagree about
+  // whether a request carries a body.
+  const isJson = isJsonBody(request.headers.get("content-type"));
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
-  if (isJson && hasBody) {
+  // An over-sized body is refused a few lines later by middleware/bodyLimit - but this edge runs FIRST (it is
+  // the outermost wrapper in index.ts), so reading the body here is what actually committed it to isolate
+  // memory, and the cap became a report rather than a limit. Declining to transform a body that is already
+  // over the cap leaves it to be rejected on its declared length, untouched and unbuffered. Decoding it would
+  // be wasted work on a request that cannot succeed.
+  const declared = Number(request.headers.get("content-length"));
+  const overCap = Number.isFinite(declared) && declared > MAX_DOCUMENT_BYTES;
+  if (isJson && hasBody && !overCap) {
     const text = await request.text();
     let outText = text;
     if (text) {

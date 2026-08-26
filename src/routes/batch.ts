@@ -37,16 +37,49 @@ export const batch = new Hono<AppEnv>().post("/", zValidator("json", schema), as
   // sub-dispatch, so the fan-out pays one JWT verify + one HKDF key derivation total instead of one per
   // sub-request - the difference between fitting and blowing the Worker's 10ms CPU budget on a 27-read batch.
   // authz still runs per sub-request (it reads the shared user), so per-read gating is unchanged.
-  const sharedEnv = { ...c.env, __sharedCtx: { deps: c.get("deps"), user: c.get("user") } };
+  const sharedDeps = c.get("deps");
+  const sharedUser = c.get("user");
 
   const responses = await Promise.all(
     requests.map(async (r) => {
       const method = (r.method ?? "GET").toUpperCase();
       if (method !== "GET") return { status: 400, body: { title: "batch supports GET sub-requests only" } };
-      if (!r.path.startsWith("/v1/")) return { status: 400, body: { title: "sub-request path must start with /v1/" } };
+      // Build the URL FIRST, then check the prefix on the normalised pathname. Testing the raw string let a
+      // traversal through: `/v1/../healthz` starts with `/v1/` but the parser resolves it to `/healthz`, so the
+      // prefix stopped describing where the sub-request actually went. Nothing sensitive lives outside /v1
+      // today, which is why this was invisible - but the envelope's guarantee is that every sub-request is
+      // gated as a /v1 request, and that has to be true of the path that gets dispatched.
+      let url: URL;
+      try {
+        url = new URL(r.path, origin);
+      } catch {
+        return { status: 400, body: { title: "sub-request path is not a valid path" } };
+      }
+      if (url.origin !== origin || !url.pathname.startsWith("/v1/")) {
+        return { status: 400, body: { title: "sub-request path must start with /v1/" } };
+      }
       const headers = new Headers({ "X-Requested-By": "hrms-spa" });
-      const sub = await decodeWireIdsRequest(new Request(origin + r.path, { method, headers }), codec);
-      const res = await app.fetch(sub, sharedEnv, c.executionCtx);
+      // A SHALLOW COPY of the caller per sub-request, not the one object twenty times.
+      //
+      // The sub-requests run concurrently (Promise.all), and the authz middleware WRITES to the user it is
+      // handed: `user.audited = false` on the way in, `user.reqMeta = {...}`, and the write backstop reads
+      // `audited` back after the handler. Sharing one object makes those interleave - one sub-request's reset
+      // lands after another's handler set the flag, and the audit row is duplicated or lost. Today the GET-only
+      // rule above keeps it inert (mutationAudit answers null for GET, so the flag is never consulted), but
+      // that is a second guarantee resting on the first, invisibly. A copy costs one object per sub-request and
+      // removes the coupling: `grant` and `policy` are shared by reference, so the CPU win is untouched.
+      const sharedEnv = { ...c.env, __sharedCtx: { deps: sharedDeps, user: { ...sharedUser } } };
+      const sub = await decodeWireIdsRequest(new Request(url, { method, headers }), codec);
+      // `c.executionCtx` THROWS when the context has none (the test runner, and any in-process dispatch) rather
+      // than returning undefined, so it cannot be read inline - see the same guard in middleware/auth.ts. The
+      // sub-dispatch needs no waitUntil of its own, so passing undefined is the correct fallback.
+      let ctx: ExecutionContext | undefined;
+      try {
+        ctx = c.executionCtx;
+      } catch {
+        /* no execution context */
+      }
+      const res = await app.fetch(sub, sharedEnv, ctx);
       const text = await res.text();
       let body: unknown = text || null;
       try {

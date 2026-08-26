@@ -6,7 +6,7 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition, forbidden } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { assertKeyName } from "../lib/apiKeyToken";
 import { parseScope, scopeToWire, type KeyScope } from "../domain/keyScope";
@@ -22,6 +22,7 @@ import { COLLECTIONS } from "../domain/collections";
 
 export type ApiKeyInput = {
   display_name?: string;
+  description?: string | null;
   owner?: string; // "users/<internal id>" after the inbound wire decode
   scope?: unknown; // WireScope, validated here
   expire_time?: string;
@@ -33,18 +34,17 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 // should start as weak as is still useful, and be widened deliberately.
 const DEFAULT_SCOPE: KeyScope = { collections: "*", maxLevel: "read", verbs: [] };
 
-export async function listApiKeys(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string) {
-  const all = (await deps.db.select().from(schema.apiKeys)).sort(
-    (a, b) => +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid),
-  );
-  const cur = decodeCursor(pageToken);
-  const start = cur
-    ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid))
-    : 0;
-  const items = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = items[items.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items, nextPageToken };
+// `q` is matched HERE rather than over the client's cached page, which is the only way a search can reach a
+// key past the first page. Deliberately a plain substring match over the labels and the public prefix, not the
+// FTS index: this collection is not in it, and adding credentials to the app-wide search index is a bigger
+// decision than a filter box.
+export async function listApiKeys(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string, deletedOnly = false) {
+  const rows = await deps.db.select().from(schema.apiKeys);
+  const needle = (q ?? "").trim().toLowerCase();
+  const all = rows
+    .filter((r) => (deletedOnly ? r.deleteTime !== null : showDeleted || r.deleteTime === null))
+    .filter((r) => !needle || `${r.name} ${r.description ?? ""} ${r.prefix}`.toLowerCase().includes(needle));
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
 }
 
 async function getApiKey(deps: Deps, _actor: AppUser, id: string) {
@@ -91,6 +91,7 @@ export async function createApiKey(deps: Deps, actor: AppUser, input: ApiKeyInpu
         code: await allocFlatCode(deps, schema.apiKeys),
         ...(id ? { id } : {}),
         name,
+        description: input.description?.trim() || null,
         ownerUserId: owner.uuid,
         prefix: minted.prefix,
         hash: minted.hash,
@@ -102,7 +103,7 @@ export async function createApiKey(deps: Deps, actor: AppUser, input: ApiKeyInpu
   )[0]!;
 
   // The audit row records WHAT was minted and for whom. It must never record the token or the hash.
-  await audit(deps, actor, "api-key.create", "api-keys", row.uuid, { owner: owner.email, prefix: row.prefix, scope: scopeToWire(scope) }, row);
+  await audit(deps, actor, "api_key.create", "api-keys", row.uuid, { owner: owner.email, prefix: row.prefix, scope: scopeToWire(scope) }, row);
   return { row, token: minted.token };
 }
 
@@ -118,27 +119,29 @@ export async function revokeApiKey(deps: Deps, actor: AppUser, id: string) {
       .where(eq(schema.apiKeys.uuid, id))
       .returning()
   )[0]!;
-  await audit(deps, actor, "api-key.revoke", "api-keys", id, { prefix: row.prefix }, updated);
+  await audit(deps, actor, "api_key.revoke", "api-keys", id, { prefix: row.prefix }, updated);
   return updated;
 }
 
 // Hard delete. There is no soft-delete lane here on purpose: a "deleted but restorable" credential is a
 // credential, and restore would resurrect a working secret. Revoke is the reversible-looking operation;
 // delete is final.
-export async function deleteApiKey(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  const row = await getApiKey(deps, actor, id);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  await deps.db.delete(schema.apiKeys).where(eq(schema.apiKeys.uuid, id));
-  await audit(deps, actor, "api-key.delete", "api-keys", id, { prefix: row.prefix }, row);
-}
-
 // The auth lane's lookup: one indexed read by prefix, restricted to keys that are live RIGHT NOW. Never
 // cached - see middleware/auth.ts.
 export function findLiveKeyByPrefix(deps: Deps, prefix: string, now: Date) {
   return deps.db
     .select()
     .from(schema.apiKeys)
-    .where(and(eq(schema.apiKeys.prefix, prefix), isNull(schema.apiKeys.revokedAt), or(isNull(schema.apiKeys.expiresAt), gt(schema.apiKeys.expiresAt, now))))
+    .where(
+      and(
+        eq(schema.apiKeys.prefix, prefix),
+        isNull(schema.apiKeys.revokedAt),
+        // Soft-deleted counts as gone. A deleted credential that still authenticated would make DELETE a
+        // cosmetic act - the one outcome nobody expects from it.
+        isNull(schema.apiKeys.deleteTime),
+        or(isNull(schema.apiKeys.expiresAt), gt(schema.apiKeys.expiresAt, now)),
+      ),
+    )
     .limit(1);
 }
 

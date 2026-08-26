@@ -6,9 +6,9 @@ import type { DB } from "../deps";
 // build, run deletion and cron fan-outs are shaped around - collect statements, flush once.
 //
 // Statements are drizzle query builders passed UNAWAITED (a builder only executes when awaited or batched).
-// The D1 100-bound-params-per-statement cap still applies to each statement individually - chunk multi-row
-// inserts (~8 rows) and inArray lists (~90 ids) BEFORE pushing them here; chunked statements inside one
-// batch still cost the one subrequest.
+// The D1 100-bound-params-per-statement cap still applies to each statement individually - build multi-row
+// inserts with `insertBatches` (which MEASURES the cap instead of guessing at columns) and chunk inArray
+// lists (~90 ids) BEFORE pushing them here; chunked statements inside one batch still cost the one subrequest.
 export type BatchStmt = PromiseLike<unknown>;
 
 export async function runBatch(db: DB, stmts: BatchStmt[]): Promise<void> {
@@ -42,6 +42,29 @@ export async function runBatchChecked(db: DB, stmts: (BatchStmt | CheckedStmt)[]
     if (!Array.isArray(rows) || rows.length !== s.expect) short.push(s.label);
   });
   return short;
+}
+
+/** D1 binds at most this many parameters per statement. Not a tunable - exceeding it is `D1_ERROR: too many
+ *  SQL variables`, which is a runtime failure the size of whatever batch happened to be large enough. */
+export const PARAM_CAP = 100;
+
+/**
+ * Multi-row INSERTs for `rows`, split so each statement stays inside the parameter cap.
+ *
+ * The row count per statement is MEASURED off the real query rather than guessed from the columns the caller
+ * sets: drizzle also binds every JS-defaulted column (uuid, created_at, updated_at), so a 13-field object is
+ * a 15-parameter row - and counting by hand is exactly how "too many SQL variables" ships. `build` turns one
+ * group into one statement, so it stays the caller's query.
+ *
+ *   await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.assets).values(group)));
+ */
+export function insertBatches<T extends object>(rows: T[], build: (group: T[]) => BatchStmt): BatchStmt[] {
+  if (!rows.length) return [];
+  // The widest row decides: a group is bound by whichever of its members carries the most fields.
+  const widest = rows.reduce((a, b) => (Object.keys(b).length > Object.keys(a).length ? b : a), rows[0]!);
+  const measured = build([widest]) as unknown as { toSQL?: () => { params: unknown[] } };
+  const perRow = Math.max(1, measured.toSQL?.().params.length ?? PARAM_CAP);
+  return chunk(rows, Math.max(1, Math.floor(PARAM_CAP / perRow))).map(build);
 }
 
 /** Split `items` into runs of at most `size` (D1 param-cap chunking for IN lists / multi-row inserts). */

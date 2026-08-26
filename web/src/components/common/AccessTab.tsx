@@ -24,8 +24,15 @@ export function AccessTab({
   // pushed the last tab to a second row) just from toggling a UX-only affordance. Overlaid, the bar is
   // byte-identical in both modes and only the icon appears. The trigger keeps a little end padding so the
   // key never lands on the label.
+  // `self-stretch` is load-bearing, and the reason is not obvious from either file: a segmented TabsTrigger
+  // sizes itself with `h-full`, which resolves against its PARENT - and once that parent is this wrapper
+  // rather than the TabsList track, "full" means the span's own content height. The span shrank to the text,
+  // so every tab rendered through here came out 28px tall next to a plain sibling trigger at 36px: visibly
+  // uneven, and under the touch floor on a phone. Stretching the wrapper to the track restores both.
+  // `shrink-0` for the same reason the trigger inside carries it: as a shrinkable item in the scrolling tab
+  // strip this wrapper is squeezed narrower than its nowrap label, which then spills over the next tab.
   return (
-    <span className="relative inline-flex items-center">
+    <span className="relative inline-flex shrink-0 items-center self-stretch">
       <TabsTrigger value={value} className={className}>
         {children}
       </TabsTrigger>

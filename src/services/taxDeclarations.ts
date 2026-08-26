@@ -8,7 +8,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { notify } from "./notifications";
 
@@ -30,14 +30,15 @@ export async function listTaxDeclarations(deps: Deps, scope: ListScope, maxPageS
   if (financialYear) conds.push(eq(schema.taxDeclarations.financialYear, financialYear));
   if (status) conds.push(eq(schema.taxDeclarations.status, status as Status));
   const all = (await deps.db.select().from(schema.taxDeclarations).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((d) => showDeleted || !d.deleteTime)
-    .sort((a, b) => (a.section ?? "").localeCompare(b.section ?? "") || +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+    .filter((d) => showDeleted || !d.deleteTime);
+  // Paged on `createdAt` (the cursor's key). Grouping by tax SECTION is how the page is read, not how it is
+  // paged: sorting the whole set by section and then seeking on `createdAt` were two different orders, and a
+  // declaration could disappear between pages because of it.
+  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return {
+    ...page,
+    items: page.items.sort((a, b) => (a.section ?? "").localeCompare(b.section ?? "") || +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid)),
+  };
 }
 
 export async function getTaxDeclaration(deps: Deps, _actor: AppUser, id: string) {

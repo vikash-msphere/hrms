@@ -48,19 +48,19 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   // Company
   { key: "identity", title: "Name & branding", desc: "Company name, legal name, logo, address and how the sidebar wordmark renders.", group: "Company", icon: Building2, keywords: ["logo", "brand", "company name", "address", "anniversary", "wordmark"], target: org("Organization identity") },
   { key: "banks-currency", title: "Banks & currency", desc: "Allowed currencies, the default currency, and the bank list used in pickers.", group: "Company", icon: Landmark, keywords: ["money", "inr", "usd", "fx"], target: org("Banks & currency") },
-  { key: "defaults", title: "Probation & holiday defaults", desc: "Default probation length for new hires and the optional-holiday allowance.", group: "Company", icon: SlidersHorizontal, keywords: ["probation months", "optional holidays"], target: { collection: "settings", objectPath: "settings/probation", label: "Defaults" } },
+  { key: "defaults", title: "Probation & holiday defaults", desc: "Default probation length for new hires, the optional-holiday allowance and deadline, and the subscribable holiday calendar.", group: "Company", icon: SlidersHorizontal, keywords: ["probation months", "optional holidays", "pick deadline", "holiday feed", "subscribe", "ics", "webcal"], target: { collection: "settings", objectPath: "settings/probation", label: "Defaults" } },
   { key: "employee-ids", title: "Employee IDs", desc: "The EMP-0042 style scheme new hires are auto-numbered with.", group: "Company", icon: Hash, keywords: ["number", "emp", "id format", "sequence"], target: { collection: "settings", objectPath: "settings/employee-number", label: "Employee IDs" } },
   { key: "departments", title: "Departments", desc: "The org's department tree - used by the directory, org chart and reporting.", group: "Company", icon: Network, perm: "departments.write", target: { collection: "departments", label: "Departments" } },
   { key: "employee-fields", title: "Employee identity fields", desc: "PAN, Aadhaar and other identity details collected per employee.", group: "Company", icon: Fingerprint, keywords: ["pan", "aadhaar", "uan", "custom fields", "sensitive"], target: { collection: "settings", objectPath: "settings/employee_fields", label: "Employee fields" } },
   { key: "dashboard", title: "Dashboard visibility", desc: "Which roles or people see each KPI card and timeline marker, and the shortcut tiles.", group: "Company", icon: LayoutDashboard, keywords: ["kpi", "timeline markers", "widgets", "shortcuts", "tiles"], target: { collection: "settings", objectPath: "settings/dashboard", label: "Dashboard" } },
   { key: "kudos", title: "Kudos levels", desc: "The recognition levels and their icons on the praise wall.", group: "Company", icon: Trophy, keywords: ["recognition", "praise", "badges"], target: { collection: "settings", objectPath: "settings/kudos", label: "Kudos levels" } },
-  { key: "asset-tags", title: "Asset tags", desc: "The tag pattern, category codes, sticker-sheet formats and label content for printed asset tags.", group: "Company", icon: Tag, keywords: ["sticker", "label", "qr", "print", "inventory", "a4-65", "tag format"], target: { collection: "settings", objectPath: "settings/asset-tags", label: "Asset tags" } },
+  { key: "asset-tags", title: "Asset tags", desc: "The tag pattern, the asset categories and their tag codes, sticker-sheet formats, label content, and whether custody has to be proved by scanning the tag.", group: "Company", icon: Tag, keywords: ["sticker", "label", "qr", "print", "inventory", "a4-65", "tag format", "categories", "category", "tag code", "custody", "scan", "acknowledge", "stocktake", "verify"], target: { collection: "settings", objectPath: "settings/asset-tags", label: "Asset tags" } },
   { key: "quick-actions", title: "Quick create menu", desc: "Which items appear in the top-bar + (New) menu, and their order.", group: "Company", icon: Plus, keywords: ["new menu", "plus menu", "quick create", "shortcuts", "actions", "+ new"], target: org("Quick create menu") },
 
   // Time & leave
   { key: "leave-policy", title: "Leave policy", desc: "Carry-forward and encashment caps, accrual rounding, back-dated requests.", group: "Time & leave", icon: CalendarRange, keywords: ["carry forward", "encash", "accrual", "backdated"], target: { collection: "settings", objectPath: "settings/leave_caps", label: "Leave policy" } },
   { key: "leave-types", title: "Leave types", desc: "Casual, sick, earned - quotas, accrual, carry-forward and encashment per type.", group: "Time & leave", icon: Palmtree, perm: "leave-types.write", keywords: ["vacation", "sick", "casual", "earned", "quota"], target: { collection: "leave-types", label: "Leave types" } },
-  { key: "attendance", title: "Attendance schedule", desc: "Shift window, grace, working days, flexible hours and loss-of-pay rules.", group: "Time & leave", icon: Clock, keywords: ["late", "grace", "working days", "lop", "timezone", "punch"], target: { collection: "settings", objectPath: "settings/attendance", label: "Attendance schedule" } },
+  { key: "attendance", title: "Attendance schedule", desc: "Shift window, grace, working days, week start, flexible hours and loss-of-pay rules.", group: "Time & leave", icon: Clock, keywords: ["late", "grace", "working days", "week start", "lop", "timezone", "punch"], target: { collection: "settings", objectPath: "settings/attendance", label: "Attendance schedule" } },
   { key: "shifts", title: "Shift patterns", desc: "Named shifts (morning, night…) assignable on the team roster.", group: "Time & leave", icon: CalendarClock, perm: "shifts.write", keywords: ["roster", "schedule"], target: { collection: "shifts", label: "Shifts" } },
 
   // Pay & money
@@ -128,8 +128,13 @@ export const settingsEntry = (key: string): SettingsEntry | undefined => SETTING
 export const HOST_SETTINGS: Record<string, string[]> = {
   // Time & leave
   "leave-requests": ["leave-policy", "leave-types"],
-  "leave-calendar": ["leave-policy", "leave-types"],
+  // The calendar also reads the work schedule (working days, which weekday a grid starts on), so its gear
+  // reaches that too - otherwise "why does my week start on Sunday" is a hunt through Settings.
+  "leave-calendar": ["leave-policy", "leave-types", "attendance"],
   attendance: ["attendance"],
+  // The holiday page's breaks are computed from the working week, and its optional-pick allowance lives in
+  // Defaults - both are reachable from its gear so neither is a hunt through Settings.
+  holidays: ["defaults", "attendance"],
   schedule: ["shifts"],
   timesheets: ["projects"],
   // Pay & money
@@ -137,6 +142,9 @@ export const HOST_SETTINGS: Record<string, string[]> = {
   payslips: ["payslip-design", "pay-components", "payroll-policy", "pay-grades", "salary-structures", "bank-formats"],
   reimbursements: ["reimbursements"],
   expenses: ["expenses"],
+  // the budget-alert thresholds a budget page colours "at risk" by live in the expenses panel, so the gear
+  // reaches them from the page that shows their effect.
+  "expense-budgets": ["expenses"],
   benefits: ["benefit-plans"],
   // Hiring & growth
   pipeline: ["recruiting"],
@@ -152,7 +160,10 @@ export const HOST_SETTINGS: Record<string, string[]> = {
   notifications: ["notifications"],
   // Company
   employees: ["employee-fields", "employee-ids"],
+  // Counts are governed by the same blob as the tags they scan (custody rules + the staleness window that
+  // decides what "sighted recently" means on the Stocktakes page).
   assets: ["asset-tags"],
+  stocktakes: ["asset-tags"],
   dashboard: ["dashboard"],
   announcements: ["kudos"],
   "org-chart": ["departments"],

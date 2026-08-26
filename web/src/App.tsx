@@ -1,5 +1,8 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+// lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
+import { lazyPage as lazy } from "./lib/lazyPage";
 import { Skeleton } from "./components/ui/skeleton";
+import { StatsSkeleton, TableSkeleton } from "./components/common/Skeletons";
 import { Button } from "./components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/ui/dialog";
 import { api, setSessionExpiredHandler, setForbiddenHandler } from "./api";
@@ -9,6 +12,9 @@ import { useMe, useRealMe } from "./useMe";
 import { useRoute } from "./router";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
+import { BottomNav } from "./components/layout/BottomNav";
+import { PullToRefresh } from "./components/layout/PullToRefresh";
+import { OfflineBar } from "./components/layout/OfflineBar";
 import { CommandPalette } from "./components/layout/CommandPalette";
 import { ShortcutLayer } from "./components/layout/ShortcutLayer";
 import { Toaster } from "./components/ui/toaster";
@@ -19,12 +25,17 @@ import { AccessScope } from "./components/access/AccessScope";
 import { CapabilitiesContext, hasCapability } from "./lib/perm";
 import { OrgProvider } from "./lib/org";
 import { setTablePrefsUser } from "./lib/tablePrefs";
+import { setResourceStoreUser } from "./lib/resourceStore";
+import { setPhotoCacheUser } from "./lib/photoCache";
+import { setSettingsUser } from "./lib/settingsStore";
 import { syncThemeFromServer } from "./lib/theme";
 import { syncTabSeenFromServer } from "./lib/tabActivity";
 import { Workspace } from "./components/layout/Workspace";
-import { ApprovalsProvider } from "./lib/approvals";
+import { ApprovalsProvider, APPROVAL_COLLECTIONS, TAX_VERIFICATIONS_QUEUE } from "./lib/approvals";
+import { ClockProvider } from "./lib/clock";
 import { NotificationsProvider, NotificationClearOnLeave } from "./lib/notifications";
-import { workspaceForKey, navPerm, APPROVAL_CAPS } from "./nav";
+import { workspaceForKey, navPerm, pageGate, pageVisible, APPROVAL_CAPS, navBreadcrumb } from "./nav";
+import { NoAccess } from "./components/common/NoAccess";
 import { Building } from "lucide-react";
 import { APP_NAME } from "./lib/brand";
 
@@ -52,8 +63,29 @@ const ROUTE_SCOPE: Record<string, string | null> = {
   compliance: "compliance-events",
   workflows: "automations",
   "recruiting-analytics": "applications",
+  "team-analytics": "employees",
   activity: "audit",
 };
+// Which approval queues each route needs ROWS for. Everywhere else the sidebar badge is all that reads
+// approvals, and that is a server-side count (`GET /v1/approvals-summary`) - so a page not listed here fires
+// no approval-collection request at all. Reading all ten on every page, which is what this replaced, was ~11
+// list requests per page view for one number in the sidebar.
+//
+// A route belongs here only for the buckets it RENDERS; test/webApprovalQueues.test.ts greps the pages for
+// `approvals.<bucket>` and fails if this map has drifted from what they read.
+const ALL_QUEUES = [...APPROVAL_COLLECTIONS, TAX_VERIFICATIONS_QUEUE];
+// Stable empty value: a fresh `[]` per render would change the provider's prop identity every render.
+const NO_QUEUES: readonly string[] = [];
+const QUEUES_BY_ROUTE: Record<string, readonly string[]> = {
+  approvals: ALL_QUEUES, // the inbox itself: every queue, plus the decided-history tab built from the same rows
+  // The "waiting on you" card approves inline, across the personal-request queues it lists. Company expenses
+  // and asset requests are decided on their own pages, so the dashboard doesn't read (or fetch) them.
+  dashboard: ["leave-requests", "reimbursements", "overtime-requests", "remote-work-requests", "attendance-regularizations", "leave-encashments", "loans", "time-entries"],
+  attendance: ["attendance-regularizations"],
+  "leave-requests": ["leave-requests"],
+  "leave-calendar": ["leave-requests"],
+};
+
 // Routes whose :id segment is a TAB name, not an object id - never pin the ambient scope to it.
 const TAB_ID_ROUTES = new Set(["payroll-runs"]);
 
@@ -112,8 +144,10 @@ const CandidateProfile = lazy(() => import("./pages/CandidateProfile"));
 const Interviews = lazy(() => import("./pages/Interviews"));
 const Offers = lazy(() => import("./pages/Offers"));
 const RecruitingAnalytics = lazy(() => import("./pages/RecruitingAnalytics"));
+const TeamAnalytics = lazy(() => import("./pages/TeamAnalytics"));
 const Tickets = lazy(() => import("./pages/Tickets"));
 const Assets = lazy(() => import("./pages/Assets"));
+const Stocktakes = lazy(() => import("./pages/Stocktakes"));
 const PayrollRuns = lazy(() => import("./pages/PayrollRuns"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Workflows = lazy(() => import("./pages/Workflows"));
@@ -147,7 +181,9 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   "job-requisitions": () => import("./pages/Requisitions"), candidates: () => import("./pages/Candidates"),
   interviews: () => import("./pages/Interviews"), offers: () => import("./pages/Offers"),
   "recruiting-analytics": () => import("./pages/RecruitingAnalytics"), tickets: () => import("./pages/Tickets"),
-  assets: () => import("./pages/Assets"), "payroll-runs": () => import("./pages/PayrollRuns"),
+  "team-analytics": () => import("./pages/TeamAnalytics"),
+  assets: () => import("./pages/Assets"), stocktakes: () => import("./pages/Stocktakes"),
+  "payroll-runs": () => import("./pages/PayrollRuns"),
   "pay-periods": () => import("./pages/PayrollRuns"), workflows: () => import("./pages/Workflows"),
   activity: () => import("./pages/Activity"),
   // Deep-linked Settings tabs all resolve to the Settings chunk.
@@ -156,13 +192,18 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   users: () => import("./pages/Settings"), operations: () => import("./pages/Settings"),
 };
 
-// Route-chunk loading fallback: neutral header + content blocks, so the swap doesn't flash.
+// Route-chunk loading fallback. Shaped like the page that is coming rather than like two grey slabs: nearly
+// every route in this app is a title, a metric strip and a list, so the wait holds that geometry and the
+// arriving page settles into it instead of shoving it aside.
 function PageLoading() {
   return (
-    <div className="space-y-6">
-      <Skeleton className="h-8 w-64" />
-      <Skeleton className="h-32 w-full" />
-      <Skeleton className="h-32 w-full" />
+    <div>
+      <div className="mb-6 space-y-2">
+        <Skeleton className="h-7 w-52" />
+        <Skeleton className="h-4 w-full max-w-md" />
+      </div>
+      <StatsSkeleton count={4} className="mb-6" />
+      <TableSkeleton rows={6} cols={4} />
     </div>
   );
 }
@@ -211,6 +252,31 @@ function SessionExpiredDialog({ open, onSignedIn }: { open: boolean; onSignedIn:
   );
 }
 
+// What a page navigation owes a keyboard or screen-reader user, none of which a hash write does by itself:
+// the tab/window/task-switcher title has to say which page this is (it said the app name and nothing else on
+// every one of seventy pages), focus has to leave the link that just unmounted, and the change has to be
+// announced - a silent content swap is the classic SPA failure, where the pointer user sees a new page and
+// the screen-reader user is told nothing at all.
+//
+// Focus lands on <main>, not the page's own heading: pages own their headings and would each have to opt in,
+// whereas the landmark is always there and reads its own label first. `preventScroll` because the scroll
+// position for this navigation was just decided in router.ts and must not be re-litigated here.
+function useRouteAnnounce(page: string, sub: string | undefined, mainRef: React.RefObject<HTMLElement>) {
+  const crumb = navBreadcrumb(page, sub);
+  const label = crumb ? [crumb.label, crumb.sub].filter(Boolean).join(" · ") : undefined;
+  const [announced, setAnnounced] = useState("");
+  const first = useRef(true);
+  useEffect(() => {
+    document.title = label ? `${label} · ${APP_NAME}` : APP_NAME;
+    // The first render is a page LOAD, not a navigation: the browser announces the document itself and
+    // focus belongs wherever the document put it.
+    if (first.current) { first.current = false; return; }
+    mainRef.current?.focus({ preventScroll: true });
+    setAnnounced(label ?? "");
+  }, [label, mainRef]);
+  return announced;
+}
+
 function FullScreen({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background text-center">
@@ -232,10 +298,19 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [chunkReady, setChunkReady] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
+  const announced = useRouteAnnounce(route.page, route.id ?? undefined, mainRef);
   const booted = useRef(false); // flips true after the first full render; after that, nav uses <Suspense>
 
   // Namespace the table-prefs cache by user before any table mounts.
   setTablePrefsUser(me?.email);
+  // Same for the resource store's on-disk copies, but keyed by the IDENTITY THE APP IS ANSWERING AS: during a
+  // simulation every read returns the subject's rows, so they must not land in (or be read from) the admin's
+  // own cache. Set before any collection is read; without it the store stays memory-only.
+  const cacheUser = me ? `${me.email}${viewAs ? `~${viewAs.subject}` : ""}` : undefined;
+  setResourceStoreUser(cacheUser);
+  setPhotoCacheUser(cacheUser); // faces are cached on disk too, under the same identity key
+  setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
 
   // A simulation belongs to the admin who started it: if someone else is signed in on this browser now, drop
   // it rather than showing them a shell they never asked for. (The server re-checks permission per request
@@ -412,8 +487,10 @@ export default function App() {
         return <TaxDeclarations me={gme} openId={route.id ?? undefined} />;
       case "leave-types": // moved into Settings; deep-link to its tab
         return <Settings me={gme} tab="leave-types" />;
+      // `…/<id>` deep-links a post ON the board (search hits, the activity feed, a copied link); the `/view`
+      // tail is the pop-out: that post alone, on a page of its own, with no board behind it.
       case "announcements":
-        return <Announcements me={gme} openId={route.id ?? undefined} />;
+        return <Announcements me={gme} openId={route.id ?? undefined} solo={route.sub === "view"} />;
       case "holidays":
         return <Holidays me={gme} openId={route.id ?? undefined} />;
       case "events":
@@ -435,7 +512,7 @@ export default function App() {
       case "kudos": // merged into the board
         return <Announcements me={gme} />;
       case "suggestions":
-        return <Suggestions me={gme} openId={route.id ?? undefined} />;
+        return <Suggestions me={gme} openId={route.id ?? undefined} solo={route.sub === "view"} />;
       case "payslips":
         return <Payslips me={gme} />;
       case "reimbursements":
@@ -445,11 +522,11 @@ export default function App() {
       case "vendors":
         return <Vendors me={gme} />;
       case "expense-budgets":
-        return <ExpenseBudgets me={gme} />;
+        return <ExpenseBudgets me={gme} openId={route.id ?? undefined} />;
       case "referrals":
         return <Referrals me={gme} openId={route.id ?? undefined} />;
       case "pipeline":
-        return <Pipeline me={gme} />;
+        return <Pipeline me={gme} openId={route.id ?? undefined} />;
       case "job-requisitions":
         return <Requisitions me={gme} openId={route.id ?? undefined} />;
       case "candidates":
@@ -460,20 +537,27 @@ export default function App() {
         return <Offers me={gme} openId={route.id ?? undefined} />;
       case "recruiting-analytics":
         return <RecruitingAnalytics me={gme} />;
+      case "team-analytics":
+        return <TeamAnalytics me={gme} />;
       case "tickets":
         return <Tickets me={gme} openId={route.id ?? undefined} />;
       case "assets":
         return <Assets me={gme} openId={route.id ?? undefined} />;
+      // `stocktakes/<id>` opens that count in place: a count is a record somebody links to, not a dialog.
+      case "stocktakes":
+        return <Stocktakes me={gme} />;
       case "pay-components": // moved into Settings; deep-link straight to its tab
         return <Settings me={gme} tab="pay-components" />;
-      case "pay-periods": // merged into Payroll Runs; deep-link to its Pay periods tab
-        return <PayrollRuns me={gme} tab="periods" />;
+      case "pay-periods": // merged into Payroll Runs; deep-link to its Pay periods tab, optionally onto one period
+        return <PayrollRuns me={gme} tab="periods" openId={route.id ?? undefined} />;
+      // `payroll-runs/<tab>/<id>`: the tab takes the first segment (it predates deep-opening), so a run id
+      // rides in the third - `payroll-runs/runs/<id>` opens that run's breakdown.
       case "payroll-runs":
-        return <PayrollRuns me={gme} tab={route.id ?? undefined} />;
+        return <PayrollRuns me={gme} tab={route.id ?? undefined} openId={route.sub ?? undefined} />;
       case "settings":
         return <Settings me={gme} tab={route.id ?? undefined} openId={route.sub ?? undefined} />;
       case "workflows":
-        return <Workflows me={gme} />;
+        return <Workflows me={gme} openId={route.id ?? undefined} />;
       case "activity":
         return <Activity me={gme} />;
       case "users": // legacy deep link -> Settings Access → Roles & permissions
@@ -489,6 +573,14 @@ export default function App() {
   // both live under the "Time" workspace). Tabs are filtered to what the caller may see; an EmployeeProfile
   // detail page (a Directory record) keeps the People tab bar so it never feels like a dead-end.
   function renderWithWorkspace() {
+    // Route gate: the sidebar's answer, applied to the URL. A page the nav hides must not render just because
+    // its address was typed, bookmarked or pasted by somebody who does hold the access - so the wall goes up
+    // INSTEAD of the page (and without its workspace tab bar), rather than the page rendering itself empty.
+    if (!pageVisible(route.page, (p) => hasCapability(gme.capabilities, p))) {
+      const gate = pageGate(route.page);
+      const perm = gate?.perm ?? gate?.anyPerm?.[0];
+      return <NoAccess collection={perm?.split(".").slice(0, -1).join(".")} />;
+    }
     const ws = workspaceForKey(route.page);
     if (!ws?.tabs) return renderPage();
     const tabs = ws.tabs.filter((t) => { const p = navPerm(t); return !p || hasCapability(gme.capabilities, p); });
@@ -504,14 +596,32 @@ export default function App() {
     <ConfirmProvider>
     <OrgProvider>
     <AccessModeProvider userEmail={realMe?.email ?? me.email} capabilities={realMe?.capabilities ?? []}>
-    <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(gme.capabilities, c))}>
+    <ApprovalsProvider enabled={APPROVAL_CAPS.some((c) => hasCapability(gme.capabilities, c))} queues={QUEUES_BY_ROUTE[route.page] ?? NO_QUEUES} history={route.page === "approvals"}>
     <NotificationsProvider>
+    <ClockProvider me={gme}>
       <NotificationClearOnLeave page={route.page} />
-      <div className="flex min-h-screen bg-background">
+      <div data-app-shell className="flex min-h-screen bg-background">
         <Sidebar me={gme} current={route.page} mobileOpen={mobileOpen} onNavigate={() => setMobileOpen(false)} />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar me={gme} page={route.page} sub={route.id ?? undefined} onOpenMenu={() => setMobileOpen(true)} onOpenSearch={() => setPaletteOpen(true)} />
-          <main className="mx-auto w-full max-w-screen-2xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
+        {/* While the mobile drawer is open the page behind it is inert: that is what keeps Tab inside the
+            drawer (a modal surface has to trap focus) and stops a stray tap landing on a control under the
+            scrim. Paired with the drawer's own `inert` when closed, exactly one of the two is ever reachable.
+            React 18's typings predate the attribute, hence the cast - the DOM and browsers accept it. */}
+        <div className="flex min-w-0 flex-1 flex-col" {...(mobileOpen ? ({ inert: "" } as React.HTMLAttributes<HTMLDivElement>) : {})}>
+          <TopBar me={gme} page={route.page} sub={route.id ?? undefined} onOpenSearch={() => setPaletteOpen(true)} />
+          {/* Renders nothing while the connection is up. */}
+          <OfflineBar />
+          {/* The bottom padding clears the phone's fixed bottom nav (plus the home indicator) so the last row
+              of a list is never parked under it; from `md` up there is no bottom bar and the normal rhythm
+              applies. Vertical padding is tighter on a phone, where 32px of chrome is a sixth of the screen. */}
+          {/* Focus target for a navigation (see useRouteAnnounce). `tabIndex={-1}` makes the landmark
+              focusable programmatically without adding it to the tab sequence, and `outline-none` keeps
+              that focus silent for the pointer user who never asked for a ring around the page. */}
+          <main
+            ref={mainRef}
+            tabIndex={-1}
+            aria-label="Main content"
+            className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(5rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
+          >
             {/* Ambient access scope for the whole page: collection = the route key (the collection for most
                 pages), object = the detail id when on an item page. Shared primitives (Field, Detail, ...)
                 read this so access-mode lights up every data element/control path. ROUTE_SCOPE corrects the
@@ -527,11 +637,20 @@ export default function App() {
             </RouteAccessScope>
           </main>
         </div>
+        {/* Phone-only primary nav. Outside the scrolling column (it is `fixed`), and after <main> in the DOM
+            so the tab order runs page-then-nav rather than making every keyboard user pass the bar first. */}
+        <BottomNav me={gme} current={route.page} menuOpen={mobileOpen} onOpenMenu={() => setMobileOpen(true)} />
+        {/* Pull down from the top of any page to re-read it (touch only; renders nothing until pulled). */}
+        <PullToRefresh />
+        {/* Speaks the page a navigation landed on. Off-screen rather than hidden: `display:none` content is
+            not announced at all, which is the usual way this element ends up doing nothing. */}
+        <div aria-live="polite" aria-atomic="true" className="sr-only">{announced}</div>
         <Toaster />
         <CommandPalette me={gme} open={paletteOpen} onOpenChange={setPaletteOpen} />
         <ShortcutLayer me={gme} page={route.page} />
         <SessionExpiredDialog open={sessionExpired} onSignedIn={() => setSessionExpired(false)} />
       </div>
+    </ClockProvider>
     </NotificationsProvider>
     </ApprovalsProvider>
     </AccessModeProvider>

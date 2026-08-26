@@ -26,6 +26,15 @@ describe("encodeWireIds", () => {
     expect(out.work_email).toEqual("emp@example.com"); // not collection/id shaped
   });
 
+  it("encodes a deep link's id and keeps the trailing route segment", async () => {
+    // A notification's link is a web route into one record ("#/announcements/<id>/view"), so the id sits in the
+    // middle of the string. It still has to leave as a token, with the `/view` tail intact.
+    const out = await encodeWireIds(codec, { link: `announcements/${EVE}/view` });
+    const [, token, tail] = out.link.split("/");
+    expect(tail).toEqual("view");
+    expect(await codec.decode("announcements", token!)).toEqual(EVE);
+  });
+
   it("walks lists and leaves the pagination cursor untouched", async () => {
     const cursor = Buffer.from(`1700000000000|tok`).toString("base64url");
     const out = await encodeWireIds(codec, {

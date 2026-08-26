@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field } from "@/components/common/Field";
+import { PanelSkeleton } from "@/components/common/Skeletons";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -147,7 +148,7 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
 
   const tokenHelp = useMemo(() => PAYSLIP_TOKENS.map((t) => `{{${t}}}`).join("  "), []);
 
-  if (!template) return <p className="py-8 text-sm text-muted-foreground">Loading the payslip design…</p>;
+  if (!template) return <PanelSkeleton />;
 
   return (
     <div className="space-y-4">
@@ -157,7 +158,7 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
           now on - already-published payslips keep the design they were issued with. The preview uses sample
           figures, never a real employee's pay.
         </p>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button variant="ghost" size="sm" onClick={resetToStock}><RotateCcw className="h-4 w-4" /> Stock design</Button>
           <AccessAction collection="settings" objectPath="settings/payslip" verb="previewTemplate" label="Preview payslip design">
             <Button variant="outline" size="sm" loading={previewing} onClick={() => renderPreview(template)}>
@@ -436,9 +437,9 @@ function BlockFields({ block, onChange }: { block: PayslipBlock; onChange: (patc
           </div>
           <div className="space-y-2">
             {fields.map((f, j) => (
-              <div key={j} className="flex items-center gap-2">
-                <Input className="w-40" placeholder="Label" value={f.label} onChange={(e) => onChange({ fields: fields.map((x, k) => (k === j ? { ...x, label: e.target.value } : x)) })} />
-                <Input placeholder="{{token}} or text" value={f.value} onChange={(e) => onChange({ fields: fields.map((x, k) => (k === j ? { ...x, value: e.target.value } : x)) })} />
+              <div key={j} className="editor-row">
+                <Input className="w-full sm:w-40" placeholder="Label" value={f.label} onChange={(e) => onChange({ fields: fields.map((x, k) => (k === j ? { ...x, label: e.target.value } : x)) })} />
+                <Input className="editor-row-main" placeholder="{{token}} or text" value={f.value} onChange={(e) => onChange({ fields: fields.map((x, k) => (k === j ? { ...x, value: e.target.value } : x)) })} />
                 <Button variant="ghost" size="icon" title="Remove field" onClick={() => onChange({ fields: fields.filter((_, k) => k !== j) })}>
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>

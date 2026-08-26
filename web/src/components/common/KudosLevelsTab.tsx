@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
+import { getSetting } from "@/lib/settingsStore";
 
 // HR editor for the kudos config (settings/kudos): the recognition LEVELS (weighted tiers feeding the
 // leaderboard) and the CATEGORIES (a flat, optional taxonomy for tagging recognition), each with optional
@@ -27,7 +28,7 @@ export function KudosLevelsTab() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { levels?: KudosLevel[]; categories?: KudosCategory[] } }>("settings/kudos")
+    getSetting<{ levels?: KudosLevel[]; categories?: KudosCategory[] }>("kudos")
       .then((s) => {
         if (s.value?.levels?.length) setLevels(s.value.levels);
         if (Array.isArray(s.value?.categories)) setCategories(s.value!.categories!);
@@ -83,8 +84,8 @@ export function KudosLevelsTab() {
           </div>
           <div className="space-y-2">
             {levels.map((l, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <Input className="flex-1" value={l.name} placeholder="Level name (e.g. Impact)" onChange={(e) => setRow(i, { name: e.target.value })} />
+              <div key={i} className="editor-row">
+                <Input className="editor-row-main" value={l.name} placeholder="Level name (e.g. Impact)" onChange={(e) => setRow(i, { name: e.target.value })} />
                 <span className="text-sm text-muted-foreground">points</span>
                 <Input type="number" className="w-24" value={l.points} onChange={(e) => setRow(i, { points: Number(e.target.value) })} />
                 <Button size="icon" variant="ghost" className="h-8 w-8" aria-label="Remove level" onClick={() => setLevels((ls) => ls.filter((_, j) => j !== i))}><Trash2 className="h-4 w-4" /></Button>
@@ -106,10 +107,13 @@ export function KudosLevelsTab() {
               const open = promptsOpen === i;
               return (
                 <div key={i} className={cn("rounded-md", open && "border bg-muted/30 p-2")}>
-                  <div className="flex items-center gap-2">
+                  <div className="editor-row">
                     <IconPicker value={c.icon} onChange={(v) => setCat(i, { icon: v })} />
                     <KudosArtPicker value={c.art} onChange={(v) => setCat(i, { art: v })} />
-                    <Input className="flex-1" value={c.name} placeholder="Category name (e.g. Teamwork)" onChange={(e) => setCat(i, { name: e.target.value })} />
+                    {/* Not `editor-row-main` here: the two pickers and the Prompts button only come to
+                        ~170px between them, so the name field still gets a usable ~130px on the same
+                        line. A forced full-width field would cost a third line for no gain. */}
+                    <Input className="min-w-[7rem] flex-1" value={c.name} placeholder="Category name (e.g. Teamwork)" onChange={(e) => setCat(i, { name: e.target.value })} />
                     <Button
                       type="button"
                       size="sm"

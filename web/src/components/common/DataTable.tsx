@@ -5,11 +5,12 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetBody, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { loadLocalPrefs, fetchServerPrefs, savePrefs, type SavedView } from "@/lib/tablePrefs";
 import { useConfirm } from "@/components/common/confirm";
 import { useAccessMode, type AccessTargetRef } from "@/components/access/AccessModeProvider";
@@ -18,6 +19,7 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { usePermission } from "@/lib/perm";
 import { exportTable } from "@/lib/exportTable";
 import { useCollectionHasMore } from "@/hooks/useCollection";
+import { syncLastHash } from "@/router";
 import { useMedia } from "@/hooks/useMedia";
 
 const PAGE_SIZES = [10, 25, 50, 100, 0]; // 0 = All
@@ -37,9 +39,21 @@ export type Column<T> = {
   defaultHidden?: boolean; // hidden until the user enables it in the column selector
   defaultFilter?: string; // seed an initial filter value (e.g. Status = "Active")
   hideValueByDefault?: string; // exclude rows with this accessor value unless filtered (e.g. "Deleted")
+  // Extra select-filter values to offer even when no loaded row carries them. For a value whose rows are
+  // FETCHED ON DEMAND ("Deleted"): the option has to exist before the fetch, or picking it is impossible and
+  // the trash is unreachable. Paired with `onFilterChange` on the table, which is how the page learns to go
+  // and get them.
+  filterOptions?: string[];
   // Phone card layout: rank for inclusion (lower = more important; the best-ranked column becomes the card
-  // title, the next three its metadata lines). Unranked columns keep their visible order after ranked ones.
+  // title, the next three its metadata lines). Unranked columns keep their visible order after ranked ones,
+  // except a Status column, which is pulled up to sit directly under the title (see `mobileLayout`).
   mobilePriority?: number;
+  // Numeric column that carries a total: the table sums the accessor over every FILTERED row (all pages, not
+  // just the one on screen) into a footer strip, and the bulk bar totals the selection. Money columns pass
+  // `formatTotal` so the total reads in the same units as the cells - "what am I looking at, in total" is the
+  // question a finance table gets asked most, and reaching for a spreadsheet to answer it is a page failing.
+  aggregate?: "sum";
+  formatTotal?: (n: number) => React.ReactNode;
 };
 
 type SortState = { id: string; dir: "asc" | "desc" } | null;
@@ -120,7 +134,9 @@ export function DataTable<T>({
   tableId,
   emptyTitle = "No results",
   emptyDescription,
+  emptyAction,
   accessCollection,
+  onFilterChange,
   accessTargetOf,
   getSubRows,
   hasMore,
@@ -143,6 +159,11 @@ export function DataTable<T>({
   tableId?: string;
   emptyTitle?: string;
   emptyDescription?: string;
+  /** The page's create control, repeated in the zero state. A collection nobody has added to yet is the
+   *  state every new tenant meets on every page, and describing the action there ("use Add delegation") while
+   *  the button itself is a header away is a worse answer than putting the button in front of them. Suppressed
+   *  automatically when a filter is what emptied the table - there the recovery is to clear the filter. */
+  emptyAction?: React.ReactNode;
   // Access-management mode: when set + the mode is on, each row gets a "manage access" affordance scoped to
   // the row's object. `accessTargetOf` supplies the per-row object path / label / can-hint.
   accessCollection?: string;
@@ -163,6 +184,10 @@ export function DataTable<T>({
   // Follow the server cursor and append the next page (useCollection's loadMore). When set and the rows are
   // truncated, the footer grows a "Load more" button - the way past the server's page cap without search.
   onLoadMore?: () => Promise<void> | void;
+  // Told the CURRENT value of one column's filter whenever it changes. The one case that needs it: a filter
+  // value whose rows are not loaded ("Deleted"), where the page has to go and fetch them. Everything else
+  // filters the rows already in hand and the page never needs to know.
+  onFilterChange?: (colId: string, value: string) => void;
 }) {
   const am = useAccessMode();
   const autoHasMore = useCollectionHasMore(accessCollection);
@@ -243,6 +268,8 @@ export function DataTable<T>({
   const urlKey = tableId ?? accessCollection;
   const urlInitial = React.useRef(readUrlTableState(urlKey));
   const [sort, setSort] = React.useState<SortState>(() => parseUrlSort(urlInitial.current?.s));
+  const onFilterChangeRef = React.useRef(onFilterChange);
+  onFilterChangeRef.current = onFilterChange;
   const [filters, setFilters] = React.useState<Record<string, string>>(() => {
     // A URL-carried filter set replaces the defaults wholesale (an empty {} means "defaults cleared").
     if (urlInitial.current?.f) return urlInitial.current.f;
@@ -250,6 +277,17 @@ export function DataTable<T>({
     for (const c of columns) if (c.defaultFilter) seed[c.id] = c.defaultFilter;
     return seed;
   });
+  // Report each filter that CHANGED value. Seeded as empty so the first run also reports a filter restored
+  // from the URL - a link to the trash has to fetch the trash, not land on an empty table.
+  const reported = React.useRef<Record<string, string>>({});
+  React.useEffect(() => {
+    const prev = reported.current;
+    reported.current = filters;
+    if (!onFilterChangeRef.current) return;
+    for (const id of new Set([...Object.keys(prev), ...Object.keys(filters)])) {
+      if ((prev[id] ?? "") !== (filters[id] ?? "")) onFilterChangeRef.current(id, filters[id] ?? "");
+    }
+  }, [filters]);
 
   // Mirror sort + filters back into the hash query (debounced) so the current view is shareable and survives
   // navigation. Skipped entirely without a urlKey; the param is dropped when the state matches the defaults.
@@ -272,6 +310,7 @@ export function DataTable<T>({
       else params.set(`t.${urlKey}`, value);
       const q = params.toString();
       history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${path}${q ? `?${q}` : ""}`);
+      syncLastHash(); // no hashchange fires, so the guard has to be told what the address bar now says
     }, 250);
     return () => clearTimeout(t);
     // `columns` is usually a fresh array per render; reading defaults inside the debounce keeps it out of deps.
@@ -465,6 +504,17 @@ export function DataTable<T>({
   const from = total === 0 ? 0 : safePage * (pageSize || total) + 1;
   const to = pageSize > 0 ? Math.min(total, (safePage + 1) * pageSize) : total;
 
+  // --- totals ----------------------------------------------------------------------------------------------
+  // Summed over the FILTERED rows, not the visible page: a total that changed when you turned the page would
+  // answer a question nobody asked.
+  const sumCols = React.useMemo(() => columns.filter((c) => c.aggregate === "sum"), [columns]);
+  const sumOf = React.useCallback(
+    (rs: T[], col: Column<T>) => rs.reduce((n, r) => n + (Number(col.accessor?.(r)) || 0), 0),
+    [],
+  );
+  const fmtTotal = (col: Column<T>, n: number) => (col.formatTotal ? col.formatTotal(n) : String(n));
+  const showTotals = sumCols.length > 0 && filtered.length > 0;
+
   function toggleSort(col: Column<T>) {
     if (col.sortable === false || !col.accessor) return;
     setSort((s) =>
@@ -478,6 +528,7 @@ export function DataTable<T>({
       const v = col.accessor?.(r);
       if (v != null && String(v) !== "") set.add(String(v));
     }
+    for (const v of col.filterOptions ?? []) set.add(v);
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }
 
@@ -520,7 +571,16 @@ export function DataTable<T>({
   const isPhone = useMedia("(max-width: 639px)");
   const mobileLayout = React.useMemo(() => {
     const dataCols = visibleColumns.filter((c) => c.header !== "");
-    const ranked = [...dataCols].sort((a, b) => (a.mobilePriority ?? 99) - (b.mobilePriority ?? 99));
+    // Four of a dozen columns fit a card, and which four is a real editorial choice. A page states it with
+    // `mobilePriority`; the default is column order, with one correction: the STATUS column is pulled to the
+    // front of the metadata. Column order is written for a table, where status is read across the row and
+    // its position hardly matters - but a card that shows a leave request's type and dates and not whether
+    // it was approved has left out the only thing the reader opened the page for. Every list in this app
+    // that has a state has it under a header called Status (or an id of `state`/`status`), so one rule here
+    // beats thirty-three per-page rankings.
+    const isStatus = (c: Column<T>) => /^(state|status)$/i.test(c.id) || /^status$/i.test(String(c.header));
+    const rank = (c: Column<T>, i: number) => c.mobilePriority ?? (i === 0 ? 0 : isStatus(c) ? 1 : i + 1);
+    const ranked = dataCols.map((c, i) => ({ c, r: rank(c, i), i })).sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.c);
     return { title: ranked[0], meta: ranked.slice(1, 4) };
   }, [visibleColumns]);
 
@@ -571,8 +631,18 @@ export function DataTable<T>({
               })}
             </dl>
           </div>
+          {/* The action cluster wraps rather than holding one line: a row-actions column is free to carry
+              labelled buttons ("Confirm receipt", "Return"), and three of those in a row want more than a
+              phone screen. Wrapping makes the cluster's floor its widest button instead of their sum, so the
+              card shrinks to the screen instead of pushing the page sideways. */}
           {trailing.length > 0 && (
-            <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            <div
+              // Row actions are written dense (`size="sm"`, h-8) because a table row is a cursor's surface.
+              // A card is a finger's, so the same buttons get a 36px floor here - the table itself is left
+              // alone, where inflating every row would push the columns off screen.
+              className="flex max-w-[55%] flex-wrap items-center justify-end gap-1 coarse:[&_button]:min-h-9 [&>*]:flex-wrap"
+              onClick={(e) => e.stopPropagation()}
+            >
               {trailing.map((c) => (
                 <React.Fragment key={c.id}>{c.cell?.(r)}</React.Fragment>
               ))}
@@ -592,14 +662,17 @@ export function DataTable<T>({
   // (so it reaches rows past the first page, which a column filter cannot), and the column filters then
   // narrow whatever came back. Only rendered when the page wires it up.
   const searchControl = search && (
-    <div className="relative">
+    // Full width on a phone: search is the main way to find a row when the table is a card list, and a 208px
+    // box next to nothing looks (and reads) like an afterthought.
+    <div className="relative w-full sm:w-auto">
       <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
       <Input
+        type="search"
         value={search.value}
         onChange={(e) => search.onChange(e.target.value)}
         placeholder={search.placeholder ?? "Search all records…"}
         aria-label={search.placeholder ?? "Search all records"}
-        className="h-9 w-52 pl-8 pr-7"
+        className="h-9 w-full pl-8 pr-7 sm:w-52"
       />
       {search.value && (
         <button
@@ -868,6 +941,133 @@ export function DataTable<T>({
     </TooltipProvider>
   );
 
+  // --- phone sort & filter ----------------------------------------------------------------------------------
+  // On a phone the table becomes cards, and cards have no column headers - which is where all of the sorting
+  // and filtering lived. Without this control the phone view is a fixed, unsortable, unfilterable list: the
+  // same rows in the same order, however many there are. Everything the header offers is gathered into one
+  // sheet instead, in the order the questions get asked ("newest first", "only the pending ones").
+  const [sortSheet, setSortSheet] = React.useState(false);
+  const sortableCols = visibleColumns.filter((c) => c.sortable !== false && !!c.accessor && c.header);
+  const filterableCols = visibleColumns.filter((c) => c.filter !== "none" && !!c.accessor && c.header);
+  const phoneToolsControl = (sortableCols.length > 0 || filterableCols.length > 0) && (
+    <Sheet open={sortSheet} onOpenChange={setSortSheet}>
+      <SheetTrigger asChild>
+        <Button variant="outline" size="sm" className="h-9 gap-1.5">
+          <SlidersHorizontal className="h-4 w-4" />
+          Sort & filter
+          {activeFilters.length > 0 && (
+            <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-4 text-primary-foreground">
+              {activeFilters.length}
+            </span>
+          )}
+        </Button>
+      </SheetTrigger>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>Sort & filter</SheetTitle>
+          <SheetDescription>
+            {total} row{total === 1 ? "" : "s"} shown{truncated ? " of the records loaded so far" : ""}
+          </SheetDescription>
+        </SheetHeader>
+        <SheetBody className="space-y-6">
+          {sortableCols.length > 0 && (
+            <section className="space-y-1">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Sort by</h4>
+              {sortableCols.map((col) => {
+                const dir = sort?.id === col.id ? sort.dir : null;
+                return (
+                  <button
+                    key={col.id}
+                    type="button"
+                    // Same three-state cycle as tapping a column header on a desktop (asc, desc, off), so the
+                    // two surfaces do not disagree about what a second tap means.
+                    onClick={() => toggleSort(col)}
+                    className={cn(
+                      "flex min-h-11 w-full items-center justify-between gap-2 rounded-lg px-3 text-sm transition-colors",
+                      dir ? "bg-accent font-medium text-accent-foreground" : "hover:bg-muted",
+                    )}
+                  >
+                    <span className="truncate">{col.header}</span>
+                    {dir === "asc" ? (
+                      <span className="flex shrink-0 items-center gap-1 text-xs">
+                        <ArrowUp className="h-3.5 w-3.5" /> A-Z
+                      </span>
+                    ) : dir === "desc" ? (
+                      <span className="flex shrink-0 items-center gap-1 text-xs">
+                        <ArrowDown className="h-3.5 w-3.5" /> Z-A
+                      </span>
+                    ) : (
+                      <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+                    )}
+                  </button>
+                );
+              })}
+            </section>
+          )}
+
+          {filterableCols.length > 0 && (
+            <section className="space-y-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Filter</h4>
+              {filterableCols.map((col) => {
+                const value = filters[col.id] ?? "";
+                return (
+                  <div key={col.id} className="space-y-1.5">
+                    <label className="text-sm font-medium">{col.header}</label>
+                    {col.filter === "select" ? (
+                      // A native-feeling Select rather than the desktop popover's option list: on a phone one
+                      // tap to a bounded, scrollable list beats a nested overlay inside a sheet.
+                      <Select
+                        value={value || "__all__"}
+                        onValueChange={(v) => setFilters((f) => ({ ...f, [col.id]: v === "__all__" ? "" : v }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__all__">All</SelectItem>
+                          {distinctValues(col).map((v) => (
+                            <SelectItem key={v} value={v}>
+                              {v}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <Input
+                          value={value}
+                          placeholder={`Any ${col.header.toLowerCase()}`}
+                          onChange={(e) => setFilters((f) => ({ ...f, [col.id]: e.target.value }))}
+                        />
+                        {value && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Clear ${col.header} filter`}
+                            onClick={() => setFilters((f) => ({ ...f, [col.id]: "" }))}
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </section>
+          )}
+        </SheetBody>
+        <SheetFooter className="justify-between">
+          <Button variant="ghost" onClick={() => setFilters({})} disabled={activeFilters.length === 0}>
+            Clear filters
+          </Button>
+          {/* The sheet applies as you go, so this is a dismiss, not a commit - labelled for what it does. */}
+          <Button onClick={() => setSortSheet(false)}>Done</Button>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
+  );
+
   // Cross-module export: the visible, accessor-bearing columns (skips the access/actions columns) of the
   // FILTERED rows (all of them, not just the current page). Gated by the `export` capability; the AccessAction
   // overlays the manage icon in access mode so admins control who may export.
@@ -906,31 +1106,107 @@ export function DataTable<T>({
     </AccessAction>
   );
 
+  // The zero state, written once for the two places it renders (a Card on a phone, a full-width row in the
+  // table). A table can be empty for two different reasons and they need two different offers: nothing has
+  // been created yet -> the page's own create control; a filter or a search excluded everything -> the way
+  // back out of it. Offering "Add delegation" to someone who has simply mistyped a search is noise.
+  const filteredEmpty = anyFilter || !!search?.value;
+  const emptyBody = (
+    <>
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <Inbox className="h-6 w-6" />
+      </div>
+      <div>
+        {/* With only the first page loaded, "no results" would be a lie: the match may sit in a row that was
+            never fetched. Say which set was actually searched. */}
+        <p className="text-sm font-medium text-foreground">
+          {truncated && anyFilter ? `No matches in the ${rows.length} loaded records` : emptyTitle}
+        </p>
+        {truncated && anyFilter ? (
+          <p className="mt-1 text-sm text-muted-foreground">
+            This page holds only the first {rows.length} records, and filters apply to those. The record you want may not be loaded — use search (⌘K) to look across everything.
+          </p>
+        ) : filteredEmpty ? (
+          <p className="mt-1 text-sm text-muted-foreground">Nothing here matches what you're filtering by.</p>
+        ) : (
+          emptyDescription && <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
+        )}
+      </div>
+      {filteredEmpty ? (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => { setFilters({}); search?.onChange(""); }}
+        >
+          Clear {anyFilter && search?.value ? "search and filters" : anyFilter ? "filters" : "search"}
+        </Button>
+      ) : (
+        emptyAction
+      )}
+    </>
+  );
+
   return (
     <div className="space-y-3">
       {/* Controls: portaled into a parent bar (tabs/toggles) when a slot is given, else their own row. */}
+      {/* Which controls belong on a phone: search (full width - it is the primary way to find a row on a
+          small screen), the sort & filter sheet in place of the column headers that no longer exist, and the
+          same views/export affordances. The column picker is dropped: cards have no columns to pick, and its
+          density switch is a table-only setting. */}
       {controlsSlot !== undefined ? (
-        controlsSlot ? createPortal(<div className="flex flex-wrap items-center justify-end gap-2">{searchControl}{chipsControl}{toolbar}{exportControl}{viewsControl}{columnsControl}</div>, controlsSlot) : null
+        controlsSlot
+          ? createPortal(
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {searchControl}
+                {chipsControl}
+                {toolbar}
+                {isPhone && phoneToolsControl}
+                {exportControl}
+                {viewsControl}
+                {!isPhone && columnsControl}
+              </div>,
+              controlsSlot,
+            )
+          : null
       ) : (
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-2">
             {title && <h3 className="mr-1 text-lg font-semibold">{title}</h3>}
             {searchControl}
             {chipsControl}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
             {toolbar}
+            {isPhone && phoneToolsControl}
             {exportControl}
             {viewsControl}
-            {columnsControl}
+            {!isPhone && columnsControl}
           </div>
         </div>
       )}
 
-      {/* Bulk bar: appears with the first selected row, sticky so it stays reachable over a long table. */}
+      {/* Bulk bar: appears with the first selected row.
+          Desktop - sticky under the toolbar, so it stays reachable while scrolling a long table.
+          Phone - docked above the bottom nav instead. Selecting rows on a phone means scrolling a card list,
+          and a bar stuck to the TOP of that list is off screen by the third selection; docked at the bottom
+          it stays exactly where the selecting thumb already is. */}
       {bulkActions && selected.size > 0 && (
-        <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop">
-          <span className="text-sm font-medium tabular-nums">{selectedRows.length} selected</span>
+        <div
+          className={cn(
+            "z-20 flex items-center gap-2 rounded-lg border border-primary/30 bg-card px-3 py-2 shadow-pop",
+            "fixed inset-x-3 bottom-[calc(4.25rem+env(safe-area-inset-bottom))] flex-wrap",
+            "md:sticky md:inset-x-auto md:bottom-auto md:top-2",
+          )}
+        >
+          <span className="text-sm font-medium tabular-nums">
+            {selectedRows.length} selected
+            {/* What the selection adds up to, before an irreversible bulk action decides its fate. */}
+            {sumCols.map((col) => (
+              <span key={col.id} className="ml-2 font-normal text-muted-foreground">
+                {col.header}: {fmtTotal(col, sumOf(selectedRows, col))}
+              </span>
+            ))}
+          </span>
           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSelected(new Set())}>
             Clear
           </Button>
@@ -956,23 +1232,17 @@ export function DataTable<T>({
 
       {isPhone ? (
         filtered.length === 0 ? (
-          <Card className="flex flex-col items-center gap-3 p-8 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
-              <Inbox className="h-6 w-6" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-foreground">
-                {truncated && anyFilter ? `No matches in the ${rows.length} loaded records` : emptyTitle}
-              </p>
-              {(truncated && anyFilter) ? (
-                <p className="mt-1 text-sm text-muted-foreground">Filters apply to the loaded records only - use search to look across everything.</p>
-              ) : (
-                emptyDescription && <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
-              )}
-            </div>
-          </Card>
+          <Card className="flex flex-col items-center gap-3 p-6 text-center sm:p-8">{emptyBody}</Card>
         ) : (
           <div className="space-y-2">
+            {showTotals && (
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border bg-muted/60 px-3 py-2 text-xs">
+                <span className="uppercase tracking-wide text-muted-foreground">Total · {total} row{total === 1 ? "" : "s"}</span>
+                {sumCols.map((col) => (
+                  <span key={col.id} className="font-medium tabular-nums">{col.header}: {fmtTotal(col, sumOf(filtered, col))}</span>
+                ))}
+              </div>
+            )}
             {paged.flatMap((row) => [
               renderMobileCard(row, false),
               // Children are always visible on phone: cards carry no fold chevron.
@@ -983,7 +1253,7 @@ export function DataTable<T>({
       ) : (
       <Card className="overflow-hidden">
         <Table
-          containerClassName="max-h-[68vh]"
+          containerClassName="max-h-[68dvh]"
           className={density === "compact" ? "[&_tbody_td]:py-1.5 [&_thead_th]:h-9" : undefined}
         >
           {/* Sticky, opaque header so column labels stay visible while scrolling a long list (the container
@@ -1085,7 +1355,7 @@ export function DataTable<T>({
                                     className="h-8"
                                   />
                                   {filterValue && (
-                                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={() => setFilters((f) => ({ ...f, [col.id]: "" }))}>
+                                    <Button variant="ghost" size="icon" aria-label={`Clear the ${col.header.toLowerCase()} filter`} className="h-8 w-8 shrink-0" onClick={() => setFilters((f) => ({ ...f, [col.id]: "" }))}>
                                       <X className="h-4 w-4" />
                                     </Button>
                                   )}
@@ -1115,25 +1385,7 @@ export function DataTable<T>({
             {filtered.length === 0 ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={renderCols.length} className="h-48 text-center">
-                  <div className="flex flex-col items-center justify-center gap-3 py-6">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      <Inbox className="h-6 w-6" />
-                    </div>
-                    <div>
-                      {/* With only the first page loaded, "no results" would be a lie: the match may sit in a
-                          row that was never fetched. Say which set was actually searched. */}
-                      <p className="text-sm font-medium text-foreground">
-                        {truncated && anyFilter ? `No matches in the ${rows.length} loaded records` : emptyTitle}
-                      </p>
-                      {truncated && anyFilter ? (
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          This page holds only the first {rows.length} records, and filters apply to those. The record you want may not be loaded — use search (⌘K) to look across everything.
-                        </p>
-                      ) : (
-                        emptyDescription && <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
-                      )}
-                    </div>
-                  </div>
+                  <div className="flex flex-col items-center justify-center gap-3 py-6">{emptyBody}</div>
                 </TableCell>
               </TableRow>
             ) : (
@@ -1207,6 +1459,25 @@ export function DataTable<T>({
               })
             )}
           </TableBody>
+          {showTotals && (
+            <TableFooter>
+              <TableRow className="hover:bg-transparent">
+                {renderCols.map((col, i) => (
+                  <TableCell
+                    key={col.id}
+                    style={widthStyle(col.id)}
+                    className={cn("truncate text-xs", col.align === "right" && "text-right tabular-nums", col.align === "center" && "text-center")}
+                  >
+                    {col.aggregate === "sum" ? (
+                      fmtTotal(col, sumOf(filtered, col))
+                    ) : i === 0 ? (
+                      <span className="uppercase tracking-wide text-muted-foreground">Total · {total} row{total === 1 ? "" : "s"}</span>
+                    ) : null}
+                  </TableCell>
+                ))}
+              </TableRow>
+            </TableFooter>
+          )}
         </Table>
       </Card>
       )}
@@ -1221,7 +1492,9 @@ export function DataTable<T>({
             <Button
               variant="outline"
               size="sm"
-              className="h-6 px-2 text-xs"
+              // "Load more" is how you reach records past the first page - the one control in this row that
+              // must be easy to hit, and it was the smallest thing on the page at 24px.
+              className="h-7 px-2 text-xs coarse:h-9 coarse:px-3"
               loading={loadingMore}
               onClick={() => {
                 setLoadingMore(true);
@@ -1232,11 +1505,13 @@ export function DataTable<T>({
             </Button>
           )}
         </span>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 sm:gap-4">
           <div className="flex items-center gap-2">
-            <span>Rows per page</span>
+            {/* The label is the first thing to go on a narrow screen: the select's own value ("25") plus its
+                position in the pager already says what it does, and the words cost a third of the row. */}
+            <span className="hidden sm:inline">Rows per page</span>
             <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))}>
-              <SelectTrigger className="h-7 w-[72px]">
+              <SelectTrigger className="h-7 w-[72px] coarse:min-h-9" aria-label="Rows per page">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1253,10 +1528,11 @@ export function DataTable<T>({
               <span className="mr-1">
                 Page {safePage + 1} of {pageCount}
               </span>
-              <Button variant="outline" size="icon" className="h-7 w-7" disabled={safePage <= 0} onClick={() => setPage(safePage - 1)}>
+              {/* Paging arrows are pure navigation and get hit repeatedly - 28px is a miss on touch. */}
+              <Button variant="outline" size="icon" className="h-7 w-7 coarse:h-9 coarse:w-9" aria-label="Previous page" disabled={safePage <= 0} onClick={() => setPage(safePage - 1)}>
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-              <Button variant="outline" size="icon" className="h-7 w-7" disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>
+              <Button variant="outline" size="icon" className="h-7 w-7 coarse:h-9 coarse:w-9" aria-label="Next page" disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>
                 <ChevronRight className="h-4 w-4" />
               </Button>
             </div>

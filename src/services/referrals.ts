@@ -41,7 +41,7 @@ export async function listReferrals(deps: Deps, scope: ListScope, maxPageSize: n
   const conds = [applyScope(scope, schema.referrals.code, schema.referrals.referrerId)];
   if (statusFilter) conds.push(eq(schema.referrals.status, statusFilter as Status));
   if (!showDeleted) conds.push(isNull(schema.referrals.deleteTime));
-  return keysetPage(deps, schema.referrals, "referrals", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage(deps, schema.referrals, "referrals", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 export async function getReferral(deps: Deps, _actor: AppUser, id: string) {

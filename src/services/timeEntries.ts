@@ -9,7 +9,7 @@ import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
-import { encodeCursor, decodeCursor } from "../http/pagination";
+import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 
 type Status = typeof schema.timeEntries.$inferSelect.status;
@@ -32,14 +32,13 @@ export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize:
   if (from && !Number.isNaN(dayMs(from))) conds.push(gte(schema.timeEntries.date, new Date(dayMs(from))));
   if (to && !Number.isNaN(dayMs(to))) conds.push(lte(schema.timeEntries.date, new Date(dayMs(to) + 86_399_999)));
   const all = (await deps.db.select().from(schema.timeEntries).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((e) => showDeleted || !e.deleteTime)
-    .sort((a, b) => +new Date(a.date) - +new Date(b.date) || a.uuid.localeCompare(b.uuid));
-  const cur = decodeCursor(pageToken);
-  const start = cur ? all.findIndex((e) => +new Date(e.createdAt) > cur.createTimeMs || (+new Date(e.createdAt) === cur.createTimeMs && e.uuid > cur.uid)) : 0;
-  const slice = start < 0 ? [] : all.slice(start, start + maxPageSize);
-  const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < all.length && last ? encodeCursor(+new Date(last.createdAt), last.uuid) : undefined;
-  return { items: slice, nextPageToken };
+    .filter((e) => showDeleted || !e.deleteTime);
+  // Paged on `createdAt`, which is what the cursor carries. It used to page a set pre-sorted by `date` while
+  // seeking on `createdAt`: two different orders, so the seek could land past rows that had never been returned
+  // and they vanished from the listing (the same defect test/paginateOrder.test.ts pins for the tiebreaker).
+  // The worked day is a PRESENTATION order, so it is applied to the page that came back, below.
+  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return { ...page, items: page.items.sort((a, b) => +new Date(b.date) - +new Date(a.date) || a.uuid.localeCompare(b.uuid)) };
 }
 
 

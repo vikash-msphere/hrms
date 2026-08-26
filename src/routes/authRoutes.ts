@@ -1,8 +1,11 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env";
-import { sealSession } from "../lib/session";
+import { users } from "../db/schema";
+import { makeDeps } from "../deps";
+import { openSession, sealSession } from "../lib/session";
 
 // Direct Google sign-in (OIDC authorization-code flow), the no-per-seat-cost alternative to fronting the
 // app with Cloudflare Access. Selected by configuration: GOOGLE_CLIENT_ID set = Google mode; absent =
@@ -129,10 +132,40 @@ export const authRoutes = new Hono<AppEnv>()
     });
     return c.redirect("/");
   })
-  .post("/logout", (c) => {
+  .post("/logout", async (c) => {
     // Same CSRF posture as every /v1 mutation: a cross-site form can't log the user out.
     if (c.req.header("X-Requested-By") !== "hrms-spa") return c.text("missing X-Requested-By header", 403);
+    const token = getCookie(c, SESSION_COOKIE);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
+
+    // Deleting the cookie only takes this browser's copy away; the TOKEN stays valid until it expires, because
+    // it is verified by signature alone and nothing server-side is consulted. So signing out also stamps the
+    // user's session cut-off, which the auth middleware checks on the read it already does per request. That
+    // is what makes "sign out" survive a lost or cloned cookie.
+    //
+    // It signs out EVERY device, which is the honest behaviour for a token with no per-device identity to
+    // revoke, and the one that answers "I left my laptop on a train". Cheap: only reached when a real session
+    // cookie was presented, so a bare logout call costs no write.
+    //
+    // Deps are built HERE rather than by a `/auth/*` middleware, the same way the e-sign webhook does it
+    // (routes/esignCallback.ts). Login and callback touch no DB and must keep working in Access mode, where
+    // there may be no app-side session config to build a Deps from at all - so the one route that writes owns
+    // its own, inside the branch that writes.
+    if (c.env.GOOGLE_CLIENT_ID && token) {
+      // Best-effort throughout: a failed stamp must not leave the caller stuck on a page they have already
+      // left. The cookie is gone from this browser regardless, and the session still expires on its own.
+      try {
+        const session = await openSession(token, c.env.AUTH_SESSION_KEY!, Date.now());
+        if (session) {
+          await makeDeps(c.env)
+            .db.update(users)
+            .set({ sessionsValidFrom: new Date(), updatedAt: new Date() })
+            .where(eq(users.email, session.email.toLowerCase()));
+        }
+      } catch (e) {
+        console.error("[auth] logout: session cut-off stamp failed (non-fatal)", e);
+      }
+    }
     // Access mode has no app-side session; the edge session is ended at Cloudflare's own logout path.
     return c.json({ signin_url: c.env.GOOGLE_CLIENT_ID ? "/auth/login" : "/cdn-cgi/access/logout" });
   });

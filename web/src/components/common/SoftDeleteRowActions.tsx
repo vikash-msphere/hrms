@@ -21,6 +21,7 @@ export function SoftDeleteRowActions<T extends Item>({
   onEdit,
   lifecycle,
   publishable,
+  extra,
 }: {
   row: T;
   writable: boolean;
@@ -29,6 +30,9 @@ export function SoftDeleteRowActions<T extends Item>({
   onEdit?: (row: T) => void;
   lifecycle?: Lifecycle;
   publishable?: boolean;
+  /** Page-specific actions for an ACTIVE row, offered right after Edit (e.g. "Duplicate to next period").
+   *  Deleted and locked rows keep their restricted menus - the caller's actions never appear there. */
+  extra?: RowAction[];
 }) {
   const deleted = !!row.delete_time;
   const locked = !!row.locked;
@@ -42,6 +46,7 @@ export function SoftDeleteRowActions<T extends Item>({
     if (writable && lifecycle) items.push({ label: "Unlock", icon: <Unlock className="h-4 w-4" />, onClick: () => lifecycle.unlock(row), verb: "unlock" });
   } else {
     if (writable && onEdit) items.push({ label: "Edit", icon: <Pencil className="h-4 w-4" />, onClick: () => onEdit(row), verb: "update" });
+    if (extra) items.push(...extra);
     if (writable && lifecycle && publishable)
       items.push(
         row.published === false

@@ -54,21 +54,191 @@ export const AUTOMATIONS: AutomationSeed[] = [
       },
     ],
   },
+  // ---- Recruiting: the pipeline runs itself ----------------------------------------------------------------
+  //
+  // Every move on the pipeline board emits an event carrying the whole context (candidate, requisition, hiring
+  // manager, pay band, and the dates the org's offer policy implies - see applicationEventPayload in
+  // services/ats.ts). These rules turn each of those transitions into the work it implies, so moving a card is
+  // the ONLY manual step: the offer is drafted, the round is booked, the requisition closes, the hire converts.
+  //
+  // Every one of them is data: rename a stage, change a figure, or switch a rule off in the Workflows builder
+  // and the pipeline behaves differently with no code change. Conditions key on `stageKind` where the meaning
+  // is structural (a hired stage is a hired stage whatever an org calls it) and on `stage` where the meaning is
+  // the org's own naming.
+  {
+    name: "Alert the hiring manager to a new applicant",
+    description: "When an application is received, tell the requisition's hiring manager there is someone new to look at.",
+    trigger: "application.created",
+    condition: { field: "hiringManagerId", op: "exists" },
+    actions: [{
+      kind: "notify",
+      recipient: { of: "ref", field: "hiringManagerId" },
+      title: "New applicant",
+      body: "{{candidateName}} applied for {{requisitionTitle}}.",
+      link: "pipeline",
+    }],
+  },
+  {
+    name: "Ask the hiring manager to screen",
+    description: "When an application reaches the screening stage, ask the hiring manager to review the candidate.",
+    trigger: "application.stageChanged",
+    condition: { all: [{ field: "stage", op: "eq", value: "screening" }, { field: "hiringManagerId", op: "exists" }] },
+    actions: [{
+      kind: "notify",
+      recipient: { of: "ref", field: "hiringManagerId" },
+      title: "Someone to screen",
+      body: "{{candidateName}} is at screening for {{requisitionTitle}}.",
+      link: "pipeline",
+      action: "advance",
+    }],
+  },
+  {
+    name: "Auto-schedule a screening interview",
+    description:
+      "When an application reaches the interview stage, book the round for it (Recruiting → Interviews), titled " +
+      "after the role, then tell the hiring manager to set the panel and the time.",
+    trigger: "application.stageChanged",
+    condition: { field: "stage", op: "eq", value: "interview" },
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/interviews", body: { application: "{{subject}}", title: "{{requisitionTitle}} - screening interview", mode: "video" }, captureAs: "round" },
+      { kind: "notify", recipient: { of: "ref", field: "hiringManagerId" }, title: "Interview to arrange", body: "A screening round is open for {{candidateName}} ({{requisitionTitle}}). Set the panel and the time.", link: "interviews" },
+    ],
+  },
+  {
+    name: "Draft the offer when a candidate reaches the offer stage",
+    description:
+      "When an application reaches the offer stage, DRAFT the offer already filled in: the figure from the " +
+      "requisition's pay band (settings/ats picks which point of the band), the band's currency, today's date, " +
+      "and the join + expiry dates the org's notice and validity periods imply. Then ask for approval. Nothing " +
+      "is sent to the candidate - a draft offer still has to be approved and extended.",
+    trigger: "application.stageChanged",
+    condition: { field: "stage", op: "eq", value: "offer" },
+    actions: [
+      {
+        kind: "apiCall",
+        method: "POST",
+        path: "/v1/offers",
+        body: {
+          application: "{{subject}}",
+          base_comp: "{{offerAmount}}",
+          currency_code: "{{currency}}",
+          offer_date: "{{offerDate}}",
+          join_date: "{{suggestedJoinDate}}",
+          expiry_date: "{{suggestedExpiryDate}}",
+          notes: "Drafted automatically when {{candidateName}} reached the offer stage for {{requisitionTitle}}.",
+        },
+        captureAs: "offer",
+      },
+      {
+        kind: "notify",
+        recipient: { of: "ref", field: "hiringManagerId" },
+        title: "Offer ready to approve",
+        body: "A draft offer for {{candidateName}} ({{requisitionTitle}}) is waiting for approval. Check the figure before it goes out.",
+        link: "offers",
+        type: "recruiting.offer_approval",
+      },
+    ],
+  },
+  {
+    name: "Hire when the card reaches the hired stage",
+    description:
+      "When an application lands on a hired-kind stage, convert the candidate into an employee (which opens " +
+      "their onboarding via the hire rules above). Without this, a card in the Hired column is only a label: " +
+      "the person has no employee record and nothing to onboard. Idempotent - a candidate already converted is " +
+      "left alone. Disable it if hiring must always go through an accepted offer.",
+    trigger: "application.stageChanged",
+    condition: { all: [{ field: "stageKind", op: "eq", value: "hired" }, { field: "candidateEmail", op: "exists" }] },
+    actions: [{ kind: "apiCall", method: "POST", path: "/v1/applications/{{applicationId}}:hire" }],
+  },
   {
     name: "Close the requisition when filled",
-    description: "When an offer is accepted for the last opening on a requisition, mark the requisition filled (updates the record via the API).",
-    trigger: "offer.accepted",
+    description:
+      "When a candidate is hired for the last opening on a requisition, mark the requisition filled. Keyed on " +
+      "the hire itself, so it fires whether the team accepted an offer or hired straight off the board.",
+    trigger: "application.hired",
     condition: { field: "openings", op: "lte", value: 1 },
     actions: [{ kind: "apiCall", method: "PATCH", path: "/v1/job-requisitions/{{requisitionId}}", body: { status: "filled" } }],
   },
-
-  // ---- Recruiting: pipeline automation (creates a record in another ATS entity) ----
   {
-    name: "Auto-schedule a screening interview",
-    description: "When an application reaches the interview stage, create a screening interview for it (Recruiting → Interviews).",
-    trigger: "application.stageChanged",
-    condition: { field: "stage", op: "eq", value: "interview" },
-    actions: [{ kind: "apiCall", method: "POST", path: "/v1/interviews", body: { application: "{{subject}}", title: "Screening interview", mode: "video" } }],
+    name: "Announce the hire to the hiring manager",
+    description: "When a candidate is hired, tell the hiring manager - their search is over and onboarding has started.",
+    trigger: "application.hired",
+    condition: { field: "hiringManagerId", op: "exists" },
+    actions: [{
+      kind: "notify",
+      recipient: { of: "ref", field: "hiringManagerId" },
+      title: "You have a new hire",
+      body: "{{candidateName}} is hired for {{requisitionTitle}}. Their onboarding checklist is open.",
+      link: "onboarding",
+      type: "recruiting.hired",
+    }],
+  },
+  {
+    name: "Chase an offer the candidate hasn't answered",
+    description:
+      "When an offer is extended, wait for the candidate's answer. If neither an acceptance nor a decline lands " +
+      "within 3 days, nudge the hiring manager to follow up. Durable - the wait survives restarts.",
+    trigger: "offer.extended",
+    actions: [{
+      kind: "waitFor",
+      on: [
+        // Either answer resolves the wait, which is what stops the nudge below from firing. Each arm marks the
+        // answer as one milestone event, so "we are no longer waiting on this candidate" is a signal an org can
+        // build its own reporting or follow-ups on.
+        { event: "offer.accepted", match: "subject", then: [{ kind: "emitEvent", type: "offer.answered", payload: { answer: "accepted" } }] },
+        { event: "offer.declined", match: "subject", then: [{ kind: "emitEvent", type: "offer.answered", payload: { answer: "declined" } }] },
+        {
+          timer: { days: 3 },
+          then: [{
+            kind: "notify",
+            recipient: { of: "ref", field: "hiringManagerId" },
+            title: "Offer still unanswered",
+            body: "{{candidateName}} hasn't answered the offer for {{requisitionTitle}}. It expires on {{expiryDate}}.",
+            link: "offers",
+          }],
+        },
+      ],
+    }],
+  },
+  {
+    name: "Reopen the search when an offer is declined",
+    description: "When a candidate declines, tell the hiring manager so the requisition can go back out.",
+    trigger: "offer.declined",
+    condition: { field: "hiringManagerId", op: "exists" },
+    actions: [{
+      kind: "notify",
+      recipient: { of: "ref", field: "hiringManagerId" },
+      title: "Offer declined",
+      body: "{{candidateName}} declined the offer for {{requisitionTitle}}. The requisition is still open.",
+      link: "job-requisitions",
+      type: "recruiting.offer_declined",
+    }],
+  },
+  {
+    name: "Tell the hiring manager when a candidate is rejected",
+    description: "When an application is rejected, let the hiring manager know their candidate is out of the running, with the reason.",
+    trigger: "application.rejected",
+    condition: { field: "hiringManagerId", op: "exists" },
+    actions: [{
+      kind: "notify",
+      recipient: { of: "ref", field: "hiringManagerId" },
+      title: "Candidate rejected",
+      body: "{{candidateName}} is out for {{requisitionTitle}}. {{reason}}",
+      link: "pipeline",
+    }],
+  },
+  {
+    name: "Ask for a decision after an interview",
+    description: "When an interview is marked held, nudge the hiring manager to read the scorecards and move the candidate on.",
+    trigger: "interview.completed",
+    condition: { field: "hiringManagerId", op: "exists" },
+    actions: [{
+      kind: "notify",
+      recipient: { of: "ref", field: "hiringManagerId" },
+      title: "Interview held - decision needed",
+      body: "{{interviewTitle}} with {{candidateName}} is done. Read the scorecards and move them on or out.",
+      link: "pipeline",
+    }],
   },
 
   // ---- Onboarding milestone fan-out (Lifecycle → Performance + Engagement), demonstrating emitEvent ----
@@ -809,13 +979,192 @@ export const AUTOMATIONS: AutomationSeed[] = [
   },
 
   // Lifecycle -> Assets: create a laptop asset assigned to the new hire so IT inventory tracks it. Disabled by
-  // default (asset tags are usually filled in by IT).
+  // default (IT records the real model and files it under a category). No `category` in the body: it is a
+  // reference to an asset-categories row, whose id differs per org, so the tag is allocated uncategorised
+  // (AST-nnn) until IT files it - which is also when the row stops being a placeholder.
   {
     name: "Assign a laptop to new hires",
-    description: "When an employee is created, add a 'Company laptop' asset assigned to them so it shows in IT inventory. Bridges Lifecycle -> Assets. Disabled by default (IT sets the real tag/model).",
+    description: "When an employee is created, add a 'Company laptop' asset assigned to them so it shows in IT inventory. Bridges Lifecycle -> Assets. Disabled by default (IT sets the real model and category).",
     trigger: "employee.created",
     enabled: false,
-    actions: [{ kind: "apiCall", method: "POST", path: "/v1/assets", body: { name: "Company laptop", category: "IT hardware", status: "assigned", assigned_to: "{{subject}}" } }],
+    actions: [{ kind: "apiCall", method: "POST", path: "/v1/assets", body: { name: "Company laptop", status: "assigned", assigned_to: "{{subject}}" } }],
+  },
+
+  // ============================================================================================
+  // Assets: turning "somebody asked for a laptop" into a process that finishes.
+  //
+  // The inventory already enforces the physical half by itself (a tag is allocated on create, custody is only
+  // proved by scanning, the nightly tick chases an unconfirmed hand-over). What no service does is close the
+  // ORGANISATIONAL loop: an approved request that nobody acts on, kit that arrives broken, a leaver who walks
+  // out still holding a laptop. Those are the rules below, and they are what make the request feature useful
+  // rather than a form that files a row.
+  //
+  // A rule that has to name an asset CATEGORY ships disabled, because a category id differs per org - the
+  // description says which path to paste in.
+  // ============================================================================================
+
+  // The fulfilment chain, and the reason `:issue` exists as its own step: approving a request promises somebody
+  // a machine, so the promise gets a ticket in the queue that actually holds the stock, the requester is told
+  // where their ask went, and then the chain SUSPENDS. Handing the asset over resolves the ticket by itself
+  // (data-passing: the ticket's own path came back from the create call); a week of silence bumps it to high
+  // priority and says so out loud, rather than letting an approved request rot.
+  {
+    name: "Asset request approved: open the hand-over ticket, then chase it",
+    description:
+      "When an asset request is approved: open an IT ticket to prepare and hand over the kit, tell the requester which ticket " +
+      "is carrying it, then wait. If the asset is handed over, the ticket resolves itself and the requester is told to scan its " +
+      "tag. If a week passes with nothing handed over, the ticket goes to high priority and both sides hear about it. This is " +
+      "the approve -> prepare -> hand over -> confirm loop as data.",
+    trigger: "assetRequest.approved",
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/tickets", body: { employee: "employees/{{employeeId}}", category: "it", subject: "Prepare and hand over requested kit", description: "An asset request from this person was approved. Pick something out of stock and use Hand over on their profile's Assets tab - that closes the request and starts the custody scan.", priority: "medium", initial_todos: ["Find or order the kit", "Print its tag", "Hand it over from the request"] }, captureAs: "handover" },
+      { kind: "notify", recipient: { of: "subject" }, title: "Your asset request was approved", body: "IT is preparing it - {{results.handover.path}} is tracking the hand-over. You'll be asked to scan the tag when you receive it.", link: "profile" },
+      {
+        kind: "waitFor",
+        on: [
+          {
+            event: "assetRequest.issued",
+            match: "employeeId",
+            then: [
+              { kind: "apiCall", method: "POST", path: "/v1/{{results.handover.path}}:resolve" },
+              { kind: "notify", recipient: { of: "subject" }, title: "Your kit is ready", body: "It has been handed over. Scan the tag on it to confirm you have it - until then it still shows as awaiting your confirmation.", link: "profile" },
+            ],
+          },
+          {
+            timer: { days: 7 },
+            then: [
+              { kind: "apiCall", method: "POST", path: "/v1/{{results.handover.path}}:prioritize", body: { priority: "high" } },
+              { kind: "apiCall", method: "POST", path: "/v1/{{results.handover.path}}:comment", body: { body: "A week since this request was approved and nothing has been handed over yet." } },
+              { kind: "notify", recipient: { of: "subject" }, title: "Still waiting on your kit", body: "Your approved asset request hasn't been handed over after a week. It has been escalated with IT.", link: "profile" },
+              { kind: "notifyManager", noun: "approved asset request still not handed over" },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+
+  // Receiving is the first honest inspection an asset gets, and the scan already carries what the holder saw.
+  // Anything other than "good" becomes a ticket instead of a condition string nobody reads again.
+  {
+    name: "Asset arrived damaged: raise it with IT",
+    description:
+      "When somebody confirms receipt of an asset but reports it as damaged or missing parts, open a high-priority IT ticket " +
+      "with what they reported and tell them it is being handled. The condition comes from their own scan, so this fires on the " +
+      "first look anyone has had at the thing.",
+    trigger: "asset.acknowledged",
+    condition: { field: "condition", op: "ne", value: "good" },
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/tickets", body: { employee: "employees/{{employeeId}}", category: "it", subject: "Asset {{assetTag}} reported as {{condition}} on receipt", description: "The holder confirmed receipt of {{assetTag}} and reported it as {{condition}}. Decide whether to repair, replace or swap it.", priority: "high", initial_todos: ["Inspect the asset", "Repair, replace or swap", "Update the asset's condition"] } },
+      { kind: "notify", recipient: { of: "subject" }, title: "Thanks - we've logged that", body: "You reported {{assetTag}} as {{condition}} when you confirmed it. IT has a ticket for it and will come back to you.", link: "tickets" },
+    ],
+  },
+
+  // The nightly tick nudges the holder every day and copies their manager at twice the threshold. Three weeks
+  // of that means nudging is not working, so it stops being a notification and becomes somebody's job.
+  {
+    name: "Custody unconfirmed for three weeks: make it IT's job",
+    description:
+      "When an asset has been waiting three weeks for its holder to scan the tag, open an IT ticket to go and find it in person " +
+      "and tell the manager. Beyond this point the daily reminder is clearly not landing - the asset may not be where the record " +
+      "says it is.",
+    trigger: "asset.custodyOverdue",
+    condition: { all: [{ field: "kind", op: "eq", value: "ack" }, { field: "days", op: "gte", value: 21 }] },
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/tickets", body: { employee: "employees/{{employeeId}}", category: "it", subject: "{{assetTag}} unconfirmed for {{days}} days", description: "{{name}} ({{assetTag}}) has been waiting {{days}} days for its holder to scan its tag. Go and sight it: either scan it with them, or record it as unaccounted for.", priority: "high", initial_todos: ["Find the asset in person", "Scan it with the holder", "If it can't be found, mark it accordingly"] } },
+      { kind: "notifyManager", noun: "asset your report has never confirmed" },
+    ],
+  },
+
+  // A tag exists so an asset can be sighted; an asset nobody has sighted in months is a record, not an asset.
+  // The holder is the cheapest person to ask, and it costs them one scan.
+  {
+    name: "Asset not sighted in months: ask its holder to scan it",
+    description:
+      "When an asset hasn't been sighted for as long as the org's staleness window allows, ask whoever holds it to scan its tag " +
+      "so the inventory is true again. Cheaper than a stocktake and it keeps the audit trail honest between them.",
+    trigger: "asset.stale",
+    actions: [
+      { kind: "notify", recipient: { of: "subject" }, title: "Scan the kit you're holding", body: "Nobody has sighted {{name}} ({{assetTag}}) in {{days}} days. Open Assets and scan its tag - it takes a second and keeps the inventory true.", link: "assets" },
+    ],
+  },
+
+  // A count that closes with things unaccounted for has done its job only if somebody then goes and looks. The
+  // holder is the one person who can settle it in a minute, and the event fires once per missing item they hold.
+  {
+    name: "Missing in a stocktake: ask the holder to find it",
+    description:
+      "When a count closes without sighting an asset that somebody is holding, ask that person to scan its tag or say where it is. " +
+      "The alternative is a missing list nobody reads, which is how paper inventories rot.",
+    trigger: "asset.stocktakeMissing",
+    actions: [
+      { kind: "notify", recipient: { of: "subject" }, title: "We couldn't find your kit in the count", body: "{{name}} ({{assetTag}}) wasn't sighted in {{label}} - last seen {{days}} days ago. Open Assets and scan its tag, or tell IT where it is.", link: "assets" },
+    ],
+  },
+
+  // Adding a row to the inventory is a claim; scanning it is the evidence. This waits for the evidence and only
+  // speaks up if it never arrives - so the person who added the asset hears about their own loose end, once.
+  {
+    name: "New asset never scanned into stock: tell whoever added it",
+    description:
+      "When an asset is added, wait for somebody to scan it into stock. If that happens, confirm it to whoever added it; if three " +
+      "days pass without a scan, remind them it is still an unverified record rather than kit anyone can hand out.",
+    trigger: "asset.created",
+    actions: [
+      {
+        kind: "waitFor",
+        on: [
+          { event: "asset.verified", match: "subject", then: [{ kind: "notify", recipient: { of: "actor" }, title: "Asset counted into stock", body: "{{assetTag}} has been scanned in and is available to hand out.", link: "assets" }] },
+          { timer: { days: 3 }, then: [{ kind: "notify", recipient: { of: "actor" }, title: "An asset is still unverified", body: "{{assetTag}} was added three days ago and nobody has scanned it into stock yet, so it can't be handed to anyone. Print its tag and scan it in.", link: "assets" }] },
+        ],
+      },
+    ],
+  },
+
+  // Offboarding closing is exactly when kit goes missing: the checklist is ticked, the person leaves, and a
+  // laptop stays on their record forever. The count comes from the inventory itself (a GET whose response is
+  // templated into the ticket), so the ticket says how many things are actually outstanding.
+  {
+    name: "Offboarding closed: reclaim whatever kit is still on their record",
+    description:
+      "When an offboarding completes, read what the leaver still has assigned and open a ticket to reclaim exactly that many " +
+      "items. Uses the inventory's own answer rather than a generic 'collect the laptop' reminder, so it is obvious when the " +
+      "answer is zero and nothing is owed.",
+    trigger: "transition.completed",
+    condition: { field: "kind", op: "eq", value: "offboarding" },
+    actions: [
+      { kind: "apiCall", method: "GET", path: "/v1/assets?employee=employees/{{employeeId}}", captureAs: "kit" },
+      { kind: "apiCall", method: "POST", path: "/v1/tickets", body: { employee: "employees/{{employeeId}}", category: "it", subject: "Reclaim {{results.kit.results.length}} asset(s) from a leaver", description: "Offboarding is complete and the inventory still lists {{results.kit.results.length}} asset(s) against this person. Collect each one, scan it back into stock, and clear it off their record.", priority: "high", initial_todos: ["Collect the kit", "Scan each item back into stock", "Confirm nothing is left on their record"] } },
+    ],
+  },
+
+  // Org-specific: both of these need one asset-category path pasted in, so they ship disabled rather than
+  // half-configured. They are the two places where a standard kit policy stops being a conversation.
+  {
+    name: "Auto-approve requests for one standard category",
+    description:
+      "When an asset request names a chosen category, approve it without a human. Disabled and inert until configured: paste " +
+      "the category's resource path (asset-categories/<id>, from Settings -> Asset tags -> Categories) into the condition's " +
+      "value. Use it for the kit nobody argues about - a mouse, a headset - and leave laptops to a person.",
+    trigger: "assetRequest.requested",
+    enabled: false,
+    condition: { field: "categoryId", op: "eq", value: "" },
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/{{subject}}:approve", body: { note: "Auto-approved: standard kit for this category." } },
+    ],
+  },
+  {
+    name: "New hire: file their standard kit request",
+    description:
+      "When an employee is created, file an asset request for their standard kit so it goes through the normal decide-and-hand-over " +
+      "flow (and the chase rules above apply to it). Disabled until configured: paste the category's resource path " +
+      "(asset-categories/<id>) into the body. Prefer this over creating an asset out of thin air - it hands over something that " +
+      "really exists, tagged, from stock.",
+    trigger: "employee.created",
+    enabled: false,
+    actions: [
+      { kind: "apiCall", method: "POST", path: "/v1/asset-requests", body: { employee: "{{subject}}", category: "asset-categories/PASTE_CATEGORY_ID", justification: "Standard kit for a new hire.", needed_by: "{{startDate}}" } },
+    ],
   },
 
   // -------------------------------------------------------------------------------------------------------
@@ -890,6 +1239,37 @@ export const AUTOMATIONS: AutomationSeed[] = [
     schedule: { freq: "monthly", day: 1, scope: "once" },
     enabled: false,
     actions: [{ kind: "notifyAudience", audience: { kind: "everyone" }, title: "Payroll prep for this month", body: "Time to review income inputs (reimbursements, overtime, loans) and build this month's payroll run." }],
+  },
+
+  // Assets, weekly: the queue of promises. An approved request with nothing handed over is invisible unless
+  // somebody asks the inventory, so this asks it and mails the answer to whoever owns stock. Off by default -
+  // it needs an email provider AND the distro address pasted in (`to.address`).
+  {
+    name: "Weekly: email IT the asset requests still awaiting hand-over",
+    description:
+      "Every Monday, count the approved asset requests nobody has handed over yet and email the total to the IT distro. Off by " +
+      "default: set the address on the email action (and configure an email provider). Complements the per-request chase - this " +
+      "is the standing backlog, not one late item.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "once" },
+    enabled: false,
+    actions: [
+      { kind: "apiCall", method: "GET", path: "/v1/asset-requests?state=APPROVED", captureAs: "awaiting" },
+      { kind: "email", to: { of: "address", address: "it@example.com" }, subject: "{{results.awaiting.results.length}} asset request(s) awaiting hand-over", html: "<p><strong>{{results.awaiting.results.length}}</strong> approved asset request(s) are still waiting for kit to be handed over. Each one is on somebody's profile, under Assets - handing an asset over closes the request and starts its custody scan.</p>" },
+    ],
+  },
+
+  // Assets, monthly: a stocktake is the only thing that turns the inventory back into a fact. Broadcast rather
+  // than per-person, and off by default because how often an org counts its kit is a policy, not a default.
+  {
+    name: "Month start: stocktake reminder",
+    description:
+      "On the 1st of every month, remind the team to walk the office with the Stocktake scanner so every asset gets sighted. Off " +
+      "by default - point the audience at whoever owns inventory and pick a cadence that matches your policy.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "monthly", day: 1, scope: "once" },
+    enabled: false,
+    actions: [{ kind: "notifyAudience", audience: { kind: "everyone" }, title: "Stocktake this week", body: "Open Assets -> Stocktake and scan what you can see. Anything nobody sights keeps showing up as unverified until somebody does.", link: "assets" }],
   },
 
   // -------------------------------------------------------------------------------------------------------

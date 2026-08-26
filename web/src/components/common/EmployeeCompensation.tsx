@@ -10,11 +10,18 @@ import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { DetailSkeleton } from "@/components/common/Skeletons";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
+import { getSetting } from "@/lib/settingsStore";
 
 const BAND_LABEL: Record<NonNullable<Compensation["band_status"]>, string> = { below: "Below band", in_band: "In band", above: "Above band" };
 const BAND_VARIANT: Record<NonNullable<Compensation["band_status"]>, "secondary" | "success" | "warning"> = { below: "warning", in_band: "success", above: "warning" };
@@ -77,6 +84,8 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ ctc: "", effective_from: todayYmd(), pay_grade: "", salary_structure: "" });
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "revision" });
   // Monthly/annual display toggle for the breakdown figures (annual = ×12); CTC is stored annual.
   const [unit, setUnit] = useState<"monthly" | "annual">("monthly");
   const mult = unit === "annual" ? 12 : 1;
@@ -85,7 +94,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   // (their own `in_ctc`), so nothing about gratuity/PF/ESI is configured or hardcoded here.
   const [ctcCfg, setCtcCfg] = useState<{ basic_pct: number; pf_wage_basis?: string }>({ basic_pct: 50, pf_wage_basis: "basic" });
   useEffect(() => {
-    get<{ value?: Partial<typeof ctcCfg> }>("settings/ctc").then((s) => { if (s.value) setCtcCfg((p) => ({ ...p, ...s.value })); }).catch(() => {});
+    getSetting<Partial<typeof ctcCfg>>("ctc").then((s) => { if (s.value) setCtcCfg((p) => ({ ...p, ...s.value })); }).catch(() => {});
   }, []);
 
   async function load() {
@@ -235,6 +244,10 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     return out;
   }, [rows]);
 
+  // Saveable when the CTC is positive, dated, and actually solvable against the chosen structure - the same
+  // three conditions the footer and the Enter key both need, so they read it from one place.
+  const canSave = !busy && !!form.effective_from && Number(form.ctc) > 0 && !!splitPreview(Number(form.ctc), form.salary_structure || undefined);
+
   // Live band feedback for the revise dialog: the selected grade's annual-CTC range + where the entered CTC
   // sits in it. Bands are guardrails, so this just informs - it never blocks saving.
   const selectedBand = useMemo(() => {
@@ -261,6 +274,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
 
   async function revise() {
     setBusy(true);
+    setErr(null);
     try {
       // Comp is set as an annual CTC; the server derives the monthly basic + Special Allowance plug.
       await create("compensation", {
@@ -275,7 +289,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
       setForm({ ctc: "", effective_from: todayYmd(), pay_grade: "", salary_structure: "" });
       await load();
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't revise", description: (e as Error).message });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -296,14 +310,18 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
           </div>
           {canEdit && (
             <AccessAction collection="compensation" create label="Revise compensation">
-              <Button size="sm" onClick={() => { setForm({ ctc: current ? String(current.annual_ctc) : "", effective_from: todayYmd(), pay_grade: current?.pay_grade ?? "", salary_structure: current?.salary_structure ?? "" }); setOpen(true); }}><Plus className="h-4 w-4" /> Revise</Button>
+              <Button size="sm" onClick={() => { setForm({ ctc: current ? String(current.annual_ctc) : "", effective_from: todayYmd(), pay_grade: current?.pay_grade ?? "", salary_structure: current?.salary_structure ?? "" }); setErr(null); setOpen(true); }}><Plus className="h-4 w-4" /> Revise</Button>
             </AccessAction>
           )}
         </div>
       </CardHeader>
       <CardContent>
         {!loaded ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+          <>
+            <Skeleton className="mb-3 h-6 w-48 rounded-full" />
+            <Skeleton className="mb-5 h-24 w-full rounded-lg" />
+            <DetailSkeleton rows={5} />
+          </>
         ) : rows.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No compensation on record.{canEdit ? " Use Revise to set the CTC." : ""}</p>
         ) : (
@@ -446,16 +464,18 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
             </div>
 
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Revision history</p>
-            <table className="w-full text-sm">
+            {/* One labelled block per revision on a phone, five columns from `sm` up. */}
+            <div className="scroll-shadow-x -mx-1 overflow-x-auto px-1 [--scroll-ground:hsl(var(--card))]">
+            <table className="table-stack w-full text-sm sm:min-w-[32rem]">
               <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Effective</th><th className="py-2 pr-3 font-medium">CTC ({unit})</th><th className="py-2 pr-3 font-medium">Change</th><th className="py-2 pr-3 font-medium">Grade</th><th className="py-2 font-medium">Until</th></tr></thead>
               <tbody>
                 {rows.map((r) => {
                   const delta = deltaByPath.get(r.path);
                   return (
                     <tr key={r.path} className={cn("border-b last:border-0", r.current && "bg-muted/30")}>
-                      <td className="py-2 pr-3 font-medium">{r.effective_from}{r.arrears_amount ? <Badge variant={r.arrears_paid ? "success" : "warning"} className="ml-1.5 align-middle">{r.arrears_paid ? "arrears paid" : `arrears ${money(r.arrears_amount, r.currency_code)}`}</Badge> : null}</td>
-                      <td className="py-2 pr-3 tabular-nums">{money(r.annual_ctc / (unit === "annual" ? 1 : 12), r.currency_code)}</td>
-                      <td className="py-2 pr-3">
+                      <td data-label="Effective" className="py-2 pr-3 font-medium"><span className="inline-block text-right sm:text-left">{r.effective_from}{r.arrears_amount ? <Badge variant={r.arrears_paid ? "success" : "warning"} className="ml-1.5 align-middle">{r.arrears_paid ? "arrears paid" : `arrears ${money(r.arrears_amount, r.currency_code)}`}</Badge> : null}</span></td>
+                      <td data-label={`CTC (${unit})`} className="py-2 pr-3 tabular-nums">{money(r.annual_ctc / (unit === "annual" ? 1 : 12), r.currency_code)}</td>
+                      <td data-label="Change" className="py-2 pr-3">
                         {delta == null ? <span className="text-muted-foreground">-</span> : (
                           <span className={cn("inline-flex items-center gap-0.5 tabular-nums", delta >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>
                             {delta >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
@@ -463,29 +483,80 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                           </span>
                         )}
                       </td>
-                      <td className="py-2 pr-3">
+                      <td data-label="Grade" className="py-2 pr-3">
                         {r.pay_grade_name ? (
                           <span className="flex flex-wrap items-center gap-1.5">{r.pay_grade_name}<BandBadge row={r} /></span>
                         ) : "-"}
                       </td>
-                      <td className="py-2 text-muted-foreground">{r.current ? <Badge variant="success">current</Badge> : r.effective_to ?? "-"}</td>
+                      <td data-label="Until" className="py-2 text-muted-foreground">{r.current ? <Badge variant="success">current</Badge> : r.effective_to ?? "-"}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            </div>
           </>
         )}
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Revise compensation</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">Record a pay revision, effective from a date you choose. Enter the annual CTC; basic and allowances are calculated. Payroll uses the new pay from its next run.</p>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Annual CTC" hint={`Basic = ${ctcCfg.basic_pct}% of CTC; a Special Allowance balances the rest.`}><Input type="number" min={1} value={form.ctc} onChange={(e) => setForm({ ...form, ctc: e.target.value })} autoFocus /></Field>
-            <Field label="Effective from"><Input type="date" value={form.effective_from} onChange={(e) => setForm({ ...form, effective_from: e.target.value })} /></Field>
-          </div>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (canSave) void revise(); }}>
+          <AccessScope collection="compensation">
+          <DialogHeader>
+            <DialogTitle>Revise compensation</DialogTitle>
+            <DialogDescription>
+              Enter the new annual CTC; basic and allowances are derived from it. The revision takes effect on the date you choose, and payroll picks it up from its next run.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
+          {payComponents.filter((c) => c.kind === "earning" && !c.delete_time).length === 0 && (
+            /* Without earning components there is nothing to split a CTC ACROSS, and the split preview below
+               fails with a message about the structure rather than the real cause. */
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              No earning components are set up, so a CTC can't be broken into basic and allowances yet. Payroll needs at least a basic earning before this revision will price.
+            </p>
+          )}
+          <FieldRow>
+            <Field label="Annual CTC" hint={`Basic = ${ctcCfg.basic_pct}% of CTC; a Special Allowance balances the rest.`}>
+              <MoneyInput value={form.ctc} onChange={(v) => setForm({ ...form, ctc: v })} min={1} autoFocus suffix="a year" />
+            </Field>
+            <Field label="Effective from" hint={form.effective_from < todayYmd() ? "Backdated - payroll prices past periods at the new rate when they're rebuilt." : undefined}>
+              <Input type="date" value={form.effective_from} onChange={(e) => setForm({ ...form, effective_from: e.target.value })} />
+            </Field>
+          </FieldRow>
+          {/* A revision is nearly always expressed as a raise, so the raise is what the form shows back: the
+              delta against what they earn today, and one-tap chips for the usual increments. */}
+          {current && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Raise</span>
+              {[5, 10, 15, 20, 30].map((pct) => {
+                const target = Math.round((current.annual_ctc * (1 + pct / 100)) / 100) * 100;
+                return (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() => setForm({ ...form, ctc: String(target) })}
+                    className={cn(
+                      "rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:bg-accent",
+                      Number(form.ctc) === target && "border-primary bg-primary/10 text-primary",
+                    )}
+                  >
+                    +{pct}%
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {current && Number(form.ctc) > 0 && Number(form.ctc) !== current.annual_ctc && (
+            <p className="text-sm">
+              <span className={cn("font-medium tabular-nums", Number(form.ctc) > current.annual_ctc ? "text-success" : "text-destructive")}>
+                {Number(form.ctc) > current.annual_ctc ? "+" : "−"}{money(Math.abs(Number(form.ctc) - current.annual_ctc))}
+                {" "}({Number(form.ctc) > current.annual_ctc ? "+" : "−"}{Math.abs(((Number(form.ctc) - current.annual_ctc) / current.annual_ctc) * 100).toFixed(1)}%)
+              </span>
+              <span className="text-muted-foreground"> against the current {money(current.annual_ctc)}.</span>
+            </p>
+          )}
           {Number(form.ctc) > 0 && (() => {
             const p = splitPreview(Number(form.ctc), form.salary_structure || undefined);
             if (!p) return <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">This CTC is too low for the selected structure: basic + fixed components already exceed it. Raise the CTC, or lower the basic %.</p>;
@@ -517,10 +588,12 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
               </SelectContent>
             </Select>
           </Field>
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={revise} disabled={busy || !form.effective_from || !(Number(form.ctc) > 0) || !splitPreview(Number(form.ctc), form.salary_structure || undefined)}>Save revision</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
+            <Button onClick={revise} loading={busy} disabled={!canSave}>Save revision</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </Card>

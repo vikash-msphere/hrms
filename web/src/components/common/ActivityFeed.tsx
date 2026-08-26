@@ -11,6 +11,7 @@ import { entityLabel, iconOf } from "@/lib/entityKinds";
 import { BASE_COLLECTIONS } from "@/components/access/permMatrix";
 import { PhotoAvatar } from "./PhotoAvatar";
 import { PersonAvatar } from "./PersonAvatar";
+import { CardsSkeleton } from "@/components/common/Skeletons";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -42,7 +43,7 @@ const TONE_CLS: Record<ActionTone, string> = {
 // gated by the `audit` capability) — it adds an entity-type filter and shows each row's touched record.
 // `initialEntity` pre-selects the object-type filter (the Activity page's "Permission changes" view opens the
 // feed already narrowed to access-rules); the filter itself stays fully editable afterwards.
-export function ActivityFeed({ resource, global = false, initialEntity }: { resource?: string; global?: boolean; initialEntity?: string }) {
+export function ActivityFeed({ resource, global = false, initialEntity, apiKey }: { resource?: string; global?: boolean; initialEntity?: string; /** Narrow the org-wide feed to everything ONE credential did (`api-keys/<id>`). */ apiKey?: string }) {
   const { rows: employees } = useCollection<Employee>("employees");
   const [rows, setRows] = useState<Activity[] | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -58,10 +59,10 @@ export function ActivityFeed({ resource, global = false, initialEntity }: { reso
   const [pageSize, setPageSize] = useState(25);
   const fetchKey = useRef(""); // dedupes the server-filter effect against the initial load
   const sizeInited = useRef(false);
-  const scope = resource ?? "*"; // stable key for the initial-load effect (undefined for the global feed)
+  const scope = resource ?? apiKey ?? "*"; // stable key for the initial-load effect (undefined for the global feed)
 
   const params = (extra: Record<string, string | undefined>) => {
-    const u = new URLSearchParams(resource ? { resource } : {});
+    const u = new URLSearchParams(resource ? { resource } : apiKey ? { api_key: apiKey } : {});
     for (const [k, v] of Object.entries(extra)) if (v) u.set(k, v);
     return `activity?${u.toString()}`;
   };
@@ -222,7 +223,7 @@ export function ActivityFeed({ resource, global = false, initialEntity }: { reso
   };
   const visible = paginated ? (rows ?? []) : (rows ?? []).filter(clientMatch);
 
-  if (state === "loading" && !rows) return <p className="py-6 text-center text-sm text-muted-foreground">Loading activity…</p>;
+  if (state === "loading" && !rows) return <CardsSkeleton count={4} />;
   if (state === "error") return <p className="py-6 text-center text-sm text-destructive">Couldn't load activity.</p>;
   if (rows && rows.length === 0 && !q && tone === "all" && entity === "all" && actor === "all") return <p className="py-6 text-center text-sm text-muted-foreground">No activity yet.</p>;
 
@@ -276,7 +277,7 @@ export function ActivityFeed({ resource, global = false, initialEntity }: { reso
       {visible.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted-foreground">{state === "loading" ? "Searching…" : "No matching activity."}</p>
       ) : (
-        <ul className={`${global ? "max-h-[68vh]" : "max-h-[50vh]"} divide-y overflow-y-auto`}>
+        <ul className={`${global ? "max-h-[68dvh]" : "max-h-[50dvh]"} divide-y overflow-y-auto`}>
           {visible.map((a) => {
             const e = empOf(a);
             const name = nameOf(a);
@@ -337,7 +338,7 @@ export function ActivityFeed({ resource, global = false, initialEntity }: { reso
       {/* Drill into one record's own trail (global feed). The nested feed reads lazily, only while open. The
           record identity lives in the title, so the rows don't repeat it. */}
       <Dialog open={!!drill} onOpenChange={(o) => !o && setDrill(null)}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+        <DialogContent className="sm:max-w-3xl">
           <DialogHeader><DialogTitle>{drill?.label || "Activity"}</DialogTitle></DialogHeader>
           {drill && <ActivityFeed resource={drill.resource} />}
         </DialogContent>

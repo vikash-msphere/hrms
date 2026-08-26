@@ -163,6 +163,57 @@ describe("update", () => {
     expect(ok.status).toBe(200);
   });
 
+  // The version has to be in the WHERE, not merely compared against the row we just read. The test above
+  // passes either way - a stale header is caught by the comparison - so it never covered the case the
+  // comparison cannot answer: two writers who each read the SAME version and are each, individually, current.
+  it("detects a concurrent write even when both callers hold the same fresh etag", async () => {
+    const { id } = await newHoliday();
+    const row = (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!;
+    const etag = etagOf(+new Date(row.updatedAt));
+
+    // Both hold the CURRENT etag, so both pass any in-memory check.
+    const first = await send(`/v1/holidays/${id}`, "PATCH", { display_name: "First" }, { "If-Match": etag });
+    expect(first.status).toBe(200);
+    const second = await send(`/v1/holidays/${id}`, "PATCH", { display_name: "Second" }, { "If-Match": etag });
+    expect(second.status).toBe(409);
+
+    // The loser's write must not have landed: last-writer-wins is the bug, not the fallback.
+    const after = (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!;
+    expect(after.name).toBe("First");
+  });
+
+  // A caller who sends NO If-Match opted out of being told about a stale read - not into clobbering a write
+  // they never saw. The guard is the row version, so it applies whether or not the header was sent.
+  it("refuses a write against a version that has already moved, with no If-Match at all", async () => {
+    const { id } = await newHoliday();
+    const stale = (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!;
+    // Move the row on behalf of somebody else, so the version the next writer reads is already gone.
+    await deps.db.update(schema.holidays).set({ name: "Moved", updatedAt: new Date(+new Date(stale.updatedAt) + 1000) }).where(eq(schema.holidays.uuid, id));
+    const res = await send(`/v1/holidays/${id}`, "PATCH", { display_name: "Clobber" }, { "If-Match": etagOf(+new Date(stale.updatedAt)) });
+    expect(res.status).toBe(409);
+    expect((await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!.name).toBe("Moved");
+  });
+
+  // Purge racing the read is a different answer from a version conflict: the row is gone, so retrying cannot
+  // help. Both used to collapse into one status; the guarded write distinguishes them with one read.
+  it("answers 404, not 409, when the row was purged between the read and the write", async () => {
+    const { id } = await newHoliday();
+    const row = (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!;
+    await deps.db.delete(schema.holidays).where(eq(schema.holidays.uuid, id));
+    expect((await send(`/v1/holidays/${id}`, "PATCH", { display_name: "Gone" }, { "If-Match": etagOf(+new Date(row.updatedAt)) })).status).toBe(404);
+  });
+
+  // Same guard on the delete lane, which had the same read-then-write shape.
+  it("refuses a soft delete whose version has moved", async () => {
+    const { id } = await newHoliday();
+    const stale = (await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!;
+    await deps.db.update(schema.holidays).set({ name: "Renamed", updatedAt: new Date(+new Date(stale.updatedAt) + 1000) }).where(eq(schema.holidays.uuid, id));
+    const res = await call(`/v1/holidays/${id}`, { method: "DELETE", headers: { "If-Match": etagOf(+new Date(stale.updatedAt)) } });
+    expect(res.status).toBe(409);
+    // Still live: a delete that lost the race must not have marked the row.
+    expect((await deps.db.select().from(schema.holidays).where(eq(schema.holidays.uuid, id)))[0]!.deleteTime).toBeNull();
+  });
+
   it("refuses to edit a locked row (workflow precondition, not access control)", async () => {
     const { id } = await newHoliday();
     expect((await call(`/v1/holidays/${id}:lock`, { method: "POST" })).status).toBe(200);
@@ -234,19 +285,19 @@ describe("a collection's own rules ride on the same surface", () => {
   });
 
   it("pages every row exactly once across a boundary, even under a custom sort", async () => {
-    // The cursor seeks in the DB's (createdAt, uuid) order while `sort` presents within the page. When the two
-    // disagree - here creation order 5, 1, 3 against pay-grades' by-level presentation - a cursor compared
-    // against the PRESENTED order skips whole rows: paging by 2 used to answer levels [1,3] then nothing at
-    // all, losing the row created first. Distinct createdAt values so the boundary is exact.
+    // The cursor seeks in the DB's (createdAt, uuid) order - newest first - while `sort` presents within the
+    // page. When the two disagree - here creation order 5, 1, 3 against pay-grades' by-level presentation - a
+    // cursor compared against the PRESENTED order skips whole rows: paging by 2 used to answer two levels and
+    // then nothing at all, losing a row entirely. Distinct createdAt values so the boundary is exact.
     const t = 1_700_000_000_000;
     await deps.db.insert(schema.payGrades).values(
       [5, 1, 3].map((level, i) => ({ uuid: genId(), code: `pg-${level}`, name: `L${level}`, level, createdAt: new Date(t + i * 1000), updatedAt: new Date(t + i * 1000) })),
     );
     const first = await body(await call("/v1/pay-grades?max_page_size=2"));
-    expect(first.results.map((r: { level: number }) => r.level), "the two oldest rows, presented by level").toEqual([1, 5]);
+    expect(first.results.map((r: { level: number }) => r.level), "the two NEWEST rows, presented by level").toEqual([1, 3]);
     expect(first.next_page_token).toBeTruthy();
     const second = await body(await call(`/v1/pay-grades?max_page_size=2&page_token=${encodeURIComponent(first.next_page_token)}`));
-    expect(second.results.map((r: { level: number }) => r.level)).toEqual([3]);
+    expect(second.results.map((r: { level: number }) => r.level)).toEqual([5]);
     expect(second.next_page_token, "the last page is not labelled partial").toBeUndefined();
   });
 
@@ -479,10 +530,14 @@ describe("spec dimensions", () => {
     let saw: unknown;
     const call = mount({ ...holidaySpec, param: "id", list: async (_c, page) => { saw = page; return { items: [] }; } });
     await call(`${COLLECTION}?max_page_size=500&page_token=abc&show_deleted=true`);
-    // 500 clamped to the 100-row cap, the cursor as sent, and the flag already read as a boolean.
-    expect(saw).toEqual({ maxPageSize: 100, pageToken: "abc", showDeleted: true });
+    // 500 clamped to the 100-row cap, the cursor as sent, and the flags already read as booleans.
+    expect(saw).toEqual({ maxPageSize: 100, pageToken: "abc", showDeleted: true, deletedOnly: false });
     await call(COLLECTION);
-    expect(saw).toEqual({ maxPageSize: 50, pageToken: undefined, showDeleted: false });
+    expect(saw).toEqual({ maxPageSize: 50, pageToken: undefined, showDeleted: false, deletedOnly: false });
+    // `only` is the third state: the trash BY ITSELF. It still reads as "deleted are visible" for any list
+    // that only knows the boolean, so an older hook cannot accidentally exclude the very rows being asked for.
+    await call(`${COLLECTION}?deleted_only=true`);
+    expect(saw).toEqual({ maxPageSize: 50, pageToken: undefined, showDeleted: true, deletedOnly: true });
   });
 
   it("binds the caller's list scope, and answers nothing when the request was never scoped", async () => {

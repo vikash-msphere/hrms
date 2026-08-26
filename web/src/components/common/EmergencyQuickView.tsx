@@ -6,13 +6,16 @@ import type { PersonalDetails, DocumentResource } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { useDialogGuard } from "@/components/common/dialogGuard";
 import { FieldAccess } from "@/components/access/FieldAccess";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { IconEdit } from "@/components/common/IconEdit";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { DetailSkeleton } from "@/components/common/Skeletons";
 
 const BLOOD = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
 const NONE = "__none__";
@@ -43,6 +46,10 @@ export function EmergencyQuickView({
   const [edit, setEdit] = useState(false);
   const [form, setForm] = useState<PersonalDetails>({});
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  // Guards the EDIT pass, not the dialog: the read view holds nothing to lose, so it closes on the first click
+  // as it always has, while a half-typed contact asks first.
+  const guard = useDialogGuard(edit, form, () => setEdit(false), { label: "emergency details" });
   // Health-insurance e-card: a personal-document typed INSURANCE, filed once and surfaced here (for emergencies)
   // and on the Documents page. Reads/writes ride personal-documents access; if the viewer can't read them the
   // list simply comes back empty (section hidden), never an error.
@@ -95,15 +102,17 @@ export function EmergencyQuickView({
 
   async function save() {
     setSaving(true);
+    setErr(null);
     try {
       // Save the full record so the contact fields (edited elsewhere) are preserved.
       const updated = await patch<PersonalDetails>(`employees/${employeeId}/personal-info`, form);
       setData(updated);
+      guard.markSaved();
       setEdit(false);
       toast({ title: "Emergency details saved", variant: "success" });
       onSaved?.();
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -141,33 +150,50 @@ export function EmergencyQuickView({
         </Button>
         <FieldAccess accessTarget={subRef} />
       </span>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
-          <DialogHeader className="flex flex-row items-center justify-between">
-            <DialogTitle className="flex items-center gap-2">
-              <HeartPulse className="h-5 w-5 text-destructive" /> Emergency details
-              <FieldAccess accessTarget={subRef} />
-            </DialogTitle>
+      <Dialog open={open} onOpenChange={(next) => (edit ? guard.onOpenChange(next) : setOpen(next))}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (edit && !saving) save(); }}>
+          <DialogHeader className="flex flex-row items-start justify-between gap-3">
+            <div className="min-w-0 space-y-1.5">
+              <DialogTitle className="flex items-center gap-2">
+                <HeartPulse className="h-5 w-5 text-destructive" /> Emergency details
+                <FieldAccess accessTarget={subRef} />
+              </DialogTitle>
+              <DialogDescription>
+                {edit
+                  ? "Who to call if something happens at work, and what a paramedic needs to know. Stored encrypted."
+                  : "Who to call if something happens at work. Kept encrypted and visible only to them, HR and whoever you've shared it with."}
+              </DialogDescription>
+            </div>
             {canEdit && !edit && !loading && (
               <AccessAction collection="employees" objectPath={obj} field="personal-info" label="Emergency details">
-                <IconEdit label={hasAny ? "Edit" : "Add"} onClick={() => { setForm(data ?? {}); setEdit(true); }} />
+                <IconEdit label={hasAny ? "Edit" : "Add"} onClick={() => { setForm(data ?? {}); setErr(null); setEdit(true); }} />
               </AccessAction>
             )}
           </DialogHeader>
 
           {loading ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+            <DetailSkeleton rows={5} className="px-1" />
           ) : edit ? (
             <>
-              <div className="grid grid-cols-3 gap-3">
-                <Field label="Contact Name"><Input placeholder="1st contact name" value={form.emergency_name ?? ""} onChange={(e) => set({ emergency_name: e.target.value })} /></Field>
-                <Field label="Number"><Input value={form.emergency_phone ?? ""} onChange={(e) => set({ emergency_phone: e.target.value })} /></Field>
-                <Field label="Relation"><Input value={form.emergency_relation ?? ""} onChange={(e) => set({ emergency_relation: e.target.value })} /></Field>
-                <Field label="Contact Name"><Input placeholder="2nd contact name" value={form.emergency2_name ?? ""} onChange={(e) => set({ emergency2_name: e.target.value })} /></Field>
-                <Field label="Number"><Input value={form.emergency2_phone ?? ""} onChange={(e) => set({ emergency2_phone: e.target.value })} /></Field>
-                <Field label="Relation"><Input value={form.emergency2_relation ?? ""} onChange={(e) => set({ emergency2_relation: e.target.value })} /></Field>
-              </div>
-              <Field label="Blood group">
+              <DialogBody>
+              <FormError error={err} />
+              <fieldset className="space-y-3">
+                <legend className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">First contact</legend>
+                <FieldRow className="sm:grid-cols-3">
+                  <Field label="Name" field="personal-info.emergency_name"><Input value={form.emergency_name ?? ""} onChange={(e) => set({ emergency_name: e.target.value })} /></Field>
+                  <Field label="Phone" field="personal-info.emergency_phone"><Input type="tel" inputMode="tel" value={form.emergency_phone ?? ""} onChange={(e) => set({ emergency_phone: e.target.value })} /></Field>
+                  <Field label="Relation" field="personal-info.emergency_relation"><Input placeholder="e.g. Spouse" value={form.emergency_relation ?? ""} onChange={(e) => set({ emergency_relation: e.target.value })} /></Field>
+                </FieldRow>
+              </fieldset>
+              <fieldset className="space-y-3">
+                <legend className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Second contact (optional)</legend>
+                <FieldRow className="sm:grid-cols-3">
+                  <Field label="Name" field="personal-info.emergency2_name"><Input value={form.emergency2_name ?? ""} onChange={(e) => set({ emergency2_name: e.target.value })} /></Field>
+                  <Field label="Phone" field="personal-info.emergency2_phone"><Input type="tel" inputMode="tel" value={form.emergency2_phone ?? ""} onChange={(e) => set({ emergency2_phone: e.target.value })} /></Field>
+                  <Field label="Relation" field="personal-info.emergency2_relation"><Input value={form.emergency2_relation ?? ""} onChange={(e) => set({ emergency2_relation: e.target.value })} /></Field>
+                </FieldRow>
+              </fieldset>
+              <Field label="Blood group" field="personal-info.blood_group">
                 <Select value={form.blood_group || NONE} onValueChange={(v) => set({ blood_group: v === NONE ? "" : v })}>
                   <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
                   <SelectContent>
@@ -176,15 +202,21 @@ export function EmergencyQuickView({
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Allergies"><Textarea rows={2} value={form.allergies ?? ""} onChange={(e) => set({ allergies: e.target.value })} /></Field>
-              <Field label="Medical notes"><Textarea rows={2} value={form.medical_notes ?? ""} onChange={(e) => set({ medical_notes: e.target.value })} /></Field>
+              <Field label="Allergies" field="personal-info.allergies" hint="Anything a paramedic should know before treating them."><Textarea rows={2} value={form.allergies ?? ""} onChange={(e) => set({ allergies: e.target.value })} /></Field>
+              <Field label="Medical notes" field="personal-info.medical_notes"><Textarea rows={2} value={form.medical_notes ?? ""} onChange={(e) => set({ medical_notes: e.target.value })} /></Field>
+              {!(form.emergency_name ?? "").trim() !== !(form.emergency_phone ?? "").trim() && (
+                <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                  A contact needs both a name and a number to be worth calling.
+                </p>
+              )}
+              </DialogBody>
               <DialogFooter>
-                <Button variant="outline" onClick={() => setEdit(false)}>Cancel</Button>
+                <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
                 <Button onClick={save} loading={saving}>Save</Button>
               </DialogFooter>
             </>
           ) : (
-            <>
+            <DialogBody>
               {!hasAny ? (
                 <p className="py-4 text-center text-sm text-muted-foreground">No emergency details on file.</p>
               ) : (
@@ -222,9 +254,11 @@ export function EmergencyQuickView({
                           <span className="truncate">{doc.display_name}</span>
                           <FieldAccess accessTarget={{ collection: "personal-documents", objectPath: doc.path, label: doc.display_name }} />
                         </span>
-                        <Button size="sm" variant="ghost" className="h-7 shrink-0" title="Download" onClick={() => download(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" }))}>
-                          <DownloadIcon className="h-4 w-4" />
-                        </Button>
+                        <AccessAction collection="personal-documents" objectPath={doc.path} can={doc.access?.can} verb="download" label="Download the e-card">
+                          <Button size="sm" variant="ghost" className="h-7 shrink-0" title="Download" onClick={() => download(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" }))}>
+                            <DownloadIcon className="h-4 w-4" />
+                          </Button>
+                        </AccessAction>
                       </li>
                     ))}
                   </ul>
@@ -232,7 +266,7 @@ export function EmergencyQuickView({
                   <p className="text-xs text-muted-foreground">No card on file{canEdit ? " - upload a PDF or image." : "."}</p>
                 )}
               </div>
-            </>
+            </DialogBody>
           )}
         </DialogContent>
       </Dialog>

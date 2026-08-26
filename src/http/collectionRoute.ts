@@ -19,6 +19,7 @@ import { customMethod } from "./customMethod";
 import { lifecycleVerb } from "./lifecycleVerb";
 import { accessHint, withAccess } from "./accessHint";
 import { clampPageSize } from "./pagination";
+import { jsonBody } from "./jsonRequest";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
 
 /**
@@ -49,8 +50,12 @@ export type PageRequest = {
   maxPageSize: number;
   /** `?page_token`, the opaque cursor as sent. */
   pageToken?: string;
-  /** `?show_deleted=true`: include soft-deleted rows. */
+  /** `?show_deleted=true`: include soft-deleted rows alongside the live ones. */
   showDeleted: boolean;
+  /** `?deleted_only=true`: the trash BY ITSELF. A "Deleted" view is its own fetch rather than a client-side
+   *  filter over a page of mostly-live rows - which on any list longer than one page would show an empty
+   *  trash while deleted rows sat past the cursor. */
+  deletedOnly: boolean;
 };
 
 export type CollectionRouteSpec<I, T extends CrudTable = CrudTable> = CrudSpec<I, T> & {
@@ -104,7 +109,7 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   // employees' profile flags went missing from its item read - and a route-level `list` skipped it entirely, so
   // 13 collections computed the same field a second time in their list hook, in a second shape.
   const decorate = async (c: Context<AppEnv>, rows: any[]) =>
-    spec.decorate && rows.length ? spec.decorate(c.get("deps"), c.get("user"), rows) : rows;
+    spec.decorate && rows.length ? spec.decorate(c.get("deps"), c.get("user"), rows, c.get("scope")) : rows;
   // An item response carries the per-object-merged grant (a share can lift a caller above their role), so the
   // SPA's affordances on a single record are share-accurate. Lists pass the role grant - one grant, many rows.
   const item = async (c: Context<AppEnv>, row: { code?: string | null } | undefined) => {
@@ -150,12 +155,15 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     const page: PageRequest = {
       maxPageSize: clampPageSize(Number(c.req.query("max_page_size")) || undefined),
       pageToken: c.req.query("page_token"),
-      showDeleted: c.req.query("show_deleted") === "true",
+      // `deleted_only` implies "deleted are visible", so a list hook that only knows the boolean cannot
+      // accidentally exclude the very rows being asked for.
+      showDeleted: c.req.query("show_deleted") === "true" || c.req.query("deleted_only") === "true",
+      deletedOnly: c.req.query("deleted_only") === "true",
     };
     const user = c.get("user");
     const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = spec.list
       ? await spec.list(c, page)
-      : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted);
+      : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly);
     const rows = await decorate(c, items);
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
@@ -205,7 +213,10 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
     if (own) {
       if (own.raw) return own.raw(c, id);
       // A verb body is optional on the wire (`:unblock` carries none), so a missing/!JSON body parses as {}.
-      const body = own.schema ? own.schema.parse(await c.req.json().catch(() => ({}))) : undefined;
+      // Read through jsonBody, not c.req.json(): the latter parses whatever bytes arrived whatever the declared
+      // type, which would let a verb body that the authz field/reference gate declined to inspect (it gates
+      // JSON-family types only) still reach the service - a gate the request talked its way around.
+      const body = own.schema ? own.schema.parse(await jsonBody(c)) : undefined;
       return item(c, (await own.run(c.get("deps"), c.get("user"), id, body, c)) as { code?: string | null });
     }
     if (verb === "restore" && softDeletable) return item(c, await svc.restore(c.get("deps"), c.get("user"), id));

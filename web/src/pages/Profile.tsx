@@ -1,20 +1,23 @@
 import { useMemo, useState } from "react";
-import { UserRound, Contact, IdCard, Landmark, ShieldCheck, PenLine, FileText, Hash, UserCog, Users, Network } from "lucide-react";
+import { UserRound, Contact, IdCard, Landmark, ShieldCheck, PenLine, FileText, Hash, UserCog, Users, Network, Package, Wallet } from "lucide-react";
 import { navigate } from "@/router";
 import { useToast } from "@/components/ui/use-toast";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useCollection } from "@/hooks/useCollection";
+import { useIntent } from "@/lib/intent";
 import { formatDate, idOf, probationLabel, tenureLabel } from "@/lib/utils";
 import type { Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { ProfileView, ProfileDetails } from "@/components/common/ProfileView";
+import { EmployeeAssets } from "@/components/common/EmployeeAssets";
 import { EmployeeDocuments } from "@/components/common/EmployeeDocuments";
 import { EmployeeBankDetails } from "@/components/common/EmployeeBankDetails";
 import { EmployeeIdentityDetails } from "@/components/common/EmployeeIdentityDetails";
 import { EmployeePersonalDetails } from "@/components/common/EmployeePersonalDetails";
 import { EmployeeProfilePersonal } from "@/components/common/EmployeeProfilePersonal";
 import { EmployeeTaxDetails } from "@/components/common/EmployeeTaxDetails";
+import { MyCompensation } from "@/components/common/MyCompensation";
 import { EmergencyQuickView } from "@/components/common/EmergencyQuickView";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { SignatureField } from "@/components/common/SignatureField";
@@ -26,6 +29,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
 import { AccessTab } from "@/components/common/AccessTab";
 import { AccessScope } from "@/components/access/AccessScope";
+import { usePermission } from "@/lib/perm";
 
 // Same chip style as the employee page header.
 const CHIP = "inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground";
@@ -37,6 +41,18 @@ export default function Profile({ me }: { me: Me }) {
   const { toast } = useToast();
   // Controlled so the completeness meter's chips can jump to a section / open its dialog.
   const [tab, setTab] = useState("profile");
+  // The kit I hold. The assets list is scoped server-side (assignedTo = me), so the tab appears only once
+  // someone has granted the employee assets.read - otherwise it would show an empty, 403-ing panel. Being able
+  // to ASK for kit is reason enough for the tab too, even in an org that hides the inventory from employees.
+  const canAssets = usePermission("assets.read") || usePermission("asset-requests.write");
+  // Whether an employee may see their own salary is org policy, not a given (plenty of orgs keep pay off
+  // self-service and let the payslip speak). So the tab follows the grant: absent compensation.read it never
+  // appears, and an admin opens it from the tab's own access affordance. The rows are scoped to the caller
+  // server-side, and a self-service read carries no grade or band.
+  const canComp = usePermission("compensation.read");
+  // "+ New → Request an asset" from anywhere lands here: switch to the tab and let the card open its dialog.
+  const [requestAsset, setRequestAsset] = useState(false);
+  useIntent("new-asset-request", () => { setTab("assets"); setRequestAsset(true); });
   const [photoOpen, setPhotoOpen] = useState(false);
   const [emergencyOpen, setEmergencyOpen] = useState(false);
   const [bioOpen, setBioOpen] = useState(false);
@@ -74,7 +90,7 @@ export default function Profile({ me }: { me: Me }) {
         <>
           <ProfileView name={name} email={me.email} />
           <Card className="mt-4">
-            <CardContent className="py-6 text-sm text-muted-foreground">
+            <CardContent className="py-6 text-sm text-muted-foreground sm:py-6">
               Your account isn't linked to an employee record yet. Ask an HR admin to connect it.
             </CardContent>
           </Card>
@@ -145,7 +161,9 @@ export default function Profile({ me }: { me: Me }) {
                   <AccessTab value="identity" target={{ collection: "employees", objectPath: selfPath, field: "identity", label: "Identity" }}><IdCard className="h-4 w-4" /> Identity</AccessTab>
                   <AccessTab value="bank" target={{ collection: "employees", objectPath: selfPath, field: "bank-account", label: "Bank details" }}><Landmark className="h-4 w-4" /> Bank details</AccessTab>
                   <AccessTab value="tax" target={{ collection: "employees", objectPath: selfPath, field: "tax", label: "Tax" }}><ShieldCheck className="h-4 w-4" /> Tax</AccessTab>
+                  {canComp && <AccessTab value="compensation" target={{ collection: "compensation", label: "Compensation" }}><Wallet className="h-4 w-4" /> Compensation</AccessTab>}
                   <AccessTab value="signature" target={{ collection: "employees", objectPath: selfPath, field: "signature", label: "Signature" }}><PenLine className="h-4 w-4" /> Signature</AccessTab>
+                  {canAssets && <AccessTab value="assets" target={{ collection: "assets", label: "Assets" }}><Package className="h-4 w-4" /> Assets</AccessTab>}
                   <AccessTab value="documents" target={{ collection: "personal-documents", label: "Documents" }}><FileText className="h-4 w-4" /> Documents</AccessTab>
                 </TabsList>
                 <TabsContent value="profile" className="space-y-4">
@@ -171,9 +189,29 @@ export default function Profile({ me }: { me: Me }) {
                 <TabsContent value="tax">
                   <EmployeeTaxDetails employeeId={me.employee_id} canEdit />
                 </TabsContent>
+                {canComp && (
+                  <TabsContent value="compensation">
+                    <MyCompensation employeeId={me.employee_id} />
+                  </TabsContent>
+                )}
                 <TabsContent value="signature">
                   <SignatureField employeeId={me.employee_id} signature={emp.signature} canEdit onChanged={reload} />
                 </TabsContent>
+                {canAssets && (
+                  <TabsContent value="assets">
+                    {/* Read-only on the self page for the kit itself: handing out or reclaiming it is an
+                        inventory action on the Assets page. Asking for kit IS self-service, so the card's
+                        request affordance lives here. */}
+                    <EmployeeAssets
+                      employeeId={me.employee_id}
+                      employeeName={`${emp.first_name} ${emp.last_name}`}
+                      title="My assets"
+                      isSelf
+                      requestNow={requestAsset}
+                      onRequestHandled={() => setRequestAsset(false)}
+                    />
+                  </TabsContent>
+                )}
                 <TabsContent value="documents">
                   <EmployeeDocuments employeeId={me.employee_id} title="My documents" />
                 </TabsContent>

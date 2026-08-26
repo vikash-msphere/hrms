@@ -15,7 +15,7 @@ const serialize = Object.values(rawSer)[0]!;
 // Sub-object serializers that have no named schema of their own: their shape is declared inline inside the
 // parent resource (an announcement's replies, a card's todos/comments, an activity entry), so there is no
 // `components/schemas` entry to point a Wire<> at. The parent's annotation covers them.
-const INLINE_SUB_RESOURCES = new Set(["AnnouncementReply", "CardTodo", "CardComment", "Activity"]);
+const INLINE_SUB_RESOURCES = new Set(["AnnouncementReply", "CardTodo", "CardComment", "GoalComment", "Activity"]);
 
 function serializers(src: string): { name: string; annotated: boolean }[] {
   const out: { name: string; annotated: boolean }[] = [];

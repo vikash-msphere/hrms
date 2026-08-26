@@ -9,12 +9,18 @@ compatibility_flags = ["nodejs_compat"]
 enabled = true
 
 # The built SPA (web/dist) is served as static assets with SPA fallback. run_worker_first forces API +
-# webhook paths to the Worker FIRST, so the SPA `not_found_handling` can never intercept `/v1/*` or
-# `/esign/*` and serve index.html in place of a real API/webhook response.
+# webhook + public-page paths to the Worker FIRST, so the SPA `not_found_handling` can never intercept them and
+# serve index.html in place of a real API/webhook/page response. `/found/*` (asset lost-and-found) and
+# `/calendar/*` (holiday feed) are unauthenticated Worker routes, not SPA routes, so they belong here too.
 [assets]
 directory = "./web/dist"
-not_found_handling = "single-page-application"
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*"]
+binding = "ASSETS"
+# "none", NOT "single-page-application": the platform's SPA fallback answers every miss with index.html at
+# 200, including a miss for a .js/.css/.wasm file, which browsers then cache as a script of the wrong type.
+# The Worker's notFound handler does the fallback instead - 404 for a missing FILE, the shell for a real app
+# route. See src/index.ts.
+not_found_handling = "none"
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*"]
 
 # Explicit CPU ceiling: PDF / Form-16 / letter rendering is CPU-heavy. Bounded so a runaway render can't run
 # away, with headroom above a normal request.
@@ -64,8 +70,9 @@ enabled = true
 
 [env.staging.assets]
 directory = "./web/dist"
-not_found_handling = "single-page-application"
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*"]
+binding = "ASSETS"
+not_found_handling = "none" # the Worker owns the SPA fallback - see the note on the top-level [assets]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*"]
 
 [env.staging.vars]
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.

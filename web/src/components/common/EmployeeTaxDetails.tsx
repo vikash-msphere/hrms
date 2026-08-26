@@ -7,9 +7,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { useOrg } from "@/lib/org";
 
@@ -26,6 +30,8 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<{ prior_employer_income: string; prior_employer_tds: string }>({ prior_employer_income: "", prior_employer_tds: "" });
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "declaration" });
   const [deciding, setDeciding] = useState(false);
 
   async function load() {
@@ -44,11 +50,13 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
       prior_employer_income: data?.prior_employer_income ? String(data.prior_employer_income) : "",
       prior_employer_tds: data?.prior_employer_tds ? String(data.prior_employer_tds) : "",
     });
+    setErr(null);
     setOpen(true);
   }
 
   async function save() {
     setSaving(true);
+    setErr(null);
     try {
       const values = {
         prior_employer_income: form.prior_employer_income ? Number(form.prior_employer_income) : 0,
@@ -58,7 +66,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
       toast({ title: "Tax declarations saved", description: "Awaiting HR/payroll verification before they affect withholding.", variant: "success" });
       setOpen(false);
     } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -235,24 +243,33 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
         </div>
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
         <DialogContent onEnterSubmit={() => { if (!saving) save(); }}>
+          <AccessScope collection="employees">
           <DialogHeader>
             <DialogTitle>Income from a previous employer (this financial year)</DialogTitle>
+            <DialogDescription>
+              Joining mid-year splits the year's income across two employers. Declaring what the previous one paid - and withheld - keeps the monthly tax here from being far too low, and a large bill in March.
+              These figures only affect withholding once payroll verifies them.
+            </DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">If you joined mid-year, declare the income earned and TDS already deducted at a previous employer so the projection and monthly TDS are accurate.</p>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Gross income (₹)">
-              <Input type="number" min={0} value={form.prior_employer_income} onChange={(e) => setForm({ ...form, prior_employer_income: e.target.value })} />
+          <FormError error={err} />
+          <FieldRow>
+            <Field label="Gross income" hint="Salary earned there this financial year, before deductions.">
+              <MoneyInput value={form.prior_employer_income} onChange={(v) => setForm({ ...form, prior_employer_income: v })} min={0} autoFocus />
             </Field>
-            <Field label="TDS deducted (₹)">
-              <Input type="number" min={0} value={form.prior_employer_tds} onChange={(e) => setForm({ ...form, prior_employer_tds: e.target.value })} />
+            <Field label="TDS deducted" hint="Tax they already withheld - it counts against your liability.">
+              <MoneyInput value={form.prior_employer_tds} onChange={(v) => setForm({ ...form, prior_employer_tds: v })} min={0} />
             </Field>
-          </div>
+          </FieldRow>
+          {Number(form.prior_employer_tds) > Number(form.prior_employer_income) && Number(form.prior_employer_income) > 0 && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">Tax withheld is larger than the income - check the two figures aren't swapped.</p>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
             <Button onClick={save} loading={saving}>Save</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </Card>

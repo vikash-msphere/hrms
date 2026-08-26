@@ -82,3 +82,23 @@ describe("a 2-token verb DENY revokes the capability (it must not fail open)", (
     expect(objRule).toMatchObject({ scopeKind: "exact", scopeCode: "04-002-001-9", matchCode: "04-002-001-9", effect: "deny" });
   });
 });
+
+// The wildcard-verb rule (access rule verb:"*") is how a role is granted "every custom method of this
+// collection" in one line - it is what hr_admin holds on assets in the seed. A collection-level verb has to be
+// inside it, or adding one (`assets:batchCreate`) silently 403s the role that was granted everything.
+describe("the wildcard-verb rule covers a collection-level custom method", () => {
+  const all = rulesToGrant([rule("assets.**", "allow")]);
+
+  it("allows both key shapes of a custom method, and stays out of the standard lane", () => {
+    expect(allows(all, "POST", "/v1/assets:batchCreate")).toBe(true);
+    expect(allows(all, "POST", "/v1/assets/04-002-001-9:verify")).toBe(true);
+    expect(allows(all, "GET", "/v1/assets")).toBe(false); // reading is a level grant, a separate rule
+    expect(allows(all, "POST", "/v1/stocktakes:batchCreate")).toBe(false); // and it is one collection's
+  });
+
+  it("a verb deny still revokes one method out of it", () => {
+    const denied = rulesToGrant([rule("assets.**", "allow"), rule("assets.**.batchCreate", "deny")]);
+    expect(allows(denied, "POST", "/v1/assets:batchCreate")).toBe(false);
+    expect(allows(denied, "POST", "/v1/assets/04-002-001-9:verify")).toBe(true);
+  });
+});

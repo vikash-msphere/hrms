@@ -48,11 +48,15 @@ export const found = new Hono<AppEnv>()
   })
   .get("/:token", async (c) => {
   const deps = c.get("deps");
+  // Decode BEFORE reading anything. This route is unauthenticated and unrated by nature (a stranger returning
+  // hardware has no session), and token validation is pure compute with zero DB reads - so checking it first
+  // means a forged or scanned-at-random token costs nothing, instead of a settings read per attempt.
+  const uuid = await deps.idCodec.decode("assets", c.req.param("token"));
+  if (!uuid) return c.notFound();
   const cfg = await getSettingValue<{ found_page?: FoundPage }>(deps, "asset-tags", {});
   const fp = cfg.found_page;
   if (!fp?.enabled) return c.notFound();
-  const uuid = await deps.idCodec.decode("assets", c.req.param("token"));
-  const row = uuid ? (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, uuid)).limit(1))[0] : undefined;
+  const row = (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, uuid)).limit(1))[0];
   if (!row) return c.notFound();
   const org = await getSettingValue<{ name?: string }>(deps, "organization", {});
   const contact = fp.contact?.trim();

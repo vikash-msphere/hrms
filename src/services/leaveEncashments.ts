@@ -49,6 +49,7 @@ export type EncashmentInput = {
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 import { round2 } from "../domain/money";
+import { refPayComponents } from "../lib/refData";
 
 // Rate config (data, configurable in Settings). basis "base" => basePay / divisor; "gross" => monthly recurring
 // gross / divisor. divisor defaults to 30 (per-day rate basis). Exported because the FnF prices exit encashment
@@ -64,7 +65,7 @@ export async function listEncashments(deps: Deps, scope: ListScope, maxPageSize:
   const conds = [applyScope(scope, schema.leaveEncashments.code, schema.leaveEncashments.employeeId)];
   if (stateFilter) conds.push(eq(schema.leaveEncashments.state, stateFilter as typeof schema.leaveEncashments.$inferSelect.state));
   if (employeeId) conds.push(eq(schema.leaveEncashments.employeeId, employeeId));
-  return keysetPage<typeof schema.leaveEncashments.$inferSelect>(deps, schema.leaveEncashments, "leave-encashments", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  return keysetPage<typeof schema.leaveEncashments.$inferSelect>(deps, schema.leaveEncashments, "leave-encashments", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
 }
 
 // The row the workflow verbs act on. The read side of the collection is the factory's generic get (same
@@ -113,6 +114,23 @@ export async function encashedDaysThisYear(deps: Deps, employeeId: string, leave
   return round2(rows.reduce((s, r) => s + r.days, 0));
 }
 
+// Per-day rate + payable for `days`, from the employee's CURRENT compensation and the org's encashment rate
+// settings (basis base/gross, per-day divisor). Returns null when the employee has no compensation on record.
+// One definition, used when the request is raised AND again when it is approved, so the two can never disagree
+// about the rate for a reason other than the salary actually changing.
+async function priceEncashment(deps: Deps, employeeId: string, days: number): Promise<{ ratePerDay: number; amount: number } | null> {
+  const comp = await currentComp(deps, employeeId);
+  if (!comp) return null;
+  const { basis, divisor } = await encashmentRateConfig(deps);
+  let perBasis = comp.basePay;
+  if (basis === "gross") {
+    const components = await refPayComponents(deps);
+    const effective = applyStructure(components, await structureLinesById(deps, comp.structureId));
+    perBasis = monthlyRecurringGross(comp.basePay, effective, comp.specialAllowance);
+  }
+  return { ratePerDay: encashmentRatePerDay(perBasis, divisor), amount: encashmentAmount(days, perBasis, divisor) };
+}
+
 export async function computeAndStoreEncashment(deps: Deps, actor: AppUser, input: EncashmentInput) {
   const days = Number(input.days);
   if (!Number.isFinite(days) || days <= 0) throw invalidArgument("days must be a positive number");
@@ -147,15 +165,9 @@ export async function computeAndStoreEncashment(deps: Deps, actor: AppUser, inpu
 
   const comp = await currentComp(deps, employeeId);
   if (!comp) throw invalidArgument("the employee has no compensation on record");
-  const { basis, divisor } = await encashmentRateConfig(deps);
-  let perBasis = comp.basePay;
-  if (basis === "gross") {
-    const components = await deps.db.select().from(schema.payComponents);
-    const effective = applyStructure(components, await structureLinesById(deps, comp.structureId));
-    perBasis = monthlyRecurringGross(comp.basePay, effective, comp.specialAllowance);
-  }
-  const ratePerDay = encashmentRatePerDay(perBasis, divisor); // stored/displayed per-day figure
-  const amount = encashmentAmount(days, perBasis, divisor); // payable, rounded once (not days x rounded-rate)
+  // Priced now for the requester to see; re-priced at approval, which is when the payout is committed.
+  const priced = (await priceEncashment(deps, employeeId, days))!;
+  const { ratePerDay, amount } = priced;
 
   const row = (await deps.db
     .insert(schema.leaveEncashments)
@@ -184,14 +196,8 @@ export async function createAutoEncashment(deps: Deps, employeeId: string, leave
   if (!(days > 0)) return false;
   const comp = await currentComp(deps, employeeId);
   if (!comp) return false;
-  const { basis, divisor } = await encashmentRateConfig(deps);
-  let perBasis = comp.basePay;
-  if (basis === "gross") {
-    const components = await deps.db.select().from(schema.payComponents);
-    const effective = applyStructure(components, await structureLinesById(deps, comp.structureId));
-    perBasis = monthlyRecurringGross(comp.basePay, effective, comp.specialAllowance);
-  }
-  const ratePerDay = encashmentRatePerDay(perBasis, divisor);
+  const priced = await priceEncashment(deps, employeeId, days);
+  if (!priced) return false;
   const row = (await deps.db
     .insert(schema.leaveEncashments)
     .values({
@@ -199,8 +205,8 @@ export async function createAutoEncashment(deps: Deps, employeeId: string, leave
       employeeId,
       leaveTypeId,
       days: round2(days),
-      ratePerDay,
-      amount: encashmentAmount(days, perBasis, divisor),
+      ratePerDay: priced.ratePerDay,
+      amount: priced.amount,
       currency: comp.currency || "INR",
       state: "APPROVED",
     })
@@ -233,11 +239,17 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string) 
       throw failedPrecondition(`annual encashment cap of ${capDays} day(s) exceeded (${alreadyEncashed} already used)`);
     }
   }
+  // RE-PRICE at approval. The amount stored when the request was raised is an estimate: approval is the moment
+  // the payout is committed, and a compensation revision (or a change to the rate basis/divisor in settings)
+  // between the two would otherwise pay days at a salary the employee no longer earns. A request for someone
+  // whose compensation has since been removed keeps its original figure rather than dropping to zero.
+  const priced = await priceEncashment(deps, row.employeeId, row.days);
+
   // Claim the approval EXACTLY ONCE first (guarded PENDING->APPROVED): a double-clicked/concurrent approve of
   // the SAME row would otherwise debit the balance twice - each debit is guarded against over-draw below zero
   // but not against re-running for one request. Only the winner (1 row) proceeds to debit.
   const [updated] = await deps.db.update(schema.leaveEncashments)
-    .set({ state: "APPROVED", decidedBy: actor.uuid, updatedAt: new Date() })
+    .set({ state: "APPROVED", decidedBy: actor.uuid, updatedAt: new Date(), ...(priced ?? {}) })
     .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, "PENDING"))).returning();
   if (!updated) throw failedPrecondition("encashment is not pending");
   // Atomic guarded debit: decrement only if the balance still covers it (balanceDays >= days in the WHERE), so
@@ -303,16 +315,15 @@ export async function approvedUnpaidEncashmentsAll(deps: Deps) {
 // Settled by a full-and-final settlement rather than a run: PAID with paidRunId left null, exactly like a
 // separately-paid reimbursement, so it drops out of the payroll queue (state APPROVED + no run). The release
 // puts it back when a corrected settlement is recomputed; it only ever touches rows with no run.
-export async function markEncashmentsSettled(deps: Deps, ids: string[], at: Date) {
-  if (!ids.length) return;
-  await deps.db
+// Unexecuted statement, so the FnF commits it in the same atomic batch as the settlement (see reimbursements).
+export function markEncashmentsSettledStmt(deps: Deps, ids: string[], at: Date) {
+  return deps.db
     .update(schema.leaveEncashments)
     .set({ state: "PAID", paidAt: at, updatedAt: at })
     .where(and(inArray(schema.leaveEncashments.uuid, ids), eq(schema.leaveEncashments.state, "APPROVED"), isNull(schema.leaveEncashments.paidRunId)));
 }
-export async function releaseEncashmentsSettled(deps: Deps, ids: string[]) {
-  if (!ids.length) return;
-  await deps.db
+export function releaseEncashmentsSettledStmt(deps: Deps, ids: string[]) {
+  return deps.db
     .update(schema.leaveEncashments)
     .set({ state: "APPROVED", paidAt: null, updatedAt: new Date() })
     .where(and(inArray(schema.leaveEncashments.uuid, ids), eq(schema.leaveEncashments.state, "PAID"), isNull(schema.leaveEncashments.paidRunId)));

@@ -8,8 +8,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
-import { Field } from "@/components/common/Field";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Field, FieldRow } from "@/components/common/Field";
+import { DetailSkeleton } from "@/components/common/Skeletons";
+import { FormError } from "@/components/common/FormError";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 const todayYmd = () => new Date().toISOString().slice(0, 10);
@@ -24,6 +28,8 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ settlement_date: todayYmd(), leave_days: "", notice_shortfall_days: "0" });
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "settlement inputs" });
   const money = (n: number) => formatMoney(n, latest?.currency_code || org.default_currency, currencyDecimals(latest?.currency_code, org));
 
   async function load() {
@@ -42,6 +48,7 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
 
   async function compute() {
     setBusy(true);
+    setErr(null);
     try {
       const body: Record<string, unknown> = { employee: "employees/" + employeeId, notice_shortfall_days: Number(form.notice_shortfall_days) || 0 };
       if (form.settlement_date) body.settlement_date = form.settlement_date;
@@ -51,7 +58,7 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
       setOpen(false);
       await load();
     } catch (e) {
-      toast({ variant: "destructive", title: "Couldn't compute", description: (e as Error).message });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -67,18 +74,21 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
         </CardTitle>
         {canEdit && (
           <AccessAction collection="settlements" create label="Compute settlement">
-            <Button size="sm" onClick={() => { setForm({ settlement_date: todayYmd(), leave_days: "", notice_shortfall_days: "0" }); setOpen(true); }}><Plus className="h-4 w-4" /> {latest ? "Recompute" : "Compute"}</Button>
+            <Button size="sm" onClick={() => { setForm({ settlement_date: todayYmd(), leave_days: "", notice_shortfall_days: "0" }); setErr(null); setOpen(true); }}><Plus className="h-4 w-4" /> {latest ? "Recompute" : "Compute"}</Button>
           </AccessAction>
         )}
       </CardHeader>
       <CardContent>
         {!loaded ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">Loading…</p>
+          <DetailSkeleton rows={6} />
         ) : !latest ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No settlement computed.{canEdit ? " Use Compute to generate the FnF for this employee." : ""}</p>
         ) : (
           <>
             <p className="mb-3 text-xs text-muted-foreground">As of {latest.settlement_date}</p>
+            {/* Two columns, but a settlement line name ("Less: notice period recovery") plus its amount can
+                still outgrow a narrow phone; the wrapper keeps that overflow local to the table. */}
+            <div className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto">
             <table className="w-full text-sm">
               <tbody>
                 {latest.lines.map((l, i) => (
@@ -100,6 +110,7 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
                 </tr>
               </tbody>
             </table>
+            </div>
             {/* The exit payout withholds income tax like a payroll run: state the chargeable base + the tax on it,
                 because this is also what the employee's Form 16 will report for the year. */}
             {latest.tds != null && latest.tds > 0 && (
@@ -109,19 +120,36 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
         )}
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Compute full & final settlement</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">Builds a final settlement from their compensation, leave balance and pending reimbursements. Leave encashable days blank to use the current balance.</p>
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Settlement date" hint="Defaults to the employee's end date."><Input type="date" value={form.settlement_date} onChange={(e) => setForm({ ...form, settlement_date: e.target.value })} /></Field>
-            <Field label="Notice shortfall (days)" hint="Days of notice not served."><Input type="number" min={0} value={form.notice_shortfall_days} onChange={(e) => setForm({ ...form, notice_shortfall_days: e.target.value })} /></Field>
-          </div>
-          <Field label="Encashable leave (days)" hint="Blank = use the leave balance."><Input type="number" min={0} value={form.leave_days} onChange={(e) => setForm({ ...form, leave_days: e.target.value })} placeholder="Leave balance" /></Field>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        {/* scrollBody: a six-field form under a four-line description, so on a phone Compute was below the
+            fold of its own dialog. */}
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy) void compute(); }}>
+          <AccessScope collection="settlements">
+          <DialogHeader>
+            <DialogTitle>{latest ? "Recompute full & final settlement" : "Compute full & final settlement"}</DialogTitle>
+            <DialogDescription>
+              Collects everything still owed either way - final salary, leave encashment, pending bonuses and reimbursements, less any outstanding loan and unserved notice - and withholds tax on the balance.
+              {latest ? " Recomputing replaces the current snapshot; a settlement already paid out is left alone." : " It's a snapshot you can recompute until it's paid."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
+          <FieldRow>
+            <Field label="Settlement date" hint="Defaults to the employee's end date."><Input type="date" value={form.settlement_date} onChange={(e) => setForm({ ...form, settlement_date: e.target.value })} autoFocus /></Field>
+            <Field
+              label="Notice shortfall (days)"
+              hint={Number(form.notice_shortfall_days) > 0 ? "Recovered from the payout at their daily rate." : "Days of notice not served."}
+            >
+              <Input type="number" min={0} value={form.notice_shortfall_days} onChange={(e) => setForm({ ...form, notice_shortfall_days: e.target.value })} />
+            </Field>
+          </FieldRow>
+          <Field label="Encashable leave (days)" hint="Blank uses their leave balance as it stands on the settlement date."><Input type="number" min={0} value={form.leave_days} onChange={(e) => setForm({ ...form, leave_days: e.target.value })} placeholder="Leave balance" /></Field>
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={compute} disabled={busy}>Compute</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
+            <Button onClick={compute} loading={busy}>{latest ? "Recompute" : "Compute"}</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </Card>

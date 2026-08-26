@@ -4,19 +4,13 @@ import { api, download } from "@/api";
 import { usePermission } from "@/lib/perm";
 import type { DocumentResource } from "@/types";
 import { documentFileName } from "@/lib/documents";
+import { currentFy, fyOptions, fySpan } from "@/lib/fy";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Field } from "@/components/common/Field";
-import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { WriteDialog } from "@/components/common/WriteDialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
-
-// Indian FY label (Apr–Mar) for `asOf` - defaults the dialog to the current financial year.
-function currentFy(): string {
-  const d = new Date();
-  const y = d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
-  return `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
-}
 
 /** Generate an employee's Form 16 (Part B) for a financial year and file it as their personal document. Gated
  *  to HR + super (server enforces personal-documents.generateForm16); renders nothing for anyone else. */
@@ -24,28 +18,23 @@ export function GenerateForm16Button({ employeeId, onGenerated }: { employeeId: 
   const canGenerate = usePermission("personal-documents.write");
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
+  // A year label is a format, not a free-text field: "2025-26" is right, "FY25" and "2025-2026" are rejected
+  // by the server. Picking from the years that exist removes the whole class of mistake.
   const [fy, setFy] = useState(currentFy());
-  const [busy, setBusy] = useState(false);
 
   if (!canGenerate) return null;
 
   async function generate() {
-    setBusy(true);
-    try {
-      const doc = await api<DocumentResource>("/personal-documents:generateForm16", {
-        method: "POST",
-        body: JSON.stringify({ employee: `employees/${employeeId}`, financial_year: fy.trim() || undefined }),
-      });
-      toast({ title: "Form 16 generated", description: doc.display_name, variant: "success" });
-      setOpen(false);
-      onGenerated?.();
-      try { await download(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" })); } catch { /* filed under the employee's documents */ }
-    } catch (e) {
-      toast({ title: "Couldn't generate Form 16", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    const doc = await api<DocumentResource>("/personal-documents:generateForm16", {
+      method: "POST",
+      body: JSON.stringify({ employee: `employees/${employeeId}`, financial_year: fy }),
+    });
+    toast({ title: "Form 16 generated", description: doc.display_name, variant: "success" });
+    onGenerated?.();
+    try { await download(doc.path, documentFileName({ ...doc, content_type: doc.content_type ?? "application/pdf" })); } catch { /* filed under the employee's documents */ }
   }
+
+  const incomplete = fy === currentFy();
 
   return (
     <>
@@ -54,17 +43,24 @@ export function GenerateForm16Button({ employeeId, onGenerated }: { employeeId: 
           <FileText className="h-4 w-4" /> Generate Form 16
         </Button>
       </AccessAction>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Generate Form 16 (Part B)</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">Built from the year's finalized payroll and income-tax computation.</p>
-          <Field label="Financial year" hint="Apr–Mar, e.g. 2025-26."><Input value={fy} onChange={(e) => setFy(e.target.value)} placeholder="2025-26" /></Field>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={generate} loading={busy} disabled={!/^\d{4}-\d{2}$/.test(fy.trim())}>Generate</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <WriteDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Generate Form 16 (Part B)"
+        description="Built from the year's finalized payroll and income-tax computation, then filed under the employee's documents and downloaded now."
+        collection="personal-documents"
+        guardLabel="Form 16"
+        form={{ fy }}
+        submitLabel="Generate"
+        onSubmit={generate}
+      >
+        <Field label="Financial year" hint={`${fySpan(fy)}.${incomplete ? " This year is still running - the figures cover the runs finalized so far." : ""}`}>
+          <Select value={fy} onValueChange={setFy}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>{fyOptions().map((y) => <SelectItem key={y} value={y}>FY {y}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+      </WriteDialog>
     </>
   );
 }

@@ -13,13 +13,18 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { Field } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 type Form = { name: string; level: string; band_min: string; band_mid: string; band_max: string; currency_code: string; description: string };
@@ -39,6 +44,10 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<PayGrade | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
+  const [err, setErr] = useState<string | null>(null);
+  // A ladder is entered as a ladder - L1 through L5 in one sitting - so the level auto-advances on each save.
+  const [again, setAgain] = useState(false);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "pay grade" });
 
   const money = (n: number, cc?: string) => formatMoney(n, cc || org.default_currency, currencyDecimals(cc, org));
 
@@ -50,13 +59,20 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
         : bMid != null && bMax != null && bMid > bMax ? "Midpoint is above max."
           : undefined;
 
+  // Band width and where the midpoint sits in it - the two things a reader checks after typing three numbers.
+  // A midpoint pushed off-centre is a real design choice (a wide band skewed low), so it is reported, not fixed.
+  const bandSpan = bMin != null && bMax != null && bMax > bMin ? bMax - bMin : null;
+  const midPct = bandSpan && bMid != null ? Math.round(((bMid - bMin!) / bandSpan) * 100) : null;
+
   function openCreate() {
     setEditing(null);
     setForm(EMPTY);
+    setErr(null);
     setOpen(true);
   }
   function openEdit(g: PayGrade) {
     setEditing(g);
+    setErr(null);
     setForm({
       name: g.display_name,
       level: String(g.level ?? 0),
@@ -71,6 +87,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
 
   async function submit() {
     setBusy(true);
+    setErr(null);
     try {
       const body = {
         display_name: form.name.trim(),
@@ -88,10 +105,18 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
         await create("pay-grades", body);
         toast({ title: "Pay grade created", variant: "success" });
       }
-      setOpen(false);
+      // Next rung up, blank band: the level is the one field whose next value is knowable.
+      if (again && !editing) {
+        const next = { ...EMPTY, level: String((Number(form.level) || 0) + 1), currency_code: form.currency_code };
+        setForm(next);
+        guard.markSaved(next);
+      } else {
+        guard.markSaved();
+        setOpen(false);
+      }
       reload();
     } catch (e) {
-      toast({ title: "Couldn't save pay grade", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -150,35 +175,79 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
           rowClassName={(g) => (g.delete_time ? "opacity-60" : undefined)}
           emptyTitle="No pay grades"
           emptyDescription="Define grades (e.g. L1–L5) with a salary band (min / mid / max)."
+          emptyAction={createBtn}
           toolbar={createBtn}
           accessCollection="pay-grades"
           accessTargetOf={(g) => ({ objectPath: g.path, label: g.display_name, can: g.access?.can })}
         />
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim() && !bandError) submit(); }}>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && !bandError) submit(); }}>
+          <AccessScope collection="pay-grades" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit pay grade" : "New pay grade"}</DialogTitle>
+            <DialogDescription>One rung of the ladder. Its midpoint is what every employee's compa-ratio is measured against.</DialogDescription>
           </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
           <div className="grid grid-cols-[1fr_auto] gap-4">
             <Field label="Grade name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. L3 or Senior Engineer" autoFocus /></Field>
             <Field label="Level" hint="Orders the ladder (lower = junior)."><Input type="number" className="w-24" value={form.level} onChange={(e) => setForm({ ...form, level: e.target.value })} /></Field>
           </div>
-          <Field label="Salary band" hint="Annual CTC range. Leave blank for an open end. The midpoint anchors the compa-ratio." error={bandError}>
-            <div className="grid grid-cols-3 gap-2">
-              <Input type="number" value={form.band_min} onChange={(e) => setForm({ ...form, band_min: e.target.value })} placeholder="Min" />
-              <Input type="number" value={form.band_mid} onChange={(e) => setForm({ ...form, band_mid: e.target.value })} placeholder="Mid" />
-              <Input type="number" value={form.band_max} onChange={(e) => setForm({ ...form, band_max: e.target.value })} placeholder="Max" />
+          <Field label="Salary band" hint="Annual CTC range. Leave any blank for an open end." error={bandError}>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Minimum</span>
+                <MoneyInput value={form.band_min} onChange={(v) => setForm({ ...form, band_min: v })} currency={form.currency_code || undefined} min={0} placeholder="Min" />
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Midpoint</span>
+                <MoneyInput value={form.band_mid} onChange={(v) => setForm({ ...form, band_mid: v })} currency={form.currency_code || undefined} min={0} placeholder="Mid" />
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Maximum</span>
+                <MoneyInput value={form.band_max} onChange={(v) => setForm({ ...form, band_max: v })} currency={form.currency_code || undefined} min={0} placeholder="Max" />
+              </div>
             </div>
           </Field>
-          <Field label="Currency" hint="ISO code; defaults to the org currency."><Input className="w-32" value={form.currency_code} onChange={(e) => setForm({ ...form, currency_code: e.target.value })} placeholder={org.default_currency} /></Field>
+          {/* Only a bounded band can be drawn. The bar makes a lopsided midpoint - the thing that quietly skews
+              every compa-ratio in the grade - visible at a glance instead of implied by three numbers. */}
+          {!bandError && bandSpan && midPct != null && (
+            <div className="space-y-1.5 rounded-md border bg-muted/40 px-3 py-2">
+              <div className="relative h-2 rounded-full bg-primary/20">
+                <div className="absolute top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded bg-primary" style={{ left: `${Math.min(100, Math.max(0, midPct))}%` }} />
+              </div>
+              <div className="flex justify-between text-xs tabular-nums text-muted-foreground">
+                <span>{money(bMin!, form.currency_code)}</span>
+                <span>Midpoint {midPct}% through the band{midPct < 40 || midPct > 60 ? " (off-centre)" : ""}</span>
+                <span>{money(bMax!, form.currency_code)}</span>
+              </div>
+            </div>
+          )}
+          {bMin != null && bMax != null && bMid == null && (
+            <p className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              No midpoint, so no compa-ratio for anyone on this grade.
+              <button type="button" className="font-medium text-primary hover:underline" onClick={() => setForm({ ...form, band_mid: String(Math.round((bMin! + bMax!) / 2)) })}>
+                Use the centre ({money((bMin + bMax) / 2, form.currency_code)})
+              </button>
+            </p>
+          )}
+          <Field label="Currency" hint="ISO code; defaults to the org currency."><Input className="w-32" value={form.currency_code} onChange={(e) => setForm({ ...form, currency_code: e.target.value.toUpperCase() })} placeholder={org.default_currency} /></Field>
           <Field label="Description (optional)"><Textarea rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+          {!editing && (
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox checked={again} onCheckedChange={(v) => setAgain(v === true)} />
+              Keep this open to add another
+            </label>
+          )}
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.name.trim() || !!bandError}>{editing ? "Save changes" : "Create"}</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
+            <Button onClick={submit} loading={busy} disabled={!form.name.trim() || !!bandError}>{editing ? "Save changes" : again ? "Create & add another" : "Create"}</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>

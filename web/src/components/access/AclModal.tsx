@@ -92,7 +92,6 @@ export function AclModal({
   // Bulk grant: the add form collects a LIST of people (chips) and writes one rule each, because granting the
   // same access to five people was five open-pick-add cycles.
   const [addUsers, setAddUsers] = React.useState<string[]>([]);
-  const [addUser, setAddUser] = React.useState("");
   // Optional expiry on what is being granted (contractor / temporary access). "" = permanent.
   const [addExpires, setAddExpires] = React.useState("");
   const [addAccess, setAddAccess] = React.useState("read"); // level (read|write|admin|deny) or verb effect (allow|deny)
@@ -175,7 +174,6 @@ export function AclModal({
   React.useEffect(() => {
     if (target) void reload();
     setFocusVerb(undefined);
-    setAddUser("");
     setAddUsers([]);
     setAddExpires("");
     setShowHistory(false);
@@ -292,6 +290,10 @@ export function AclModal({
   // target thing RIGHT NOW, so the confirm dialog states what is being taken away instead of a bare "sure?".
   // Preview-capability holders only; everyone else keeps the plain confirm (fail quiet, never block).
   const canPreview = usePermission("access-rules.preview");
+  // Deciding a pending change is its own verb, and deliberately not the one that PROPOSES it (maker-checker):
+  // an author holding `access-rules.write` alone must see the "awaiting approval" badge without an approve or
+  // reject they cannot use.
+  const canDecideRule = usePermission("access-rules.approve");
   async function impactLine(): Promise<string | undefined> {
     if (!canPreview || !collection) return undefined;
     try {
@@ -358,7 +360,9 @@ export function AclModal({
     try {
       const before = roleAll(name).filter((x) => !x.verb);
       for (const r of before) await remove(r.path, r.etag); // edit = delete + create
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...expiryBody() });
+      // An expiring DENY would quietly re-open access on a date nobody is watching, so an expiry only ever
+      // rides on a grant.
+      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...levelBody(value), ...(value === "deny" ? {} : expiryBody()) });
       undoable(`Updated ${roleLabel(name)}`, async () => {
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && !x.verb)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
@@ -379,7 +383,7 @@ export function AclModal({
     try {
       const before = roleAll(name).filter((x) => x.verb === v);
       for (const r of before) await remove(r.path, r.etag);
-      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...expiryBody() });
+      if (value !== "none") await create("access-rules", { subject_kind: "role", subject: name, collection, ...scopeBody(), ...verbBody(v, value as "allow" | "deny"), ...(value === "deny" ? {} : expiryBody()) });
       undoable(`Updated ${roleLabel(name)} · ${v}`, async () => {
         for (const r of (await fetchAllAccessRules()).filter((x) => x.subject_kind === "role" && x.subject === name && matchesTarget(x) && x.verb === v)) await remove(r.path, r.etag);
         for (const r of before) await recreate(r);
@@ -423,7 +427,7 @@ export function AclModal({
   // One rule per picked person, in one go. Rules that already exist come back as a 409 from the server; that
   // person is reported as skipped instead of failing the whole batch, so a bulk grant is safely repeatable.
   async function addUserRule() {
-    const subjects = addUsers.length ? addUsers : addUser ? [addUser] : [];
+    const subjects = addUsers;
     if (!subjects.length) return;
     if (addAccess !== "deny") {
       const blocker = subjects.map((s) => denyBlocking({ subject_kind: "user", subject: s, collection: collection ?? "", scope: scopeSel, field, verb: activeVerb }, rules)).find(Boolean);
@@ -443,7 +447,6 @@ export function AclModal({
           else throw e;
         }
       }
-      setAddUser("");
       setAddUsers([]);
       undoable(
         `${added.length} ${added.length === 1 ? "person" : "people"} updated${skipped ? ` · ${skipped} already had it` : ""}`,
@@ -514,7 +517,7 @@ export function AclModal({
           phone that is taller than the viewport, and the dialog primitive does not scroll on its own - so cap
           it against the DYNAMIC viewport height (dvh, which excludes the mobile browser chrome) and scroll
           inside. */}
-      <DialogContent className="max-h-[90dvh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-w-2xl lg:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="h-5 w-5 text-amber-600 dark:text-amber-400" /> Manage access · {meta.label}
@@ -683,18 +686,44 @@ export function AclModal({
             {collectionVerbs.map((v) => {
               const info = verbInfo(collection ?? "", v);
               return (
-                <Button key={v} variant="outline" size="sm" className="h-7" title={info.description ?? v} onClick={() => setFocusVerb(v)}>
+                <Button
+                  key={v}
+                  variant="outline"
+                  size="sm"
+                  className="h-7"
+                  title={[info.description ?? v, info.caution].filter(Boolean).join("\n\n")}
+                  onClick={() => setFocusVerb(v)}
+                >
                   {info.label}
+                  {/* A verb that grants more than its name says gets a visible mark, not just a tooltip - the
+                      reader has to be able to spot it while scanning the row, before clicking. */}
+                  {info.caution && <span className="ml-1 text-amber-600 dark:text-amber-500">!</span>}
                 </Button>
               );
             })}
           </div>
         )}
+        {/* Spelled out in full once a cautioned verb is the one in focus, where the grant is actually made. */}
+        {verbMode && activeVerb && activeVerb !== ALL_VERBS && verbInfo(collection ?? "", activeVerb).caution && (
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            {verbInfo(collection ?? "", activeVerb).caution}
+          </p>
+        )}
 
         <Tabs defaultValue={defaultTab}>
+          {/* The counts are on the tabs so the reader knows which one holds the answer before opening it -
+              "Roles 0 · Users 3" says where this target's access actually comes from. */}
           <TabsList>
-            {showUsers && <TabsTrigger value="users">Users</TabsTrigger>}
-            {showRoles && <TabsTrigger value="roles">Roles</TabsTrigger>}
+            {showUsers && (
+              <TabsTrigger value="users">
+                Users{userShown.length > 0 ? ` ${userShown.length}` : ""}
+              </TabsTrigger>
+            )}
+            {showRoles && (
+              <TabsTrigger value="roles">
+                Roles{holders.roles > 0 ? ` ${holders.roles}` : ""}
+              </TabsTrigger>
+            )}
           </TabsList>
 
           {showUsers && (
@@ -708,7 +737,10 @@ export function AclModal({
                 {userShown.length === 0 && <p className="text-sm text-muted-foreground">No per-user rules here.</p>}
                 {userShown.length > 0 && shownUserRules.length === 0 && <p className="text-sm text-muted-foreground">No rule matches "{userFilter}".</p>}
                 {userPaged.pageItems.map((r) => (
-                  <div key={r.path} className={cn("flex items-center justify-between rounded-md border px-3 py-2 text-sm", r.status && r.status !== "active" && "border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30")}>
+                  // Same stacking as the role rows: person on top, the badges and controls beneath, one row
+                  // from `sm` up. An email plus an expiry badge plus an approve/reject pair does not fit a
+                  // phone side by side.
+                  <div key={r.path} className={cn("flex flex-col gap-2 rounded-md border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between", r.status && r.status !== "active" && "border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30")}>
                     <span className="flex min-w-0 flex-col">
                       <span className="truncate">{emailOf(r.subject)}</span>
                       {(() => {
@@ -732,7 +764,7 @@ export function AclModal({
                         ) : null;
                       })()}
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {expiryLabel(r.expire_time) && (
                         <Badge variant="muted" className="gap-1">
                           <Clock className="h-3 w-3" /> {expiryLabel(r.expire_time)}
@@ -743,12 +775,16 @@ export function AclModal({
                           <Badge variant="secondary" className="gap-1 text-amber-700 dark:text-amber-400">
                             <Clock className="h-3 w-3" /> {r.status === "pending" ? "awaiting approval" : "removal awaiting approval"}
                           </Badge>
-                          <Button variant="ghost" size="icon" title="Approve this change" disabled={busy} onClick={() => decide(r, "approve")}>
-                            <Check className="h-4 w-4 text-emerald-600" />
-                          </Button>
-                          <Button variant="ghost" size="icon" title="Reject this change" disabled={busy} onClick={() => decide(r, "reject")}>
-                            <X className="h-4 w-4 text-destructive" />
-                          </Button>
+                          {canDecideRule && (
+                            <>
+                              <Button variant="ghost" size="icon" title="Approve this change" disabled={busy} onClick={() => decide(r, "approve")}>
+                                <Check className="h-4 w-4 text-emerald-600" />
+                              </Button>
+                              <Button variant="ghost" size="icon" title="Reject this change" disabled={busy} onClick={() => decide(r, "reject")}>
+                                <X className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </>
+                          )}
                         </>
                       )}
                       {/* Same tone as the dropdowns, so an existing per-user rule reads as the same thing the
@@ -756,7 +792,7 @@ export function AclModal({
                       <Badge variant={r.effect === "deny" ? "destructive" : "secondary"} className={r.effect === "deny" ? undefined : accessTone(r.verb ? "allow" : r.level ?? "allow", createMode).text}>
                         {r.effect === "deny" ? "deny" : r.verb ? verbInfo(collection ?? "", r.verb).label : createMode ? "can create" : levelLabel(r.level ?? "allow")}
                       </Badge>
-                      <Button variant="ghost" size="icon" disabled={busy} onClick={() => removeRule(r)}>
+                      <Button variant="ghost" size="icon" aria-label="Remove this access rule" disabled={busy} onClick={() => removeRule(r)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </div>
@@ -809,17 +845,17 @@ export function AclModal({
                       <Input type="date" className="h-9" value={addExpires} min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)} onChange={(e) => setAddExpires(e.target.value)} />
                     </div>
                   )}
-                  <Button disabled={busy || (!addUsers.length && !addUser)} onClick={addUserRule}>
+                  <Button disabled={busy || !addUsers.length} onClick={addUserRule}>
                     <Plus className="h-4 w-4" /> Add{addUsers.length > 1 ? ` ${addUsers.length}` : ""}
                   </Button>
                 </div>
                 {/* The rule reads before it lands: the exact sentence the engine will enforce. */}
-                {(addUsers.length > 0 || addUser) && (
+                {addUsers.length > 0 && (
                   <p className="rounded-md bg-muted/40 px-2 py-1.5 text-xs">
                     <span className="font-medium">Grant:</span>{" "}
                     {ruleSentence(
-                      { path: "", subject_kind: "user", subject: addUsers[0] ?? addUser, collection: collection ?? "", scope: createMode ? "create" : scopeSel, field, ...(verbMode ? { verb: activeVerb } : { level: addAccess }), effect: addAccess === "deny" ? "deny" : "allow" },
-                      addUsers.length > 1 ? `${addUsers.length} people` : emailOf(addUsers[0] ?? addUser),
+                      { path: "", subject_kind: "user", subject: addUsers[0]!, collection: collection ?? "", scope: createMode ? "create" : scopeSel, field, ...(verbMode ? { verb: activeVerb } : { level: addAccess }), effect: addAccess === "deny" ? "deny" : "allow" },
+                      addUsers.length > 1 ? `${addUsers.length} people` : emailOf(addUsers[0]!),
                     )}
                     {addExpires && addAccess !== "deny" ? `, until ${addExpires}` : ""}
                   </p>
@@ -834,6 +870,26 @@ export function AclModal({
                 Access per role on {scopeNote} (one rule per role). {verbMode && "Allowed only with an explicit allow; a deny wins."}
                 {!verbMode && !createMode && " Levels nest: read ⊂ write ⊂ full (full = delete + purge)."}
               </p>
+              {/* Temporary access for a ROLE, not just a person: an audit window, a cover period, a project
+                  team that should stop having this in March. The write path already carried an expiry (the
+                  per-user add form has one); the roles tab simply never offered the control, so a role grant
+                  was always permanent and relied on somebody remembering to take it away. */}
+              <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 p-2 text-xs">
+                <span className="font-medium text-muted-foreground">Expires:</span>
+                <Input
+                  type="date"
+                  className="h-8 w-40"
+                  value={addExpires}
+                  min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)}
+                  onChange={(e) => setAddExpires(e.target.value)}
+                />
+                <span className="text-muted-foreground">
+                  {addExpires ? `Access set below removes itself on ${addExpires}.` : "Empty = permanent. Set a date and the next level you pick expires on it."}
+                </span>
+                {addExpires && (
+                  <Button variant="ghost" size="sm" className="h-7" onClick={() => setAddExpires("")}>Clear</Button>
+                )}
+              </div>
               {sortedRoles.length > 8 && <Input className="h-8" placeholder="Filter roles…" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} />}
               <div className="space-y-2">
                 {sortedRoles.length > 0 && shownRoles.length === 0 && <p className="text-sm text-muted-foreground">No role matches "{roleFilter}".</p>}
@@ -842,8 +898,12 @@ export function AclModal({
                   return (
                   <div
                     key={role.name}
+                    // A 160px access dropdown plus the row's padding leaves the role name about 150px on a
+                    // phone, and the name carries badges ("awaiting approval") that cannot wrap out of the
+                    // way. Stacked below `sm` - name over control, control full width - and the same single
+                    // row from `sm` up.
                     className={cn(
-                      "flex items-center justify-between rounded-md border px-3 py-2 text-sm",
+                      "flex flex-col gap-2 rounded-md border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between",
                       isEveryone && "border-indigo-300 bg-indigo-50 dark:border-indigo-900 dark:bg-indigo-950/40",
                     )}
                   >
@@ -875,8 +935,12 @@ export function AclModal({
                                 <Badge variant="secondary" className="gap-1 text-amber-700 dark:text-amber-400">
                                   <Clock className="h-3 w-3" /> {pendingRule.status === "pending" ? "awaiting approval" : "removal awaiting approval"}
                                 </Badge>
-                                <button type="button" disabled={busy} onClick={() => decide(pendingRule, "approve")} className="text-[11px] font-medium text-emerald-700 underline-offset-2 hover:underline dark:text-emerald-400">approve</button>
-                                <button type="button" disabled={busy} onClick={() => decide(pendingRule, "reject")} className="text-[11px] font-medium text-destructive underline-offset-2 hover:underline">reject</button>
+                                {canDecideRule && (
+                                  <>
+                                    <button type="button" disabled={busy} onClick={() => decide(pendingRule, "approve")} className="text-[11px] font-medium text-emerald-700 underline-offset-2 hover:underline dark:text-emerald-400">approve</button>
+                                    <button type="button" disabled={busy} onClick={() => decide(pendingRule, "reject")} className="text-[11px] font-medium text-destructive underline-offset-2 hover:underline">reject</button>
+                                  </>
+                                )}
                               </>
                             )}
                           </span>
@@ -884,7 +948,7 @@ export function AclModal({
                       );
                       return isEveryone ? (
                         <span className="flex flex-col">
-                          <span className="flex items-center gap-2">
+                          <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                             <Globe className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
                             <span className="font-medium text-indigo-700 dark:text-indigo-300">Everyone</span>
                             <span className="text-xs text-muted-foreground">all signed-in users</span>
@@ -900,7 +964,7 @@ export function AclModal({
                     })()}
                     {verbMode ? (
                       <Select value={roleVerbCurrent(role.name, activeVerb!)} onValueChange={(v) => setRoleVerb(role.name, activeVerb!, v)} disabled={busy}>
-                        <SelectTrigger className={cn("w-40 shrink-0", ACCESS_TRIGGER)}>
+                        <SelectTrigger className={cn("w-full shrink-0 sm:w-40", ACCESS_TRIGGER)}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -913,7 +977,7 @@ export function AclModal({
                       </Select>
                     ) : (
                       <Select value={roleLevelCurrent(role.name)} onValueChange={(v) => setRoleLevel(role.name, v)} disabled={busy}>
-                        <SelectTrigger className={cn("w-40 shrink-0", ACCESS_TRIGGER)}>
+                        <SelectTrigger className={cn("w-full shrink-0 sm:w-40", ACCESS_TRIGGER)}>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>

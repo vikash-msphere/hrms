@@ -1,7 +1,10 @@
+import type { Context } from "hono";
 import { z } from "zod";
 import * as schema from "../db/schema";
+import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listApplications, createApplication, updateApplication, advanceApplication, rejectApplication, type ApplicationInput } from "../services/ats";
+import { jsonBody } from "../http/jsonRequest";
+import { listApplications, createApplication, updateApplication, advanceApplication, hireApplication, rejectApplication, type ApplicationInput } from "../services/ats";
 import { toApplicationResource } from "../http/serialize";
 
 const writeSchema = z
@@ -18,7 +21,7 @@ const writeSchema = z
 
 // One candidate against one requisition, moving through the configured pipeline. :advance takes the target
 // stage and :reject a reason, both as sent - the hand-written route validated neither.
-const bodyOf = async (c: { req: { json: () => Promise<unknown> } }) => ((await c.req.json().catch(() => ({}))) as { stage?: string; reason?: string });
+const bodyOf = async (c: Context<AppEnv>) => (await jsonBody<{ stage?: string; reason?: string; notify_candidate?: boolean }>(c));
 
 export const applications = collectionRoutes<ApplicationInput, typeof schema.applications>({
   table: schema.applications,
@@ -43,6 +46,7 @@ export const applications = collectionRoutes<ApplicationInput, typeof schema.app
   },
   verbs: {
     advance: { run: async (deps, user, id, _body, c) => advanceApplication(deps, user, id, (await bodyOf(c)).stage) },
-    reject: { run: async (deps, user, id, _body, c) => rejectApplication(deps, user, id, (await bodyOf(c)).reason) },
+    hire: { run: (deps, user, id) => hireApplication(deps, user, id) },
+    reject: { run: async (deps, user, id, _body, c) => { const b = await bodyOf(c); return rejectApplication(deps, user, id, b.reason, b.notify_candidate === true); } },
   },
 });

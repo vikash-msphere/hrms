@@ -14,18 +14,25 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { ActivitySection } from "@/components/common/ActivitySection";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { useDeepOpen } from "@/hooks/useDeepOpen";
+import { AccessScope } from "@/components/access/AccessScope";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 type Form = { name: string; start: string; end: string; pay: string };
 const EMPTY: Form = { name: "", start: "", end: "", pay: "" };
 
-export default function PayPeriods({ embedded }: { me?: Me; embedded?: boolean }) {
+export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: boolean; openId?: string }) {
   const { rows, state, error, reload } = useCollection<PayPeriod>("pay-periods", { showDeleted: true });
+  useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
   const sd = useSoftDelete("pay-periods", "pay period", reload);
@@ -36,20 +43,40 @@ export default function PayPeriods({ embedded }: { me?: Me; embedded?: boolean }
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<PayPeriod | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
+  const [err, setErr] = useState<string | null>(null);
+  // Periods are set up in runs of twelve, so the form offers to stay open rather than making someone reopen it
+  // eleven times. A checkbox, not a third footer button: three stacked buttons on a phone is worse than a tick.
+  const [again, setAgain] = useState(false);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "pay period" });
 
   function openCreate() {
     setEditing(null);
     setForm(EMPTY);
+    setErr(null);
     setOpen(true);
   }
   function openEdit(pp: PayPeriod) {
     setEditing(pp);
     setForm({ name: pp.display_name, start: pp.period_start, end: pp.period_end, pay: pp.pay_date });
+    setErr(null);
     setOpen(true);
   }
 
+  // A period that overlaps a live one double-counts everyone in it, and the clash only surfaces later as two
+  // runs paying the same days. Cheaper to say so while the dates are still being typed.
+  const clash = rows.find(
+    (pp) =>
+      !pp.delete_time &&
+      pp.path !== editing?.path &&
+      form.start &&
+      form.end &&
+      pp.period_start <= form.end &&
+      pp.period_end >= form.start,
+  );
+
   async function submit() {
     setBusy(true);
+    setErr(null);
     try {
       const body = { display_name: form.name, period_start: form.start, period_end: form.end, pay_date: form.pay };
       if (editing) {
@@ -59,10 +86,11 @@ export default function PayPeriods({ embedded }: { me?: Me; embedded?: boolean }
         await create("pay-periods", body);
         toast({ title: "Pay period created", variant: "success" });
       }
-      setOpen(false);
+      if (again && !editing) { setForm(EMPTY); guard.markSaved(EMPTY); }
+      else { guard.markSaved(); setOpen(false); }
       reload();
     } catch (e) {
-      toast({ title: "Couldn't save pay period", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -119,15 +147,23 @@ export default function PayPeriods({ embedded }: { me?: Me; embedded?: boolean }
         )}
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim() && form.start && form.end && form.pay && form.end >= form.start) void submit(); }}>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && form.start && form.end && form.pay && form.end >= form.start) void submit(); }}>
+          <AccessScope collection="pay-periods" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit pay period" : "New pay period"}</DialogTitle>
+            <DialogDescription>
+              {editing
+                ? "Runs already built against this period keep their numbers until they're rebuilt."
+                : "The cycle a payroll run is built against: the days it pays for, and the date the money leaves."}
+            </DialogDescription>
           </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
           <Field label="Label">
             <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. May 2026" autoFocus />
           </Field>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <FieldRow>
             <Field label="Period start">
               <Input type="date" value={form.start} onChange={(e) => {
                 const start = e.target.value;
@@ -146,16 +182,35 @@ export default function PayPeriods({ embedded }: { me?: Me; embedded?: boolean }
             <Field label="Period end" error={form.start && form.end && form.end < form.start ? "End is before the start." : undefined}>
               <Input type="date" value={form.end} min={form.start || undefined} onChange={(e) => setForm({ ...form, end: e.target.value })} />
             </Field>
-          </div>
-          <Field label="Pay date">
+          </FieldRow>
+          {/* Paying before the period closes is legitimate (many payrolls pay on the 25th for a month ending on
+              the 31st) but it means the last days are paid on estimate, so it is said rather than blocked. */}
+          <Field
+            label="Pay date"
+            hint={form.pay && form.end && form.pay < form.end ? "Falls inside the period - the last days are paid before they're worked." : "The day the money reaches employees."}
+          >
             <Input type="date" value={form.pay} onChange={(e) => setForm({ ...form, pay: e.target.value })} />
           </Field>
+          {clash && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              Overlaps <span className="font-medium">{clash.display_name}</span> ({formatDate(clash.period_start)} - {formatDate(clash.period_end)}). Two periods covering the same days can pay those days twice.
+            </p>
+          )}
+          {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+          {!editing && (
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox checked={again} onCheckedChange={(v) => setAgain(v === true)} />
+              Keep this open to add another
+            </label>
+          )}
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
             <Button onClick={submit} loading={busy} disabled={!form.name.trim() || !form.start || !form.end || !form.pay || form.end < form.start}>
-              {editing ? "Save changes" : "Create"}
+              {editing ? "Save changes" : again ? "Create & add another" : "Create"}
             </Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>

@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { renderSearchDdl, SEARCH_DDL_MARKER } from "../src/db/searchDdl";
 import { SEARCH_INDEX } from "../src/domain/searchIndex";
+import { CHANGE_DDL_MARKER } from "../src/db/changeDdl";
 
 // The FTS index and its sync triggers are GENERATED from SEARCH_INDEX and appended to the single migration by
 // `npm run db:generate` (drizzle-kit emits neither virtual tables nor triggers). Nothing at runtime would fail
@@ -19,7 +20,12 @@ describe("generated search DDL matches the migration", () => {
   it("has the generated block, byte-identical to the generator's output", () => {
     const cut = migration.indexOf(SEARCH_DDL_MARKER);
     expect(cut, "no generated search DDL in the migration - run `npm run db:generate`").toBeGreaterThan(0);
-    expect(migration.slice(cut).trim(), "search DDL is stale - run `npm run db:generate`").toBe(renderSearchDdl().trim());
+    // The migration carries a SECOND generated block after this one (the change stamps, src/db/changeDdl.ts),
+    // so compare up to where that starts rather than to the end of the file.
+    const next = migration.indexOf(CHANGE_DDL_MARKER, cut);
+    const block = (next > cut ? migration.slice(cut, next) : migration.slice(cut))
+      .replace(/(?:\s*-->\s*statement-breakpoint)+\s*$/, "");
+    expect(block.trim(), "search DDL is stale - run `npm run db:generate`").toBe(renderSearchDdl().trim());
   });
 
   it("covers every searchable collection with insert, update and delete triggers", () => {

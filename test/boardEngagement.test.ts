@@ -8,9 +8,11 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
+import { eq } from "drizzle-orm";
 import { genId } from "../src/lib/idCodec";
 import {
   createAnnouncement,
+  listAnnouncements,
   addReply,
   markAnnouncementRead,
   markAllAnnouncementsRead,
@@ -199,5 +201,48 @@ describe("mentions", () => {
     const mentions = (await notifications()).filter((n) => n.type === "announcement.mention");
     expect(mentions).toHaveLength(1);
     expect(mentions[0]!.recipientId).toBe(named.employeeId);
+  });
+});
+
+// A list page caps out, so a text filter that only ran on the client searched a window. The board's list takes
+// `q` and matches it against the FTS index over the WHOLE collection, ANDed onto the visibility it always
+// applied - so the reach grows and the rules do not.
+describe("searching the board", () => {
+  it("finds a post that is past the first page", async () => {
+    const actor = await seedActor();
+    await post(actor, "Filler one");
+    await post(actor, "Filler two");
+    const target = await post(actor, "Zebra parade");
+    // The list pages newest-first, so stamping the target as the OLDEST row puts it firmly past a one-row
+    // page: an unfiltered read can only reach it by following the cursor.
+    await deps.db
+      .update(schema.announcements)
+      .set({ createdAt: new Date(Date.now() - 60_000) })
+      .where(eq(schema.announcements.uuid, target.uuid));
+
+    const page1 = await listAnnouncements(deps, editors, 1);
+    expect(page1.items.map((a) => a.uuid)).not.toContain(target.uuid);
+    expect(page1.nextPageToken).toBeTruthy();
+
+    const found = await listAnnouncements(deps, editors, 1, undefined, false, "zebra");
+    expect(found.items.map((a) => a.uuid)).toEqual([target.uuid]);
+  });
+
+  it("still hides a draft from someone who may not see it", async () => {
+    const actor = await seedActor();
+    const draft = await createAnnouncement(deps, actor, { kind: "post", title: "Zebra secret", body: "not out yet", published: false });
+
+    const asEditor = await listAnnouncements(deps, editors, 50, undefined, false, "zebra");
+    expect(asEditor.items.map((a) => a.uuid)).toContain(draft.uuid);
+
+    const asReader = await listAnnouncements(deps, everyone, 50, undefined, false, "zebra");
+    expect(asReader.items.map((a) => a.uuid)).not.toContain(draft.uuid);
+  });
+
+  it("ignores a query too short to be a search", async () => {
+    const actor = await seedActor();
+    await post(actor, "Zebra parade");
+    const all = await listAnnouncements(deps, editors, 50, undefined, false, "z");
+    expect(all.items).toHaveLength(1);
   });
 });

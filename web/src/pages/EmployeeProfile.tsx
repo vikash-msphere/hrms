@@ -34,14 +34,14 @@ import { EmergencyQuickView } from "@/components/common/EmergencyQuickView";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { ProfileCompleteness, type CompletenessKey } from "@/components/common/ProfileCompleteness";
 import { IconEdit } from "@/components/common/IconEdit";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
 import { AccessTab } from "@/components/common/AccessTab";
 import { SettingsButton } from "@/components/common/SettingsButton";
@@ -100,7 +100,9 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   const { rows: depts } = useCollection<Department>("departments");
   const { rows: employees } = useCollection<Employee>("employees");
   const { rows: types } = useCollection<LeaveType>("leave-types");
-  const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
+  // This person's balances, narrowed server-side. Filtering a page of the whole collection in the browser was
+  // both dearer and blind to anything past the cursor.
+  const { rows: balances } = useCollection<LeaveBalance>("leave-balances", { params: { employee: `employees/${id}` } });
   const { toast } = useToast();
 
   const deptName = useMemo(() => {
@@ -115,13 +117,12 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
     const m = new Map(types.map((t) => [idOf(t.path), t.display_name]));
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [types]);
-  const myBalances = useMemo(() => balances.filter((b) => b.employee && idOf(b.employee) === id), [balances, id]);
-  // This employee's leave requests (scoped by the viewer's leave-requests access), newest first.
-  const { rows: leaveReqs } = useCollection<LeaveRequest>("leave-requests");
-  const myLeaves = useMemo(
-    () => leaveReqs.filter((l) => l.employee && idOf(l.employee) === id).sort((a, b) => b.start_date.localeCompare(a.start_date)),
-    [leaveReqs, id],
-  );
+  const myBalances = balances;
+  // This employee's leave requests (scoped by the viewer's leave-requests access), newest first - narrowed to
+  // this person server-side, so the profile shows their whole history rather than whichever of their requests
+  // happened to land on the first page of the collection.
+  const { rows: leaveReqs } = useCollection<LeaveRequest>("leave-requests", { params: { employee: `employees/${id}` } });
+  const myLeaves = useMemo(() => [...leaveReqs].sort((a, b) => b.start_date.localeCompare(a.start_date)), [leaveReqs]);
 
   const onProbation = !!emp?.probation_end_date && Date.parse(emp.probation_end_date) >= Date.now();
 
@@ -180,31 +181,23 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
 
   // --- edit: employment dates ---
   const [empOpen, setEmpOpen] = useState(false);
-  const [empForm, setEmpForm] = useState({ start_date: "", probation_end_date: "", epf_enrolled: false });
+  const [empForm, setEmpForm] = useState({ start_date: "", probation_end_date: "", epf_enrolled: false, eps_excluded: false });
   // Offer to re-solve pay splits when a change here moves one (EPF enrolment). Silent for everything else.
   const { promptReapply } = useSplitStaleness({ auto: false });
   function openEmp() {
-    setEmpForm({ start_date: emp?.start_date ?? "", probation_end_date: emp?.probation_end_date ?? "", epf_enrolled: !!emp?.epf_enrolled });
+    setEmpForm({ start_date: emp?.start_date ?? "", probation_end_date: emp?.probation_end_date ?? "", epf_enrolled: !!emp?.epf_enrolled, eps_excluded: !!emp?.eps_excluded });
     setEmpOpen(true);
   }
 
-  const [saving, setSaving] = useState(false);
-  async function savePatch(body: Record<string, unknown>, done: string, close: () => void) {
-    setSaving(true);
-    try {
-      await patch(`employees/${id}`, body, emp?.etag);
-      toast({ title: done, variant: "success" });
-      close();
-      reload();
-    } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setSaving(false);
-    }
+  // Throws on failure: the WriteDialog that called it shows the reason and stays open.
+  async function savePatch(body: Record<string, unknown>, done: string) {
+    await patch(`employees/${id}`, body, emp?.etag);
+    toast({ title: done, variant: "success" });
+    reload();
   }
-  // Named submit handlers so both the footer button and Enter-to-submit share one definition.
   const coreEmailOk = core.work_email.trim() === "" || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(core.work_email.trim());
   const coreValid = !!core.first_name.trim() && !!core.last_name.trim() && coreEmailOk;
+  const coreWhyNot = !core.first_name.trim() || !core.last_name.trim() ? "A first and last name are required." : !coreEmailOk ? "That work email isn't a valid address." : undefined;
   const saveCore = () =>
     savePatch(
       {
@@ -218,7 +211,6 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
         manager: core.manager === NONE ? null : core.manager,
       },
       "Profile updated",
-      () => setCoreOpen(false),
     );
   // Value-based check: only complain once both dates are set and out of order.
   const empDatesOk = !empForm.start_date || !empForm.probation_end_date || empForm.probation_end_date >= empForm.start_date;
@@ -228,9 +220,8 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   const saveEmp = async () => {
     const enrolmentChanged = !!emp?.epf_enrolled !== empForm.epf_enrolled;
     await savePatch(
-      { start_date: empForm.start_date || null, probation_end_date: empForm.probation_end_date || null, epf_enrolled: empForm.epf_enrolled },
+      { start_date: empForm.start_date || null, probation_end_date: empForm.probation_end_date || null, epf_enrolled: empForm.epf_enrolled, eps_excluded: empForm.eps_excluded },
       "Employment updated",
-      () => setEmpOpen(false),
     );
     if (enrolmentChanged) await promptReapply();
   };
@@ -251,9 +242,11 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
       <DataState state={state} error={error} rows={2}>
         {emp && (
           <>
-            <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <Button variant="ghost" size="sm" className="-ml-2 text-muted-foreground" onClick={() => navigate("employees")}>
-                <ArrowLeft className="h-4 w-4" /> Back to directory
+                {/* "Back to directory" plus the prev/next pager is wider than a phone; the label shortens
+                    rather than the pager disappearing. */}
+                <ArrowLeft className="h-4 w-4" /> <span className="hidden sm:inline">Back to directory</span><span className="sm:hidden">Back</span>
               </Button>
               {empIdx >= 0 && liveEmployees.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -426,7 +419,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                     <Card>
                       <CardHeader><CardTitle className="text-base">Leave balances</CardTitle></CardHeader>
                       <CardContent>
-                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
                           {myBalances.map((b) => (
                             <div key={b.path} className="rounded-lg border p-3">
                               <div className="text-sm text-muted-foreground">{typeName(b.leave_type)}</div>
@@ -441,17 +434,18 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                     <Card>
                       <CardHeader><CardTitle className="text-base">Leave history</CardTitle></CardHeader>
                       <CardContent>
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
+                        <div className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto">
+                          {/* Five columns of dates: a labelled block per request on a phone. */}
+                          <table className="table-stack w-full text-sm">
                             <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Type</th><th className="py-2 pr-3 font-medium">From</th><th className="py-2 pr-3 font-medium">To</th><th className="py-2 pr-3 text-right font-medium">Days</th><th className="py-2 font-medium">Status</th></tr></thead>
                             <tbody>
                               {myLeaves.map((l) => (
                                 <tr key={l.path} className="border-b last:border-0">
                                   <td className="py-1.5 pr-3 font-medium">{typeName(l.leave_type)}</td>
-                                  <td className="py-1.5 pr-3 tabular-nums">{formatDate(l.start_date)}</td>
-                                  <td className="py-1.5 pr-3 tabular-nums">{formatDate(l.end_date)}</td>
-                                  <td className="py-1.5 pr-3 text-right tabular-nums">{l.days}</td>
-                                  <td className="py-1.5"><StatusBadge state={l.state} /></td>
+                                  <td data-label="From" className="py-1.5 pr-3 tabular-nums">{formatDate(l.start_date)}</td>
+                                  <td data-label="To" className="py-1.5 pr-3 tabular-nums">{formatDate(l.end_date)}</td>
+                                  <td data-label="Days" className="py-1.5 pr-3 text-right tabular-nums">{l.days}</td>
+                                  <td data-label="Status" className="py-1.5"><StatusBadge state={l.state} /></td>
                                 </tr>
                               ))}
                             </tbody>
@@ -487,7 +481,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
               )}
               {canAssets && (
                 <TabsContent value="assets">
-                  <EmployeeAssets employeeId={id} employeeName={`${emp.first_name} ${emp.last_name}`} canAssign={canAssetsEdit} />
+                  <EmployeeAssets employeeId={id} employeeName={`${emp.first_name} ${emp.last_name}`} canAssign={canAssetsEdit} isSelf={id === me.employee_id} />
                 </TabsContent>
               )}
               <TabsContent value="documents">
@@ -505,20 +499,29 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
               )}
             </Tabs>
 
-            <Dialog open={coreOpen} onOpenChange={setCoreOpen}>
-              <DialogContent onEnterSubmit={() => { if (!saving && coreValid) saveCore(); }}>
-                <DialogHeader>
-                  <DialogTitle>Edit profile</DialogTitle>
-                </DialogHeader>
-                <div className="grid gap-4 sm:grid-cols-2">
+            <WriteDialog
+              open={coreOpen}
+              onClose={() => setCoreOpen(false)}
+              title="Edit profile"
+              description="Who they are and where they sit. Changes show up in the directory, org chart and approval routing straight away."
+              collection="employees"
+              objectPath={empPath}
+              guardLabel="profile edit"
+              form={core}
+              submitLabel="Save changes"
+              canSubmit={coreValid}
+              whyNot={coreWhyNot}
+              onSubmit={saveCore}
+            >
+                <FieldRow>
                   <Field label="First name"><Input value={core.first_name} onChange={(e) => setCore({ ...core, first_name: e.target.value })} autoFocus /></Field>
                   <Field label="Last name"><Input value={core.last_name} onChange={(e) => setCore({ ...core, last_name: e.target.value })} /></Field>
-                </div>
+                </FieldRow>
                 <Field label="Legal name" hint="As on official documents/IDs/bank. Used for signing and letter sign-off. Leave blank to use the display name."><Input value={core.legal_name} onChange={(e) => setCore({ ...core, legal_name: e.target.value })} placeholder={`${core.first_name} ${core.last_name}`.trim()} /></Field>
                 <Field label="Employee ID" field="employee_number" hint="Shown on payslips and letters, e.g. EMP-0042. Must be unique."><Input value={core.employee_number} onChange={(e) => setCore({ ...core, employee_number: e.target.value })} className="font-mono" /></Field>
                 <Field label="Work email" error={core.work_email.trim() !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(core.work_email.trim()) ? "Enter a valid email address." : undefined}><Input type="email" value={core.work_email} onChange={(e) => setCore({ ...core, work_email: e.target.value })} /></Field>
                 <Field label="Job title"><Input value={core.job_title} onChange={(e) => setCore({ ...core, job_title: e.target.value })} /></Field>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <FieldRow>
                   <Field label="Department" field="department">
                     <Select value={core.department} onValueChange={(v) => setCore({ ...core, department: v })}>
                       <SelectTrigger><SelectValue placeholder="Unassigned" /></SelectTrigger>
@@ -538,33 +541,45 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                       options={[{ value: NONE, label: "None" }, ...employees.filter((e) => !e.disabled && idOf(e.path) !== id).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))]}
                     />
                   </Field>
-                </div>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setCoreOpen(false)}>Cancel</Button>
-                  <Button loading={saving} disabled={!coreValid} onClick={saveCore}>Save changes</Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+                </FieldRow>
+            </WriteDialog>
 
-            <Dialog open={empOpen} onOpenChange={setEmpOpen}>
-              <DialogContent onEnterSubmit={() => { if (!saving && empDatesOk) saveEmp(); }}>
-                <DialogHeader>
-                  <DialogTitle>Edit employment</DialogTitle>
-                </DialogHeader>
-                <div className="grid gap-4 sm:grid-cols-2">
+            <WriteDialog
+              open={empOpen}
+              onClose={() => setEmpOpen(false)}
+              title="Edit employment"
+              description="Start date and probation drive leave accrual and the confirmation badge; EPF changes what payroll deducts from the next run."
+              collection="employees"
+              objectPath={empPath}
+              guardLabel="employment edit"
+              form={empForm}
+              submitLabel="Save changes"
+              canSubmit={empDatesOk}
+              whyNot="Probation can't end before the start date."
+              onSubmit={saveEmp}
+            >
+                <FieldRow>
                   <Field label="Start date" hint="Drives leave accrual."><Input type="date" value={empForm.start_date} onChange={(e) => setEmpForm({ ...empForm, start_date: e.target.value })} autoFocus /></Field>
-                  <Field label="Probation ends" hint="Leave blank to clear." error={!empDatesOk ? "Probation can't end before the start date." : undefined}><Input type="date" value={empForm.probation_end_date} onChange={(e) => setEmpForm({ ...empForm, probation_end_date: e.target.value })} /></Field>
-                </div>
+                  <Field label="Probation ends" hint="Leave blank to clear." error={!empDatesOk ? "Probation can't end before the start date." : undefined}><Input type="date" min={empForm.start_date || undefined} value={empForm.probation_end_date} onChange={(e) => setEmpForm({ ...empForm, probation_end_date: e.target.value })} /></Field>
+                </FieldRow>
                 <label className="flex items-start gap-2 text-sm">
                   <input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-input" checked={empForm.epf_enrolled} onChange={(e) => setEmpForm({ ...empForm, epf_enrolled: e.target.checked })} />
                   <span>Enrolled in EPF<span className="block text-xs text-muted-foreground">Opt-in. Adds the provident-fund deduction and the employer PF share within CTC.</span></span>
                 </label>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setEmpOpen(false)}>Cancel</Button>
-                  <Button loading={saving} disabled={!empDatesOk} onClick={saveEmp}>Save changes</Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+                {empForm.epf_enrolled && (
+                  <label className="flex items-start gap-2 text-sm">
+                    <input type="checkbox" className="mt-0.5 h-4 w-4 rounded border-input" checked={empForm.eps_excluded} onChange={(e) => setEmpForm({ ...empForm, eps_excluded: e.target.checked })} />
+                    <span>Excluded from EPS<span className="block text-xs text-muted-foreground">Tick when their pay was already above the pension wage ceiling when they first joined EPF. The whole employer share then stays in EPF instead of 8.33% going to the pension fund. Affects the statutory register and PF challan only, never take-home.</span></span>
+                  </label>
+                )}
+                {!!emp.epf_enrolled !== empForm.epf_enrolled && (
+                  <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                    {empForm.epf_enrolled
+                      ? "Enrolling adds a PF deduction and the employer share to their CTC build-up. You'll be offered a re-split of their pay after saving."
+                      : "Un-enrolling drops the PF lines, which changes take-home and the CTC they were promised. You'll be offered a re-split after saving."}
+                  </p>
+                )}
+            </WriteDialog>
           </>
         )}
       </DataState>

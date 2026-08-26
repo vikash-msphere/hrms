@@ -1,7 +1,7 @@
 import {
   CalendarPlus, ReceiptText, LifeBuoy, Sparkles, Megaphone,
-  Target, Timer, House, MessagesSquare, UserPlus, Lightbulb, Upload, KanbanSquare,
-  HandCoins, FileCheck, UserSearch, Briefcase, UserRoundPlus, Zap,
+  Target, Timer, House, MessagesSquare, UserPlus, Lightbulb, Upload, KanbanSquare, Clock,
+  HandCoins, FileCheck, UserSearch, Briefcase, UserRoundPlus, Zap, Laptop,
   type LucideIcon,
 } from "lucide-react";
 import { navigate } from "@/router";
@@ -32,17 +32,23 @@ export type QuickAction = {
 
 export const QUICK_ACTIONS: QuickAction[] = [
   // Request - submitted for approval / verification / servicing
-  { id: "request-leave", label: "Request leave", icon: CalendarPlus, route: "leave-requests", intent: "request-leave", group: "Request", visible: (me) => !!me.employee_id },
+  { id: "request-leave", label: "Request leave", icon: CalendarPlus, route: "leave-requests", intent: "request-leave", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "leave-requests.write") },
   { id: "new-overtime", label: "Log overtime", icon: Timer, route: "overtime", intent: "new-overtime", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "overtime-requests.write") },
   { id: "new-remote", label: "Request remote work", icon: House, route: "remote-work", intent: "new-remote", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "remote-work-requests.write") },
-  { id: "new-reimbursement", label: "New reimbursement", icon: ReceiptText, route: "reimbursements", intent: "new-reimbursement", group: "Request", visible: (me) => !!me.employee_id },
+  // Lands on the profile's Assets tab, which is where a person's kit and their requests for it both live.
+  { id: "new-asset-request", label: "Request an asset", icon: Laptop, route: "profile", intent: "new-asset-request", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "asset-requests.write") },
+  { id: "new-reimbursement", label: "New reimbursement", icon: ReceiptText, route: "reimbursements", intent: "new-reimbursement", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "reimbursements.write") },
   { id: "new-expense", label: "New expense", icon: ReceiptText, route: "expenses", intent: "new-expense", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "expenses.write") },
   { id: "quick-expense", label: "Quick expense", icon: Zap, route: "expenses", intent: "quick-expense", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "expenses.write") },
   { id: "new-loan", label: "Request a loan", icon: HandCoins, route: "loans", intent: "new-loan", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "loans.write") },
   { id: "new-tax", label: "Declare tax investment", icon: FileCheck, route: "tax-declarations", intent: "new-tax", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "tax-declarations.write") },
   { id: "new-referral", label: "Refer someone", icon: UserPlus, route: "referrals", intent: "new-referral", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "referrals.write") },
   { id: "new-suggestion", label: "Submit a suggestion", icon: Lightbulb, route: "suggestions", intent: "new-suggestion", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "suggestions.write") },
-  { id: "new-ticket", label: "Raise a support ticket", icon: LifeBuoy, route: "tickets", intent: "new-ticket", group: "Request", visible: (me) => !!me.employee_id },
+  { id: "new-ticket", label: "Raise a support ticket", icon: LifeBuoy, route: "tickets", intent: "new-ticket", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "tickets.write") },
+  // Punching is state-dependent, so it can't be a "New ..." menu item: the top-bar clock chip is its real
+  // affordance. This entry exists so ⌘K can reach it too - it opens Attendance and punches the way that
+  // matches the caller's current state.
+  { id: "clock-toggle", label: "Clock in / clock out", icon: Clock, route: "attendance", intent: "clock-toggle", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "attendance.clockIn") },
   // Create - authored directly
   { id: "new-card", label: "Create a task", icon: KanbanSquare, route: "boards", intent: "new-card", group: "Create", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "cards.write") },
   { id: "new-goal", label: "Set a goal", icon: Target, route: "goals", intent: "new-goal", group: "Create", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "goals.write") },
@@ -61,7 +67,8 @@ export const QUICK_ACTIONS: QuickAction[] = [
 // and every "+" menu resolve path (but still appear in the ⌘K palette).
 export const KUDOS_ACTION_ID = "give-kudos";
 export const TICKET_ACTION_ID = "new-ticket";
-export const STANDALONE_ACTION_IDS = new Set([KUDOS_ACTION_ID, TICKET_ACTION_ID]);
+export const CLOCK_ACTION_ID = "clock-toggle";
+export const STANDALONE_ACTION_IDS = new Set([KUDOS_ACTION_ID, TICKET_ACTION_ID, CLOCK_ACTION_ID]);
 
 // Actions the org can arrange into menu sections (everything except the standalone top-bar buttons).
 export const CONFIGURABLE_QUICK_ACTIONS = QUICK_ACTIONS.filter((a) => !STANDALONE_ACTION_IDS.has(a.id));

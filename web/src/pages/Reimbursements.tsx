@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Ban, Paperclip, Download, Wallet } from "lucide-react";
+import { Plus, Ban, Paperclip, Download, Wallet, ClipboardCheck } from "lucide-react";
+import { navigate, navigateTab } from "@/router";
 import { create, get, invoke, upload, download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
@@ -17,14 +18,22 @@ import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { useDialogGuard, useDialogDraft } from "@/components/common/dialogGuard";
+import { DraftNotice } from "@/components/common/DraftNotice";
+import { AccessScope } from "@/components/access/AccessScope";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
+import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const sum = (rs: Reimbursement[]) => rs.reduce((n, r) => n + (r.amount || 0), 0);
@@ -38,6 +47,7 @@ export default function Reimbursements({ me }: { me: Me }) {
   const { rows: categories } = useCollection<ReimbursementCategory>("reimbursement-categories");
   const { rows: employees } = useCollection<Employee>("employees");
   const { toast } = useToast();
+  const confirm = useConfirm();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const canDecide = usePermission("reimbursements.approve");
@@ -46,9 +56,15 @@ export default function Reimbursements({ me }: { me: Me }) {
   const [form, setForm] = useState(EMPTY);
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "claim" });
+  // A claim is filled in from a paper receipt, often on a phone, often interrupted. The typed part survives a
+  // reload; the attachment can't (a File isn't serializable), which the notice's "start over" makes recoverable.
+  const draft = useDialogDraft("reimbursement-claim", open, form, setForm);
   function openCreate() {
     setForm({ ...EMPTY, incurred_on: todayStr() });
     setFile(null);
+    setErr(null);
     setOpen(true);
   }
   // Global "New reimbursement" quick action opens the claim dialog on arrival.
@@ -56,7 +72,7 @@ export default function Reimbursements({ me }: { me: Me }) {
   // Payout mode drives whether a manual "Mark paid" action is offered (separate) or payout is automatic (payroll).
   const [payoutMode, setPayoutMode] = useState<"payroll" | "separate">("payroll");
   useEffect(() => {
-    get<{ value?: { payout_mode?: string } }>("settings/reimbursements")
+    getSetting<{ payout_mode?: string }>("reimbursements")
       .then((s) => { if (s.value?.payout_mode === "separate") setPayoutMode("separate"); })
       .catch(() => {});
   }, []);
@@ -81,12 +97,31 @@ export default function Reimbursements({ me }: { me: Me }) {
   const pending = myAll.filter(isPending);
   const approvedUnpaid = myAll.filter((r) => upper(r.state) === "APPROVED");
   const paidThisYear = myAll.filter((r) => upper(r.state) === "PAID" && (r.paid_time ?? "") >= yearStart);
+  // A claim of your own with nothing attached is the one that comes back to you; someone else's pending claim
+  // is a decision you owe them. Both are worth a metric of their own.
+  const missingReceipt = pending.filter((r) => !r.has_receipt);
+  const toDecide = useMemo(() => (canDecide ? rows.filter((r) => isPending(r) && !isOwn(r)) : []), [rows, canDecide, me.employee_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedCat = categories.find((c) => c.path && form.category && idOf(c.path) === idOf(form.category));
   const receiptRequired = !!selectedCat?.requires_receipt;
 
+  // The same expense filed twice is the classic claim mistake - a slow submit, a reload, a "did that go
+  // through?" - and it's invisible on a list sorted by date. Matched on the trio that identifies an expense.
+  const duplicate = useMemo(() => {
+    if (!(Number(form.amount) > 0) || !form.incurred_on) return undefined;
+    return myAll.find(
+      (r) =>
+        Math.abs(r.amount - Number(form.amount)) < 0.01 &&
+        (r.incurred_on ?? "").slice(0, 10) === form.incurred_on &&
+        idOf(r.category ?? "") === idOf(form.category ?? "") &&
+        upper(r.state) !== "CANCELLED" &&
+        upper(r.state) !== "REJECTED",
+    );
+  }, [myAll, form.amount, form.incurred_on, form.category]);
+
   async function submit() {
     setBusy(true);
+    setErr(null);
     try {
       const claim = await create<Reimbursement>("reimbursements", {
         category: form.category || null,
@@ -96,12 +131,15 @@ export default function Reimbursements({ me }: { me: Me }) {
       });
       if (file) await upload(`reimbursements/${idOf(claim.path)}`, file);
       toast({ title: "Claim submitted", variant: "success" });
+      // Filed, so the draft has served its purpose - leaving it would restore a claim that already exists.
+      draft.clear();
+      guard.markSaved();
       setForm(EMPTY);
       setFile(null);
       setOpen(false);
       reload();
     } catch (e) {
-      toast({ title: "Couldn't submit", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -109,6 +147,7 @@ export default function Reimbursements({ me }: { me: Me }) {
 
   async function action(r: Reimbursement, verb: "approve" | "reject" | "cancel" | "pay") {
     const done = { approve: "Claim approved", reject: "Claim rejected", cancel: "Claim cancelled", pay: "Claim marked paid" };
+    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s ${money(r.amount ?? 0)} claim`))) return;
     try {
       await invoke("reimbursements/" + idOf(r.path), verb, r.etag);
       toast({ title: done[verb], variant: "success" });
@@ -203,6 +242,7 @@ export default function Reimbursements({ me }: { me: Me }) {
       getRowId={(r) => r.path}
       emptyTitle={emptyTitle}
       emptyDescription={emptyDescription}
+      emptyAction={requestBtn}
       accessCollection="reimbursements"
       accessTargetOf={(r) => ({ objectPath: r.path, label: `Claim ${money(r.amount)}`, can: r.access?.can })}
     />
@@ -217,9 +257,17 @@ export default function Reimbursements({ me }: { me: Me }) {
       {state === "ready" && myAll.length > 0 && (
         <SummaryStrip
           items={[
-            { label: "Pending", value: money(sum(pending)), hint: `${pending.length} claim${pending.length === 1 ? "" : "s"}`, tone: pending.length ? "warning" : "muted" },
-            { label: "Approved, awaiting payout", value: money(sum(approvedUnpaid)), hint: approvedUnpaid.length ? `${approvedUnpaid.length} claim${approvedUnpaid.length === 1 ? "" : "s"}${payoutMode === "payroll" ? " · paid via payroll" : ""}` : "all settled", tone: approvedUnpaid.length ? "default" : "muted" },
-            { label: "Paid this year", value: money(sum(paidThisYear)), hint: `${paidThisYear.length} claim${paidThisYear.length === 1 ? "" : "s"}`, tone: "success" },
+            // Your own claims live in the Requests/History tabs below; other people's pending claims are a
+            // decision, which belongs to the Approvals inbox. Each metric opens the one that owns its rows.
+            { label: "Pending", value: money(sum(pending)), hint: `${pending.length} claim${pending.length === 1 ? "" : "s"}, cancellable`, tone: pending.length ? "warning" : "muted", onClick: () => navigateTab("reimbursements", "requests") },
+            ...(toDecide.length
+              ? [{ label: "Awaiting your decision", value: money(sum(toDecide)), icon: ClipboardCheck, tone: "warning" as const, hint: `${toDecide.length} from others`, onClick: () => navigate("approvals") }]
+              : []),
+            ...(missingReceipt.length
+              ? [{ label: "No receipt attached", value: missingReceipt.length, icon: Paperclip, tone: "warning" as const, hint: "attach before deciding", onClick: () => navigateTab("reimbursements", "requests") }]
+              : []),
+            { label: "Approved, awaiting payout", value: money(sum(approvedUnpaid)), hint: approvedUnpaid.length ? `${approvedUnpaid.length} claim${approvedUnpaid.length === 1 ? "" : "s"}${payoutMode === "payroll" ? " · via payroll" : ""}` : "all settled", tone: approvedUnpaid.length ? "default" : "muted", onClick: () => navigateTab("reimbursements", "history") },
+            { label: "Paid this year", value: money(sum(paidThisYear)), hint: `${paidThisYear.length} claim${paidThisYear.length === 1 ? "" : "s"}`, tone: "success", onClick: () => navigateTab("reimbursements", "history") },
           ]}
         />
       )}
@@ -240,48 +288,74 @@ export default function Reimbursements({ me }: { me: Me }) {
         }
       />
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        <DialogContent scrollBody>
+          <AccessScope collection="reimbursements">
           <DialogHeader>
             <DialogTitle>New reimbursement claim</DialogTitle>
+            <DialogDescription>
+              Goes to your manager for approval.{payoutMode === "payroll" ? " Once approved it's paid with your next salary." : " Once approved, finance pays it out separately."}
+            </DialogDescription>
           </DialogHeader>
           <form
-            className="grid gap-4"
+            className="flex min-h-0 flex-1 flex-col gap-5"
             onSubmit={(e) => { e.preventDefault(); if (form.amount && Number(form.amount) > 0 && !(receiptRequired && !file) && !(form.incurred_on && form.incurred_on > todayStr()) && !busy) submit(); }}
           >
+          <DialogBody>
+          <FormError error={err} />
+          {draft.restored && <DraftNotice onStartOver={() => { draft.clear(); setForm({ ...EMPTY, incurred_on: todayStr() }); setFile(null); }} />}
           <FieldRow>
             <Field label="Category">
-              <Select value={form.category} onValueChange={(v) => setForm({ ...form, category: v })}>
-                <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
-                <SelectContent>
-                  {categories.filter((c) => !c.disabled).map((c) => (
-                    <SelectItem key={c.path} value={`reimbursement-categories/${idOf(c.path)}`}>
-                      {c.display_name}{c.requires_receipt ? <span className="text-muted-foreground"> · receipt required</span> : null}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {categories.filter((c) => !c.disabled).length === 0 ? (
+                /* An empty category list is a dead end: the select opens onto nothing and the claim can't be
+                   filed. Say who can fix it rather than leaving the form to be stared at. */
+                <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  No claim categories have been set up yet - ask HR or payroll to add one.
+                </p>
+              ) : (
+                <Select value={form.category} onValueChange={(v) => setForm({ ...form, category: v })}>
+                  <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
+                  <SelectContent>
+                    {categories.filter((c) => !c.disabled).map((c) => (
+                      <SelectItem key={c.path} value={`reimbursement-categories/${idOf(c.path)}`}>
+                        {c.display_name}{c.requires_receipt ? <span className="text-muted-foreground"> · receipt required</span> : null}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </Field>
             <Field label="Amount" error={form.amount !== "" && Number(form.amount) <= 0 ? "Enter an amount greater than 0." : undefined}>
-              <Input type="number" min={0} step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} autoFocus />
+              <MoneyInput value={form.amount} onChange={(v) => setForm({ ...form, amount: v })} min={0} step="0.01" autoFocus />
             </Field>
           </FieldRow>
           <Field label="Date incurred" error={form.incurred_on && form.incurred_on > todayStr() ? "That's in the future - expenses are claimed after they're incurred." : undefined}>
             <Input type="date" max={todayStr()} value={form.incurred_on} onChange={(e) => setForm({ ...form, incurred_on: e.target.value })} />
           </Field>
-          <Field label="Description (optional)">
+          <Field label="Description (optional)" hint="What it was for. An approver reading a bare amount usually asks anyway.">
             <Textarea rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
           </Field>
-          <Field label={receiptRequired ? "Receipt" : "Receipt (optional)"} hint={receiptRequired && !file ? "This category requires a receipt - attach one to submit." : receiptRequired ? "This category requires a receipt." : undefined}>
-            <Input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          <Field
+            label={receiptRequired ? "Receipt" : "Receipt (optional)"}
+            hint={file ? `Attached: ${file.name}` : receiptRequired ? "This category requires a receipt - attach one to submit." : "A photo of the bill is enough."}
+          >
+            <Input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </Field>
+          {duplicate && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              You already have a claim for {money(duplicate.amount)} in this category on {formatDate(form.incurred_on)}
+              {upper(duplicate.state) === "PAID" ? ", already paid" : upper(duplicate.state) === "APPROVED" ? ", approved and awaiting payout" : ", still pending"}. File this only if it's a second, separate expense.
+            </p>
+          )}
+          </DialogBody>
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button type="button" variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
             <Button type="submit" loading={busy} disabled={!form.amount || Number(form.amount) <= 0 || (receiptRequired && !file) || !!(form.incurred_on && form.incurred_on > todayStr())}>
               Submit claim
             </Button>
           </DialogFooter>
           </form>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>

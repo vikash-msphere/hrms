@@ -8,7 +8,10 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 
 // Collection name -> table, for resources that carry an authz-relevant `code`.
-const TABLES: Record<string, any> = {
+// The registry is exported (as COLLECTION_TABLES) because it is the one place that knows, for every wire
+// collection, which table backs it - so the change-stamp triggers are generated from it and cannot miss a
+// collection that authz already knows about.
+export const TABLES: Record<string, any> = {
   "api-keys": schema.apiKeys,
   employees: schema.employees,
   departments: schema.departments,
@@ -80,6 +83,9 @@ const TABLES: Record<string, any> = {
   positions: schema.positions,
   bonuses: schema.bonuses,
   assets: schema.assets,
+  "asset-categories": schema.assetCategories,
+  "asset-requests": schema.assetRequests,
+  stocktakes: schema.stocktakes, // inventory counts (walk-throughs); flat, HR/asset-admin managed
   settlements: schema.settlements,
   "leave-encashments": schema.leaveEncashments,
   attendance: schema.attendanceSessions,

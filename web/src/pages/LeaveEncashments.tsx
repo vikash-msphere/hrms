@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Plus, Check, X, Ban } from "lucide-react";
 import { create, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
-import { formatMoney, idOf } from "@/lib/utils";
+import { cn, formatMoney, idOf } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Employee, LeaveType, LeaveBalance, LeaveEncashment, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -13,7 +13,9 @@ import { metaColumns } from "@/components/common/metaColumns";
 import { withNewBadge } from "@/components/common/NewBadge";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Field } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { Card } from "@/components/ui/card";
+import { StatRow } from "@/components/common/StatRow";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Input } from "@/components/ui/input";
@@ -21,27 +23,42 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AccessTab } from "@/components/common/AccessTab";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
+import { useConfirm } from "@/components/common/confirm";
+import { confirmDecision } from "@/lib/confirmDecision";
 
 const COL = "leave-encashments";
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const sum = (rs: LeaveEncashment[]) => rs.reduce((n, r) => n + (r.amount || 0), 0);
 const EMPTY = { employee: "", leave_type: "", days: "" };
 
-export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boolean }) {
+export default function LeaveEncashments({ embedded, initialType, meEmployeeId }: { me?: Me; embedded?: boolean; initialType?: string | null; meEmployeeId?: string | null }) {
   const { rows, state, error, reload } = useCollection<LeaveEncashment>(COL);
   const { rows: employees } = useCollection<Employee>("employees");
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
   const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
   const { toast } = useToast();
+  const confirm = useConfirm();
   const { org } = useOrg();
   const money = (n: number) => formatMoney(n, org.default_currency, currencyDecimals(undefined, org));
   const canCreate = usePermission(`${COL}.write`);
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
-  const [busy, setBusy] = useState(false);
+  // "Encash days" on a Leaves balance card hands the type over: open the form already pointed at that balance
+  // instead of making the caller re-pick the type they just clicked.
+  useEffect(() => {
+    if (!initialType) return;
+    setForm({ ...EMPTY, employee: meEmployeeId ? `employees/${meEmployeeId}` : "", leave_type: initialType });
+    setOpen(true);
+  }, [initialType, meEmployeeId]);
+
+  // Opening the form with the caller already filled in: self-service is the common case, and re-picking your
+  // own name from a directory-wide combobox is pure friction.
+  function openCreate() {
+    setForm({ ...EMPTY, employee: meEmployeeId ? `employees/${meEmployeeId}` : "" });
+    setOpen(true);
+  }
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
@@ -96,26 +113,19 @@ export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boo
   const paidThisYear = rows.filter((r) => upper(r.state) === "PAID" && (r.paid_time ?? "") >= yearStart);
 
   async function submit() {
-    setBusy(true);
-    try {
-      await create<LeaveEncashment>(COL, {
-        employee: `employees/${idOf(form.employee)}`,
-        leave_type: `leave-types/${idOf(form.leave_type)}`,
-        days: Number(form.days),
-      });
-      toast({ title: "Encashment requested", variant: "success" });
-      setForm(EMPTY);
-      setOpen(false);
-      reload();
-    } catch (e) {
-      toast({ title: "Couldn't request encashment", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
+    await create<LeaveEncashment>(COL, {
+      employee: `employees/${idOf(form.employee)}`,
+      leave_type: `leave-types/${idOf(form.leave_type)}`,
+      days: Number(form.days),
+    });
+    toast({ title: "Encashment requested", variant: "success" });
+    setForm(EMPTY);
+    reload();
   }
 
   async function action(r: LeaveEncashment, verb: "approve" | "reject" | "cancel") {
     const past = { approve: "approved", reject: "rejected", cancel: "cancelled" }[verb];
+    if (!(await confirmDecision(confirm, verb, `${empName(r.employee)}'s encashment of ${r.days} day${r.days === 1 ? "" : "s"}`))) return;
     try {
       await invoke(`${COL}/${idOf(r.path)}`, verb, r.etag);
       toast({ title: `Encashment ${past}`, variant: "success" });
@@ -170,7 +180,7 @@ export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boo
 
   const newBtn = canCreate && (
     <AccessAction collection={COL} create label="New encashment">
-      <Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> New encashment</Button>
+      <Button onClick={openCreate}><Plus className="h-4 w-4" /> New encashment</Button>
     </AccessAction>
   );
 
@@ -182,6 +192,7 @@ export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boo
       getRowId={(r) => r.path}
       emptyTitle={emptyTitle}
       emptyDescription={emptyDescription}
+      emptyAction={newBtn}
       accessCollection={COL}
       accessTargetOf={(r) => ({ objectPath: r.path, label: `${empName(r.employee)} · ${r.days}d`, can: r.access?.can })}
     />
@@ -202,12 +213,14 @@ export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boo
         />
       )}
 
+      {/* Three tiles, two across a phone: the third stretches to fill its own row rather than sitting next to
+          a hole. */}
       {rows.length > 0 && (
-        <div className="mb-6 grid gap-3 sm:grid-cols-3">
+        <StatRow caps={[2, 3]} gap={{ base: "0.75rem" }} className="mb-6">
           <Stat label="Pending" value={money(sum(pending))} sub={`${pending.length} request${pending.length === 1 ? "" : "s"}`} />
           <Stat label="Approved (awaiting payout)" value={money(sum(approvedUnpaid))} sub={`${approvedUnpaid.length} request${approvedUnpaid.length === 1 ? "" : "s"}`} />
           <Stat label="Paid this year" value={money(sum(paidThisYear))} sub={`${paidThisYear.length} request${paidThisYear.length === 1 ? "" : "s"}`} accent />
-        </div>
+        </StatRow>
       )}
 
       <DataState state={state} error={error} onRetry={reload}>
@@ -226,11 +239,21 @@ export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boo
         </Tabs>
       </DataState>
 
-      <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setForm(EMPTY); }}>
-        <DialogContent onEnterSubmit={() => { if (!busy && canSubmit) submit(); }}>
-          <DialogHeader>
-            <DialogTitle>New leave encashment</DialogTitle>
-          </DialogHeader>
+      <WriteDialog
+        open={open}
+        onClose={() => { setOpen(false); setForm(EMPTY); }}
+        title="New leave encashment"
+        description="Trades accrued leave days for cash on a payroll run. The days leave the balance when the request is approved."
+        collection={COL}
+        guardLabel="encashment request"
+        form={form}
+        submitLabel="Request encashment"
+        canSubmit={canSubmit}
+        whyNot={
+          !form.employee ? "Pick whose leave is being encashed." : !form.leave_type ? "Pick which leave type to encash." : !form.days || daysNum <= 0 ? "Enter how many days to encash." : maxEncashable != null && daysNum > maxEncashable ? `At most ${maxEncashable} day${maxEncashable === 1 ? "" : "s"} can be encashed right now.` : undefined
+        }
+        onSubmit={submit}
+      >
           <Field label="Employee">
             <Combobox
               value={form.employee}
@@ -277,33 +300,50 @@ export default function LeaveEncashments({ embedded }: { me?: Me; embedded?: boo
                   : undefined
             }
           >
-            <Input type="number" min={0} step="0.5" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} />
+            <div className="flex items-center gap-2">
+              <Input type="number" min={0} step="0.5" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} />
+              {/* "Cash out everything I'm allowed to" is the request people actually make; making them work
+                  the retained minimum and the annual cap out by hand invites a rejected request. */}
+              {maxEncashable != null && maxEncashable > 0 && (
+                <Button type="button" variant="outline" className="shrink-0" onClick={() => setForm({ ...form, days: String(maxEncashable) })}>
+                  Max {maxEncashable}
+                </Button>
+              )}
+            </div>
           </Field>
-          <p className="text-sm text-muted-foreground">
+          {/* What the request turns into: cash out, days left behind. The estimate is explicitly an estimate -
+              the server prices the days off the employee's current salary when the request lands. */}
+          <div className={cn("rounded-lg border p-3", canSubmit ? "bg-muted/40" : "")}>
             {lastRate != null && canSubmit ? (
-              <>Estimated payout: <span className="font-medium text-foreground">{money(daysNum * lastRate)}</span> at the last known rate of {money(lastRate)}/day. The final amount uses the employee's current salary.</>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                <span className="text-sm text-muted-foreground">
+                  Estimated payout
+                  <span className="ml-2 text-xl font-semibold tabular-nums text-foreground">{money(daysNum * lastRate)}</span>
+                </span>
+                {selectedBalance != null && (
+                  <span className="text-sm text-muted-foreground tabular-nums">{Math.round((selectedBalance - daysNum) * 2) / 2} days left after this</span>
+                )}
+                <span className="w-full text-xs text-muted-foreground">
+                  At the last known rate of {money(lastRate)}/day. The final amount uses the employee's current salary.
+                </span>
+              </div>
             ) : (
-              <>The payout amount is computed from the employee's daily salary rate when the request is created.</>
+              <p className="text-sm text-muted-foreground">The payout amount is computed from the employee's daily salary rate when the request is created.</p>
             )}
-          </p>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setOpen(false); setForm(EMPTY); }}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!canSubmit}>
-              Request encashment
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+      </WriteDialog>
     </div>
   );
 }
 
-function Stat({ label, value, sub, accent }: { label: string; value: string; sub: string; accent?: boolean }) {
+function Stat({ label, value, sub, accent, style }: { label: string; value: string; sub: string; accent?: boolean; style?: CSSProperties }) {
   return (
-    <Card className="p-4">
-      <div className="text-sm text-muted-foreground">{label}</div>
-      <div className={`mt-1 text-2xl font-semibold tabular-nums ${accent ? "text-primary" : ""}`}>{value}</div>
-      <div className="mt-0.5 text-xs text-muted-foreground">{sub}</div>
+    <Card className="p-4" style={style}>
+      {/* These carry money, which is the longest thing a tile like this holds: smaller and truncating on a
+          phone, where the tile is half the screen wide, with the full figure on tap. */}
+      <div className="truncate text-sm text-muted-foreground" title={label}>{label}</div>
+      <div className={`mt-1 truncate text-xl font-semibold tabular-nums sm:text-2xl ${accent ? "text-primary" : ""}`} title={value}>{value}</div>
+      <div className="truncate text-xs text-muted-foreground" title={sub}>{sub}</div>
     </Card>
   );
 }

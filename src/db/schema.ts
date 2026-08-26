@@ -22,7 +22,17 @@ const pk = () => text("uuid").primaryKey().$defaultFn(genId);
 // SQLite allows multiple NULLs, so code-less rows are unaffected.
 const codeCol = () => text("code").unique();
 const created = () => integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date());
-const updated = () => integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date());
+// `updated_at` is the ETag source (http/serialize.ts etagOf), so a write that leaves it alone silently disables
+// If-Match for that row: a client holding the pre-mutation ETag passes the check against a row that has already
+// moved. `$onUpdateFn` makes that structural instead of per-call-site - the generic crudService always set it,
+// but the inline `.set({...})` writers across the services did not (job status, itemsBuiltAt, e-sign state,
+// cascade clears). It is also what the job queue's stale-reclaim clock reads: without it every `running` job
+// older than the cutoff looked orphaned, because the column still held its creation time.
+const updated = () =>
+  integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date())
+    .$onUpdateFn(() => new Date());
 
 // Seed role set (the typed default). NOT the runtime source of truth - the `roles` table is. Kept only to
 // seed that table and as the key set for DEFAULT_GRANTS. Roles are data: add/remove via a row, not an edit.
@@ -47,6 +57,16 @@ export const users = sqliteTable("users", {
   role: text("role").notNull().default("employee").references((): AnySQLiteColumn => roles.name, { onDelete: "restrict" }),
   status: text("status", { enum: ["active", "disabled"] }).notNull().default("active"),
   employeeId: text("employee_id").references((): AnySQLiteColumn => employees.uuid),
+  // Session cut-off: any Google-mode session cookie issued BEFORE this instant is refused (middleware/auth.ts).
+  // The cookie is stateless by design - verifying it costs zero reads - which left signing out with nothing to
+  // revoke: deleting the browser's copy does not stop the token, so a cookie lifted off a lost laptop stayed
+  // good for the rest of its 12 hours and the only server-side answers were disabling the person or rotating
+  // AUTH_SESSION_KEY (which signs out the whole company).
+  //
+  // One nullable column closes that at ZERO cost on the hot path, because auth already reads this row on every
+  // request to check `status` and resolve the role - the comparison rides a read that was happening anyway.
+  // NULL means "nothing revoked", the state every user starts in.
+  sessionsValidFrom: integer("sessions_valid_from", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
 });
@@ -66,6 +86,9 @@ export const apiKeys = sqliteTable(
     uuid: pk(),
     code: codeCol(),
     name: text("name").notNull(),
+    // What this credential is for, in the operator's own words. A name identifies the integration; this says
+    // why it exists and who to ask before revoking it - the question a key outlives the person who made it.
+    description: text("description"),
     ownerUserId: text("owner_user_id")
       .notNull()
       .references((): AnySQLiteColumn => users.uuid, { onDelete: "cascade" }),
@@ -75,6 +98,10 @@ export const apiKeys = sqliteTable(
     expiresAt: integer("expires_at", { mode: "timestamp_ms" }), // null = never (allowed, discouraged in the UI)
     lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }), // throttled write, best-effort (see middleware/auth)
     revokedAt: integer("revoked_at", { mode: "timestamp_ms" }), // set by :revoke; a revoked key stays for the audit trail
+    // Soft delete, for the same reason revocation keeps the row: the audit trail resolves a credential by its
+    // id, so a hard DELETE would orphan every row that key ever wrote. Deleting hides it and stops it
+    // authenticating; `?force` still purges when a record genuinely has to go.
+    deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
     createdBy: text("created_by").references((): AnySQLiteColumn => users.uuid),
     createdAt: created(),
     updatedAt: updated(),
@@ -135,6 +162,19 @@ export const accessRules = sqliteTable("access_rules", {
   subjNsMatch: index("ar_subject_ns_match_idx").on(t.subject, t.namespace, t.matchCode),
 }));
 
+// Comp-off earned by working on a holiday: one row per (employee, worked day). The row IS the idempotency
+// marker - the nightly credit inserts it first (unique index) and credits the leave balance only if that insert
+// won, so a re-run or an overlapping tick can never credit the same day twice.
+export const compOffCredits = sqliteTable("comp_off_credits", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references((): AnySQLiteColumn => employees.uuid),
+  workedDate: integer("worked_date", { mode: "timestamp_ms" }).notNull(),
+  days: real("days").notNull(), // 0.5 (half a day worked) or 1
+  holidayId: text("holiday_id").references((): AnySQLiteColumn => holidays.uuid),
+  createdAt: created(),
+}, (t) => ({ uk: uniqueIndex("compoff_emp_date_idx").on(t.employeeId, t.workedDate) }));
+
 // Which optional holidays each employee has picked.
 export const holidaySelections = sqliteTable("holiday_selections", {
   uuid: pk(),
@@ -192,12 +232,22 @@ export const employees = sqliteTable("employees", {
   endDate: integer("end_date", { mode: "timestamp_ms" }),
   probationEndDate: integer("probation_end_date", { mode: "timestamp_ms" }),
   epfEnrolled: integer("epf_enrolled", { mode: "boolean" }).notNull().default(false), // EPF is opt-in per employee; default off (no PF deduction / employer share)
+  // EPS (Employees' Pension Scheme) exclusion. A member whose pay already exceeded the pension wage ceiling
+  // when they first joined EPF is excluded from EPS, and the WHOLE employer share stays in EPF instead of
+  // 8.33% being diverted to the pension fund. Membership history is not derivable from this system's data, so
+  // it is HR-declared per employee; default false (the ordinary case, EPS applies).
+  epsExcluded: integer("eps_excluded", { mode: "boolean" }).notNull().default(false),
   // ENCRYPTED (base64 AES-GCM) - never plaintext, never serialized:
   nationalIdEnc: text("national_id_enc"),
   bankDetailsEnc: text("bank_details_enc"),
   identityDetailsEnc: text("identity_details_enc"), // JSON blob of configured identity field values
   personalDetailsEnc: text("personal_details_enc"), // JSON blob of contact + emergency info
   taxDetailsEnc: text("tax_details_enc"), // JSON blob: prior-employer income + TDS declarations (mid-year joiners)
+  // The verification state of the blob above, mirrored in PLAINTEXT (never the figures - only which lane the
+  // declaration sits in). It exists so the approvals badge can COUNT the verification queue in SQL; without it
+  // the count means scanning every employee and decrypting every blob, which the badge did on every page load.
+  // Written only where taxDetailsEnc is (services/taxDetails.ts), so the two can't drift.
+  taxVerificationStatus: text("tax_verification_status", { enum: ["DECLARED", "VERIFIED", "REJECTED"] }),
   photoKey: text("photo_key"), // R2 key of the profile photo (JPEG), null if none
   signatureKey: text("signature_key"), // R2 key of the uploaded signature image (PNG), null if none
   // Per-user in-app notification preferences (self-service): JSON `{ muted: string[] }` of event categories
@@ -295,6 +345,12 @@ export const holidays = sqliteTable("holidays", {
   date: integer("date", { mode: "timestamp_ms" }).notNull(),
   name: text("name").notNull(),
   kind: text("kind", { enum: ["fixed", "optional"] }).notNull().default("fixed"),
+  // Regional holidays: null = the whole company, otherwise only employees whose CURRENT position location
+  // matches (compared case/space-insensitively - locations are free text, same as positions.location). This is
+  // not access control: everyone can see the whole calendar, it just isn't everyone's day off.
+  location: text("location"),
+  // A holiday the office only closes for half of. Leave crossing it is charged 0.5 days, not 0 or 1.
+  halfDay: integer("half_day", { mode: "boolean" }).notNull().default(false),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
@@ -347,10 +403,32 @@ export const events = sqliteTable("events", {
   color: text("color"), // hex for the timeline band; null = a default accent
   description: text("description"),
   attendeeIds: text("attendee_ids"), // JSON array of employee uuids marked unavailable
+  // Repeats: the all-hands every Monday, the review week every quarter, Founders' Day every year. Set on the
+  // one row that carries the series, and the nightly cron creates the next occurrence once this one has passed
+  // and MOVES the repeat onto it - the same "exactly one row carries it" shape recurring 1:1s use, so there is
+  // never a generator quietly filling the calendar years ahead.
+  repeat: text("repeat", { enum: ["weekly", "monthly", "yearly"] }),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ startIdx: index("event_start_idx").on(t.startTime) }));
+
+// One attendee's answer to an event (sub-resource, like card_comments): not a wire collection, folded into the
+// event's serialize and written via the event `:respond` verb. Being on `attendee_ids` says an event was aimed
+// at you; this says whether you are coming. Without it an organiser counting heads for an off-site is guessing,
+// and the attendance credit `count_as_work` grants was being handed to a list nobody had confirmed.
+export const eventResponses = sqliteTable("event_responses", {
+  uuid: pk(),
+  eventId: text("event_id").notNull().references(() => events.uuid),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  response: text("response", { enum: ["going", "maybe", "declined"] }).notNull(),
+  note: text("note"), // "can only make the morning" - the useful half of a maybe
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  uniq: uniqueIndex("event_response_uniq").on(t.eventId, t.employeeId),
+  eventIdx: index("event_response_event_idx").on(t.eventId),
+}));
 
 // Statutory compliance calendar: each row is one dated statutory obligation occurrence (PF/ESI/TDS/GST/PT/
 // annual returns, etc.) with a due date + status workflow. Flat + company-wide; private by default (no role
@@ -367,6 +445,11 @@ export const complianceEvents = sqliteTable("compliance_events", {
   status: text("status", { enum: ["pending", "filed", "waived"] }).notNull().default("pending"),
   filedDate: integer("filed_date", { mode: "timestamp_ms" }),
   reference: text("reference"), // challan / acknowledgement number
+  // The PROOF of the filing - the challan or acknowledgement PDF - filed on the org document shelf and linked
+  // here. A reference number says a filing happened; only the receipt survives an audit, so the ledger has to
+  // be able to hold one. Deliberately a link rather than a second file store: the document shelf already owns
+  // access, audit and expiry for company paperwork.
+  documentId: text("document_id").references((): AnySQLiteColumn => orgDocuments.uuid),
   assigneeId: text("assignee_id").references((): AnySQLiteColumn => employees.uuid),
   notes: text("notes"),
   // The recurring rule that generated this occurrence, if any (null = ad-hoc one-off). Lets the UI flag
@@ -413,6 +496,9 @@ export const backgroundChecks = sqliteTable("background_checks", {
   initiatedDate: integer("initiated_date", { mode: "timestamp_ms" }),
   completedDate: integer("completed_date", { mode: "timestamp_ms" }),
   notes: text("notes"),
+  // The vendor's report, filed as the employee's own document and linked here. Notes summarise a finding; the
+  // report is what a dispute is settled against. Personal, not org: it is about one person.
+  documentId: text("document_id").references((): AnySQLiteColumn => personalDocuments.uuid),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
@@ -426,6 +512,10 @@ export const orgDocuments = sqliteTable("org_documents", {
   // via :acknowledge. Replacing the file bumps ackVersion so everyone must re-acknowledge the new version.
   requiresAck: integer("requires_ack", { mode: "boolean" }).notNull().default(false),
   ackVersion: integer("ack_version").notNull().default(1),
+  // When the CURRENT ack version landed (set when acknowledgement is switched on, re-stamped when the file is
+  // replaced). The chase-up schedule ages off this rather than off `updatedAt`, so renaming a policy doesn't
+  // restart everybody's reminder clock.
+  ackVersionTime: integer("ack_version_time", { mode: "timestamp_ms" }),
   // How an acknowledgement is signed (only meaningful when requiresAck): "internal" embeds the employee's
   // on-file signature image in place; "cashfree" runs a per-employee Aadhaar e-sign. Required when requiresAck.
   ackMethod: text("ack_method", { enum: ["internal", "cashfree"] }),
@@ -460,11 +550,11 @@ export const personalDocuments = sqliteTable("personal_documents", {
   official: integer("official", { mode: "boolean" }).notNull().default(false),
   // E-sign provider tracking (vendor-agnostic; see src/domain/esign.ts). Which driver handled this doc, the
   // provider's request id (matched by the inbound webhook), the last known status, and the signer link the
-  // employee opens to sign at the vendor. `internal` (in-app image signing) leaves esignRequestId/esignUrl null.
+  // employee opens to sign at the vendor. `internal` (in-app image signing) leaves esignRequestId/esignUri null.
   esignProvider: text("esign_provider"),
   esignRequestId: text("esign_request_id"),
   esignStatus: text("esign_status").notNull().default("none"),
-  esignUrl: text("esign_url"),
+  esignUri: text("esign_uri"),
   esignSentAt: integer("esign_sent_at", { mode: "timestamp_ms" }),
   esignSignedAt: integer("esign_signed_at", { mode: "timestamp_ms" }),
   ...docCommon(),
@@ -501,6 +591,10 @@ export const announcements = sqliteTable("announcements", {
   title: text("title").notNull(),
   body: text("body").notNull(),
   authorEmployeeId: text("author_employee_id").references(() => employees.uuid),
+  // A DRAFT's schedule, and after it goes out, the date the post carries. Null on a post published straight
+  // away - that one is placed on the board by `created_at`, which is the same moment. Settable only while the
+  // row is a draft and only in the future, so the board's order (domain/board.ts) stays a fact about when
+  // things went out rather than a field an author can edit afterwards.
   publishTime: integer("publish_time", { mode: "timestamp_ms" }),
   published: integer("published", { mode: "boolean" }).notNull().default(true),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
@@ -522,6 +616,21 @@ export const announcements = sqliteTable("announcements", {
   // exactly one is set. A department kudo is a single feed card fanned out as a notification to every member;
   // it carries no per-head points (the leaderboard groups by employee recipient, so a dept kudo credits no one).
   recipientDepartmentId: text("recipient_department_id").references((): AnySQLiteColumn => departments.uuid),
+  // Who gets NOTIFIED about a post (announcements/posts/polls): everybody, one department, or nobody at all.
+  //
+  // This is an audience, not a permission. The board is still the board - anyone who can read announcements can
+  // read this one, on every setting - and what changes is the fan-out: a company-wide bell, one department's, or
+  // silence for a notice that only needs to be on the wall (a menu change, a minutes archive, a correction to
+  // last week's post that nobody needs pinging about twice). Access is authz's job; inventing a second, quieter
+  // access system in a content column is how a "private" post ends up being read by everyone anyway.
+  audienceScope: text("audience_scope", { enum: ["everyone", "department", "none"] }).notNull().default("everyone"),
+  // Which department, when `audienceScope` is "department". Also the label the card carries, so the rest of the
+  // company can see at a glance that a post is not aimed at them.
+  audienceDepartmentId: text("audience_department_id").references((): AnySQLiteColumn => departments.uuid),
+  // Send it as email too, to the same audience, when it goes live. Recorded rather than inferred so a draft
+  // remembers the author's decision, and so publishing twice cannot email twice.
+  emailAudience: integer("email_audience", { mode: "boolean" }).notNull().default(false),
+  emailedAt: integer("emailed_at", { mode: "timestamp_ms" }),
   value: text("value"), // free-text company value tag (e.g. Teamwork), optional
   category: text("category"), // HR-configurable kudos category (settings/kudos), optional
   level: text("level"), // recognition level name (settings/kudos), optional
@@ -634,10 +743,33 @@ export const goals = sqliteTable("goals", {
   progress: integer("progress").notNull().default(0),
   status: text("status", { enum: ["not_started", "in_progress", "completed", "cancelled"] }).notNull().default("not_started"),
   dueDate: integer("due_date", { mode: "timestamp_ms" }),
+  // A measure, when the goal has one: where it started, where it has to get to, and what the number IS
+  // ("customers", "%", "days"). With all three set, `progress` is COMPUTED from them on every write instead of
+  // being somebody's estimate - "42 of 60 customers" is a fact, "70%" is a feeling. `baselineValue` matters
+  // because plenty of goals start above zero (churn from 8% to 4%, uptime from 99.0 to 99.9), and measuring
+  // from zero would report those as nearly done on day one. Targets below the baseline count DOWN, so a
+  // reduction goal reads the same way as a growth one.
+  unit: text("unit"),
+  baselineValue: real("baseline_value"),
+  targetValue: real("target_value"),
+  currentValue: real("current_value"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ empIdx: index("goal_emp_idx").on(t.employeeId), parentIdx: index("goal_parent_idx").on(t.parentId) }));
+
+// A comment on a goal (sub-resource, like card_comments): not a wire collection, emitted inline on the goal Get
+// and written via the goal `:comment` verb. A goal is a conversation between an owner and a manager for a
+// quarter at a time, and until this existed the only writable text on it was the owner's own progress note -
+// so the conversation happened in chat and the goal recorded nothing.
+export const goalComments = sqliteTable("goal_comments", {
+  uuid: pk(),
+  goalId: text("goal_id").notNull().references(() => goals.uuid),
+  authorId: text("author_id").references(() => employees.uuid),
+  authorEmail: text("author_email"),
+  body: text("body").notNull(),
+  createdAt: created(),
+}, (t) => ({ goalIdx: index("goalcomment_goal_idx").on(t.goalId) }));
 
 // ---- Performance: review cycles + reviews ----
 // A review cycle (e.g. "H1 2026"): an HR-managed container, flat-coded like pay-periods. DRAFT while being set
@@ -884,6 +1016,17 @@ export const checkIns = sqliteTable("check_ins", {
   // Recurring 1:1s: when set and meetingDate passes, the nightly cron creates the next one (carrying open
   // action items forward) and MOVES the cadence onto it - so exactly one row per pair carries the cadence.
   cadence: text("cadence", { enum: ["weekly", "biweekly", "monthly"] }),
+  // Everything above is shared with the other party by design. These two are not.
+  //
+  // A 1:1 whose every word is read by both people is a 1:1 where the honest half goes in a private notebook
+  // instead - so each side gets one note only they can read, served to its owner and stripped for everyone
+  // else (see services/checkIns.ts). Two columns rather than one table because there are exactly two parties.
+  employeeNote: text("employee_note"),
+  counterpartNote: text("counterpart_note"),
+  // How the meeting felt, 1 (bad) to 5 (great), recorded by the employee. One number, asked once a fortnight,
+  // is the cheapest honest signal a manager gets; it is the employee's own, so the counterpart can read it but
+  // never write it.
+  pulse: integer("pulse"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -1078,12 +1221,20 @@ export const auditLog = sqliteTable("audit_log", {
   entityId: text("entity_id"),
   entityName: text("entity_name"), // descriptive label of the touched record AS OF the event (point-in-time snapshot)
   meta: text("meta"), // JSON: change details, incl. `diff` ({field:{from,to}}) on updates
+  // The API key the request rode, when it rode one. The actor columns name the HUMAN the key acts as (that is
+  // what a key is), so without this "what has this credential been doing?" - the question incident response
+  // actually asks, and the one that decides whether revoking it is safe - has no answer. `meta.via_api_key`
+  // carries the key's point-in-time name for display; this column is what makes it queryable.
+  apiKeyId: text("api_key_id"),
   ip: text("ip"), // request IP (cf-connecting-ip / x-forwarded-for), when available
   userAgent: text("user_agent"), // request User-Agent, when available
   at: integer("at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 }, (t) => ({
   entIdx: index("audit_entity_idx").on(t.entity, t.entityId), // per-entity feed
   atIdx: index("audit_at_idx").on(t.at), // org-wide feed (newest-first keyset paging)
+  // Partial: nearly every row is a human's, so indexing only the key-borne ones keeps this tiny and costs
+  // almost nothing on the write path that every audited request pays.
+  keyIdx: index("audit_api_key_idx").on(t.apiKeyId, t.at).where(sql`${t.apiKeyId} is not null`),
 }));
 
 // `jobs` doubles as the AEP Operation store (operations/{id}).
@@ -1339,6 +1490,9 @@ export const jobRequisitions = sqliteTable("job_requisitions", {
   employmentType: text("employment_type", { enum: ["full_time", "part_time", "contract", "intern", "temporary"] }),
   openings: integer("openings").notNull().default(1),
   description: text("description"),
+  // The budget for the role. A requisition that records its band is what lets the pipeline draft a real offer
+  // when a candidate reaches the offer stage, instead of an empty one somebody has to price by hand.
+  payGradeId: text("pay_grade_id").references((): AnySQLiteColumn => payGrades.uuid),
   status: text("status", { enum: ["draft", "open", "on_hold", "closed", "filled"] }).notNull().default("draft"),
   openedDate: integer("opened_date", { mode: "timestamp_ms" }),
   closedDate: integer("closed_date", { mode: "timestamp_ms" }),
@@ -1377,12 +1531,15 @@ export const applications = sqliteTable("applications", {
   rejectionReason: text("rejection_reason"),
   source: text("source"),
   referralId: text("referral_id").references((): AnySQLiteColumn => referrals.uuid),
+  // Who this application became. A hired stage is only a string; this is the proof the conversion happened,
+  // and it is what the pipeline hands off to onboarding (stamped by `offers:accept` and `applications:hire`).
+  hiredEmployeeId: text("hired_employee_id").references((): AnySQLiteColumn => employees.uuid),
   appliedDate: integer("applied_date", { mode: "timestamp_ms" }),
   stageChangedDate: integer("stage_changed_date", { mode: "timestamp_ms" }),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ candidateIdx: index("application_candidate_idx").on(t.candidateId), requisitionIdx: index("application_requisition_idx").on(t.requisitionId) }));
+}, (t) => ({ candidateIdx: index("application_candidate_idx").on(t.candidateId), requisitionIdx: index("application_requisition_idx").on(t.requisitionId), hiredIdx: index("application_hired_idx").on(t.hiredEmployeeId) }));
 
 // ATS - a scheduled interview on an application. Flat/company-level, private-by-default + ACL. `interviewerIds`
 // is a JSON array of employee uuids (the panel); `:complete`/`:cancel` move the status.
@@ -1444,23 +1601,96 @@ export const offers = sqliteTable("offers", {
 // Company asset inventory (laptops, phones, etc.). Org-level (flat code); ownership is dynamic via
 // `assignedTo` (an employee, nullable when in stock), so the same row can be reassigned over time. The
 // employee profile lists assets assigned to that person; the inventory page lists everything.
+//
+// Custody is claimed by SCANNING the printed tag, never by typing a form: a fresh (or returned) asset sits in
+// `pending_verification` until an admin scans it into stock, and an assigned one sits in `pending_ack` until
+// the holder scans it themselves. `tagSecret` is the nonce printed inside the QR that makes a scan evidence
+// of physically holding the thing - it is withheld from every caller who may not print tags.
+// What kind of thing an asset is (mirrors reimbursement-categories: own table, Settings editor, soft-delete).
+// `tagCode` is the short code that lands in the middle of a printed tag (Laptop -> LAP -> MS-LAP-014), so a
+// category is the one place a tag's shape is decided; the sequence after it is per code.
+export const assetCategories = sqliteTable("asset_categories", {
+  uuid: pk(),
+  code: codeCol(),
+  name: text("name").notNull(), // e.g. "Laptop"
+  tagCode: text("tag_code").notNull(), // short code printed in the tag, e.g. "LAP"
+  requiresSerial: integer("requires_serial", { mode: "boolean" }).notNull().default(false), // serial number mandatory for this kind
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
+  locked: integer("locked", { mode: "boolean" }).notNull().default(false),
+  lockedBy: text("locked_by"),
+  createdAt: created(),
+  updatedAt: updated(),
+});
+
 export const assets = sqliteTable("assets", {
   uuid: pk(),
   code: codeCol(),
-  assetTag: text("asset_tag"), // internal label, e.g. LAP-014
+  // Human-facing tag, allocated by the server on create from settings/asset-tags + the category's code
+  // (see domain/assetTag.ts), HR-overridable. UNIQUE: it is what a sticker says, and two assets answering to
+  // the same sticker would make every scan ambiguous. Also the backstop for the read-max-then-write race.
+  assetTag: text("asset_tag").unique(),
   name: text("name").notNull(), // e.g. "MacBook Pro 14"
-  category: text("category"), // laptop / phone / monitor / peripheral / furniture / other
+  categoryId: text("category_id").references((): AnySQLiteColumn => assetCategories.uuid),
   serialNumber: text("serial_number"),
-  status: text("status", { enum: ["in_stock", "assigned", "repair", "retired"] }).notNull().default("in_stock"),
+  status: text("status", { enum: ["pending_verification", "in_stock", "pending_ack", "assigned", "repair", "retired"] }).notNull().default("pending_verification"),
   assignedTo: text("assigned_to").references(() => employees.uuid),
   assignedOn: integer("assigned_on", { mode: "timestamp_ms" }),
   purchaseDate: integer("purchase_date", { mode: "timestamp_ms" }),
   tagPrintedAt: integer("tag_printed_at", { mode: "timestamp_ms" }), // last time a physical sticker tag was printed for this asset
   verifiedAt: integer("verified_at", { mode: "timestamp_ms" }), // last time the physical asset was sighted (stocktake scan)
+  // Who sighted it, and whether that sighting was PROVEN by a scan or ticked off by hand (a destroyed sticker
+  // is allowed, with a note - see requireProof). The audit row carries both too; these are here so the
+  // inventory itself can say "last seen by Priya, unscanned" without reading the log per row.
+  verifiedBy: text("verified_by").references((): AnySQLiteColumn => employees.uuid),
+  verifiedScanned: integer("verified_scanned", { mode: "boolean" }),
+  // Which stocktake claimed the last sighting (null for an ordinary check-in outside a walk-through). Set to
+  // null if that count is ever purged: it is provenance, not a dependency.
+  lastStocktakeId: text("last_stocktake_id").references((): AnySQLiteColumn => stocktakes.uuid, { onDelete: "set null" }),
+  tagSecret: text("tag_secret"), // nonce printed in the QR; proves a :verify/:acknowledge came from a real scan
+  acknowledgedAt: integer("acknowledged_at", { mode: "timestamp_ms" }), // when the current holder confirmed receipt
+  custodyState: text("custody_state"), // free-form condition the holder reported: good / damaged / missing_parts
+  custodySince: integer("custody_since", { mode: "timestamp_ms" }), // when the current pending_* wait started (drives the chase-up cron)
   notes: text("notes"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ assignedIdx: index("asset_assigned_idx").on(t.assignedTo), statusIdx: index("asset_status_idx").on(t.status) }));
+}, (t) => ({
+  assignedIdx: index("asset_assigned_idx").on(t.assignedTo),
+  statusIdx: index("asset_status_idx").on(t.status),
+  categoryIdx: index("asset_category_idx").on(t.categoryId),
+}));
+
+// One physical walk-through of the inventory. The SIGHTINGS it collects are not stored here - they are the
+// `verified_at` / `verified_by` / `last_stocktake_id` stamps `:verify` already writes on each asset row, so a
+// scan stays one write. What this row adds is everything a stamp cannot carry: who is counting, from when,
+// over what scope, and - once closed - the frozen result.
+//
+// `result_json` is the reason the collection exists. A missing list derived live rots (assets get retired,
+// reassigned, or scanned a week later), so closing a count SNAPSHOTS its counts and its missing rows; that
+// snapshot is the auditable artefact. Closing is one-way: another walk is another row.
+export const stocktakes = sqliteTable("stocktakes", {
+  uuid: pk(),
+  code: codeCol(),
+  label: text("label").notNull(), // e.g. "Q3 2026 - Bengaluru office"
+  // `{ statuses?: string[], categories?: string[] }` - what this walk expects to sight. The client's presets
+  // ("in the office") resolve to an explicit status list before they are stored, so the server never has to
+  // agree with the client about what a preset means.
+  scopeJson: text("scope_json").notNull().default("{}"),
+  status: text("status", { enum: ["open", "closed"] }).notNull().default("open"),
+  startedBy: text("started_by").references((): AnySQLiteColumn => employees.uuid),
+  startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  closedBy: text("closed_by").references((): AnySQLiteColumn => employees.uuid),
+  closedAt: integer("closed_at", { mode: "timestamp_ms" }),
+  // Scans that matched no asset: "there is a laptop here that nobody recorded" is a finding, not a typo.
+  foundJson: text("found_json").notNull().default("[]"),
+  resultJson: text("result_json"), // frozen counts + missing rows, written by :close
+  notes: text("notes"),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete: an accidental count can be dropped
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  statusIdx: index("stocktake_status_idx").on(t.status),
+}));
 
 // Full-and-final settlement (FnF) snapshots computed at exit. Each POST stores the computed line items +
 // net; the FnF letter renders the most recent one. A snapshot (not recomputed live) so the issued letter and
@@ -1561,7 +1791,7 @@ export const payComponents = sqliteTable("pay_components", {
   // "edli" and "pf_admin" are the employer's two statutory PF side-charges (EDLI 0.5%, administration 0.5%),
   // priced on the SAME PF wages as method "epf" (basic-or-configured composition, capped at the wage ceiling).
   // They exist as their own methods rather than a percent_base row because percent_base ignores the PF ceiling.
-  method: text("method", { enum: ["fixed", "percent_base", "rate_qty", "income_tax", "epf", "esi", "pt", "edli", "pf_admin"] }).notNull().default("fixed"),
+  method: text("method", { enum: ["fixed", "percent_base", "income_tax", "epf", "esi", "pt", "edli", "pf_admin"] }).notNull().default("fixed"),
   rate: real("rate"),
   cap: real("cap"), // for methods "epf"/"edli"/"pf_admin": wage ceiling on PF wages (e.g. 15000); null = uncapped
   regime: text("regime"), // for method "income_tax": which tax regime block to use (e.g. "new")
@@ -1655,7 +1885,15 @@ export const payslips = sqliteTable("payslips", {
   net: real("net").notNull().default(0),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("payslip_emp_idx").on(t.employeeId), runIdx: index("payslip_run_idx").on(t.runId) }));
+}, (t) => ({
+  empIdx: index("payslip_emp_idx").on(t.employeeId),
+  runIdx: index("payslip_run_idx").on(t.runId),
+  // One slip per run item, enforced by the storage layer. processPayslipRunJob already skips items that
+  // have a slip, which holds for a sequential retry but not for two drains running the same job at once -
+  // both would read an empty `existing` set and both insert. This is the backstop that makes a duplicate
+  // job a harmless conflict instead of a second payslip for the same month.
+  runItemUniq: uniqueIndex("payslip_run_item_idx").on(t.runItemId),
+}));
 
 // ---- Reimbursements (employee expense claims; request/approve/deny like leave; paid out non-taxable) ----
 // Configurable categories (mirrors leave-types / pay-components: own table, Settings tab, soft-delete).
@@ -1766,10 +2004,14 @@ export const expenses = sqliteTable("expenses", {
   reimbursable: integer("reimbursable", { mode: "boolean" }).notNull().default(false), // an employee fronted it
   reimbursementId: text("reimbursement_id").references((): AnySQLiteColumn => reimbursements.uuid), // set when bridged
   decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"), // why it was rejected - the submitter is told the reason, not just the verdict
   paidBy: text("paid_by").references(() => users.uuid),
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   // Recurrence: a template row (isRecurring=true) is cloned by the daily cron into concrete expenses.
   isRecurring: integer("is_recurring", { mode: "boolean" }).notNull().default(false),
+  // Paused keeps the schedule and its history but stops generation (a lease on hold, a subscription frozen);
+  // stopping for good is :cancel. Both are checked by the daily cron.
+  paused: integer("paused", { mode: "boolean" }).notNull().default(false),
   recurrenceRule: text("recurrence_rule", { enum: ["monthly", "quarterly", "yearly"] }),
   nextOccurrenceOn: integer("next_occurrence_on", { mode: "timestamp_ms" }),
   lastGeneratedOn: integer("last_generated_on", { mode: "timestamp_ms" }),
@@ -1795,6 +2037,12 @@ export const expenseBudgets = sqliteTable("expense_budgets", {
   periodType: text("period_type", { enum: ["monthly", "quarterly", "yearly"] }).notNull(),
   periodKey: text("period_key").notNull(), // "2026" | "2026-Q1" | "2026-07"
   amount: real("amount").notNull(),
+  // A recurring cap re-opens itself: once its period ends the daily cron creates the same cap for the next
+  // period at the SAME amount (never the unspent remainder - that would silently turn a monthly cap into an
+  // annual one). Repetition belongs on the cap, not on the category: a cap's identity is
+  // (department, category, period_type), so a category-level flag could not say "Travel/Sales repeats but
+  // Travel/Engineering does not".
+  recurring: integer("recurring", { mode: "boolean" }).notNull().default(false),
   alertLevel: integer("alert_level").notNull().default(0), // highest budget-alert threshold already fired
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
@@ -1881,6 +2129,30 @@ export const remoteWorkRequests = sqliteTable("remote_work_requests", {
   updatedAt: updated(),
 }, (t) => ({ empIdx: index("rwr_emp_idx").on(t.employeeId), stateIdx: index("rwr_state_idx").on(t.state) }));
 
+// A request for kit: "I need a laptop". Employee-owned + code-scoped (own/dept/all, like leave-requests): the
+// employee files it naming a CATEGORY (not a specific machine - which one they get is inventory's call), a
+// manager or HR decides, the owner cancels while pending.
+//
+// One state past the usual approve/reject: an approved request still owes the person an actual thing, so
+// `:issue` hands over an in-stock asset and lands the row in ISSUED with `issuedAssetId` pointing at what they
+// got. The hand-over runs through the normal assignment path, so the asset waits in `pending_ack` until the
+// holder scans its tag - a request being closed is not evidence that anybody received anything.
+export const assetRequests = sqliteTable("asset_requests", {
+  uuid: pk(),
+  code: codeCol(),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  categoryId: text("category_id").notNull().references((): AnySQLiteColumn => assetCategories.uuid), // what kind of thing is being asked for
+  justification: text("justification"), // why they need it (what an approver reads)
+  neededBy: integer("needed_by", { mode: "timestamp_ms" }), // when it stops being useful, e.g. a client visit
+  state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED", "ISSUED"] }).notNull().default("PENDING"),
+  decidedBy: text("decided_by").references(() => users.uuid),
+  decisionNote: text("decision_note"),
+  issuedAssetId: text("issued_asset_id").references((): AnySQLiteColumn => assets.uuid), // the thing they were actually given
+  issuedAt: integer("issued_at", { mode: "timestamp_ms" }),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({ empIdx: index("areq_emp_idx").on(t.employeeId), stateIdx: index("areq_state_idx").on(t.state) }));
+
 // Approval delegation (out-of-office cover). A manager who'll be away names a delegate to receive - and act on
 // - approvals during a date window. Owner = the delegator (their own record, self-service). While a delegation
 // is active, manager-directed notifications also copy the delegate (services/notifications.ts activeDelegate),
@@ -1951,6 +2223,10 @@ export const suggestions = sqliteTable("suggestions", {
   status: text("status", { enum: ["new", "under_review", "planned", "implemented", "declined"] }).notNull().default("new"),
   response: text("response"), // HR's public reply
   respondedById: text("responded_by_id").references(() => users.uuid),
+  // Set when this suggestion was folded into another one: the same idea, asked twice. The votes move to the
+  // target (a duplicate splits support three ways and then looks unpopular), this row stays readable so its
+  // submitter can see what happened to their words, and `:merge` is the only thing that writes it.
+  mergedIntoId: text("merged_into_id").references((): AnySQLiteColumn => suggestions.uuid),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete (moderation)
   createdAt: created(),
   updatedAt: updated(),
@@ -2037,6 +2313,11 @@ export const tickets = sqliteTable("tickets", {
   description: text("description"),
   priority: text("priority", { enum: ["low", "medium", "high"] }).notNull().default("medium"),
   state: text("state", { enum: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "CANCELLED"] }).notNull().default("OPEN"),
+  // Files attached to the ticket: a JSON array of {key,name,content_type,size_bytes,created_at,by} where `key`
+  // is the R2 object holding the bytes. A JSON column rather than a child collection because an attachment has
+  // no life of its own - it is readable exactly when its ticket is, dies with it, and is never listed, shared
+  // or granted on separately. Screenshots are how support tickets get answered, so this is not an extra.
+  attachmentsJson: text("attachments_json").notNull().default("[]"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -2096,6 +2377,25 @@ export const ticketComments = sqliteTable("ticket_comments", {
 // drift out of sync. `code` and `ownerId` are copied from the source row so the SAME `applyScope` predicate
 // the collection's own list uses can be applied to a search hit; `deleted` and `restricted` mirror the source
 // row's soft-delete and state-visibility so those rows are filtered rather than deleted from the index.
+// One row per wire collection, holding WHEN it was last written to. Maintained by generated triggers (see
+// src/db/changeDdl.ts) on every insert, update and delete of the table behind that collection.
+//
+// WHY A TABLE AND NOT THE AUDIT LOG. `GET /v1/changes` lets a client keep what it has stored instead of
+// re-reading it, so a missed write is not a stale badge - it is a client serving yesterday's rows and never
+// finding out. The audit log cannot carry that weight: cron accrual, the automation engine, the code cascade
+// and the notification writer all write without an audit row, so "no audit entry" does not mean "no change".
+// A trigger is the only place that sees every write - the same argument the search index rests on - so this is
+// complete by construction rather than by everyone remembering.
+//
+// It is also cheap to ASK: one row per collection (about seventy in total), indexed on `at`, so the question
+// "what changed since T" reads a handful of rows no matter how much data or history the org has.
+export const collectionVersions = sqliteTable("collection_versions", {
+  collection: text("collection").primaryKey(),
+  at: integer("at", { mode: "timestamp_ms" }).notNull(),
+}, (t) => ({
+  atIdx: index("collection_versions_at_idx").on(t.at),
+}));
+
 export const searchDocs = sqliteTable("search_docs", {
   collection: text("collection").notNull(), // wire collection = the authz namespace
   recordId: text("record_id").notNull(), // the source row's uuid
@@ -2105,6 +2405,12 @@ export const searchDocs = sqliteTable("search_docs", {
   subtitle: text("subtitle"),
   deleted: integer("deleted", { mode: "boolean" }).notNull().default(false),
   restricted: integer("restricted", { mode: "boolean" }).notNull().default(false), // non-public per state_visibility
+  // When the source row was created, copied from its own createdAt. This is what makes "what is new since I
+  // last looked" answerable as ONE indexed COUNT per collection (routes/activityCounts.ts) instead of the
+  // client fetching a page of every collection it wants a badge for. Indexed, so a count reads the new rows
+  // rather than scanning the table - the same reason the FTS index exists.
+  createdAt: integer("created_at", { mode: "timestamp_ms" }),
 }, (t) => ({
   recordIdx: uniqueIndex("search_docs_record_idx").on(t.collection, t.recordId),
+  createdIdx: index("search_docs_created_idx").on(t.createdAt),
 }));

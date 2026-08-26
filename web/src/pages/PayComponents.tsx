@@ -15,7 +15,11 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
-import { Field } from "@/components/common/Field";
+import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { MoneyInput } from "@/components/common/MoneyInput";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { AccessScope } from "@/components/access/AccessScope";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { Button } from "@/components/ui/button";
@@ -25,13 +29,12 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
 const METHOD_LABEL: Record<string, string> = {
   fixed: "Fixed amount",
   percent_base: "% of base",
-  rate_qty: "Rate × quantity",
   income_tax: "Income tax (TDS)",
   epf: "EPF (Provident Fund)",
   esi: "ESI (state insurance)",
@@ -82,6 +85,9 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<PayComponent | null>(null);
   const [form, setForm] = useState<Form>(EMPTY);
+  const [err, setErr] = useState<string | null>(null);
+  const [again, setAgain] = useState(false);
+  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "pay component" });
 
   // EPF/ESI: the server keeps one component per side (a second would double-charge that side). Which side is
   // already held - by whom - so the dialog can offer it as taken instead of letting the save 400.
@@ -95,16 +101,19 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
   function openCreate(kind: Form["kind"] = "earning") {
     setEditing(null);
     setForm({ ...EMPTY, kind });
+    setErr(null);
     setOpen(true);
   }
   function openEdit(pc: PayComponent) {
     setEditing(pc);
     setForm({ name: pc.display_name, kind: pc.kind, method: pc.method, rate: String(pc.rate ?? ""), cap: String(pc.cap ?? ""), regime: pc.regime ?? "new", recurring: pc.recurring, in_ctc: pc.in_ctc !== false, pf_wages: pc.pf_wages === true });
+    setErr(null);
     setOpen(true);
   }
 
   async function submit() {
     setBusy(true);
+    setErr(null);
     try {
       const isTax = form.method === "income_tax";
       const isEpf = form.method === "epf";
@@ -118,7 +127,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
       const body = {
         display_name: form.name,
         kind: (employeeOnly ? "deduction" : isPfCharge ? "employer_contribution" : form.kind) as "earning" | "deduction" | "employer_contribution",
-        method: form.method as "fixed" | "percent_base" | "rate_qty" | "income_tax" | "epf" | "esi" | "pt" | "edli" | "pf_admin",
+        method: form.method as "fixed" | "percent_base" | "income_tax" | "epf" | "esi" | "pt" | "edli" | "pf_admin",
         // TDS + PT are engine-computed (no rate); EPF defaults 12%, ESI 0.75%, EDLI/admin charges 0.5% each.
         rate: isTax || isPt ? null : isEpf ? (form.rate ? Number(form.rate) : 12) : isEsi ? (form.rate ? Number(form.rate) : (form.kind === "employer_contribution" ? 3.25 : 0.75)) : isPfCharge ? (form.rate ? Number(form.rate) : 0.5) : form.rate ? Number(form.rate) : null,
         cap: isEpf || isPfCharge ? (form.cap ? Number(form.cap) : null) : isEsi ? (form.cap ? Number(form.cap) : 21000) : null,
@@ -138,14 +147,22 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
         await create("pay-components", body);
         toast({ title: "Pay component created", variant: "success" });
       }
-      setOpen(false);
+      // "Add another" keeps the kind: components are catalogued in families (three earnings, then the deductions).
+      if (again && !editing) {
+        const next = { ...EMPTY, kind: form.kind };
+        setForm(next);
+        guard.markSaved(next);
+      } else {
+        guard.markSaved();
+        setOpen(false);
+      }
       reload();
       // Always ask the dry-run rather than guessing from the SAVED kind: an edit that moves a component OFF
       // employer_contribution (or off earning) shifts the CTC build-up exactly as much as one that moves it on,
       // and so does flipping a contribution's CTC side. The prompt stays silent when no split actually moved.
       await promptReapply();
     } catch (e) {
-      toast({ title: "Couldn't save component", description: (e as Error).message, variant: "destructive" });
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -217,21 +234,32 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
           rowClassName={(pc) => (pc.delete_time ? "opacity-60" : undefined)}
           emptyTitle="No pay components"
           emptyDescription="Create earnings (salary, bonus) and deductions (PF, TDS)."
+          emptyAction={createBtn}
           toolbar={createBtn}
           accessCollection="pay-components"
           accessTargetOf={(pc) => ({ objectPath: pc.path, label: pc.display_name, can: pc.access?.can })}
         />
       </DataState>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+      <Dialog open={open} onOpenChange={guard.onOpenChange}>
+        {/* The longest form in this domain (kind, method, rate, ceiling, CTC side, two flags, activity): its
+            Save belongs on screen the whole way down, not below the fold. */}
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+          <AccessScope collection="pay-components" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit pay component" : "New pay component"}</DialogTitle>
+            <DialogDescription>
+              {editing
+                ? "Changing a component re-prices every payroll run built after the change - existing runs keep their numbers until rebuilt."
+                : "A reusable line on the payslip. What it is (earning, deduction, employer cost) and how its amount is worked out."}
+            </DialogDescription>
           </DialogHeader>
+          <DialogBody>
+          <FormError error={err} />
           <Field label="Name">
             <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Base Salary" autoFocus />
           </Field>
-          <div className="grid gap-4 sm:grid-cols-2">
+          <FieldRow>
             <Field label="Kind">
               <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v })} disabled={["income_tax", "pt", ...PF_CHARGE_METHODS].includes(form.method)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -252,7 +280,6 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
                 <SelectContent>
                   <SelectItem value="fixed">Fixed amount</SelectItem>
                   <SelectItem value="percent_base">% of base</SelectItem>
-                  <SelectItem value="rate_qty">Rate × quantity</SelectItem>
                   <SelectItem value="income_tax">Income tax (TDS)</SelectItem>
                   <SelectItem value="epf">EPF (Provident Fund)</SelectItem>
                   <SelectItem value="esi">ESI (state insurance)</SelectItem>
@@ -262,7 +289,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
                 </SelectContent>
               </Select>
             </Field>
-          </div>
+          </FieldRow>
           {/* The CTC question for an employer contribution: inside the CTC figure (the common Indian convention)
               or paid over and above it. Per component, so employer PF, employer ESI and gratuity can differ. It
               changes every CTC surface (comp tab, letters, run totals, payslip) but never the employee's net. */}
@@ -287,37 +314,48 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
               </Select>
             </Field>
           ) : form.method === "epf" ? (
-            <div className="grid gap-4 sm:grid-cols-2">
+            <FieldRow>
               <Field label="Employee rate %" hint="Statutory employee contribution is 12%.">
-                <Input type="number" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="12" />
+                <Input type="number" min={0} max={100} step="0.01" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="12" />
               </Field>
-              <Field label="Wage ceiling" hint="Cap on the base, e.g. 15000. Leave blank to apply to the full base.">
-                <Input type="number" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} placeholder="15000" />
+              <Field label="Wage ceiling" hint="Cap on the base. Leave blank to apply to the full base.">
+                <MoneyInput value={form.cap} onChange={(v) => setForm({ ...form, cap: v })} placeholder="15000" min={0} suffix="ceiling" />
               </Field>
-            </div>
+            </FieldRow>
           ) : form.method === "esi" ? (
-            <div className="grid gap-4 sm:grid-cols-2">
+            <FieldRow>
               <Field label="Employee rate %" hint="Statutory employee contribution is 0.75% of gross.">
-                <Input type="number" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="0.75" />
+                <Input type="number" min={0} max={100} step="0.01" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="0.75" />
               </Field>
               <Field label="Eligibility ceiling" hint="No ESI when monthly gross exceeds this (default 21000).">
-                <Input type="number" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} placeholder="21000" />
+                <MoneyInput value={form.cap} onChange={(v) => setForm({ ...form, cap: v })} placeholder="21000" min={0} suffix="a month" />
               </Field>
-            </div>
+            </FieldRow>
           ) : PF_CHARGE_METHODS.includes(form.method) ? (
-            <div className="grid gap-4 sm:grid-cols-2">
+            <FieldRow>
               <Field label="Rate %" hint="Statutory EDLI and PF administration charges are 0.5% of PF wages each.">
-                <Input type="number" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="0.5" />
+                <Input type="number" min={0} max={100} step="0.01" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="0.5" />
               </Field>
-              <Field label="Wage ceiling" hint="Cap on PF wages, e.g. 15000 - the same ceiling EPF uses.">
-                <Input type="number" value={form.cap} onChange={(e) => setForm({ ...form, cap: e.target.value })} placeholder="15000" />
+              <Field label="Wage ceiling" hint="Cap on PF wages - the same ceiling EPF uses.">
+                <MoneyInput value={form.cap} onChange={(v) => setForm({ ...form, cap: v })} placeholder="15000" min={0} suffix="ceiling" />
               </Field>
-            </div>
+            </FieldRow>
           ) : form.method === "pt" ? (
             <p className="rounded-md border bg-muted/40 p-2 text-xs text-muted-foreground">Professional Tax is computed each run from the configured state slabs (default: nil up to ₹25,000/month, ₹200 above); this component just enables the deduction.</p>
+          ) : form.method === "fixed" ? (
+            /* A fixed component is the only method whose rate IS an amount, so it gets the money field - the
+               currency in view and the figure echoed back, because a stray zero here is a stray zero on every
+               payslip that carries this line. */
+            <Field label="Amount" hint="Paid in full each period this component applies to.">
+              <MoneyInput value={form.rate} onChange={(v) => setForm({ ...form, rate: v })} min={0} suffix={form.recurring ? "per period" : "one-off"} />
+            </Field>
+          ) : form.method === "percent_base" ? (
+            <Field label="Rate %" hint="Percentage of the employee's basic pay.">
+              <Input type="number" min={0} max={100} step="0.01" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} placeholder="e.g. 40" />
+            </Field>
           ) : (
-            <Field label="Rate" hint="Amount, percentage, or per-unit rate depending on the method.">
-              <Input type="number" value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} />
+            <Field label="Rate per unit" hint="Multiplied by the quantity entered on the run (e.g. overtime hours).">
+              <MoneyInput value={form.rate} onChange={(v) => setForm({ ...form, rate: v })} min={0} suffix="per unit" />
             </Field>
           )}
           {/* PF wages: only asked for an earning, and only bites when Settings → CTC sets the PF wage basis to
@@ -338,10 +376,18 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
           </div>
           <p className="-mt-2 text-xs text-muted-foreground">Use the Disable action to stop a component from being applied in payroll.</p>
           {editing && <ActivitySection resource={editing.path} className="border-t pt-3" />}
+          {!editing && (
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox checked={again} onCheckedChange={(v) => setAgain(v === true)} />
+              Keep this open to add another
+            </label>
+          )}
+          </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : "Create"}</Button>
+            <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
+            <Button onClick={submit} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : again ? "Create & add another" : "Create"}</Button>
           </DialogFooter>
+          </AccessScope>
         </DialogContent>
       </Dialog>
     </div>

@@ -12,11 +12,20 @@ export type AttendanceSchedule = {
   // widened for everyone: extra_grace_minutes added to grace_minutes, or lateness/early departure waived
   // entirely when omitted. Applies symmetrically to late arrival and early departure.
   grace_exceptions?: { date: string; reason?: string; extra_grace_minutes?: number }[]; // date = "YYYY-MM-DD"
+  // Which weekday a calendar grid starts on (0=Sun .. 6=Sat). Display-only, and org-specific: a week that
+  // starts on the wrong day makes every month grid read one column out of step with how people plan.
+  week_start?: number;
   full_day_minutes: number; // worked minutes for a full day; from half_day_minutes up to this is a half day
   half_day_minutes: number; // minimum worked minutes to earn a half day; below this the day doesn't count
   flexible_hours?: boolean; // judge the day by minutes worked only; don't flag late arrival / early departure
+  // Display-only, and the reason they're settings rather than constants: a progress bar toward a full day
+  // (and especially a projected finish time) reads as a clock-watching target in some workplaces and as a
+  // useful readout in others. Absent = shown, so an existing org keeps what it has.
+  show_day_progress?: boolean; // the Attendance clock card's full-day bar, break line and day-off note
+  show_finish_projection?: boolean; // the "Full day at ~6:12 PM" / "2h to a full day" text on that bar
   lop_enabled?: boolean; // deduct loss-of-pay for unexcused absences at payroll build
   lop_basis?: "working_days" | "days_30"; // per-day rate divisor
+  lop_wage_basis?: "gross" | "basic"; // the monthly wage that divisor divides: gross (default) or basic only
   proration_basis?: "calendar_days" | "working_days"; // how a mid-period joiner/leaver's earnings are prorated
 };
 
@@ -29,12 +38,17 @@ export const DEFAULT_SCHEDULE: AttendanceSchedule = {
   full_day_minutes: 480,
   half_day_minutes: 240,
   flexible_hours: false,
+  show_day_progress: true,
+  show_finish_projection: true,
   lop_enabled: false,
   lop_basis: "working_days",
+  lop_wage_basis: "gross",
   proration_basis: "calendar_days",
+  week_start: 1,
 };
 
-const hhmmToMin = (s: string) => {
+// Minutes-since-midnight of a wall-clock "HH:MM" (the form the schedule and the correction dialog use).
+export const hhmmToMin = (s: string) => {
   const [h, m] = s.split(":").map(Number);
   return (h || 0) * 60 + (m || 0);
 };
@@ -208,3 +222,55 @@ export const fmtHM = (iso: string, tz: string) =>
   new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: true }).format(new Date(iso));
 
 export const fmtDuration = (min: number) => `${Math.floor(min / 60)}h ${min % 60}m`;
+
+// Same duration with the zero part dropped ("8h", "45m") - for tight spots like a calendar cell.
+export const fmtDurationShort = (min: number) => {
+  const h = Math.floor(min / 60), m = min % 60;
+  return h && m ? `${h}h ${m}m` : h ? `${h}h` : `${m}m`;
+};
+
+// Minutes-since-midnight as a wall clock ("9:12 AM") - for averaged times, which are minutes, not instants.
+export const fmtMinOfDay = (min: number) => {
+  const m = ((Math.round(min) % 1440) + 1440) % 1440;
+  const h24 = Math.floor(m / 60);
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${String(m % 60).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`;
+};
+
+// ---- Calendar arithmetic (all UTC, since a "YYYY-MM-DD" is a calendar date, not an instant) ----
+export const monthStartOf = (ymd: string) => `${ymd.slice(0, 7)}-01`;
+export const addMonths = (ymd: string, n: number) => {
+  const [y, m] = ymd.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 10);
+};
+export const monthEndOf = (ymd: string) => new Date(Date.parse(`${addMonths(ymd, 1)}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+// The 42 days (6 weeks from the week-start day on/before the 1st) that fill a month grid. `weekStart` is the
+// org's configured first weekday (0=Sun default), so every grid in the app steps in the same rhythm.
+export const monthGridDays = (ymd: string, weekStart = 0) => {
+  const first = Date.parse(`${monthStartOf(ymd)}T00:00:00Z`);
+  const start = first - ((new Date(first).getUTCDay() - weekStart + 7) % 7) * 86400000;
+  return Array.from({ length: 42 }, (_, i) => new Date(start + i * 86400000).toISOString().slice(0, 10));
+};
+/** The weekday labels for a grid that starts on `weekStart`, as [index 0..6 of the column, weekday number]. */
+export const weekdayOrder = (weekStart = 0) => Array.from({ length: 7 }, (_, i) => (weekStart + i) % 7);
+// Monday of the week containing `ymd` - the grouping key for the history table's weekly subtotals.
+export const weekStartOf = (ymd: string) => {
+  const t = Date.parse(`${ymd}T00:00:00Z`);
+  return new Date(t - ((new Date(t).getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+};
+
+// How a day status looks: its plain-language label, the Badge variant of its pill, the dot colour in the
+// month grid / legend and the cell tint. One table so a colour means the same thing everywhere on the page.
+export type StatusUi = { label: string; badge: "success" | "secondary" | "warning" | "destructive" | "muted"; dot: string; cell: string };
+export const STATUS_UI: Record<DayStatus, StatusUi> = {
+  open: { label: "Clocked in", badge: "success", dot: "bg-emerald-500", cell: "bg-emerald-50 dark:bg-emerald-950/40" },
+  present: { label: "On time", badge: "secondary", dot: "bg-emerald-500", cell: "bg-emerald-50 dark:bg-emerald-950/40" },
+  late: { label: "Late", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
+  left_early: { label: "Left early", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
+  late_early: { label: "Late · left early", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
+  half_day: { label: "Half day", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
+  insufficient: { label: "Under hours", badge: "destructive", dot: "bg-rose-500", cell: "bg-rose-50 dark:bg-rose-950/40" },
+  on_leave: { label: "On leave", badge: "secondary", dot: "bg-teal-500", cell: "bg-teal-50 dark:bg-teal-950/40" },
+  holiday: { label: "Holiday", badge: "muted", dot: "bg-violet-500", cell: "bg-violet-50 dark:bg-violet-950/40" },
+  absent: { label: "Absent", badge: "destructive", dot: "bg-rose-500", cell: "bg-rose-50 dark:bg-rose-950/40" },
+};

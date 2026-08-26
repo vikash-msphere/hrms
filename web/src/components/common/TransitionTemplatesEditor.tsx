@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
+import { getSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 const blankTask = (): TemplateTask => ({ title: "", assignee: { type: "employee" }, due_offset_days: 0 });
@@ -29,7 +30,7 @@ export function TransitionTemplatesEditor() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    get<{ value?: { templates?: TransitionTemplate[] } }>("settings/transition-templates")
+    getSetting<{ templates?: TransitionTemplate[] }>("transition-templates")
       .then((s) => { if (s.value?.templates?.length) setTemplates(s.value.templates); })
       .catch(() => { /* not configured -> defaults */ })
       .finally(() => setReady(true));
@@ -90,13 +91,20 @@ export function TransitionTemplatesEditor() {
             <Input value={t.description ?? ""} placeholder="Description (optional)" className="h-9" onChange={(e) => setTpl(i, { description: e.target.value })} />
 
             <div className="space-y-2">
-              <div className="grid grid-cols-[1fr_10rem_5rem_2rem] items-center gap-2 text-xs font-medium text-muted-foreground">
+              {/* The header row only makes sense while the task rows ARE rows. Below `sm` they stack, and
+                  each control carries its own label instead. */}
+              <div className="hidden items-center gap-2 text-xs font-medium text-muted-foreground sm:grid sm:grid-cols-[1fr_10rem_5rem_2rem]">
                 <span>Task</span><span>Assignee</span><span>Day offset</span><span />
               </div>
               {t.tasks.map((tk, k) => (
-                <div key={k} className="grid grid-cols-[1fr_10rem_5rem_2rem] items-center gap-2">
+                // 17rem of fixed columns leaves the task title about 60px on a phone. Below `sm` the row
+                // becomes title-plus-remove, then assignee, then the day offset - each labelled, since the
+                // header row is gone at that width. `col-span-4` sub-rows below still span the full row
+                // because the phone grid is 2 columns and a span past the end simply clamps.
+                <div key={k} className="grid grid-cols-[1fr_auto] items-center gap-2 sm:grid-cols-[1fr_10rem_5rem_2rem]">
                   <Input value={tk.title} placeholder="Task title" className="h-8" onChange={(e) => setTask(i, k, { title: e.target.value })} />
-                  <div className="flex gap-1">
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive sm:hidden" onClick={() => setTpl(i, { tasks: t.tasks.filter((_, m) => m !== k) })} aria-label="Remove task"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  <div className="col-span-2 flex gap-1 sm:col-span-1">
                     <Select value={tk.assignee.type} onValueChange={(v) => setTask(i, k, { assignee: { type: v as TemplateTask["assignee"]["type"], employee: v === "specific" ? tk.assignee.employee : undefined } })}>
                       <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
                       <SelectContent>
@@ -106,8 +114,11 @@ export function TransitionTemplatesEditor() {
                       </SelectContent>
                     </Select>
                   </div>
-                  <Input type="number" value={tk.due_offset_days ?? 0} className="h-8" onChange={(e) => setTask(i, k, { due_offset_days: Number(e.target.value) })} />
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => setTpl(i, { tasks: t.tasks.filter((_, m) => m !== k) })} aria-label="Remove task"><Trash2 className="h-3.5 w-3.5" /></Button>
+                  <label className="col-span-2 flex items-center gap-2 text-xs text-muted-foreground sm:col-span-1 sm:block">
+                    <span className="sm:hidden">Day offset</span>
+                    <Input type="number" value={tk.due_offset_days ?? 0} className="h-8 w-20 sm:w-full" onChange={(e) => setTask(i, k, { due_offset_days: Number(e.target.value) })} />
+                  </label>
+                  <Button variant="ghost" size="icon" className="hidden h-8 w-8 text-destructive sm:inline-flex" onClick={() => setTpl(i, { tasks: t.tasks.filter((_, m) => m !== k) })} aria-label="Remove task"><Trash2 className="h-3.5 w-3.5" /></Button>
                   {tk.assignee.type === "specific" && (
                     <div className="col-span-4">
                       <Select value={tk.assignee.employee ?? ""} onValueChange={(v) => setTask(i, k, { assignee: { type: "specific", employee: v } })}>

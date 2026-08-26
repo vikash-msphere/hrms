@@ -8,8 +8,16 @@ export type LoadState = "loading" | "ready" | "error";
 // request, a short TTL lets navigations reuse cached rows, and a mutation (via api.ts) refreshes every mounted
 // view. Same return shape as before - pages don't change. `setRows` applies an optimistic edit shared by every
 // subscriber of this exact key; `reload` forces a refetch (bypasses the TTL).
-export function useCollection<T>(collection: string, opts: { showDeleted?: boolean; max?: number; enabled?: boolean; q?: string } = {}) {
-  const { showDeleted = false, max, enabled = true, q } = opts;
+export function useCollection<T>(
+  collection: string,
+  opts: { showDeleted?: boolean; deletedOnly?: boolean; max?: number; enabled?: boolean; q?: string; params?: Record<string, string> } = {},
+) {
+  const { showDeleted = false, deletedOnly = false, max, enabled = true, q, params } = opts;
+  // Collection-specific SERVER filters (e.g. `{ leave_type: "leave-types/<id>" }`). Serialised so a caller can
+  // pass a fresh object literal each render without churning the store key.
+  const paramsKey = JSON.stringify(
+    Object.entries(params ?? {}).filter(([, v]) => v).sort(([a], [b]) => a.localeCompare(b)),
+  );
   // Central capability gate: a caller without `<collection>.read` at ANY scope never fires the request -
   // the server would only 403 it. The read returns empty+ready, so data-driven UI collapses to its empty
   // state instead of skeleton-ing forever or spraying denials. This is also what makes "view as" honest for
@@ -19,7 +27,10 @@ export function useCollection<T>(collection: string, opts: { showDeleted?: boole
   // Stable opts object so the store key + effect identity don't churn each render. `enabled` is deliberately
   // NOT part of the key (it gates the fetch, not the cached data) - a disabled reader just never fetches and
   // sees whatever rows the store already holds ([] until some enabled reader loads it).
-  const stableOpts = useMemo(() => ({ showDeleted, max, q }), [showDeleted, max, q]);
+  const stableOpts = useMemo(
+    () => ({ showDeleted, deletedOnly, max, q, params: Object.fromEntries(JSON.parse(paramsKey) as [string, string][]) }),
+    [showDeleted, deletedOnly, max, q, paramsKey],
+  );
 
   const snap = useSyncExternalStore(
     useCallback((cb) => subscribe(collection, stableOpts, cb), [collection, stableOpts]),
@@ -52,8 +63,9 @@ export function useCollection<T>(collection: string, opts: { showDeleted?: boole
   // presenting the window as the total. Client-side filtering/sorting/export only ever sees `rows`.
   const hasMore = Boolean((snap.meta as { next_page_token?: string } | undefined)?.next_page_token);
 
-  // Follow the cursor: appends the next server page to the cached rows (no-op when exhausted). Explicit --
-  // wired to a "Load more" affordance, never automatic, to keep D1 reads user-driven.
+  // Follow the cursor: appends the next server page to the cached rows (no-op when exhausted). Reader-driven --
+  // wired to a "Load more" button, or to the reader reaching the foot of a feed (useInfiniteScroll). Never
+  // speculative: no page is fetched until someone has actually run out of rows, so D1 reads stay demand-led.
   const loadMore = useCallback(() => loadMoreRows(collection, stableOpts), [collection, stableOpts]);
 
   // No read capability -> a settled empty view (never a stuck skeleton, never a request).

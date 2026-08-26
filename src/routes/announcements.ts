@@ -113,6 +113,11 @@ const writeSchema = z.object({
   recipient_layout: recipientLayout,
   title_align: titleAlign,
   body_valign: bodyValign,
+  // Who it is for, and whether it also goes out as email. Both are about reach, not access - see the schema
+  // note on audience_department_id - and both are settable only while the post is still a draft.
+  audience_scope: z.enum(["everyone", "department", "none"]).optional(),
+  audience_department: z.string().nullable().optional(),
+  email_audience: z.boolean().optional(),
   ...pollFields,
 }).strict();
 // Generic board post (or poll): title + body, optionally poll options. The kind is forced to "post"/"poll" and
@@ -188,7 +193,8 @@ export const announcements = collectionRoutes<AnnouncementInput, typeof schema.a
   },
   // The board's own list: state visibility (drafts and disabled posts are editors-only) is bound in SQL there,
   // alongside the caller's scope.
-  list: (c, page) => listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
+  list: (c, page) =>
+    listAnnouncements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q")),
   verbs: {
     // Idempotent self-action: record that the caller opened this post.
     markRead: { run: (deps, user, id) => markAnnouncementRead(deps, user, id) },

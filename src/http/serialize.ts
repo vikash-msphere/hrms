@@ -1,10 +1,13 @@
 // Row -> AEP wire resource boundary. Emits `path`, snake_case fields, and standard fields.
 // NEVER emit *Enc columns or other DB-only fields.
 import type { Wire } from "./wire";
+import type { AppUser } from "../env";
 import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
 import { round2 } from "../domain/money";
 import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
 import { parseScope, scopeToWire } from "../domain/keyScope";
+import { parseAttachments } from "../domain/ticketAttachments";
+import { parseFound, parseScope as parseStocktakeScope } from "../domain/stocktake";
 import { maskedToken } from "../lib/apiKeyToken";
 
 // Entities whose id resolves via uuidToCode (the same set the activity authz gate uses). An activity row's
@@ -69,6 +72,7 @@ export function toApiKeyResource(r: any): Wire<"api-key"> {
   return {
     ...baseResource(r, "api-keys"),
     display_name: r.name,
+    description: r.description ?? undefined,
     owner: ref("users", r.ownerUserId),
     prefix: r.prefix,
     masked_token: maskedToken(r.prefix),
@@ -106,6 +110,7 @@ export function toEmployeeResource(r: any): Wire<"employee"> {
     start_date: r.startDate ? iso(r.startDate).slice(0, 10) : undefined,
     probation_end_date: r.probationEndDate ? iso(r.probationEndDate).slice(0, 10) : undefined,
     epf_enrolled: !!r.epfEnrolled,
+    eps_excluded: !!r.epsExcluded,
     photo: r.photoKey ? `employees/${r.uuid}:getPhoto` : undefined,
     signature: r.signatureKey ? `employees/${r.uuid}:getSignature` : undefined,
     // national_id / bank_details intentionally omitted (write-only, encrypted at rest).
@@ -134,6 +139,9 @@ export function toHolidayResource(r: any): Wire<"holiday"> {
     display_name: r.name,
     date: iso(r.date).slice(0, 10),
     kind: r.kind,
+    ...(r.location ? { location: r.location } : {}),
+    ...(r.halfDay ? { half_day: true } : {}),
+    ...(r.applies !== undefined ? { applies: !!r.applies } : {}),
     ...(r.selected !== undefined ? { selected: !!r.selected } : {}),
     ...(r.selectionId ? { selection: `holiday-selections/${r.selectionId}` } : {}),
   };
@@ -152,6 +160,7 @@ export function toComplianceEventResource(r: any): Wire<"compliance-event"> {
     overdue: overdue || undefined,
     filed_date: r.filedDate ? iso(r.filedDate).slice(0, 10) : undefined,
     reference: r.reference ?? undefined,
+    document: ref("org-documents", r.documentId),
     assignee: ref("employees", r.assigneeId),
     notes: r.notes ?? undefined,
     rule: ref("compliance-rules", r.ruleId),
@@ -170,6 +179,7 @@ export function toBackgroundCheckResource(r: any): Wire<"background-check"> {
     initiated_date: r.initiatedDate ? iso(r.initiatedDate).slice(0, 10) : undefined,
     completed_date: r.completedDate ? iso(r.completedDate).slice(0, 10) : undefined,
     notes: r.notes ?? undefined,
+    document: ref("personal-documents", r.documentId),
   };
 }
 
@@ -203,6 +213,19 @@ export function toEventResource(r: any): Wire<"event"> {
     attendees: ((): string[] => {
       try { return (JSON.parse(r.attendeeIds ?? "[]") as string[]).map((id) => `employees/${id}`); } catch { return []; }
     })(),
+    repeat: r.repeat ?? undefined,
+    // Who is actually coming (attached by decorate). The tally is what an organiser needs; the individual
+    // answers say who to chase.
+    responses: (r._responses ?? []).map((x: any) => ({
+      employee: ref("employees", x.employeeId),
+      response: x.response,
+      note: x.note ?? undefined,
+      update_time: iso(x.updatedAt ?? x.createdAt),
+    })),
+    going_count: (r._responses ?? []).filter((x: any) => x.response === "going").length,
+    maybe_count: (r._responses ?? []).filter((x: any) => x.response === "maybe").length,
+    declined_count: (r._responses ?? []).filter((x: any) => x.response === "declined").length,
+    my_response: r._myResponse?.response ?? undefined,
   };
 }
 
@@ -313,6 +336,13 @@ export function toAnnouncementResource(r: any): Wire<"announcement"> {
     title_align: r.titleAlign ?? undefined,
     body_valign: r.bodyValign ?? undefined,
     author: ref("employees", r.authorEmployeeId),
+    // Who gets NOTIFIED - everyone, one department, or nobody - and whether it also went out as email. Reach,
+    // not access: the board carries the post on all three, and the card shows the label so the other
+    // departments know it is not about them.
+    audience_scope: r.audienceScope ?? "everyone",
+    audience_department: ref("departments", r.audienceDepartmentId),
+    email_audience: !!r.emailAudience,
+    email_time: r.emailedAt ? iso(r.emailedAt) : undefined,
     publish_time: r.publishTime ? iso(r.publishTime) : undefined,
     // When the post was pinned to the top of the board (:pin verb); absent = not pinned. The feed shows
     // pinned posts first, most recently pinned leading.
@@ -399,6 +429,30 @@ export function toGoalResource(r: any): Wire<"goal"> {
     progress: r.progress ?? 0,
     status: r.status,
     due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
+    // The measure, when the goal has one. `measured` says which side owns `progress`, so a client can show
+    // "42 of 60 customers" and disable the slider rather than offering a number the next write would overwrite.
+    unit: r.unit ?? undefined,
+    baseline_value: r.baselineValue ?? undefined,
+    target_value: r.targetValue ?? undefined,
+    current_value: r.currentValue ?? undefined,
+    measured: r.targetValue != null && r.currentValue != null,
+    // Linked board tasks, rolled up by the route's decorate (one grouped query per page). Always present, so a
+    // client renders the delivery chip from the goal itself instead of reading and grouping every card.
+    linked_tasks: r._tasks?.tasks ?? 0,
+    delivered_tasks: r._tasks?.delivered ?? 0,
+    task_points: r._tasks?.points ?? 0,
+    delivered_task_points: r._tasks?.deliveredPoints ?? 0,
+    comments: (r._comments ?? []).map(toGoalCommentResource), // attached by the item Get
+  };
+}
+
+// A comment on a goal (sub-resource, no path of its own), same shape as a card's.
+export function toGoalCommentResource(r: any) {
+  return {
+    author: ref("employees", r.authorId),
+    author_email: r.authorEmail ?? undefined,
+    body: r.body,
+    create_time: iso(r.createdAt),
   };
 }
 
@@ -618,7 +672,15 @@ export function toTransitionTaskResource(r: any): Wire<"transition-task"> {
   };
 }
 
-export function toCheckInResource(r: any): Wire<"check-in"> {
+export function toCheckInResource(r: any, user?: AppUser): Wire<"check-in"> {
+  // A private note is served to the ONE person who wrote it and to nobody else - not to the other party, not to
+  // an HR admin who can read the row, not to a manager reading down the chain. Redacting here rather than in the
+  // query is deliberate: every read of a check-in goes through this function, so there is no path that forgets.
+  const mine = user?.employeeId
+    ? user.employeeId === r.employeeId ? (r.employeeNote ?? undefined)
+      : user.employeeId === r.counterpartId ? (r.counterpartNote ?? undefined)
+      : undefined
+    : undefined;
   return {
     ...baseResource(r, "check-ins"),
     employee: ref("employees", r.employeeId),
@@ -627,6 +689,11 @@ export function toCheckInResource(r: any): Wire<"check-in"> {
     notes: r.notes ?? undefined,
     action_items: r.actionItemsJson ? JSON.parse(r.actionItemsJson) : [],
     cadence: r.cadence ?? undefined,
+    private_note: mine,
+    // Whether the OTHER side has kept a note. The text stays private; that one exists is not a secret, and
+    // hiding even that would make "did they write anything?" a reason to go asking.
+    other_has_private_note: user?.employeeId === r.employeeId ? !!r.counterpartNote : user?.employeeId === r.counterpartId ? !!r.employeeNote : false,
+    pulse: r.pulse ?? undefined,
   };
 }
 
@@ -759,6 +826,7 @@ export function toLeaveRequestResource(r: any): Wire<"leave-request"> {
     end_session: r.endSession ?? 2,
     state: r.state,
     reason: r.reason ?? undefined,
+    has_document: !!r.hasDocument, // set by the route when a supporting file is attached to this request
   };
 }
 
@@ -792,6 +860,17 @@ export function toCompensationResource(r: any): Wire<"compensation"> {
     current: !r.effectiveTo, // the active salary
     arrears_amount: r.arrearsAmount || undefined, // retro arrears owed by this backdated revision
     arrears_paid: r.arrearsAmount ? !!r.arrearsPaidRunId : undefined, // whether a run has paid them
+    // The CTC build-up, attached by the service on the current row of a single-employee read (domain
+    // `ctcLines` - the same pricing the CTC letter and the payroll run use). It exists so a reader who cannot
+    // see the pay-component catalog or the salary-structure behind this row - an employee reading their own
+    // pay - still gets the itemised split rather than a bare CTC number.
+    ctc_monthly: (r.ctc as { ctcMonthly?: number } | undefined)?.ctcMonthly,
+    breakdown: (r.ctc as { lines?: { name: string; monthly: number; annual: number; aboveCtc?: boolean }[] } | undefined)?.lines?.map((l) => ({
+      name: l.name,
+      monthly: l.monthly,
+      annual: l.annual,
+      above_ctc: l.aboveCtc,
+    })),
   };
 }
 
@@ -858,12 +937,16 @@ export function toBonusResource(r: any): Wire<"bonus"> {
   };
 }
 
-export function toAssetResource(r: any): Wire<"asset"> {
+// The tag secret is the one field here that is NOT for everybody: it is what a scan proves possession with,
+// so serving it to the asset's holder would let them confirm custody from their sofa. It rides out only for a
+// caller who may print this asset's tag - which is exactly who needs it, since the printer renders it into
+// the QR. `can` is the access hint the route computed for this caller on this row.
+export function toAssetResource(r: any, _user?: AppUser, can?: string[]): Wire<"asset"> {
   return {
     ...baseResource(r, "assets"),
     asset_tag: r.assetTag ?? undefined,
     name: r.name,
-    category: r.category ?? undefined,
+    category: r.categoryId ? ref("asset-categories", r.categoryId) : undefined,
     serial_number: r.serialNumber ?? undefined,
     status: r.status,
     assigned_to: r.assignedTo ? ref("employees", r.assignedTo) : undefined,
@@ -871,7 +954,48 @@ export function toAssetResource(r: any): Wire<"asset"> {
     purchase_date: r.purchaseDate ? iso(r.purchaseDate).slice(0, 10) : undefined,
     tag_printed_time: r.tagPrintedAt ? iso(r.tagPrintedAt) : undefined,
     last_verified_time: r.verifiedAt ? iso(r.verifiedAt) : undefined,
+    // Who saw it last, whether a scan proved it, and which count claimed the sighting. Together these let the
+    // inventory answer "seen by whom, how well proved, in which walk-through" without reading the audit log
+    // per row - and they are what lets a stocktake resume after a refresh (domain/stocktake.ts).
+    last_verified_by: r.verifiedBy ? ref("employees", r.verifiedBy) : undefined,
+    last_verified_scanned: r.verifiedScanned == null ? undefined : !!r.verifiedScanned,
+    last_stocktake: r.lastStocktakeId ? ref("stocktakes", r.lastStocktakeId) : undefined,
+    acknowledged_time: r.acknowledgedAt ? iso(r.acknowledgedAt) : undefined,
+    pending_since_time: r.custodySince ? iso(r.custodySince) : undefined,
+    condition: r.custodyState ?? undefined,
+    ...(can?.includes("printTag") && r.tagSecret ? { tag_secret: r.tagSecret } : {}),
     notes: r.notes ?? undefined,
+  };
+}
+
+// One walk-through of the inventory. It carries no sightings - those are stamps on the asset rows - so what
+// travels here is the frame (who, from when, over what scope) plus, once closed, the frozen result. `scope`
+// and `result`/`found` are parsed out of their JSON columns so the client never re-parses stored text; the
+// refs inside `result` (assets/<id>, employees/<id>) are tokenized by the outbound wire edge like any other.
+export function toStocktakeResource(r: any): Wire<"stocktake"> {
+  const scope = parseStocktakeScope(r.scopeJson);
+  return {
+    ...baseResource(r, "stocktakes"),
+    label: r.label,
+    status: r.status,
+    scope: { ...(scope.statuses ? { statuses: scope.statuses } : {}), ...(scope.categories ? { categories: scope.categories.map((c) => `asset-categories/${c}`) } : {}) },
+    started_by: r.startedBy ? ref("employees", r.startedBy) : undefined,
+    start_time: iso(r.startedAt),
+    closed_by: r.closedBy ? ref("employees", r.closedBy) : undefined,
+    closed_time: r.closedAt ? iso(r.closedAt) : undefined,
+    found: parseFound(r.foundJson),
+    result: r.resultJson ? JSON.parse(r.resultJson) : undefined,
+    notes: r.notes ?? undefined,
+  };
+}
+
+// `tag_code` is a category's contribution to every tag printed in it (Laptop -> LAP -> MS-LAP-014).
+export function toAssetCategoryResource(r: any): Wire<"asset-category"> {
+  return {
+    ...baseResource(r, "asset-categories"),
+    display_name: r.name,
+    tag_code: r.tagCode,
+    requires_serial: !!r.requiresSerial,
   };
 }
 
@@ -962,6 +1086,23 @@ export function toRemoteWorkRequestResource(r: any): Wire<"remote-work-request">
   };
 }
 
+// An asset request names a category, not a machine; `issued_asset` is what the person actually got, once a
+// hand-over has happened.
+export function toAssetRequestResource(r: any): Wire<"asset-request"> {
+  return {
+    ...baseResource(r, "asset-requests"),
+    employee: ref("employees", r.employeeId),
+    category: ref("asset-categories", r.categoryId),
+    justification: r.justification ?? undefined,
+    needed_by: r.neededBy ? iso(r.neededBy).slice(0, 10) : undefined,
+    state: r.state,
+    decided_by: r.decidedBy ?? undefined,
+    decision_note: r.decisionNote ?? undefined,
+    issued_asset: r.issuedAssetId ? ref("assets", r.issuedAssetId) : undefined,
+    issued_time: r.issuedAt ? iso(r.issuedAt) : undefined,
+  };
+}
+
 export function toNoticePeriodResource(r: any): Wire<"notice-period"> {
   const lwd = +new Date(r.lastWorkingDay);
   const totalDays = Math.max(0, Math.round((lwd - +new Date(r.noticeDate)) / 86400000));
@@ -999,6 +1140,8 @@ export function toSuggestionResource(r: any): Wire<"suggestion"> {
     downvotes: r.downCount ?? 0,
     my_vote: r.myVote ?? 0, // -1 down, 0 none, +1 up
     own: !!r.own, // the caller submitted this one (can't vote on it) - true even when anonymous
+    // Folded into another suggestion: kept readable so its submitter can follow where their idea went.
+    merged_into: ref("suggestions", r.mergedIntoId),
   };
 }
 
@@ -1111,9 +1254,12 @@ export function toExpenseResource(r: any): Wire<"expense"> {
     reimbursement: ref("reimbursements", r.reimbursementId),
     has_invoice: !!r.hasInvoice, // set by the route when an attachment exists
     paid_time: r.paidAt ? iso(r.paidAt) : undefined,
+    decision_note: r.decisionNote ?? undefined,
     recurring: !!r.isRecurring,
+    paused: !!r.paused,
     recurrence_rule: r.recurrenceRule ?? undefined,
     next_occurrence_on: r.nextOccurrenceOn ? iso(r.nextOccurrenceOn).slice(0, 10) : undefined,
+    last_generated_time: r.lastGeneratedOn ? iso(r.lastGeneratedOn) : undefined,
     template: ref("expenses", r.templateId),
   };
 }
@@ -1126,9 +1272,14 @@ export function toExpenseBudgetResource(r: any): Wire<"expense-budget"> {
     period_type: r.periodType,
     period_key: r.periodKey,
     amount: r.amount,
+    recurring: !!r.recurring,
     spent: r.spent ?? 0, // derived by the service
+    pending: r.pending ?? 0, // submitted, not yet approved - not counted in utilization
     remaining: r.remaining ?? r.amount,
     utilization: r.utilization ?? 0,
+    // The highest alert threshold the daily cron has already fired for this period, so the page can say the
+    // notification went out (and why editing the cap re-arms it) instead of leaving it invisible.
+    alert_level: r.alertLevel ?? 0,
   };
 }
 
@@ -1164,6 +1315,7 @@ export function toRequisitionResource(r: any): Wire<"job-requisition"> {
     employment_type: r.employmentType ?? undefined,
     openings: r.openings,
     description: r.description ?? undefined,
+    pay_grade: ref("pay-grades", r.payGradeId),
     status: r.status,
     applicant_count: r.applicantCount, // set by the route (List enrichment) when available
     opened_time: r.openedDate ? iso(r.openedDate) : undefined,
@@ -1198,6 +1350,7 @@ export function toApplicationResource(r: any): Wire<"application"> {
     rejection_reason: r.rejectionReason ?? undefined,
     source: r.source ?? undefined,
     referral: ref("referrals", r.referralId),
+    hired_employee: ref("employees", r.hiredEmployeeId),
     applied_time: r.appliedDate ? iso(r.appliedDate) : undefined,
     stage_changed_time: r.stageChangedDate ? iso(r.stageChangedDate) : undefined,
   };
@@ -1286,6 +1439,11 @@ export function toTicketResource(r: any): Wire<"ticket"> {
     // counts the list query attached. Lets the table show done/total without loading the full items.
     todo_done: Array.isArray(r.todos) ? r.todos.filter((x: any) => x.done).length : (r.todoDone ?? 0),
     todo_total: Array.isArray(r.todos) ? r.todos.length : (r.todoTotal ?? 0),
+    // Attachments travel as metadata only - name, type, size and the storage key the :attachment verb takes.
+    // The bytes are never inlined: a list of ten tickets would otherwise carry megabytes of screenshots.
+    attachments: parseAttachments(r.attachmentsJson).map((a) => ({
+      key: a.key, name: a.name, content_type: a.content_type, size_bytes: a.size_bytes, create_time: a.created_at,
+    })),
     // Comments and the full checklist are attached by the Get route (the list endpoint omits them to stay cheap).
     ...(r.comments ? { comments: r.comments.map(toTicketCommentResource) } : {}),
     ...(r.todos ? { todos: r.todos.map(toTicketTodoResource) } : {}),
@@ -1343,7 +1501,7 @@ export function toOrgDocumentResource(r: any): Wire<"org-document"> {
     sign_anchor: requiresAck && r.signAnchorJson ? safeParse(r.signAnchorJson) : undefined,
     // Set only on the :acknowledge response for an Aadhaar doc: the vendor signing link to open. Not persisted
     // on the org-document row - attached ad-hoc by the acknowledge service.
-    esign_url: r.esignUrl ?? undefined,
+    esign_uri: r.esignUri ?? undefined,
   };
 }
 
@@ -1367,7 +1525,7 @@ export function toPersonalDocumentResource(r: any): Wire<"personal-document"> {
     signature_name: r.signatureName ?? undefined,
     esign_provider: r.esignProvider ?? undefined,
     esign_status: r.esignStatus && r.esignStatus !== "none" ? r.esignStatus : undefined,
-    esign_url: r.esignUrl ?? undefined,
+    esign_uri: r.esignUri ?? undefined,
     financial_year: r.financialYear ?? undefined,
     official: r.official || undefined,
     ...docFields(r),

@@ -4,10 +4,11 @@ import { api, get, create, invoke, download, remove } from "@/api";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
-import { idOf, formatMoney } from "@/lib/utils";
+import { idOf, formatDate, formatMoney, round2 } from "@/lib/utils";
 import { navigate } from "@/router";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { BankFormat, Me, Operation, PayPeriod, PayrollRun, PayrollRunItem } from "@/types";
+import { Chart } from "@/components/common/Chart";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { AccessTab } from "@/components/common/AccessTab";
@@ -16,16 +17,21 @@ import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
 import { DataState } from "@/components/common/DataState";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { EmptyState } from "@/components/common/EmptyState";
+import { TableSkeleton } from "@/components/common/Skeletons";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Field, FieldRow } from "@/components/common/Field";
+import { FormError } from "@/components/common/FormError";
+import { useDialogGuard } from "@/components/common/dialogGuard";
+import { useDeepOpen } from "@/hooks/useDeepOpen";
+import { AccessScope } from "@/components/access/AccessScope";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AccessAction } from "@/components/access/AccessAction";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
 import { useToast } from "@/components/ui/use-toast";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
@@ -68,7 +74,7 @@ function isMonth(period: PayPeriod, y: number, m: number): boolean {
   return d.getUTCFullYear() === y && d.getUTCMonth() === m;
 }
 
-export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
+export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string; openId?: string }) {
   const isSuperAdmin = me.role === "super_admin";
   const { rows, state, error, reload } = useCollection<PayrollRun>("payroll-runs");
   const { rows: periods, reload: reloadPeriods } = useCollection<PayPeriod>("pay-periods");
@@ -89,6 +95,11 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
   const { canReapply, reapplying, reapply: doReapply } = useSplitStaleness({ auto: false });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [itemQuery, setItemQuery] = useState("");
+  // Comparison against the previous run, loaded ON REQUEST. Reviewing payroll is mostly asking "who moved, and
+  // why" - a total tells you nothing about that - but a second run's items is a second page of D1 reads, so it
+  // waits for an explicit ask rather than riding along with every review.
+  const [compare, setCompare] = useState<{ label: string; net: Map<string, number> } | null>(null);
+  const [comparing, setComparing] = useState(false);
   // Fetch the run DETAIL (carries staleness: inputs changed since the last build) + the per-employee breakdown.
   // The detail response has a fresh etag, so it's stored as reviewRun and drives an in-place rebuild.
   type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift };
@@ -98,6 +109,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
     setReviewStale(null);
     setExpanded(new Set());
     setItemQuery("");
+    setCompare(null);
     try {
       const [detail, r] = await Promise.all([
         get<RunDetail>("payroll-runs/" + idOf(run.path)),
@@ -111,6 +123,33 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
       toast({ title: "Couldn't load breakdown", description: (e as Error).message, variant: "destructive" });
     }
   }
+  // The run that paid the period before this one - the only meaningful thing to compare against, and the reason
+  // the lookup goes through periods rather than run creation order (runs are often built out of order).
+  const priorRun = useMemo(() => {
+    const periodOf = (r: PayrollRun) => periods.find((p) => r.pay_period && idOf(p.path) === idOf(r.pay_period));
+    const mine = reviewRun ? periodOf(reviewRun) : undefined;
+    if (!mine) return null;
+    const candidates = rows
+      .filter((r) => r.path !== reviewRun?.path)
+      .map((r) => ({ run: r, period: periodOf(r) }))
+      .filter((x): x is { run: PayrollRun; period: PayPeriod } => !!x.period && x.period.period_start < mine.period_start)
+      .sort((a, b) => b.period.period_start.localeCompare(a.period.period_start));
+    return candidates[0] ?? null;
+  }, [rows, periods, reviewRun]);
+
+  async function loadCompare() {
+    if (!priorRun) return;
+    setComparing(true);
+    try {
+      const r = await get<{ results: PayrollRunItem[] }>("payroll-runs/" + idOf(priorRun.run.path) + "/items");
+      setCompare({ label: priorRun.period.display_name, net: new Map((r.results ?? []).map((it) => [it.employee, it.net])) });
+    } catch (e) {
+      toast({ title: "Couldn't load the previous run", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setComparing(false);
+    }
+  }
+
   // Rebuild in place from the review dialog: recompute lines from current inputs, then refresh the breakdown +
   // staleness. NOTE: like any build, one-off inputs (LOP, ad-hoc lines) are re-entered per build, not preserved.
   async function rebuildReview() {
@@ -179,6 +218,9 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
 
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState("");
+  const [newBusy, setNewBusy] = useState(false);
+  const [newErr, setNewErr] = useState<string | null>(null);
+  const [quickErr, setQuickErr] = useState<string | null>(null);
   const [publishing, setPublishing] = useState<string | null>(null);
 
   // Quick monthly run: pick a month (smart default), prefilled editable period + run created together.
@@ -186,6 +228,9 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
   const [quickBusy, setQuickBusy] = useState(false);
   const [quickYM, setQuickYM] = useState<{ y: number; m: number }>(defaultMonth);
   const [quickForm, setQuickForm] = useState(() => monthDefaults(defaultMonth().y, defaultMonth().m));
+  // The quick run's prefilled period is real work (a name and three dates); the plain new-run dialog holds one
+  // pick, so only the former needs a discard guard.
+  const quickGuard = useDialogGuard(quickOpen, quickForm, () => setQuickOpen(false), { label: "monthly run" });
   // A window of months to choose from: next month back through the last 12, newest first.
   const monthOptions = useMemo(() => {
     const now = new Date();
@@ -211,6 +256,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
   }
   async function createQuickRun() {
     setQuickBusy(true);
+    setQuickErr(null);
     try {
       // Reuse the month's period if one exists, else create it from the (editable) prefill.
       const periodPath = quickExisting
@@ -227,7 +273,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
       reloadPeriods();
       reload();
     } catch (e) {
-      toast({ title: "Couldn't create monthly run", description: (e as Error).message, variant: "destructive" });
+      setQuickErr((e as Error).message);
     } finally {
       setQuickBusy(false);
     }
@@ -238,7 +284,15 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [periods]);
 
+  // Periods that already carry a run, so the picker can say so instead of letting the create collide. A second
+  // run on one period is a genuine mistake (two payments for the same days), not a workflow.
+  const periodsWithRun = useMemo(() => new Set(rows.map((r) => idOf(r.pay_period ?? "")).filter(Boolean)), [rows]);
+  const selectedPeriod = periods.find((p) => `pay-periods/${idOf(p.path)}` === selected);
+  const reviewPeriod = periods.find((p) => reviewRun?.pay_period && idOf(p.path) === idOf(reviewRun.pay_period));
+
   async function createRun() {
+    setNewBusy(true);
+    setNewErr(null);
     try {
       await create("payroll-runs", { pay_period: selected });
       toast({ title: "Payroll run created", variant: "success" });
@@ -246,7 +300,9 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
       setOpen(false);
       reload();
     } catch (e) {
-      toast({ title: "Couldn't create run", description: (e as Error).message, variant: "destructive" });
+      setNewErr((e as Error).message);
+    } finally {
+      setNewBusy(false);
     }
   }
 
@@ -398,7 +454,9 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
   ) : null;
   const newRunBtn = (
     <AccessAction collection="payroll-runs" create label="New run">
-      <Button onClick={() => setOpen(true)} disabled={periods.length === 0}><Plus className="h-4 w-4" /> New run</Button>
+      {/* Deliberately NOT disabled when there are no pay periods: a dead button explains nothing, while the
+          dialog can say what's missing and send you to the tab that fixes it. */}
+      <Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> New run</Button>
     </AccessAction>
   );
   const runActions = (
@@ -409,6 +467,8 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
   );
 
   const activeTab = ["periods", "bonuses"].includes(tab ?? "") ? tab! : "runs";
+  // `payroll-runs/runs/<id>` opens that run's breakdown - the link you send when asking someone to check a run.
+  useDeepOpen(activeTab === "runs" ? openId : undefined, rows, openReview);
   // "New since last looked" counts per sub-tab; the tab you're on is suppressed and marked seen.
   const activity = useTabActivity([
     { key: "payroll-runs:runs", collection: "payroll-runs" },
@@ -456,7 +516,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
         </TabsContent>
 
         <TabsContent value="periods">
-          <PayPeriods />
+          <PayPeriods openId={activeTab === "periods" ? openId : undefined} />
         </TabsContent>
 
         <TabsContent value="bonuses">
@@ -464,34 +524,63 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
         </TabsContent>
       </Tabs>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setNewErr(null); }}>
+        <DialogContent onEnterSubmit={() => { if (selected && !newBusy) void createRun(); }}>
           <DialogHeader>
             <DialogTitle>New payroll run</DialogTitle>
+            <DialogDescription>Creates an empty draft. Nothing is computed until you build it, and nobody is paid until you publish.</DialogDescription>
           </DialogHeader>
-          <Field label="Pay period">
-            <Select value={selected} onValueChange={setSelected}>
-              <SelectTrigger><SelectValue placeholder="Select a pay period…" /></SelectTrigger>
-              <SelectContent>
-                {periods.filter((p) => !p.disabled).map((p) => (
-                  <SelectItem key={p.path} value={`pay-periods/${idOf(p.path)}`}>{p.display_name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
+          <FormError error={newErr} />
+          {periods.filter((p) => !p.disabled).length === 0 ? (
+            <p className="rounded-lg border bg-muted/40 p-3 text-sm">
+              There are no pay periods to run against yet - a period is the span of days a run pays for.{" "}
+              <button type="button" className="font-medium text-primary hover:underline" onClick={() => { setOpen(false); navigate("payroll-runs/periods"); }}>
+                Create a pay period
+              </button>{" "}
+              first.
+            </p>
+          ) : (
+            <Field label="Pay period">
+              <Select value={selected} onValueChange={setSelected}>
+                <SelectTrigger><SelectValue placeholder="Select a pay period…" /></SelectTrigger>
+                <SelectContent>
+                  {periods.filter((p) => !p.disabled).map((p) => (
+                    <SelectItem key={p.path} value={`pay-periods/${idOf(p.path)}`}>
+                      {p.display_name}{periodsWithRun.has(idOf(p.path)) ? " · already has a run" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          {selectedPeriod && (
+            <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+              <div className="flex justify-between"><span className="text-muted-foreground">Pays for</span><span className="font-medium">{formatDate(selectedPeriod.period_start)} - {formatDate(selectedPeriod.period_end)}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Pay date</span><span className="font-medium">{formatDate(selectedPeriod.pay_date)}</span></div>
+            </div>
+          )}
+          {selectedPeriod && periodsWithRun.has(idOf(selectedPeriod.path)) && (
+            <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              This period already has a payroll run. A second run pays the same days again - review the existing one instead unless you meant a correction run.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button onClick={createRun} disabled={!selected}>Create run</Button>
+            <Button onClick={createRun} loading={newBusy} disabled={!selected}>Create run</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={quickOpen} onOpenChange={setQuickOpen}>
-        <DialogContent onEnterSubmit={() => { if (!quickBusy && (quickExisting || (quickForm.display_name.trim() && quickForm.period_start && quickForm.period_end >= quickForm.period_start && quickForm.pay_date))) void createQuickRun(); }}>
+      <Dialog open={quickOpen} onOpenChange={quickGuard.onOpenChange}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!quickBusy && (quickExisting || (quickForm.display_name.trim() && quickForm.period_start && quickForm.period_end >= quickForm.period_start && quickForm.pay_date))) void createQuickRun(); }}>
           <DialogHeader>
             <DialogTitle>Quick monthly run</DialogTitle>
+            <DialogDescription>
+              Pick a month: the pay period is created for you if it doesn't exist, and a draft run opens against it. Defaulted to {defaultMonth().m === new Date().getUTCMonth() ? "this month" : "last month"} based on today.
+            </DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">Pick a month and start a draft run. Defaulted to {defaultMonth().m === new Date().getUTCMonth() ? "this month" : "last month"} based on today.</p>
+          <DialogBody>
+          <FormError error={quickErr} />
           <Field label="Month">
             <Select value={`${quickYM.y}-${quickYM.m}`} onValueChange={pickMonth}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -503,7 +592,18 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
             </Select>
           </Field>
           {quickExisting ? (
-            <p className="text-sm text-muted-foreground">A pay period already exists for this month - the run will use it ({quickExisting.period_start} to {quickExisting.period_end}, pay {quickExisting.pay_date}).</p>
+            <>
+              <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                <p className="text-muted-foreground">This month already has a pay period - the run will use it.</p>
+                <div className="flex justify-between"><span className="text-muted-foreground">Pays for</span><span className="font-medium">{formatDate(quickExisting.period_start)} - {formatDate(quickExisting.period_end)}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Pay date</span><span className="font-medium">{formatDate(quickExisting.pay_date)}</span></div>
+              </div>
+              {periodsWithRun.has(idOf(quickExisting.path)) && (
+                <p className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                  A run already exists for {quickExisting.display_name}. Creating another pays the same days twice.
+                </p>
+              )}
+            </>
           ) : (
             <>
               <Field label="Name">
@@ -522,6 +622,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
               </Field>
             </>
           )}
+          </DialogBody>
           <DialogFooter>
             <Button variant="outline" onClick={() => setQuickOpen(false)}>Cancel</Button>
             <Button onClick={createQuickRun} loading={quickBusy} disabled={!quickExisting && (!quickForm.display_name.trim() || !quickForm.period_start || !quickForm.period_end || !quickForm.pay_date)}>
@@ -533,13 +634,21 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
 
       {/* Per-employee breakdown - the review surface */}
       <Dialog open={!!reviewRun} onOpenChange={(o) => !o && setReviewRun(null)}>
-        <DialogContent className="flex max-h-[85vh] max-w-4xl flex-col overflow-hidden">
+        {/* 85vh from `sm` up; a phone keeps the shared keyboard-aware sheet height (see ui/dialog.tsx). */}
+        <DialogContent className="flex max-w-4xl flex-col overflow-hidden sm:max-h-[85vh]">
+          <AccessScope collection="payroll-runs" objectPath={reviewRun?.path}>
           <DialogHeader>
             <DialogTitle>Payroll breakdown · {periodName(reviewRun?.pay_period)}</DialogTitle>
+            <DialogDescription>
+              {reviewRun?.state?.toUpperCase() === "PUBLISHED"
+                ? "Published - these are the figures on the payslips employees can see."
+                : "Draft figures. Nothing reaches an employee until the run is published."}
+              {reviewPeriod ? ` Pays for ${formatDate(reviewPeriod.period_start)} - ${formatDate(reviewPeriod.period_end)}, on ${formatDate(reviewPeriod.pay_date)}.` : ""}
+            </DialogDescription>
           </DialogHeader>
           {reviewStale?.stale && (
-            <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40">
-              <div className="flex items-start gap-2 text-amber-800 dark:text-amber-200">
+            <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              <div className="flex items-start gap-2 text-warning-foreground dark:text-warning">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
                   <p className="font-medium">Inputs changed since this run was built — rebuild to update the numbers.</p>
@@ -558,8 +667,8 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
               the staleness check above (that only sees inputs touched AFTER the build; this usually predates it).
               A warning, not a block - paying the contracted stored split can be deliberate. */}
           {reviewStale?.split_drift?.stale?.length ? (
-            <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/40">
-              <div className="flex items-start gap-2 text-amber-800 dark:text-amber-200">
+            <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+              <div className="flex items-start gap-2 text-warning-foreground dark:text-warning">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
                   <p className="font-medium">
@@ -593,16 +702,62 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
             </div>
           ) : null}
           {items === null ? (
-            <p className="flex items-center gap-2 py-8 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</p>
+            <TableSkeleton rows={6} cols={5} />
           ) : items.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">No lines yet. Build the run to compute payroll, then review it here.</p>
           ) : (
             <div className="flex min-h-0 flex-col gap-2">
-              {items.length > 8 && (
-                <Input placeholder="Find an employee…" value={itemQuery} onChange={(e) => setItemQuery(e.target.value)} className="max-w-xs" />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                {items.length > 8 ? (
+                  <Input placeholder="Find an employee…" value={itemQuery} onChange={(e) => setItemQuery(e.target.value)} className="max-w-xs" />
+                ) : <span />}
+                {/* "Compare with November 2026" is a single nowrap label wider than a phone's content
+                    column on its own, and it shares this row with two more controls. */}
+                <div className="flex flex-wrap items-center gap-1">
+                  {priorRun && (compare ? (
+                    <Button variant="ghost" size="sm" onClick={() => setCompare(null)}>Hide comparison</Button>
+                  ) : (
+                    <Button variant="ghost" size="sm" onClick={loadCompare} loading={comparing}>Compare with {priorRun.period.display_name}</Button>
+                  ))}
+                  {/* Checking a run means reading the lines, not the totals: one control opens every breakdown
+                      instead of a click per person. */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setExpanded((s) => (s.size === items.length ? new Set() : new Set(items.map((it) => it.employee))))}
+                  >
+                    {expanded.size === items.length ? "Collapse all" : "Expand all"}
+                  </Button>
+                </div>
+              </div>
+              {/* The headline a reviewer actually needs: not the total, but how many people's pay moved since
+                  last month, and who is new. Everything else can be left unread. */}
+              {compare && (
+                <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                  {(() => {
+                    const changed = items.filter((it) => compare.net.has(it.employee) && Math.abs(it.net - compare.net.get(it.employee)!) >= 0.01).length;
+                    const fresh = items.filter((it) => !compare.net.has(it.employee)).length;
+                    const gone = [...compare.net.keys()].filter((e) => !items.some((it) => it.employee === e)).length;
+                    return (
+                      <>
+                        <span className="font-medium text-foreground">{changed}</span> of {items.length} changed net pay vs {compare.label}
+                        {fresh > 0 ? ` · ${fresh} not in that run` : ""}
+                        {gone > 0 ? ` · ${gone} paid then but not now` : ""}
+                        {changed === 0 && fresh === 0 && gone === 0 ? " - identical to last run" : ""}
+                      </>
+                    );
+                  })()}
+                </p>
               )}
-            <div className="overflow-auto">
-              <table className="w-full text-sm">
+            {/* Bounded from `sm` up so the `sticky` header below actually pins: a sticky element pins inside
+                its nearest SCROLLING ancestor, and a scroll box with no height ceiling never scrolls - it just
+                grows, and the headings run off the top of a 200-employee run with the page. Left unbounded on
+                a phone, where the rows are stacked labelled blocks with no header row to keep and a nested
+                scroller would only fight the page's own. */}
+            <div className="overflow-auto sm:max-h-[70dvh]">
+              {/* Five money columns per employee: on a phone each row becomes a labelled block (the expand
+                  row it opens is a `colSpan` note, which stacks as a plain block under it). */}
+              <table className="table-stack w-full text-sm">
                 <thead className="sticky top-0 bg-card">
                   <tr className="border-b text-left">
                     <th className="px-2 py-2 font-semibold">Employee</th>
@@ -610,6 +765,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                     <th className="px-2 py-2 text-right font-semibold">Deductions</th>
                     <th className="px-2 py-2 text-right font-semibold">Tax (TDS)</th>
                     <th className="px-2 py-2 text-right font-semibold">Net</th>
+                    {compare && <th className="px-2 py-2 text-right font-semibold">vs {compare.label}</th>}
                     <th className="px-2 py-2" />
                   </tr>
                 </thead>
@@ -618,12 +774,33 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                     const open = expanded.has(it.employee);
                     return (
                       <Fragment key={it.employee}>
-                        <tr className="cursor-pointer border-b hover:bg-accent/40" onClick={() => setExpanded((s) => { const n = new Set(s); n.has(it.employee) ? n.delete(it.employee) : n.add(it.employee); return n; })}>
+                        {/* The row is the disclosure for this employee's lines, so it has to work from the
+                            keyboard as well as the pointer: a tab stop, Enter/Space, and a state a screen
+                            reader can hear. `role="button"` on the <tr> would replace its row semantics, so
+                            the expanded state is announced with aria-expanded on the row itself. */}
+                        <tr
+                          className="cursor-pointer border-b hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                          tabIndex={0}
+                          aria-expanded={expanded.has(it.employee)}
+                          onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setExpanded((s) => { const n = new Set(s); n.has(it.employee) ? n.delete(it.employee) : n.add(it.employee); return n; }); } }}
+                          onClick={() => setExpanded((s) => { const n = new Set(s); n.has(it.employee) ? n.delete(it.employee) : n.add(it.employee); return n; })}
+                        >
                           <td className="px-2 py-1.5 font-medium"><span className="inline-flex items-center gap-1"><ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} /> {it.employee_name}</span></td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">{money(it.gross)}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">{money(it.total_deductions)}</td>
-                          <td className="px-2 py-1.5 text-right tabular-nums">{money(it.tax)}</td>
-                          <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{money(it.net)}</td>
+                          <td data-label="Gross" className="px-2 py-1.5 text-right tabular-nums">{money(it.gross)}</td>
+                          <td data-label="Deductions" className="px-2 py-1.5 text-right tabular-nums">{money(it.total_deductions)}</td>
+                          <td data-label="Tax (TDS)" className="px-2 py-1.5 text-right tabular-nums">{money(it.tax)}</td>
+                          <td data-label="Net" className="px-2 py-1.5 text-right font-semibold tabular-nums">{money(it.net)}</td>
+                          {compare && (
+                            <td data-label={`vs ${compare.label}`} className="px-2 py-1.5 text-right tabular-nums">
+                              {(() => {
+                                const was = compare.net.get(it.employee);
+                                if (was == null) return <span className="text-xs text-muted-foreground">new</span>;
+                                const d = round2(it.net - was);
+                                if (Math.abs(d) < 0.01) return <span className="text-xs text-muted-foreground">-</span>;
+                                return <span className={d > 0 ? "text-success" : "text-destructive"}>{d > 0 ? "+" : "−"}{money(Math.abs(d))}</span>;
+                              })()}
+                            </td>
+                          )}
                           <td className="px-2 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                             <AccessAction collection="payroll-runs" objectPath={reviewRun?.path} verb="previewPayslip" can={reviewRun?.access?.can} label="Preview payslip">
                               <Button variant="ghost" size="sm" title="Preview this payslip" onClick={() => previewSlip(it)}>
@@ -634,7 +811,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                         </tr>
                         {open && (
                           <tr className="border-b bg-muted/30">
-                            <td colSpan={6} className="px-6 py-2">
+                            <td colSpan={compare ? 7 : 6} className="px-6 py-2">
                               <div className="space-y-1">
                                 {/* Pay lines: earnings (loss of pay rides here as a negative earning - it is pay
                                     that was never earned, so it leaves gross and every tax/statutory base) and
@@ -666,7 +843,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                                   <div className="mt-2 space-y-1 border-t pt-2">
                                     <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Employer contributions (not paid to the employee)</p>
                                     {it.lines.filter((l) => l.kind === "employer_contribution").map((l, i) => (
-                                      <div key={i} className="flex justify-between text-xs text-blue-700 dark:text-blue-400">
+                                      <div key={i} className="flex justify-between text-xs text-brand-blue-700 dark:text-brand-blue-300">
                                         <span>{l.name}{l.above_ctc ? " (over & above CTC)" : ""}</span>
                                         <span className="tabular-nums">{money(l.amount)}</span>
                                       </div>
@@ -694,15 +871,52 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
                 <tfoot>
                   <tr className="border-t-2 font-semibold">
                     <td className="px-2 py-2">{items.length} employee{items.length === 1 ? "" : "s"}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{money(totals.gross)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{money(totals.total_deductions)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{money(totals.tax)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{money(totals.net)}</td>
+                    <td data-label="Gross" className="px-2 py-2 text-right tabular-nums">{money(totals.gross)}</td>
+                    <td data-label="Deductions" className="px-2 py-2 text-right tabular-nums">{money(totals.total_deductions)}</td>
+                    <td data-label="Tax (TDS)" className="px-2 py-2 text-right tabular-nums">{money(totals.tax)}</td>
+                    <td data-label="Net" className="px-2 py-2 text-right tabular-nums">{money(totals.net)}</td>
+                    {compare && (
+                      <td data-label={`vs ${compare.label}`} className="px-2 py-2 text-right tabular-nums">
+                        {(() => {
+                          // Only employees present in BOTH runs: a joiner's whole salary is not a "change" in
+                          // the payroll, and lumping them in makes every month look like a big movement.
+                          const both = items.filter((it) => compare.net.has(it.employee));
+                          const d = round2(both.reduce((s, it) => s + it.net - compare.net.get(it.employee)!, 0));
+                          if (Math.abs(d) < 0.01) return <span className="text-muted-foreground">-</span>;
+                          return <span className={d > 0 ? "text-success" : "text-destructive"}>{d > 0 ? "+" : "−"}{money(Math.abs(d))}</span>;
+                        })()}
+                      </td>
+                    )}
                     <td className="px-2 py-2" />
                   </tr>
                 </tfoot>
               </table>
             </div>
+            {/* Where the money in this run goes. A pie is right for exactly this shape and almost nothing
+                else: the slices are the parts of ONE whole (what the run costs), they add to it exactly, and
+                there are four of them. The numbers themselves stay in the table above - this is the ratio. */}
+            {totals.gross > 0 && (
+              <div className="mt-4 border-t pt-4">
+                <p className="mb-3 text-sm font-medium">Where this run goes</p>
+                <Chart
+                  type="pie"
+                  height={220}
+                  labels={["Take-home", "Tax (TDS)", "Other deductions", "Employer contributions"]}
+                  datasets={[{
+                    name: "Cost",
+                    values: [
+                      round2(totals.net),
+                      round2(totals.tax),
+                      round2(Math.max(0, totals.total_deductions - totals.tax)),
+                      round2(totals.employer_cost + totals.above_ctc_cost),
+                    ],
+                  }]}
+                  format={(v) => money(v)}
+                  ariaLabel="How this payroll run's cost divides between take-home pay, tax, other deductions and employer contributions"
+                />
+              </div>
+            )}
+
             {/* What the run costs the company: gross + the employer contributions that count inside CTC, plus any
                 the org keeps over and above CTC (employer PF under a "CTC + PF" policy). */}
             {(totals.employer_cost > 0 || totals.above_ctc_cost > 0) && (
@@ -715,6 +929,7 @@ export default function PayrollRuns({ me, tab }: { me: Me; tab?: string }) {
             </div>
           )}
           {reviewRun && <ActivitySection resource={reviewRun.path} className="border-t pt-3" />}
+          </AccessScope>
         </DialogContent>
       </Dialog>
 

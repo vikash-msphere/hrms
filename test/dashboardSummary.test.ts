@@ -29,7 +29,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.tickets, schema.cards, schema.boards, schema.loans, schema.timeEntries, schema.transitionTasks, schema.transitions, schema.employees];
+const TABLES = [schema.tickets, schema.cards, schema.boards, schema.loans, schema.timeEntries, schema.transitionTasks, schema.transitions, schema.leaveRequests, schema.leaveTypes, schema.employees];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
 });
@@ -48,9 +48,12 @@ const utcToday = () => {
 };
 
 async function seed() {
+  const day = utcToday().getTime();
+  // A is a recent joiner whose probation ends inside the 30-day window; B joined long ago and their probation
+  // date sits outside it. Both drive the directory aggregates.
   await deps.db.insert(schema.employees).values([
-    { uuid: A.uuid, code: A.code, firstName: "A", lastName: "A", workEmail: "a@x.test", status: "active" },
-    { uuid: B.uuid, code: B.code, firstName: "B", lastName: "B", workEmail: "b@x.test", status: "active" },
+    { uuid: A.uuid, code: A.code, firstName: "A", lastName: "A", workEmail: "a@x.test", status: "active", startDate: new Date(day - 10 * DAY), probationEndDate: new Date(day + 20 * DAY) },
+    { uuid: B.uuid, code: B.code, firstName: "B", lastName: "B", workEmail: "b@x.test", status: "active", startDate: new Date(day - 100 * DAY), probationEndDate: new Date(day + 60 * DAY) },
   ]);
   // Tickets: A has 2 OPEN + 1 RESOLVED + 1 soft-deleted OPEN; B has 1 OPEN.
   await deps.db.insert(schema.tickets).values([
@@ -103,6 +106,40 @@ describe("dashboard summary aggregates", () => {
     const scopes = new Map<string, ListScope>([["tickets", all()]]);
     const out = await dashboardSummary(deps, user(A.uuid), scopes, "open_tickets,cards_blocked,loans_outstanding,not_a_kpi");
     expect(Object.keys(out)).toEqual(["open_tickets"]);
+  });
+
+  it("counts the directory and today's leave, so the wall needs no page of rows", async () => {
+    await seed();
+    const day = utcToday().getTime();
+    const type = genId();
+    await deps.db.insert(schema.leaveTypes).values({ uuid: type, code: "lt-1", name: "Annual" });
+    await deps.db.insert(schema.leaveRequests).values([
+      // A: two approved requests spanning today - one PERSON on leave, not two.
+      { uuid: genId(), code: `${A.code}-lr1`, employeeId: A.uuid, leaveTypeId: type, startDate: new Date(day - DAY), endDate: new Date(day + DAY), days: 3, state: "APPROVED" },
+      { uuid: genId(), code: `${A.code}-lr2`, employeeId: A.uuid, leaveTypeId: type, startDate: new Date(day), endDate: new Date(day), days: 1, state: "APPROVED" },
+      // B: pending today (not away yet), and an approved one that ended yesterday.
+      { uuid: genId(), code: `${B.code}-lr1`, employeeId: B.uuid, leaveTypeId: type, startDate: new Date(day), endDate: new Date(day), days: 1, state: "PENDING" },
+      { uuid: genId(), code: `${B.code}-lr2`, employeeId: B.uuid, leaveTypeId: type, startDate: new Date(day - 3 * DAY), endDate: new Date(day - DAY), days: 3, state: "APPROVED" },
+    ]);
+    const scopes = new Map<string, ListScope>([["employees", all()], ["leave-requests", all()]]);
+    const out = await dashboardSummary(deps, user(A.uuid), scopes, "headcount,joiners,probation_ending,on_leave");
+    expect(out.headcount).toEqual({ value: 2, extra: 2 }); // employed now / everyone in scope
+    expect(out.joiners).toEqual({ value: 1 }); // A only - B started 100 days ago
+    expect(out.probation_ending).toEqual({ value: 1 }); // A only - B's date is 60 days out
+    expect(out.on_leave).toEqual({ value: 1 }); // distinct people: A once, B not away today
+  });
+
+  it("binds the leave count to an own-breadth scope", async () => {
+    await seed();
+    const day = utcToday().getTime();
+    const type = genId();
+    await deps.db.insert(schema.leaveTypes).values({ uuid: type, code: "lt-1", name: "Annual" });
+    await deps.db.insert(schema.leaveRequests).values([
+      { uuid: genId(), code: `${A.code}-lr1`, employeeId: A.uuid, leaveTypeId: type, startDate: new Date(day), endDate: new Date(day), days: 1, state: "APPROVED" },
+      { uuid: genId(), code: `${B.code}-lr1`, employeeId: B.uuid, leaveTypeId: type, startDate: new Date(day), endDate: new Date(day), days: 1, state: "APPROVED" },
+    ]);
+    const out = await dashboardSummary(deps, user(B.uuid), new Map([["leave-requests", own(B.uuid)]]), "on_leave");
+    expect(out.on_leave).toEqual({ value: 1 }); // B's own row only
   });
 
   it("joins transition tasks through their ACTIVE parent under the transitions scope", async () => {

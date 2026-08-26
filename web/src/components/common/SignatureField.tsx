@@ -84,7 +84,7 @@ export function SignatureField({ employeeId, signature, canEdit, onChanged }: { 
 
   return (
     <Card>
-      <CardContent className="space-y-4 pt-6">
+      <CardContent className="space-y-4 pt-4 sm:pt-6">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="flex items-center gap-2 text-sm font-semibold"><PenLine className="h-4 w-4 text-primary" /> Signature

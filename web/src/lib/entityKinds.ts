@@ -27,6 +27,8 @@ const ENTITY_SINGULAR: Record<string, string> = {
   holidays: "Holiday",
   expenses: "Expense",
   "expense-categories": "Expense category",
+  "asset-categories": "Asset category",
+  "asset-requests": "Asset request",
   "reimbursement-categories": "Reimbursement category",
   "compliance-events": "Compliance event",
   "compliance-rules": "Compliance rule",
@@ -100,7 +102,7 @@ const TONE_OF: Record<string, Tone> = {
   "org-documents": "docs", "personal-documents": "docs", "letter-templates": "docs",
   announcements: "docs", events: "docs", "compliance-events": "docs", "compliance-rules": "docs",
   transitions: "docs", "transition-tasks": "docs", "notice-periods": "docs", "background-checks": "docs",
-  tickets: "support", "ticket-checklists": "support", suggestions: "support", assets: "support",
+  tickets: "support", "ticket-checklists": "support", suggestions: "support", assets: "support", "asset-categories": "support", "asset-requests": "support",
   notifications: "support",
   automations: "admin",
 };

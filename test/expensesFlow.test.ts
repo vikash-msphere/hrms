@@ -10,8 +10,9 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import {
-  createExpense, submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense,
+  createExpense, submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense, listExpenses,
 } from "../src/services/expenses";
+import type { ListScope } from "../src/domain/access";
 import { approvedUnpaidReimbursements } from "../src/services/reimbursements";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -58,6 +59,11 @@ async function seedCategory(name = "Software"): Promise<string> {
   const uuid = genId();
   await deps.db.insert(schema.expenseCategories).values({ uuid, code: short("c"), name });
   return `expense-categories/${uuid}`;
+}
+async function seedVendor(name = "Acme"): Promise<string> {
+  const uuid = genId();
+  await deps.db.insert(schema.vendors).values({ uuid, code: short("v"), name });
+  return `vendors/${uuid}`;
 }
 
 describe("expenses workflow", () => {
@@ -116,6 +122,24 @@ describe("expenses workflow", () => {
     expect(rejected.state).toBe("REJECTED");
   });
 
+  it("keeps the rejection reason on the record and relays it to the submitter", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    const cat = await seedCategory();
+
+    const e = await createExpense(deps, actor, { category: cat, amount: 4200 });
+    await submitExpense(deps, actor, e.uuid);
+    const rejected = await rejectExpense(deps, actor, e.uuid, "  Missing the vendor invoice  ");
+    expect(rejected.decisionNote).toBe("Missing the vendor invoice"); // trimmed, not stored as typed
+    const notes = await deps.db.select().from(schema.notifications);
+    expect(notes.some((n) => n.type === "expense.rejected" && (n.body ?? "").includes("Missing the vendor invoice"))).toBe(true);
+
+    // An empty reason is stored as absent, not as an empty string.
+    const e2 = await createExpense(deps, actor, { category: cat, amount: 100 });
+    await submitExpense(deps, actor, e2.uuid);
+    expect((await rejectExpense(deps, actor, e2.uuid, "   ")).decisionNote).toBeNull();
+  });
+
   it("bridges a reimbursable expense to an APPROVED reimbursement on the payroll queue, and refuses :pay", async () => {
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
@@ -142,5 +166,25 @@ describe("expenses workflow", () => {
     await expect(approveExpense(deps, actor, e.uuid)).rejects.toThrow();
     const all = await deps.db.select().from(schema.reimbursements);
     expect(all.length).toBe(1);
+  });
+
+  // The vendor filter is what lets a vendor's own dialog total its spend without downloading the ledger, so
+  // it has to narrow SERVER-side like the category and cost-centre filters next to it.
+  it("narrows a list to one vendor", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    const cat = await seedCategory("Hosting");
+    const acme = await seedVendor("Acme");
+    const other = await seedVendor("Other");
+
+    await createExpense(deps, actor, { category: cat, vendor: acme, amount: 1000 });
+    await createExpense(deps, actor, { category: cat, vendor: acme, amount: 2500 });
+    await createExpense(deps, actor, { category: cat, vendor: other, amount: 700 });
+
+    const scope = { breadth: "all", deptCode: null, ownerId: emp, seeRestricted: true } as ListScope;
+    const mine = await listExpenses(deps, scope, 100, undefined, { vendor: acme });
+    expect(mine.items.map((r) => r.amount).sort((a, b) => a - b)).toEqual([1000, 2500]);
+    const everything = await listExpenses(deps, scope, 100, undefined, {});
+    expect(everything.items.length).toBe(3);
   });
 });

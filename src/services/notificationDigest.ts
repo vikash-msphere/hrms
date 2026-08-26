@@ -7,7 +7,7 @@ import { CODE_WIDTH } from "./codeAlloc";
 import { nextChildCode } from "../domain/codes";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { runBatch, chunk } from "../lib/dbBatch";
+import { runBatch, chunk, insertBatches } from "../lib/dbBatch";
 
 // Park one notification for later digest delivery (best-effort; never throws - a failed park must not break the
 // action that triggered it). Called by notify() when the recipient has digest on and the item is digestible.
@@ -71,7 +71,7 @@ export async function flushDigests(deps: Deps): Promise<number> {
     // under the D1 bound-parameter cap (see notifyMany).
     const ids = queued.map((q) => q.uuid);
     await runBatch(deps.db, [
-      ...chunk(rows, 8).map((c) => deps.db.insert(schema.notifications).values(c)),
+      ...insertBatches(rows, (c) => deps.db.insert(schema.notifications).values(c)),
       ...chunk(ids, 90).map((c) => deps.db.delete(schema.notificationDigestQueue).where(inArray(schema.notificationDigestQueue.uuid, c))),
     ]);
     return rows.length;

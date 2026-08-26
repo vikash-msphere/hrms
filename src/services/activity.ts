@@ -77,7 +77,7 @@ export async function listActivity(
 // `entity` narrows to one collection, `actor` matches actor email (LIKE). One indexed scan (audit_at_idx).
 export async function listAllActivity(
   deps: Deps,
-  opts: { limit?: number; before?: number; q?: string; tone?: string; entity?: string; actor?: string; actorId?: string } = {},
+  opts: { limit?: number; before?: number; q?: string; tone?: string; entity?: string; actor?: string; actorId?: string; apiKeyId?: string } = {},
 ) {
   const limit = Math.max(1, Math.min(100, opts.limit ?? 25));
   const conds: SQL[] = [];
@@ -87,6 +87,9 @@ export async function listAllActivity(
     conds.push(eq(schema.auditLog.entity, opts.entity));
   }
   if (opts.actorId) conds.push(eq(schema.auditLog.actorId, opts.actorId)); // exact actor (employee id, from a ref filter)
+  // Everything one credential did. Not an actor filter: a key acts AS a human, so its rows are attributed to
+  // that person and are indistinguishable from what they did at a keyboard without this.
+  if (opts.apiKeyId) conds.push(eq(schema.auditLog.apiKeyId, opts.apiKeyId));
   const actor = opts.actor?.trim();
   if (actor) conds.push(like(schema.auditLog.actorEmail, `%${actor}%`)); // free-text actor-email match
   conds.push(...textAndToneConds(opts));

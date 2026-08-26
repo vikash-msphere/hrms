@@ -11,6 +11,7 @@ import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { Chart, ChartCard } from "@/components/common/Chart";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -34,13 +35,32 @@ export default function Payslips({ me }: { me: Me }) {
   const ytd = useMemo(() => {
     const year = new Date().getFullYear().toString();
     const slips = rows.filter((s) => (s.create_time ?? "").startsWith(year));
-    return { net: slips.reduce((sum, s) => sum + (s.net ?? 0), 0), count: slips.length };
+    const net = slips.reduce((sum, s) => sum + (s.net ?? 0), 0);
+    return {
+      net,
+      count: slips.length,
+      // Tax withheld so far and the typical month: the two numbers people open a payslip page to work out.
+      tax: slips.reduce((sum, s) => sum + (s.tax ?? 0), 0),
+      avgNet: slips.length ? Math.round(net / slips.length) : 0,
+    };
   }, [rows]);
+  const thisYear = new Date().getFullYear().toString();
   // Year filter chips - only shown once the history spans more than one calendar year.
   const years = useMemo(
     () => [...new Set(rows.map((s) => (s.create_time ?? "").slice(0, 4)).filter(Boolean))].sort().reverse(),
     [rows],
   );
+  // The last two years at most: a pay history chart is read for the trend, and thirty labels on a phone is
+  // no trend at all. Oldest first, because time runs that way even though the table below does not.
+  const payChart = useMemo(() => {
+    const recent = [...rows].reverse().slice(-24);
+    return {
+      labels: recent.map((s) => (s.create_time ? new Date(s.create_time).toLocaleDateString(undefined, { month: "short", year: "2-digit" }) : "")),
+      gross: recent.map((s) => Math.round(s.gross ?? 0)),
+      net: recent.map((s) => Math.round(s.net ?? 0)),
+    };
+  }, [rows]);
+
   const [year, setYear] = useState<string>("all");
   const visible = useMemo(
     () => (year === "all" ? rows : rows.filter((s) => (s.create_time ?? "").startsWith(year))),
@@ -137,12 +157,34 @@ export default function Payslips({ me }: { me: Me }) {
           <EmptyState icon={RupeeCircle} title="No payslips yet" description="Payslips appear here once a payroll run is published. New joiners usually see their first one after the first full pay cycle." />
         ) : (
           <>
+          {/* Pay over time, which a list of downloadable PDFs cannot show at all. Gross against net says
+              where a raise actually landed, and where a month of extra deductions quietly ate one. */}
+          {payChart.labels.length > 2 && (
+            <ChartCard className="mb-4" title="Your pay over time" description="Gross and take-home on each payslip you can see, oldest first.">
+              <Chart
+                type="axis-mixed"
+                height={200}
+                labels={payChart.labels}
+                datasets={[
+                  { name: "Gross", values: payChart.gross, chartType: "bar" },
+                  { name: "Take-home", values: payChart.net, chartType: "line" },
+                ]}
+                format={(v) => money(v)}
+                ariaLabel="Gross pay and take-home pay on each payslip"
+              />
+            </ChartCard>
+          )}
           {latest && (
             <SummaryStrip
               items={[
-                { label: "Latest net pay", value: money(latest.net), icon: Banknote, tone: "primary", hint: `Issued ${formatDate(latest.create_time)}` },
-                { label: "Latest gross", value: money(latest.gross), icon: Sigma, hint: `${money(latest.total_deductions)} deducted` },
-                { label: `Net paid in ${new Date().getFullYear()}`, value: money(ytd.net), icon: CalendarDays, hint: `${ytd.count} payslip${ytd.count === 1 ? "" : "s"} this year` },
+                // The latest-payslip figures open that payslip; the year-to-date figures narrow the table to
+                // this year's slips, which is the same set they were summed from - so the strip rides on the
+                // table, under the chart.
+                { label: "Latest net pay", value: money(latest.net), icon: Banknote, tone: "primary", hint: `Issued ${formatDate(latest.create_time)}`, onClick: () => onPreview(latest) },
+                { label: "Latest gross", value: money(latest.gross), icon: Sigma, hint: `${money(latest.total_deductions)} deducted`, onClick: () => onPreview(latest) },
+                { label: `Net paid in ${thisYear}`, value: money(ytd.net), icon: CalendarDays, hint: `${ytd.count} payslip${ytd.count === 1 ? "" : "s"}`, onClick: () => setYear(thisYear), active: year === thisYear },
+                ...(ytd.count > 1 ? [{ label: "Average month", value: money(ytd.avgNet), icon: Sigma, hint: `net, over ${ytd.count} slips`, onClick: () => setYear(thisYear), active: year === thisYear }] : []),
+                ...(ytd.tax > 0 ? [{ label: `TDS in ${thisYear}`, value: money(ytd.tax), icon: CalendarDays, tone: "muted" as const, hint: "tax withheld so far", onClick: () => setYear(thisYear), active: year === thisYear }] : []),
               ]}
             />
           )}

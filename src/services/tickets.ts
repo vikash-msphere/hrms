@@ -6,14 +6,17 @@ import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import { keysetPage } from "./keysetPage";
 import { notify, notifyMany } from "./notifications";
+import { notifyMentions } from "./mentions";
 import { emitEvent } from "./eventBus";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
+import { aborted, invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { getSettingValue, getDefaultDepartmentId } from "./settings";
+import { assertUploadSize, isAllowedUpload } from "./documentsCommon";
+import { parseAttachments, safeAttachmentName, MAX_TICKET_ATTACHMENTS, type TicketAttachment } from "../domain/ticketAttachments";
 import { DEFAULT_TICKET_WORKFLOW, transitionFor } from "../domain/stateMachines";
 import { shareTicketWith, grantTicketRead, revokeTicketRead, usersForEmployees } from "./ticketShares";
 
@@ -70,7 +73,7 @@ export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: num
   }
   conds.push(isNull(schema.tickets.deleteTime));
   const { items: slice, nextPageToken } = await keysetPage<typeof schema.tickets.$inferSelect>(
-    deps, schema.tickets, "tickets", and(...(conds.filter(Boolean) as any)), { dir: "asc", max: maxPageSize, pageToken },
+    deps, schema.tickets, "tickets", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken },
   );
   // Attach a compact checklist progress (done/total) per row so the list table can show it without loading the
   // full items. One grouped read over just this page's tickets keeps it cheap.
@@ -293,12 +296,107 @@ export async function commentTicket(deps: Deps, actor: AppUser, id: string, body
   // Notify the other party (requester <-> assignee) that there's a new comment on the thread.
   for (const rid of [t.employeeId, t.assigneeId].filter((r): r is string => !!r && r !== actor.employeeId))
     await notify(deps, { recipient: rid, type: "ticket.comment", title: "New comment on a ticket", body: t.subject, link: "tickets", subject: `tickets/${id}`, actorId: actor.employeeId });
+  // Anyone else named in the reply: pulling a third person into a thread is most of what @ is for on a
+  // support ticket. Notification only - it grants nothing (see services/mentions.ts).
+  await notifyMentions(deps, actor, { subject: `tickets/${id}`, link: "tickets", type: "ticket.mention", body: text, title: t.subject });
   return getTicketWithComments(deps, actor, id);
 }
 
 // Touch the parent ticket's update_time so checklist activity surfaces it as recently active, mirroring comments.
 async function touchTicket(deps: Deps, id: string) {
   await deps.db.update(schema.tickets).set({ updatedAt: new Date() }).where(eq(schema.tickets.uuid, id));
+}
+
+// ---- attachments -------------------------------------------------------------------------------------------
+// A screenshot is usually the whole bug report, so a ticket takes files. They live in the ticket's JSON column
+// with the bytes in R2 (encrypted app-side by the document store, same as every other upload), which means an
+// attachment is readable exactly when its ticket is: no second collection, no second access surface, and
+// nothing to leave behind when the ticket is purged.
+
+/**
+ * Both writers below change ONE JSON column by reading it, editing it in memory and writing it back, so both
+ * guard the write with a compare-and-set on the exact value that was read. Two people attaching at the same
+ * moment (a screenshot each, on the same ticket) used to leave the loser's entry out of the row while its bytes
+ * stayed in R2 - an invisible attachment and an orphaned object. On a lost race the whole step re-runs against
+ * the fresh list, so caps and lookups are re-checked rather than carried over from a stale read. Bounded, so a
+ * pathological hot row fails loudly instead of spinning.
+ */
+async function writeAttachments(deps: Deps, id: string, step: (current: TicketAttachment[]) => TicketAttachment[]): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const row = (await deps.db.select({ attachmentsJson: schema.tickets.attachmentsJson }).from(schema.tickets).where(eq(schema.tickets.uuid, id)).limit(1))[0];
+    if (!row) throw notFound("ticket not found");
+    const next = step(parseAttachments(row.attachmentsJson));
+    const [updated] = await deps.db
+      .update(schema.tickets)
+      .set({ attachmentsJson: JSON.stringify(next), updatedAt: new Date() })
+      .where(and(eq(schema.tickets.uuid, id), row.attachmentsJson === null ? isNull(schema.tickets.attachmentsJson) : eq(schema.tickets.attachmentsJson, row.attachmentsJson)))
+      .returning({ uuid: schema.tickets.uuid });
+    if (updated) return;
+  }
+  throw aborted("this ticket's attachments are being changed by somebody else - try again");
+}
+
+/** Attach one uploaded file. The R2 key is generated here - a client-supplied key would be a path to anywhere. */
+export async function attachToTicket(
+  deps: Deps,
+  actor: AppUser,
+  id: string,
+  bytes: ArrayBuffer,
+  opts: { fileName?: string; contentType?: string } = {},
+) {
+  const t = await getTicket(deps, actor, id); // gate + existence
+  assertUploadSize(bytes.byteLength);
+  if (!isAllowedUpload(opts.fileName, opts.contentType))
+    throw invalidArgument("unsupported file type; allowed: documents, spreadsheets, presentations, images");
+  if (parseAttachments(t.attachmentsJson).length >= MAX_TICKET_ATTACHMENTS)
+    throw invalidArgument(`a ticket can hold ${MAX_TICKET_ATTACHMENTS} attachments; remove one first`);
+  const key = `tickets/${id}/${crypto.randomUUID()}`;
+  const contentType = opts.contentType || "application/octet-stream";
+  await deps.docs.put(key, bytes, contentType);
+  const entry: TicketAttachment = {
+    key,
+    name: safeAttachmentName(opts.fileName),
+    content_type: contentType,
+    size_bytes: bytes.byteLength,
+    created_at: new Date().toISOString(),
+    ...(actor.employeeId ? { by: actor.employeeId } : {}),
+  };
+  await writeAttachments(deps, id, (current) => {
+    // Re-checked against the CURRENT list, not the one read before the upload: the cap has to hold even when
+    // several people attach at once, which is exactly the case the guarded write below exists for.
+    if (current.length >= MAX_TICKET_ATTACHMENTS) throw invalidArgument(`a ticket can hold ${MAX_TICKET_ATTACHMENTS} attachments; remove one first`);
+    return [...current, entry];
+  });
+  await audit(deps, actor, "ticket.attach", "tickets", id, { name: entry.name, size_bytes: entry.size_bytes });
+  return getTicketWithComments(deps, actor, id);
+}
+
+/** Remove one attachment, bytes and all. Gated by the verb, so whoever may attach may also tidy up. */
+export async function detachFromTicket(deps: Deps, actor: AppUser, id: string, key?: string | null) {
+  const t = await getTicket(deps, actor, id); // gate + existence
+  const found = parseAttachments(t.attachmentsJson).find((a) => a.key === key);
+  if (!found) throw notFound("attachment not found");
+  // Row first, bytes second: the row is what the reader sees, so an object whose row entry is already gone is
+  // merely unreferenced, whereas bytes deleted ahead of a write that then loses its guard would leave the
+  // ticket listing an attachment nobody can open.
+  await writeAttachments(deps, id, (current) => {
+    if (!current.some((a) => a.key === found.key)) throw notFound("attachment not found");
+    return current.filter((a) => a.key !== found.key);
+  });
+  await deps.docs.delete(found.key).catch(() => { /* already gone: the row is what the reader sees */ });
+  await audit(deps, actor, "ticket.detach", "tickets", id, { name: found.name });
+  return getTicketWithComments(deps, actor, id);
+}
+
+/** The bytes of one attachment. The key must already be on THIS ticket, so a key alone opens nothing. */
+export async function readTicketAttachment(deps: Deps, actor: AppUser, id: string, key?: string | null) {
+  const t = await getTicket(deps, actor, id); // gate + existence
+  const found = parseAttachments(t.attachmentsJson).find((a) => a.key === key);
+  if (!found) throw notFound("attachment not found");
+  const bytes = await deps.docs.get(found.key);
+  if (!bytes) throw notFound("the attached file is no longer stored");
+  await audit(deps, actor, "ticket.attachment", "tickets", id, { name: found.name });
+  return { bytes, fileName: found.name, contentType: found.content_type };
 }
 
 // Add one or more checklist items. The web sends a single item from the input box, or a whole predefined

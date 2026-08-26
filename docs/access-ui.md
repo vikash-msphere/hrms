@@ -68,7 +68,9 @@ Wiring is ambient-first so a page opts in once and everything inside lights up:
 - Card/list pages wrap each item in `<AccessItem>` with `can`/`why` so the modal's "you can / via" context
   is accurate.
 - Read-only rollup pages point their header icon at the underlying collection (Recruiting analytics →
-  `applications`; Activity → `audit`).
+  `applications`; Team analytics → `employees`, the roster its rows are; Activity → `audit`). A rollup over
+  MANY collections still names one: the report's own columns appear or vanish with the caller's access to the
+  collection each was read from, which no icon on the page can change.
 - Cross-collection targets never inherit the ambient object: `AccessAction`/`AccessItem` drop the ambient
   `objectPath` whenever their explicit `collection` differs from the ambient one (the export icon on a
   detail route, a settings-blob gear on a feature page). Settings-blob targets always pass
@@ -79,9 +81,11 @@ Wiring is ambient-first so a page opts in once and everything inside lights up:
 - `Profile` rebinds its content to `employees/<self>` so the shared section components (identity, bank,
   tax, …) target exactly what they target on `employees/<id>`.
 
-`test/webAccessCoverage.test.ts` enforces the two mechanical halves of this: every page references an
-access affordance, and every file calling `invoke()`/`upload()` references `AccessAction`/`RowActions`
-(allowlist with reason for true exceptions).
+`test/webAccessCoverage.test.ts` enforces the mechanical halves of this: every page references an access
+affordance; every file calling `invoke()`/`upload()` references `AccessAction`/`RowActions`; every
+per-object verb affordance passes the row's `can` hint (allowlisted with a reason only where the object
+never arrives as a row); no action is merely `disabled` by a permission check; and every route key in
+`App.tsx` has a gate in the nav (or is a declared identity surface).
 
 ## Registries that must stay in lock-step
 
@@ -178,11 +182,26 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
 - **Nav**: `navPerm()` derives `<collection>.read` for every entry/tab without an explicit `perm`; only
   Dashboard/Profile are unconditionally visible. Applied by Sidebar, CommandPalette, ShortcutLayer, and
   the workspace tab bars.
+- **Routes**: `pageGate()`/`pageVisible()` (nav.ts) answer what a ROUTE requires, and `App` renders
+  `<NoAccess>` instead of the page when the answer is no - so typing, bookmarking or pasting the URL of a
+  page the sidebar hides hands over the wall (with "Request access"), never the page. The same function
+  gates the sidebar, ⌘K and the g-chords, so all four can't disagree. Routes that render another page's
+  component (the Settings deep links) or arrive from chrome (Support) declare their gate in `ALIAS_GATE`;
+  only Dashboard, Profile and Notifications are identity surfaces open to everyone.
 - **Create buttons**: `AccessAction create` returns null without `<collection>.write` - one gate for
   every "new <X>" button app-wide. Access mode overrides so admins can manage the create gate itself.
+- **Verb buttons**: `AccessAction verb=…` returns null unless the caller may perform that verb - the row's
+  `access.can` when a row is in hand (the precise, per-object answer), else the caller's capability for the
+  verb (a collection-level action like "submit the week" has no row to ask about; a standard `update`/
+  `delete` maps to the write level). So an action declares what it needs and hands over the row's hint, and
+  no button reaches the screen whose only outcome is 403. `manageOnly` opts out for a child that is a
+  DISPLAY element naming the verb (a read-only Status select still showing which column a task is in).
+  Access mode overrides both, except mid-simulation, where the simulated user's own answer must show.
 - **Row actions**: `RowActions` drops any verb-carrying action the row's server-computed `access.can`
-  does not include (callers still pre-filter; this is the backstop). Verb buttons are NOT capability-gated
-  - a per-object share grants a verb with no broad capability, and `access.can` is the authority there.
+  does not include (callers still pre-filter; this is the backstop).
+- **Never `disabled`**: a permission answer belongs in the render decision. `disabled` is for STATE (busy,
+  invalid, a locked row); an action the caller may never perform is absent, not greyed out. The exception is
+  a control that IS the data (a checklist tick-box showing what is done) - it stays, read-only.
 - **Bell**: the notifications provider treats the read capability (not just fetch errors) as
   `available`, so the bell disappears for holders of nothing.
 - Settings gear (`settings.write` + per-entry perm), export button (`export.read`), activity affordances

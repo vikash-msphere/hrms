@@ -9,7 +9,7 @@
 import { eq, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { nextChildCode } from "../domain/codes";
+import { nextChildCode, nextChildCodes } from "../domain/codes";
 
 export const CODE_WIDTH = { dept: 2, employee: 3, owned: 3, flat: 2 } as const;
 
@@ -17,6 +17,14 @@ export const CODE_WIDTH = { dept: 2, employee: 3, owned: 3, flat: 2 } as const;
 export async function allocFlatCode(deps: Deps, table: any, minWidth: number = CODE_WIDTH.flat): Promise<string> {
   const rows = await deps.db.select({ code: table.code }).from(table);
   return nextChildCode(rows.map((r: { code: string | null }) => r.code), null, minWidth);
+}
+
+// `count` flat codes from ONE read, for a create that makes many rows in a single act (a box of twenty
+// adapters, a pasted list of serials). The point is the single select: allocating in a loop would re-read the
+// whole namespace per row, which is the thing the subrequest budget cannot afford (see lib/dbBatch.ts).
+export async function allocFlatCodes(deps: Deps, table: any, count: number, minWidth: number = CODE_WIDTH.flat): Promise<string[]> {
+  const rows = await deps.db.select({ code: table.code }).from(table);
+  return nextChildCodes(rows.map((r: { code: string | null }) => r.code), null, minWidth, count);
 }
 
 // Children of a department: BOTH sub-departments (parentId) AND employees (departmentId) share the same

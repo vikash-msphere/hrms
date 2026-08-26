@@ -12,8 +12,14 @@
 
 // Round to 2 decimal places (paise), decimal-half-correct. Non-finite / sub-paise noise collapses to 0 (also
 // dodges the exponential-string edge for |n| < 1e-6, which is already 0 at 2dp).
+// The decimal-string trick below only works while `n` stringifies in POSITIONAL notation. JS switches to
+// exponential at both ends of the range, and `${1e21}e2` parses as NaN - so both ends need a guard, not just
+// the small one. Under 1e-6 the answer is 0 at 2dp anyway; at or above 1e21 there is no meaningful paise value
+// to return, and Math.round is the honest fallback (it cannot be a decimal half-case at that magnitude).
+const EXP_MAX = 1e21;
 export function round2(n: number): number {
   if (!Number.isFinite(n) || Math.abs(n) < 1e-6) return 0;
+  if (Math.abs(n) >= EXP_MAX) return Math.round(n);
   return Number(`${Math.round(Number(`${n}e2`))}e-2`);
 }
 

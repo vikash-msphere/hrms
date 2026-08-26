@@ -82,17 +82,83 @@ function matchToken(pt: string, kt: string, self: SelfContext): boolean {
 
 // Dot-delimited pattern vs key, with `**` matching zero-or-more trailing tokens. Within a single token,
 // `me`/`my-dept`/`<prefix>-*` do '-'-boundary-aware code-prefix matching (matchToken).
+//
+// Walked by INDEX rather than by slicing both arrays at every token. Same recursion, same answer - but a list
+// response asks this hundreds of thousands of times (one decide() per candidate verb per row, over every
+// pattern in the grant), and the slicing form allocated two throwaway arrays per token of every one of them.
 export function matchTokens(pat: string[], key: string[], self: SelfContext): boolean {
-  if (pat.length === 0) return key.length === 0;
-  if (pat[0] === "**") {
-    for (let i = 0; i <= key.length; i++) {
-      if (matchTokens(pat.slice(1), key.slice(i), self)) return true;
+  return matchFrom(pat, 0, key, 0, self);
+}
+
+function matchFrom(pat: string[], pi: number, key: string[], ki: number, self: SelfContext): boolean {
+  if (pi >= pat.length) return ki >= key.length;
+  if (pat[pi] === "**") {
+    for (let i = ki; i <= key.length; i++) {
+      if (matchFrom(pat, pi + 1, key, i, self)) return true;
     }
     return false;
   }
-  if (key.length === 0) return false;
-  if (!matchToken(pat[0]!, key[0]!, self)) return false;
-  return matchTokens(pat.slice(1), key.slice(1), self);
+  if (ki >= key.length) return false;
+  if (!matchToken(pat[pi]!, key[ki]!, self)) return false;
+  return matchFrom(pat, pi + 1, key, ki + 1, self);
+}
+
+// ---- Per-grant pattern index (pure performance; decides nothing) --------------------------------------------
+//
+// A grant is a flat bag of patterns - a seeded role carries 120-190 of them across ~60 collections - and
+// decide() used to split and walk EVERY one of them on every call. The access hint asks for one decision per
+// candidate verb per row, so a 100-row page of cards was ~1,200 full walks of the whole grant: 16-22 ms of
+// pure CPU per list response, measured, which is the Workers request budget spent on hints alone.
+//
+// So each grant is indexed ONCE (memoized on the grant object) into: patterns pre-split into tokens, bucketed
+// by the collection their first token names. A decision about `cards.<code>` can only be affected by a pattern
+// whose first token is `cards` or one that matches any collection (`**`, `*`, or a scope token in the
+// collection position), so it walks those two lists instead of all 190.
+//
+// This is a lookup narrowing, not a rule change: the buckets are a partition by a token match that
+// matchTokens would have performed anyway, `deny` is left as one in-order list (it is tiny, and its
+// first-match wins the reason string), and every pattern still gets its verdict from matchToken/matchTokens.
+type Indexed = { tokens: string[]; pattern: string; level: Level | null; ord: number };
+type GrantIndex = {
+  deny: { tokens: string[]; pattern: string }[];
+  levelsByNs: Map<string, Indexed[]>;
+  levelsAny: Indexed[];
+  allowByNs: Map<string, Indexed[]>;
+  allowAny: Indexed[];
+};
+
+// Can this pattern's first token match a collection OTHER than one literal name? `**` spans tokens, `*`
+// matches any, and the code-scope tokens are only ever meaningful positionally - all of them have to be
+// consulted whatever collection is being asked about. Anything else is a literal collection name.
+const spansCollections = (first: string): boolean =>
+  first === "**" || first === "*" || first === "me" || first === "my-dept" || first.endsWith("-*");
+
+const INDEX = new WeakMap<Grant, GrantIndex>();
+
+function indexOf(grant: Grant): GrantIndex {
+  let idx = INDEX.get(grant);
+  if (idx) return idx;
+  idx = { deny: [], levelsByNs: new Map(), levelsAny: [], allowByNs: new Map(), allowAny: [] };
+  const bucket = (map: Map<string, Indexed[]>, ns: string): Indexed[] => {
+    let b = map.get(ns);
+    if (!b) map.set(ns, (b = []));
+    return b;
+  };
+  for (const d of grant.deny ?? []) idx.deny.push({ tokens: d.split("."), pattern: d });
+  let ord = 0;
+  for (const [pattern, level] of Object.entries(grant.levels)) {
+    const tokens = pattern.split(".");
+    const entry: Indexed = { tokens, pattern, level, ord: ord++ };
+    (spansCollections(tokens[0]!) ? idx.levelsAny : bucket(idx.levelsByNs, tokens[0]!)).push(entry);
+  }
+  ord = 0;
+  for (const pattern of grant.allow) {
+    const tokens = pattern.split(".");
+    const entry: Indexed = { tokens, pattern, level: null, ord: ord++ };
+    (spansCollections(tokens[0]!) ? idx.allowAny : bucket(idx.allowByNs, tokens[0]!)).push(entry);
+  }
+  INDEX.set(grant, idx);
+  return idx;
 }
 
 // The decision. Fail-closed: anything not explicitly allowed is denied; any matching deny wins.
@@ -100,21 +166,34 @@ export function decide(grant: Grant, r: Resolved, self: SelfContext): Decision {
   const resourceTokens = r.resource.split(".");
   const action = r.kind === "standard" ? r.level : r.verb;
   const keyTokens = [...resourceTokens, action];
+  const idx = indexOf(grant);
+  const ns = resourceTokens[0]!;
 
   // deny precedence (matches the full key incl. action token; no downward ladder).
-  for (const d of grant.deny ?? []) {
-    if (matchTokens(d.split("."), keyTokens, self)) return { allow: false, reason: `denied by "${d}"` };
+  for (const d of idx.deny) {
+    if (matchTokens(d.tokens, keyTokens, self)) return { allow: false, reason: `denied by "${d.pattern}"` };
   }
 
   if (r.kind === "standard") {
     let max = 0;
-    for (const pat of Object.keys(grant.levels)) {
-      if (matchTokens(pat.split("."), resourceTokens, self)) max = Math.max(max, LVL[grant.levels[pat]!]);
+    const need = LVL[r.level];
+    for (const list of [idx.levelsByNs.get(ns), idx.levelsAny]) {
+      if (!list) continue;
+      for (const p of list) {
+        const lvl = LVL[p.level!];
+        // The ladder takes the MAX, so a pattern that cannot raise it need not be matched at all.
+        if (lvl <= max) continue;
+        if (matchTokens(p.tokens, resourceTokens, self)) {
+          max = lvl;
+          if (max >= need) return { allow: true }; // nothing above the need can change the answer
+        }
+      }
     }
-    return max >= LVL[r.level] ? { allow: true } : { allow: false, reason: `need ${r.level} on ${r.resource}` };
+    return max >= need ? { allow: true } : { allow: false, reason: `need ${r.level} on ${r.resource}` };
   }
-  for (const a of grant.allow) {
-    if (matchTokens(a.split("."), keyTokens, self)) return { allow: true };
+  for (const list of [idx.allowByNs.get(ns), idx.allowAny]) {
+    if (!list) continue;
+    for (const a of list) if (matchTokens(a.tokens, keyTokens, self)) return { allow: true };
   }
   return { allow: false, reason: `no grant for ${r.resource}.${r.verb}` };
 }
@@ -128,27 +207,36 @@ export function matchingPattern(grant: Grant, r: Resolved, self: SelfContext): s
   const resourceTokens = r.resource.split(".");
   const action = r.kind === "standard" ? r.level : r.verb;
   const keyTokens = [...resourceTokens, action];
+  const idx = indexOf(grant);
+  const ns = resourceTokens[0]!;
 
   // A matching deny means not-allowed -> no positive provenance.
-  for (const d of grant.deny ?? []) {
-    if (matchTokens(d.split("."), keyTokens, self)) return null;
+  for (const d of idx.deny) {
+    if (matchTokens(d.tokens, keyTokens, self)) return null;
   }
 
   if (r.kind === "standard") {
     let best: string | null = null;
     let bestLvl = 0;
-    for (const pat of Object.keys(grant.levels)) {
-      if (matchTokens(pat.split("."), resourceTokens, self)) {
-        const lvl = LVL[grant.levels[pat]!];
-        if (lvl > bestLvl) { bestLvl = lvl; best = pat; }
+    for (const list of [idx.levelsByNs.get(ns), idx.levelsAny]) {
+      if (!list) continue;
+      for (const p of list) {
+        const lvl = LVL[p.level!];
+        if (lvl > bestLvl && matchTokens(p.tokens, resourceTokens, self)) { bestLvl = lvl; best = p.pattern; }
       }
     }
     return bestLvl >= LVL[r.level] ? best : null;
   }
-  for (const a of grant.allow) {
-    if (matchTokens(a.split("."), keyTokens, self)) return a;
+  // The FIRST matching allow pattern, in the grant's own order - which the two buckets do not preserve between
+  // them, so the winner is the lowest original ordinal rather than the first one encountered.
+  let best: Indexed | null = null;
+  for (const list of [idx.allowByNs.get(ns), idx.allowAny]) {
+    if (!list) continue;
+    for (const a of list) {
+      if ((!best || a.ord < best.ord) && matchTokens(a.tokens, keyTokens, self)) best = a;
+    }
   }
-  return null;
+  return best?.pattern ?? null;
 }
 
 // Scope-stripped capability set for a role: the `<collection>.<action>` pairs the caller can do for at

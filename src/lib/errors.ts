@@ -40,3 +40,19 @@ export const alreadyExists = (d?: string) => new AppError(409, "/errors/already-
 export const failedPrecondition = (d?: string) => new AppError(409, "/errors/failed-precondition", "Failed Precondition", d);
 export const aborted = (d?: string) => new AppError(409, "/errors/aborted", "Aborted", d);
 export const unimplemented = (d?: string) => new AppError(501, "/errors/unimplemented", "Not Implemented", d);
+
+/** Every message in an error's `cause` chain, joined - what to pattern-match a DRIVER error against.
+ *
+ *  Matching `String(err)` or `err.message` alone is a trap: drizzle wraps every failed statement in a
+ *  DrizzleQueryError whose own message is just "Failed query: <sql>", and the real D1 text ("UNIQUE
+ *  constraint failed: holidays.uuid") is only reachable through `cause`. A top-level match therefore keeps
+ *  working right up until a drizzle upgrade adds a wrapper, at which point conflicts silently become 500s.
+ *  The depth cap only guarantees termination if a chain ever cycles. */
+export function errorChainText(err: unknown, depth = 8): string {
+  const parts: string[] = [];
+  for (let e: unknown = err; e && depth-- > 0; e = (e as { cause?: unknown }).cause) {
+    const m = (e as { message?: unknown }).message;
+    parts.push(typeof m === "string" ? m : String(e));
+  }
+  return parts.join(" ");
+}

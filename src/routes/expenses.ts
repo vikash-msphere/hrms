@@ -1,6 +1,7 @@
 import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
+import { jsonBody } from "../http/jsonRequest";
 import {
   listExpenses, getExpense, createExpense, updateExpense,
   submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense,
@@ -29,6 +30,7 @@ const writeSchema = z
     recurring: z.boolean().optional(),
     recurrence_rule: z.enum(["monthly", "quarterly", "yearly"]).nullable().optional(),
     next_occurrence_on: z.string().nullable().optional(),
+    paused: z.boolean().optional(),
   })
   .strict();
 // PATCH allows the same fields but with amount optional (partial edit of a draft).
@@ -59,14 +61,26 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
     update: (deps, actor, id, patch) => updateExpense(deps, actor, id, patch),
   },
   list: (c, page) =>
-    listExpenses(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), c.req.query("department"), c.req.query("q")),
+    listExpenses(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, {
+      state: c.req.query("state"),
+      department: c.req.query("department"),
+      category: c.req.query("category"),
+      vendor: c.req.query("vendor"),
+      from: c.req.query("from"),
+      to: c.req.query("to"),
+      q: c.req.query("q"),
+    }),
   verbs: {
     submit: { run: (deps, user, id) => submitExpense(deps, user, id) },
     approve: { run: (deps, user, id) => approveExpense(deps, user, id) },
-    reject: { run: (deps, user, id) => rejectExpense(deps, user, id) },
+    // A rejection may carry its reason, so the submitter learns why (the body is optional on the wire).
+    reject: {
+      schema: z.object({ note: z.string().max(1000).nullable().optional() }).strict(),
+      run: (deps, user, id, body: { note?: string | null }) => rejectExpense(deps, user, id, body?.note ?? null),
+    },
     cancel: { run: (deps, user, id) => cancelExpense(deps, user, id) },
     // The payment details are optional and shaped by the service, so the body is taken as sent.
-    pay: { run: async (deps, user, id, _body, c) => payExpense(deps, user, id, await c.req.json().catch(() => ({}))) },
+    pay: { run: async (deps, user, id, _body, c) => payExpense(deps, user, id, await jsonBody(c)) },
     // The invoice goes up as raw bytes, but the answer is the expense itself (now carrying its invoice flag).
     upload: {
       run: async (deps, user, id, _body, c) => {

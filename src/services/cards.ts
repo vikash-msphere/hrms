@@ -15,6 +15,7 @@ import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { updateGoalProgress } from "./goals";
 import { notify } from "./notifications";
+import { notifyMentions } from "./mentions";
 import { parseColumns, commitmentIndex, columnIndex, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
 
 // Notify a card's assignee when they are newly assigned it (not a re-save to the same person, not self-assign).
@@ -59,7 +60,7 @@ export async function listCards(deps: Deps, scope: ListScope, maxPageSize: numbe
   const conds = [applyScope(scope, schema.cards.code, schema.cards.employeeId)];
   if (boardId) conds.push(eq(schema.cards.boardId, boardId));
   if (!showDeleted) conds.push(isNull(schema.cards.deleteTime));
-  const page = await keysetPage<typeof schema.cards.$inferSelect>(deps, schema.cards, "cards", and(...conds.filter(Boolean)), { dir: "asc", max: maxPageSize, pageToken });
+  const page = await keysetPage<typeof schema.cards.$inferSelect>(deps, schema.cards, "cards", and(...conds.filter(Boolean)), { max: maxPageSize, pageToken });
   // Attach compact checklist progress (done/total) per row so the board tile shows it without loading items.
   // One grouped read over just this page's cards keeps it cheap.
   const ids = page.items.map((r) => r.uuid);
@@ -96,11 +97,14 @@ export async function getCardWithComments(deps: Deps, actor: AppUser, id: string
 }
 
 export async function commentCard(deps: Deps, actor: AppUser, id: string, body?: string | null) {
-  await getCard(deps, actor, id); // gate + existence (the middleware already authorized the verb on this card)
+  const card = await getCard(deps, actor, id); // gate + existence (the middleware already authorized the verb on this card)
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("a comment body is required");
   await deps.db.insert(schema.cardComments).values({ cardId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
   await audit(deps, actor, "card.comment", "cards", id);
+  // Naming someone in a comment is how work gets handed over on a board, so it tells them. A mention is a
+  // notification and nothing more: if they cannot see this board, they still cannot - see services/mentions.ts.
+  await notifyMentions(deps, actor, { subject: `cards/${id}`, link: "boards", type: "board.mention", body: text, title: card.title });
   return getCardWithComments(deps, actor, id);
 }
 
