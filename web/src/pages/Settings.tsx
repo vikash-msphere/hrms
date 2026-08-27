@@ -430,6 +430,36 @@ export function renderSettingsPanel(key: string, me: Me, toast: Toast, slot: HTM
   return panel === null ? null : <Suspense fallback={panelLoading}>{panel}</Suspense>;
 }
 
+/**
+ * The lazily-loaded entry point the inline SettingsButton (feature-page gear) imports - the panel body plus
+ * the unsaved-changes scope the Settings page wraps its own panel in. It lives HERE, in the chunk it needs,
+ * rather than in a module of its own: a wrapper that does nothing but re-export from this page becomes its
+ * own 400-byte chunk, and opening the gear then costs a request for it on top of the request for this page.
+ *
+ * `slot` is the header portal a few Access panels park controls in; `objectPath`/`onClose` are used by
+ * object-scoped panels (e.g. a board's config) to know which instance they edit and to dismiss the Sheet
+ * after a destructive action.
+ */
+export function SettingsPanelContent({
+  entryKey,
+  me,
+  toast,
+  slot,
+  openId,
+  objectPath,
+  onClose,
+}: {
+  entryKey: string;
+  me: Me;
+  toast: Toast;
+  slot?: HTMLDivElement | null;
+  openId?: string;
+  objectPath?: string;
+  onClose?: () => void;
+}) {
+  return <UnsavedScope>{renderSettingsPanel(entryKey, me, toast, slot ?? null, openId, objectPath, onClose)}</UnsavedScope>;
+}
+
 function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivElement | null, openId?: string, objectPath?: string, onClose?: () => void) {
   switch (key) {
     // Object-scoped (per instance): opened inline from the object's own page, with its path.

@@ -19,7 +19,7 @@ import { lazyPage } from "@/lib/lazyPage";
 // bundle lean - nothing here pulls Settings.tsx until the sheet actually opens.
 // lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
 const SettingsPanelContent = lazyPage(() =>
-  import("@/settings/panels").then((m) => ({ default: m.SettingsPanelContent })),
+  import("@/pages/Settings").then((m) => ({ default: m.SettingsPanelContent })),
 );
 
 const panelLoading = <PanelSkeleton />;

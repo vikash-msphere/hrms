@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
 import { Upload, Save, FileSpreadsheet } from "lucide-react";
 import { get, patch, upload } from "@/api";
 import { usePermission } from "@/lib/perm";
@@ -150,6 +149,10 @@ export default function BankFormats({ toast }: { toast: Toast }) {
         throw new Error("not an .xlsx file");
       }
       if (bytes.byteLength > MAX_TEMPLATE_BYTES) throw new Error(`file exceeds the ${MAX_TEMPLATE_BYTES / 1048576} MB limit`);
+      // SheetJS is 488 kB and this is the only place on the page that reads a spreadsheet, so it loads here
+      // rather than with the panel - the same import() every other xlsx call site in the app uses. As a static
+      // import it also made this page the library's sole static owner, which pinned it to its own chunk.
+      const XLSX = await import("xlsx");
       // Only the header grid is wanted. Turning off formula, HTML and style parsing keeps the parser on the
       // narrowest path that still yields the columns, and never changes what a blank template produces.
       const wb = XLSX.read(buf, { type: "array", cellFormula: false, cellHTML: false, cellStyles: false, dense: true });
