@@ -37,7 +37,7 @@ export function useVisibleRegions(rootMargin = "300px") {
           for (const e of entries) {
             if (!e.isIntersecting) continue;
             const id = (e.target as HTMLElement).dataset.region;
-            if (id) arrived.push(id);
+            if (id) (arrived.push(id), nodes.current.delete(id));
             io.current?.unobserve(e.target); // latched: one sighting per region is all this needs
           }
           if (!arrived.length) return;
@@ -53,7 +53,23 @@ export function useVisibleRegions(rootMargin = "300px") {
     return io.current;
   }, []);
 
-  useEffect(() => () => io.current?.disconnect(), []);
+  // Own the observer's LIFETIME here, and re-observe every probe still attached whenever this effect runs.
+  //
+  // React 18's StrictMode re-runs effects on mount (setup, cleanup, setup) but does NOT re-run ref callbacks,
+  // and the probes are observed from the ref. A cleanup that only disconnected therefore unobserved all of them
+  // with nothing left to observe them again: no region ever came into view, `seen(id)` stayed false for the
+  // life of the page, and every viewport-gated widget sat on its skeleton while its read never fired. In DEV
+  // ONLY - a production build mounts once, which is why the built app was fine and the dev server was not.
+  //
+  // Clearing `io.current` matters as much as re-observing: the next `observer()` has to build a fresh
+  // observer rather than hand back the disconnected one.
+  useEffect(() => {
+    for (const [id, el] of nodes.current) if (!seenRef.current.has(id)) observer().observe(el);
+    return () => {
+      io.current?.disconnect();
+      io.current = null;
+    };
+  }, [observer]);
 
   /** Ref for a region's probe element. Stable per id, so attaching it costs nothing on re-render. */
   const regionRef = useCallback(
