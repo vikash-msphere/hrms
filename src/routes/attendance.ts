@@ -1,4 +1,6 @@
+import type { Context } from "hono";
 import * as schema from "../db/schema";
+import type { AppEnv } from "../env";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listSessions, clockIn, clockOut } from "../services/attendance";
 import { toAttendanceSessionResource } from "../http/serialize";
@@ -8,6 +10,14 @@ import { toAttendanceSessionResource } from "../http/serialize";
 // (scoped to the caller's visibility), which drives the live presence indicator. A session is written by a
 // punch and corrected by an attendance-regularization, never edited or deleted directly - and the table has no
 // delete_time - so the factory mounts list, get and the two punches, nothing else.
+// The client address the punches are fenced against (ATTENDANCE_ALLOWED_IPS, see src/env.ts). ONLY
+// `cf-connecting-ip` - the address Cloudflare itself observed - is trusted here. `x-forwarded-for` is a
+// client-supplied header that anyone can write, so accepting it (as the audit trail does, where a spoofed
+// value is a wrong log line rather than a bypassed control) would make the fence decorative.
+function punchOrigin(c: Context<AppEnv>) {
+  return { ip: c.req.header("cf-connecting-ip") ?? null, allowList: c.env.ATTENDANCE_ALLOWED_IPS };
+}
+
 export const attendance = collectionRoutes({
   table: schema.attendanceSessions,
   collection: "attendance",
@@ -25,7 +35,7 @@ export const attendance = collectionRoutes({
     });
   },
   verbs: {
-    clockIn: { run: (deps, user) => clockIn(deps, user) },
-    clockOut: { run: (deps, user) => clockOut(deps, user) },
+    clockIn: { run: (deps, user, _id, _body, c) => clockIn(deps, user, punchOrigin(c)) },
+    clockOut: { run: (deps, user, _id, _body, c) => clockOut(deps, user, punchOrigin(c)) },
   },
 });

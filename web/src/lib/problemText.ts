@@ -43,6 +43,13 @@ export function problemText(status: number, problem: ProblemShape, statusText = 
       ? `${said} Change it to something unique, or edit the existing record instead.`
       : "That already exists. Change it to something unique, or edit the existing record instead.";
   }
+  // The attendance clock's network fence. The web clock offers the remote-work request inline (lib/clock.tsx),
+  // so this is what every OTHER surface says - and it names the second way out, a correction, because whoever
+  // reads it here may not be able to request remote work at all. Must precede the generic 403 branch.
+  if (type.endsWith("/clock-network-fence")) {
+    const next = "If you're working remotely, request remote work for these dates; otherwise file an attendance correction.";
+    return said ? `${said} ${next}` : `Clocking in and out is limited to approved networks. ${next}`;
+  }
   if (type.endsWith("/permission-denied") || status === 403) {
     return said || "You don't have permission to do this. Ask an admin to grant it, or to make the change for you.";
   }

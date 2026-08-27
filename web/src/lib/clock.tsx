@@ -1,6 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { get, invoke } from "@/api";
+import { get, invoke, type ApiError } from "@/api";
 import { idOf } from "@/lib/utils";
+import { navigate } from "@/router";
+import { fireIntent } from "@/lib/intent";
+import { useConfirm } from "@/components/common/confirm";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import { useToast } from "@/components/ui/use-toast";
 import type { AttendanceSession, Me } from "@/types";
@@ -48,6 +51,7 @@ export const useClock = () => useContext(ClockContext);
 
 function ActiveProvider({ me, children }: { me: Me; children: ReactNode }) {
   const { toast } = useToast();
+  const confirm = useConfirm();
   const [sched, setSched] = useState<AttendanceSchedule>(DEFAULT_SCHEDULE);
   const [openSessions, setOpenSessions] = useState<AttendanceSession[]>([]);
   const [ready, setReady] = useState(false);
@@ -70,19 +74,41 @@ function ActiveProvider({ me, children }: { me: Me; children: ReactNode }) {
       .catch(() => { /* not configured -> defaults */ });
   }, []);
 
+  // Whether to offer the remote-work request when the network fence refuses a punch. Gated on the capability
+  // for the same reason every other affordance is: nothing the caller can't actually use may be offered.
+  const canRequestRemote = Boolean(me.employee_id) && hasCapability(me.capabilities, "remote-work-requests.write");
+
   const punch = useCallback(async (verb: "clockIn" | "clockOut") => {
     if (!me.employee_id) return; // no record, no session of one's own to open
     setBusy(true);
+    let failure: unknown = null;
     try {
       await invoke("attendance/me", verb);
       toast({ title: verb === "clockIn" ? "Clocked in" : "Clocked out", variant: "success" });
       await reload();
     } catch (e) {
-      toast({ title: verb === "clockIn" ? "Couldn't clock in" : "Couldn't clock out", description: (e as Error).message, variant: "destructive" });
+      failure = e;
     } finally {
       setBusy(false);
     }
-  }, [reload, toast, me.employee_id]);
+    if (!failure) return;
+    // The network fence is the one punch failure with a way out, so it gets an offer instead of a dead-end
+    // toast: working from home is a request, not an error. Matched on the problem TYPE, never the sentence.
+    // Asked after `busy` clears, so the button isn't left spinning behind a modal.
+    if ((failure as ApiError).problem?.type === "/errors/clock-network-fence" && canRequestRemote) {
+      const ask = await confirm({
+        title: "You're not on a work network",
+        description: "Clocking in and out is limited to your organisation's networks. If you're working remotely, request it for these dates - once it's approved you can punch from anywhere.",
+        confirmLabel: "Request remote work",
+        cancelLabel: "Not now",
+      });
+      // The create form lives on the Remote work page; the intent survives the navigation and opens it on
+      // mount, so confirming lands straight in the form (dated today) rather than on the page.
+      if (ask) { navigate("remote-work"); fireIntent("new-remote"); }
+      return;
+    }
+    toast({ title: verb === "clockIn" ? "Couldn't clock in" : "Couldn't clock out", description: (failure as Error).message, variant: "destructive" });
+  }, [reload, toast, me.employee_id, canRequestRemote, confirm]);
 
   const mine = useMemo(() => openSessions.find((s) => s.employee && idOf(s.employee) === me.employee_id), [openSessions, me.employee_id]);
   // `enabled` is about PUNCHING: it needs an employee record to open a session for AND the verb that opens

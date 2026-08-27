@@ -94,6 +94,30 @@ account on the internet", not "no restriction", so it is refused rather than hon
 startup and the OAuth callback returns 500. MFA and device posture are enforced in the Google Workspace
 admin console, not here.
 
+## 3b. Network fence on the attendance clock — optional
+
+`ATTENDANCE_ALLOWED_IPS` (`wrangler.toml [vars]`, comma-separated individual IPs and/or CIDR blocks, IPv4
+and IPv6 mixed freely) restricts `attendance/me:clockIn` / `:clockOut` to the listed networks — the office
+egress addresses and the VPN — so an employee cannot punch in from home. Unset or empty means no fence.
+
+Three properties make it a control rather than a hint. The client address is read **only** from
+`cf-connecting-ip`, the address Cloudflare itself observed; `x-forwarded-for` is client-supplied and is
+trusted for the audit trail but never for this decision. A punch whose client IP cannot be established is
+refused, so the fence fails closed. And a malformed entry throws at `makeDeps` rather than matching
+nothing, because a silently narrowed fence locks the whole office out with no explanation.
+
+**Approved remote work eases it, for that period only.** The fence asks "are you at work?", and an APPROVED
+`remote-work-requests` row is the sanctioned answer "no, and that was agreed" — so an off-network punch is
+admitted for exactly the approved dates and is fenced again the moment they end. Only `APPROVED` counts:
+were `PENDING` enough, filing a request would be a self-service bypass. Half-day sessions are honored (an
+afternoon-only approval does not excuse a 09:00 punch), and the punch is placed on its **org-timezone** day —
+the same timezone that decides a punch's calendar day everywhere else. The lookup runs only after the IP
+misses, so an in-office punch still costs no extra read.
+
+It fences the two self-service punches only. HR attendance-regularizations are deliberately unfenced — a
+missed punch stays correctable from anywhere, which is what keeps the fence from becoming an attendance
+outage.
+
 ## 4. Demo / seed fixtures — never in production
 
 `scripts/seed.sql` and `bootstrap/demo.sql` create predictable accounts (e.g. `super@example.com` as

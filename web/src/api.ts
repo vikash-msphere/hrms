@@ -137,12 +137,17 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     // Only user ACTIONS get the request-access offer: background reads legitimately 403 while the UI is
     // settling (and gated reads shouldn't fire at all) - a toast for those would nag constantly.
     const method = (init.method ?? "GET").toUpperCase();
-    if (res.status === 403 && forbiddenHandler && !init.skipForbiddenHandler && method !== "GET") {
+    const problem = (await res.json().catch(() => null)) as Problem | null;
+    // Not every 403 is a permission wall. The attendance clock's network fence, for one, refuses a caller who
+    // holds the verb perfectly well - offering them "request access to attendance" would send them to an
+    // admin who cannot help. So a 403 that NAMES a non-permission problem type skips the offer; one with no
+    // type (or the permission-denied type) still gets it, which is every real wall.
+    const isPermissionWall = !problem?.type || problem.type.endsWith("/permission-denied");
+    if (res.status === 403 && isPermissionWall && forbiddenHandler && !init.skipForbiddenHandler && method !== "GET") {
       // First path segment = the collection the wall belongs to ("/leave-requests/..." -> leave-requests).
       const collection = path.replace(/^\//, "").split(/[/?:]/)[0] ?? "";
       if (collection) forbiddenHandler(collection);
     }
-    const problem = (await res.json().catch(() => null)) as Problem | null;
     bailOnBrokenSimulation(res.status, problem);
     throw new ApiError(problem?.detail ?? problem?.title ?? res.statusText, res.status, problem);
   }
@@ -161,6 +166,19 @@ async function withInvalidation<T>(path: string, verb: string | undefined, p: Pr
 
 // Merge-patch helper for Update. Pass the resource etag for optimistic concurrency.
 // `path` is the resource path without a leading slash, e.g. "departments/abc".
+//
+// ## No nulls on the wire
+//
+// A request body carries VALUES, never `null`. An optional field the caller has nothing to say about is left
+// out of the object, and an emptied text box, date or reference is sent as `""` - which every service reads as
+// "clear it" (`patch.x?.trim() || null`, `x ? ref(x) : null`). openapi.yaml types these fields as `string`, so
+// a `null` fails contract validation at the Prism proxy the dev server goes through (`npm run dev:proxy`) with
+// a 422 the worker never sees - which is exactly how creating a document, an expense and a card broke there
+// while working against the worker directly.
+//
+// The distinction that survives is between OMITTED and PRESENT, and it is load-bearing on a merge patch: the
+// services test `hasOwnProperty`, so an omitted key leaves the stored value alone and `""` empties it. Do not
+// "tidy" an empty string into an omitted field, or an edit that clears a note will silently keep the old one.
 export function patch<T>(path: string, body: Record<string, unknown>, etag?: string) {
   return withInvalidation(path, undefined, api<T>(`/${path}`, {
     method: "PATCH",

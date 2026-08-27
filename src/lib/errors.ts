@@ -35,6 +35,11 @@ export const oneOf = <T extends string>(v: unknown, allowed: readonly T[], detai
 
 export const unauthenticated = (d?: string) => new AppError(401, "/errors/unauthenticated", "Unauthenticated", d);
 export const forbidden = (d?: string) => new AppError(403, "/errors/permission-denied", "Permission Denied", d);
+// A 403 with its own problem TYPE, because the client does more than print it: an off-network punch is the
+// one denial with a way out (file a remote-work request), and the web clock offers that instead of a
+// dead-end toast. Same status and title as `forbidden` - only `type` differs - so anything switching on
+// those is unaffected, and the client never has to pattern-match the human sentence to know what happened.
+export const clockNetworkFence = (d?: string) => new AppError(403, "/errors/clock-network-fence", "Permission Denied", d);
 export const notFound = (d?: string) => new AppError(404, "/errors/not-found", "Not Found", d);
 export const alreadyExists = (d?: string) => new AppError(409, "/errors/already-exists", "Already Exists", d);
 export const failedPrecondition = (d?: string) => new AppError(409, "/errors/failed-precondition", "Failed Precondition", d);

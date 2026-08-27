@@ -58,6 +58,13 @@ export type Bindings = {
   // "example.com"). Cloudflare Access is the real perimeter; this is a cheap second net so a misconfigured
   // Access policy can't silently create employee-role users for outside emails. Unset/empty = no restriction.
   ALLOWED_EMAIL_DOMAINS?: string;
+  // Optional network fence on the attendance clock: a comma-separated list of individual IPs and/or CIDR
+  // blocks (IPv4 and IPv6 may be mixed, e.g. "203.0.113.7, 198.51.100.0/24, 2001:db8::/32") from which
+  // `attendance/me:clockIn` / `:clockOut` are accepted - the office networks/VPN. Unset or empty = no fence,
+  // punch from anywhere. When set, a punch from anywhere else is 403, and a punch whose client IP cannot be
+  // established is refused too (the fence fails closed). It gates only the two self-service punches: an HR
+  // attendance-regularization still corrects a missed punch from any network.
+  ATTENDANCE_ALLOWED_IPS?: string;
   // E-sign vendor secrets (never in the settings blob). Optional: absent unless an operator wires a provider.
   ESIGN_CASHFREE_CLIENT_ID?: string;
   ESIGN_CASHFREE_CLIENT_SECRET?: string; // also the webhook HMAC key (Cashfree has no separate webhook secret)

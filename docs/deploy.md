@@ -45,6 +45,15 @@ Edit the committed `wrangler.toml`:
 - `[vars].EMAIL_PROVIDER` — `resend` (default) | `brevo` | `sendgrid` | `postmark` | `mailgun`.
 - `[vars].EMAIL_FROM` — the verified sender, e.g. `hr@acme.com` (or `Acme HR <hr@acme.com>`).
 - `[vars].EMAIL_REGION` — provider-specific; the Mailgun sending domain. Omit for other providers.
+- `[vars].ATTENDANCE_ALLOWED_IPS` — optional network fence on the attendance clock. Comma-separated
+  individual IPs and/or CIDR blocks, IPv4 and IPv6 mixed freely (`203.0.113.7, 198.51.100.0/24,
+  2001:db8::/32`): the office egress addresses and the VPN. Unset or empty means no fence — employees punch
+  from anywhere. When set, `attendance/me:clockIn` and `:clockOut` from any other address are `403`, and so
+  is a punch whose client IP can't be established; only `cf-connecting-ip` counts, never the spoofable
+  `x-forwarded-for`. An **approved** remote-work request eases the fence for exactly its dates (half-days
+  included), so working-from-home stays a normal punch once it's been agreed. HR
+  attendance-regularizations are **not** fenced, so a missed punch is still correctable from anywhere. A
+  malformed entry is a startup error, not a silently narrowed fence.
 
 Do **not** put secrets here — `wrangler.toml` is committed. The bindings (`DB`, `DOCS`) and cron triggers
 are already declared; leave them as-is.
@@ -248,6 +257,7 @@ no `.env`/config file in production; `.dev.vars` exists for **local dev only** a
 | `WIRE_ID_KEY` | secret | **yes** | 32-byte base64; wire-id tokenization |
 | `EMAIL_API_KEY` | secret | **yes** | Transactional email provider API key |
 | `ALLOWED_EMAIL_DOMAINS` | var | **yes** | Comma-separated allow-list of org domains permitted to sign in / auto-provision (e.g. `acme.com`). The org perimeter in Google mode, so an empty list is refused at startup rather than treated as "no restriction" |
+| `ATTENDANCE_ALLOWED_IPS` | var | optional | Comma-separated IPs / CIDR blocks (IPv4 + IPv6) the attendance clock punches are accepted from. Unset/empty = no fence; malformed = startup error |
 | `ESIGN_CASHFREE_CLIENT_ID` | secret | optional | Cashfree Aadhaar e-sign client id; unset unless the provider is enabled |
 | `ESIGN_CASHFREE_CLIENT_SECRET` | secret | optional | Cashfree client secret; also the webhook HMAC key |
 | `ESIGN_CASHFREE_PUBLIC_KEY` | secret | optional | Cashfree public key for the production `X-Cf-Signature` 2FA header; unset in sandbox / client-id+secret-only mode |

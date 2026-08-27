@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/d1";
 import * as schema from "./db/schema";
 import type { Bindings } from "./env";
 import { makeEncryptor } from "./lib/crypto";
+import { parseIpAllowList } from "./lib/ipAllow";
 import { makeIdCodec, type IdCodec } from "./lib/idCodec";
 import { makeApiKeySigner, type ApiKeySigner } from "./lib/apiKeyToken";
 import { makeEmailSender, EMAIL_PROVIDERS, type EmailProvider } from "./lib/email";
@@ -73,6 +74,14 @@ function assertConfigured(env: Bindings): void {
   }
   if (env.EMAIL_PROVIDER && !EMAIL_PROVIDERS.includes(env.EMAIL_PROVIDER as EmailProvider)) {
     throw new Error(`EMAIL_PROVIDER must be one of ${EMAIL_PROVIDERS.join(", ")}`);
+  }
+  // Parse the clock fence here purely to validate it. A typo in one entry would otherwise narrow the fence
+  // silently (the bad entry matching nothing) and lock the whole office out of punching, discovered only by
+  // the first employee to try - so it is a startup error instead.
+  try {
+    parseIpAllowList(env.ATTENDANCE_ALLOWED_IPS);
+  } catch (e) {
+    throw new Error(`ATTENDANCE_ALLOWED_IPS is malformed: ${(e as Error).message}`);
   }
 }
 
