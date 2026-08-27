@@ -1,0 +1,35 @@
+name: e2e
+on:
+  push:
+  pull_request:
+
+# Its own workflow, not a job inside `verify`. `verify` (spectral + tsc + vitest) is the gate on every commit
+# and it has to stay a signal you can trust at a glance; a browser lane fails for reasons a unit suite never
+# does (a timing race, a runner without enough CPU), and folding it in would make one red mark mean two very
+# different things. Separate workflows keep "the code is wrong" and "the app did not behave" apart.
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      # Chromium only: the specs run on one browser by design (this lane is about the app behaving, not about
+      # cross-browser rendering). `--with-deps` installs the system libraries the runner lacks.
+      - run: npx playwright install --with-deps chromium
+      # Playwright boots the stack itself (scripts/e2eStack.sh via `webServer`): reset + migrate + seed the
+      # e2e D1, build the SPA, serve both from the Worker.
+      # On CI the config leaves `channel` unset, so this runs the bundled chromium installed above rather
+      # than the local default of system Chrome.
+      - run: npm run test:e2e
+      # The trace is how a failure gets diagnosed without reproducing it locally.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

@@ -13,6 +13,10 @@ export default defineWorkersConfig({
   // imported straight from a test instead of being kept artificially import-free.
   resolve: { alias: { "@": fileURLToPath(new URL("./web/src", import.meta.url)) } },
   test: {
+    // Only the Worker suite. Vitest's default glob also matches `e2e/*.spec.ts`, which would drag the browser
+    // specs into the workers pool - where `@playwright/test` cannot even be imported (workerd forbids I/O in
+    // global scope) and where they mean nothing anyway. The browser lane is `npm run test:e2e`.
+    include: ["test/**/*.test.ts"],
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.toml" },

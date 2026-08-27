@@ -1,0 +1,82 @@
+import { defineConfig, devices } from "@playwright/test";
+
+// The browser lane. Deliberately small, and deliberately NOT part of `npm run verify`.
+//
+// `npm run verify` (spectral -> tsc -> vitest) is the gate that blocks every commit, and it has to stay fast
+// and boring. What this lane adds is the one thing vitest cannot reach: the React app actually running. The
+// 165 vitest files already drive the Worker through `app.fetch` with real authz and a real D1, and the source
+// scans (test/responsiveCoverage.test.ts, test/confirmCoverage.test.ts, …) already pin the front-end
+// conventions in the SOURCE. Neither of them can tell you the app renders, that a dialog's submit posts the
+// right payload, that the resource store invalidates after a write, or that a page threw in the console.
+//
+// So a spec here earns its place only by asserting something a browser is required to observe. Business
+// logic belongs in the vitest suite, where it is cheaper and stricter. See docs/04-testing.md.
+//
+// The stack is the dev stack's shape - Vite in front, `/v1` through the Prism contract proxy, then the Worker
+// - so a request or response that drifts from openapi.yaml fails the browser test where it happens.
+const PORT = Number(process.env.E2E_PORT ?? 5174);
+const baseURL = process.env.E2E_BASE ?? `http://127.0.0.1:${PORT}`;
+
+export default defineConfig({
+  testDir: "e2e",
+  // Proves the stack is in the mode the specs assume (Google cookie auth, dev bypass off) before anything runs.
+  globalSetup: "./e2e/globalSetup.ts",
+  // One local D1 file, one Worker: parallel specs writing the same rows would race each other, and a flaky
+  // browser lane is worse than no browser lane. Serial is the honest setting until the specs are sharded
+  // with per-spec data.
+  workers: 1,
+  fullyParallel: false,
+  // A retry earns its keep here: the failure that repeats is real, and the trace from the retry is how it
+  // gets diagnosed. `forbidOnly` keeps a stray `test.only` from silently shrinking the CI run to one spec.
+  retries: process.env.CI ? 2 : 1,
+  forbidOnly: !!process.env.CI,
+  reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : [["list"]],
+  use: {
+    baseURL,
+    trace: "on-first-retry",
+    video: "on-first-retry",
+    // Tight enough that a hung selector fails as a test rather than as a timed-out run.
+    actionTimeout: 15_000,
+    navigationTimeout: 30_000,
+    launchOptions: {
+      slowMo: 1000,
+    },
+  },
+  projects: [
+    {
+      name: "desktop",
+      testIgnore: "**/phone.spec.ts",
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+        // Locally: the system Chrome that scripts/uiShots.mjs already drives, so nothing extra is downloaded.
+        // In CI: the bundled chromium from `npx playwright install chromium`.
+        channel: process.env.E2E_CHANNEL ?? (process.env.CI ? undefined : "chrome"),
+      },
+    },
+    {
+      // The phone. `isMobile` + `hasTouch` are what make `matchMedia("(pointer: coarse)")` true, without which
+      // every `coarse:` rule in the app is absent and the measurements are of the desktop rendering wearing a
+      // narrow viewport - the exact mistake docs/06-responsive-ui.md warns about.
+      name: "phone",
+      testMatch: "**/phone.spec.ts",
+      use: {
+        ...devices["Pixel 5"],
+        viewport: { width: 390, height: 844 },
+        channel: process.env.E2E_CHANNEL ?? (process.env.CI ? undefined : "chrome"),
+      },
+    },
+  ],
+  webServer: {
+    command: "scripts/e2eStack.sh",
+    url: `${baseURL}/`,
+    // Cold start does a DB reset + migrations + seed, then boots three processes; Vite compiles the app on
+    // the first request rather than up front.
+    timeout: 300_000,
+    // Locally, attach to a stack you already have running (the ports are e2e-only, so this can never latch
+    // onto the dev stack and its single bypass identity). In CI, always start a clean one.
+    reuseExistingServer: !process.env.CI,
+    stdout: "pipe",
+    stderr: "pipe",
+  },
+});

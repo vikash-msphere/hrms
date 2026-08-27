@@ -26,3 +26,11 @@ cf.txt
 # which shipped 7.6 MB of publicly downloadable dead weight. Extract from somewhere else.
 web/public/assets/illustrations.zip
 .repowise/
+web/src/web/dummy-non-existing-folder/
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

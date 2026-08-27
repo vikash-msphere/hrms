@@ -119,6 +119,9 @@ which only works together with `ALLOW_DEV_AUTH=true`.
   back to `0000` (remove the sql + meta snapshot, empty the journal, `npm run db:generate`).
 - Tests: `npm test`. If it reports "no tests" with an `EPERM` on `.dev.vars`, the command sandbox denied the
   file - rerun outside it (see `docs/04-testing.md`).
+- Browser tests: `npm run test:e2e` (Playwright, `e2e/`). Its own stack on :8788 with its own database, so it
+  leaves the dev stack alone; deliberately outside `verify`, and its own CI workflow. It covers only what a
+  browser is required to show - see `docs/04-testing.md`.
 
 ## Deploying
 

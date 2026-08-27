@@ -1,0 +1,13 @@
+{
+  // The browser specs are typechecked with everything else (`npm run typecheck`) - untypechecked test code
+  // rots, and these import app modules (src/lib/session) that must keep matching.
+  //
+  // Own config rather than an entry in the root `include`: the root sets `types: ["@cloudflare/workers-types"]`
+  // for the Worker sources, and a Playwright spec runs in Node with Playwright's own globals.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@playwright/test", "node"],
+    "noEmit": true
+  },
+  "include": [".", "../playwright.config.ts"]
+}

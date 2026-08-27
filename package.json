@@ -15,8 +15,11 @@
     "db:migrate:remote": "wrangler d1 migrations apply hrms --remote",
     "api:lint": "spectral lint openapi.yaml --fail-severity=warn",
     "api:types": "openapi-typescript openapi.yaml -o src/http/openapi.d.ts",
-    "typecheck": "npm run api:types && tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "typecheck": "npm run api:types && tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "e2e:stack": "scripts/e2eStack.sh",
     "verify": "npm run api:lint && npm run typecheck && npm run test",
     "precommit": "npm run verify",
     "prepare": "husky"
@@ -68,11 +71,13 @@
     "zod": "^3.23"
   },
   "devDependencies": {
-    "@aep_dev/aep-openapi-linter": "0.5.3",
+    "@aep_dev/aep-openapi-linter": "^0.5.3",
     "@cloudflare/vitest-pool-workers": "^0.12.21",
     "@cloudflare/workers-types": "^4",
+    "@playwright/test": "^1.62.1",
     "@stoplight/spectral-cli": "^6",
     "@types/jsbarcode": "^3.11.4",
+    "@types/node": "^26.3.0",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18",
     "@types/react-dom": "^18",
