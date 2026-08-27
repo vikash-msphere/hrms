@@ -95,6 +95,7 @@ import { dashboardSummaryRoute } from "./routes/dashboardSummary";
 import { peopleAnalyticsRoute } from "./routes/peopleAnalytics";
 import { approvalsSummaryRoute } from "./routes/approvalsSummary";
 import { bankFormats } from "./routes/bankFormats";
+import { letterheadLogos } from "./routes/letterheadLogos";
 import { payrollDebit } from "./routes/payrollDebit";
 import { compensation } from "./routes/compensation";
 import { compensationReapply } from "./routes/compensationReapply";
@@ -268,6 +269,7 @@ app.route("/v1/expense-categories", expenseCategories);
 app.route("/v1/vendors", vendors);
 app.route("/v1/expense-budgets", expenseBudgets);
 app.route("/v1/bank-formats", bankFormats);
+app.route("/v1/letterhead-logos", letterheadLogos);
 app.route("/v1/payroll-debit-accounts", payrollDebit);
 app.route("/v1/compensation:reapplySplit", compensationReapply); // collection custom method, before the compensation mount
 app.route("/v1/compensation", compensation);

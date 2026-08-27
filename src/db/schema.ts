@@ -2195,12 +2195,32 @@ export const noticePeriods = sqliteTable("notice_periods", {
 // per-template access uses the real engine - READ = who may generate this letter type, WRITE =
 // who may edit it. Private by default; seed widens read+write to hr_admin. `blocks`/`inputs` are the editable
 // template content (see src/domain/letters.ts), stored as JSON.
+// The org's letterhead catalogue: the logos letters can be ISSUED on, one per legal entity or brand, distinct
+// from the single app-branding logo in settings/organization. A letter template names one as its default and a
+// generation can override it. The artwork itself lives in R2 (`letterhead-logos/<uuid>`), never in a settings
+// blob - lib/refData.ts snapshots the whole settings table on the first settings read of a request, so an image
+// parked there would be bytes read on nearly every request.
+export const letterheadLogos = sqliteTable("letterhead_logos", {
+  uuid: pk(),
+  code: codeCol(),
+  label: text("label").notNull(), // the entity/brand this letterhead belongs to
+  r2Key: text("r2_key"), // where the artwork lives; null until an image is uploaded
+  contentType: text("content_type"), // image/png | image/jpeg - the two pdf-lib can embed
+  sizeBytes: integer("size_bytes"),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  createdAt: created(),
+  updatedAt: updated(),
+});
+
 export const letterTemplates = sqliteTable("letter_templates", {
   uuid: pk(),
   code: codeCol(),
   label: text("label").notNull(),
   category: text("category"), // grouping for the editor + generate pickers (Onboarding, Compensation, ...)
   filename: text("filename"), // download filename template (placeholders ok)
+  // Which letterhead this type is issued on (letterhead_logos.uuid). Null - or a logo since removed - falls
+  // back to the single organization logo, so a deleted letterhead degrades the letter rather than breaking it.
+  letterheadId: text("letterhead_id"),
   inputs: text("inputs", { mode: "json" }).$type<unknown[]>(), // fields HR fills in at generation time
   blocks: text("blocks", { mode: "json" }).$type<unknown[]>().notNull(), // ordered content blocks
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete

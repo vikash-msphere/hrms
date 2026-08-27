@@ -44,6 +44,7 @@ export const TABLES: Record<string, any> = {
   offers: schema.offers,
   "leave-types": schema.leaveTypes,
   "letter-templates": schema.letterTemplates,
+  "letterhead-logos": schema.letterheadLogos,
   "leave-balances": schema.leaveBalances,
   holidays: schema.holidays,
   "holiday-selections": schema.holidaySelections,

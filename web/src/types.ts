@@ -107,6 +107,11 @@ export type BankFormatColumn = Wire<"bank-format-column">;
 
 export type BankFormat = Wire<"bank-format">;
 
+// One logo in the org's letterhead catalogue (one per legal entity/brand), picked per letter template and per
+// generation. The image is stored in object storage, not in the settings blob, and rides inline as a data URL
+// only when the list is read with `include=image`.
+export type LetterheadLogo = Wire<"letterhead-logo">;
+
 // The employer's debit account + currency for one bank (super_admin only). The account number is stored
 // encrypted and returned masked; writes send the full number.
 export type PayrollDebitAccount = Wire<"payroll-debit-account">;

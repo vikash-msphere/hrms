@@ -47,6 +47,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   // collection/row icons manage only the level and don't show a drill-in chip for every verb. Mirrors the
   // server's ACCESS_VERBS (kept in sync by customMethodsDrift).
   "bank-formats": ["uploadTemplate"],
+  "letterhead-logos": ["uploadImage", "image"],
   payslips: ["preview", "download"],
   "org-documents": ["download", "acknowledge", "remindAck"],
   "personal-documents": ["download", "sign", "refreshEsign"],

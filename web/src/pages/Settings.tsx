@@ -3,7 +3,7 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { lazyPage as lazy } from "@/lib/lazyPage";
 import { navigate } from "@/router";
 import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Type, Image as ImageIcon } from "lucide-react";
-import { get, patch, create, remove, list } from "@/api";
+import { get, patch, create, remove, list, upload, blobUrl } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
 import { APP_NAME } from "@/lib/brand";
@@ -18,7 +18,7 @@ import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Me, AtsConfig, AtsStage, Automation } from "@/types";
+import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, LetterheadLogo, Me, AtsConfig, AtsStage, Automation } from "@/types";
 import { DEFAULT_ATS_CONFIG } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -1561,6 +1561,169 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
   );
 }
 
+// ---- Letterhead logos -------------------------------------------------------------------------------------
+//
+// The company's OTHER logos: an org with several legal entities or brands issues each one's letters on its own
+// letterhead, so the catalogue is a list rather than the single organization logo above. A letter template
+// points at one, and whoever generates a letter can override it for that one document.
+//
+// Unlike the identity form (one blob, one Save), each row here writes on its own - and the artwork goes to
+// object storage, not into the settings blob that nearly every request reads.
+function LetterheadLogosPanel({ toast }: { toast: Toast }) {
+  const { rows, reload } = useCollection<LetterheadLogo>("letterhead-logos");
+  const [adding, setAdding] = useState(false);
+
+  // Two calls, because the row and its artwork are two objects: create the entry, then put the bytes in object
+  // storage under it. A failed upload leaves a named letterhead with no image, which the row says plainly.
+  async function add(file: File) {
+    setAdding(true);
+    try {
+      const row = await create<LetterheadLogo>("letterhead-logos", { label: file.name.replace(/\.[^.]+$/, "") || "New letterhead" });
+      await upload<LetterheadLogo>(row.path!, file, { verb: "uploadImage" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't add letterhead", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  return (
+    <Card className="mt-5">
+      <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-base">
+          <AccessAction collection="letterhead-logos" label="Letterhead logos"><span>Letterhead logos</span></AccessAction>
+        </CardTitle>
+        <AccessAction collection="letterhead-logos" create label="Add letterhead">
+          <LetterheadPicker label="Add letterhead" busy={adding} onPick={add} toast={toast} />
+        </AccessAction>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          The logos letters can be issued on - one per legal entity or brand. A letter template picks its own, and whoever generates a letter can
+          switch it for that document. Nothing here changes the app's own branding. PNG or JPG, under 256 KB (a PDF can't embed an SVG).
+        </p>
+        {rows.length === 0 && <p className="text-sm text-muted-foreground">No letterheads yet. Letters use the square mark above.</p>}
+        {rows.map((l) => <LetterheadRow key={l.path} logo={l} reload={reload} toast={toast} />)}
+      </CardContent>
+    </Card>
+  );
+}
+
+// A file input styled as a button, shared by "Add letterhead" and a row's "Replace". Refuses oversize or
+// unembeddable artwork here rather than at the server, where it would arrive as a failed upload on a row that
+// already exists.
+function LetterheadPicker({ label, busy, onPick, toast }: { label: string; busy?: boolean; onPick: (file: File) => void; toast: Toast }) {
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // so re-picking the same file still fires a change
+    if (!f) return;
+    if (!/^image\/(png|jpeg)$/.test(f.type)) {
+      toast({ variant: "destructive", title: "Use a PNG or JPG", description: "A PDF letterhead can only embed PNG or JPEG artwork." });
+      return;
+    }
+    if (f.size > MAX_LOGO_BYTES) {
+      toast({ variant: "destructive", title: "Image too large", description: `Use a file under ${Math.round(MAX_LOGO_BYTES / 1024)} KB.` });
+      return;
+    }
+    onPick(f);
+  }
+  return (
+    <label className={cn("inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent", busy && "pointer-events-none opacity-60")}>
+      <Plus className="h-4 w-4" /> {label}
+      <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={onFile} />
+    </label>
+  );
+}
+
+// One letterhead: its artwork, its name, replace/remove. Renaming keeps the row, so every template pointing at
+// it keeps working. The image is a second fetch (it lives in object storage), so it loads per row, here, where
+// somebody is actually looking at the artwork - the generate picker lists names only.
+function LetterheadRow({ logo, reload, toast }: { logo: LetterheadLogo; reload: () => void; toast: Toast }) {
+  const confirm = useConfirm();
+  const path = logo.path!; // always present on a served row (readOnly, so the shared wire type has it optional)
+  const [label, setLabel] = useState(logo.label ?? "");
+  const [busy, setBusy] = useState(false);
+  const [art, setArt] = useState<string | null>(null);
+  const dirty = label.trim() !== (logo.label ?? "");
+  useUnsavedTracker(dirty, () => (label.trim() ? save() : undefined));
+
+  // Re-fetched whenever the stored artwork changes (update_time moves on every replace), and revoked on the way
+  // out so a settings visit doesn't leak an object URL per logo.
+  useEffect(() => {
+    if (!logo.has_image) { setArt(null); return; }
+    let url: string | undefined;
+    let dropped = false;
+    void blobUrl(path, { verb: "image" })
+      .then((u) => { if (dropped) { URL.revokeObjectURL(u); return; } url = u; setArt(u); })
+      .catch(() => setArt(null)); // no access to the artwork, or it's gone - the row still names it
+    return () => { dropped = true; if (url) URL.revokeObjectURL(url); };
+  }, [path, logo.has_image, logo.update_time]);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await patch(path, { label: label.trim() }, logo.etag);
+      reload();
+      toast({ title: "Letterhead saved", variant: "success" });
+    } catch (e) {
+      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function replaceArt(file: File) {
+    setBusy(true);
+    try {
+      await upload<LetterheadLogo>(path, file, { verb: "uploadImage" });
+      reload();
+      toast({ title: "Letterhead updated", variant: "success" });
+    } catch (e) {
+      toast({ title: "Couldn't upload", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function del() {
+    const ok = await confirm({
+      title: "Remove this letterhead?",
+      description: `Templates set to "${logo.label}" fall back to the organization logo. Letters already generated keep the logo they were rendered with.`,
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await remove(path, logo.etag);
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't remove", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
+      <div className="flex h-16 w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted">
+        {art ? <img src={art} alt="" className="h-full w-full object-contain p-2" /> : <Building className="h-6 w-6 text-muted-foreground" />}
+      </div>
+      <div className="flex min-w-0 flex-1 basis-48 items-center gap-2">
+        <Input value={label} placeholder="e.g. Acme Technologies Pvt Ltd" onChange={(e) => setLabel(e.target.value)} aria-label="Letterhead name" />
+        <AccessTarget target={{ collection: "letterhead-logos", objectPath: path, label: logo.label, can: logo.access?.can }} />
+      </div>
+      <div className="flex items-center gap-2">
+        {!logo.has_image && <span className="text-xs text-warning">No artwork yet</span>}
+        {dirty && <Button size="sm" onClick={() => save()} disabled={busy || !label.trim()}><Save className="h-4 w-4" /> Save</Button>}
+        <AccessAction collection="letterhead-logos" verb="uploadImage" objectPath={path} can={logo.access?.can} label="Replace artwork">
+          <LetterheadPicker label="Replace" busy={busy} onPick={replaceArt} toast={toast} />
+        </AccessAction>
+        <Button variant="ghost" size="icon" onClick={del} disabled={busy} aria-label="Remove letterhead"><Trash2 className="h-4 w-4" /></Button>
+      </div>
+    </div>
+  );
+}
+
 // Organization identity (name + logo) - a single settings/organization row; the logo is a small data URL.
 // Saving refreshes the app-wide org context so the sidebar brand updates immediately.
 // The organization blob (settings/organization) backs three panels: identity, banks & currency and letter
@@ -1945,6 +2108,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
               </div>
             </CardContent>
           </Card>
+          <LetterheadLogosPanel toast={toast} />
         </TabsContent>
         <TabsContent value="name">
           <Card>

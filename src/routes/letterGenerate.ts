@@ -8,6 +8,7 @@ import { jsonBody } from "../http/jsonRequest";
 import { toPersonalDocumentResource } from "../http/serialize";
 import { assembleLetterContext } from "../services/letterData";
 import { findLetterTemplate } from "../services/letterTemplates";
+import { letterheadDataUrl } from "../services/letterheadLogos";
 import { resolveLetter } from "../domain/letters";
 import { renderLetterPdf } from "../lib/letterPdf";
 import { idFromPath } from "../services/documentsCommon";
@@ -27,12 +28,14 @@ import { DEFAULT_ESIGN, DEFAULT_ESIGN_METHOD, esignFor, type EsignConfig } from 
 // super_admin (`**`) match - payroll/employees hold only `personal-documents.me.*`, so they can't generate.
 const svc = makeDocumentService({ table: schema.personalDocuments, collection: "personal-documents", singular: "personal document", owned: true });
 
-const bodySchema = z.object({ employee: z.string(), letter_type: z.string(), input: z.record(z.string(), z.string().max(20_000)).refine((o) => Object.keys(o).length <= 200, "too many input fields").optional(), esign: z.boolean().optional() }).strict();
+// `letterhead` overrides the template's own letterhead for THIS generation (a `letterhead-logos/<id>` ref,
+// decoded at the edge); "" means the plain organization logo. Omitted = whatever the template says.
+const bodySchema = z.object({ employee: z.string(), letter_type: z.string(), input: z.record(z.string(), z.string().max(20_000)).refine((o) => Object.keys(o).length <= 200, "too many input fields").optional(), letterhead: z.string().max(80).optional(), esign: z.boolean().optional() }).strict();
 
 export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
   const parsed = bodySchema.safeParse(await jsonBody(c));
   if (!parsed.success) throw invalidArgument("body must be { employee, letter_type }");
-  const { employee, letter_type, input, esign: esignOverride } = parsed.data;
+  const { employee, letter_type, input, letterhead: letterheadRef, esign: esignOverride } = parsed.data;
   const employeeId = idFromPath(employee);
   if (!employeeId) throw invalidArgument("employee is required");
 
@@ -44,6 +47,11 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
   if (!(await canReadObjectId(deps, user, "letter-templates", template.id))) throw forbidden("that letter type isn't available to you");
 
   const ctx = await assembleLetterContext(deps, employeeId);
+  // Letterhead: the request's choice wins over the template's, and either falls back to the organization logo
+  // when the id is blank, unknown or its image has gone. The resolved data URL is baked into `content`, so the
+  // frozen sidecar an internal e-sign re-renders from keeps the very logo the recipient saw.
+  const letterhead = await letterheadDataUrl(deps, letterheadRef !== undefined ? letterheadRef : template.letterhead);
+  if (letterhead) ctx.org.logo = letterhead;
   const { content, title, fileName } = resolveLetter(template, ctx, input ?? {});
   const { bytes: pdf, signAnchors } = await renderLetterPdf(content);
 

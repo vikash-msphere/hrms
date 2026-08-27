@@ -5,6 +5,7 @@ import { documentFileName } from "@/lib/documents";
 import { runSequential, batchSummary, type BatchProgress } from "@/lib/batchRun";
 import { EmployeePicker } from "@/components/common/EmployeePicker";
 import { useLetterTemplates, groupByCategory, type LetterTemplateOption } from "@/lib/letterTemplates";
+import { useLetterheadLogos } from "@/lib/letterheadLogos";
 import { LetterInputFields, missingRequiredInputs } from "@/components/common/LetterInputFields";
 import { Field } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -61,7 +62,10 @@ export function GenerateLetterDialog({
   // dialog opened would read as an edit, and cancelling an untouched form would ask to discard nothing.
   // `more` holds the extra recipients of a batch (increment letters go out to forty people at once); `employee`
   // is still the primary one, and the only one the preview renders.
-  const EMPTY = { employee: "", more: [] as string[], type: "", inputs: {} as Record<string, string>, esign: null as boolean | null };
+  // `logo` is the letterhead for THIS run: null = whatever the template is set to, "" = the plain organization
+  // logo, otherwise a `letterhead-logos/<id>` ref. An org with several legal entities issues a letter on the
+  // right entity's letterhead, and the same template gets used for all of them.
+  const EMPTY = { employee: "", more: [] as string[], type: "", inputs: {} as Record<string, string>, logo: null as string | null, esign: null as boolean | null };
   const [form, setForm] = React.useState(EMPTY);
   const [pickMore, setPickMore] = React.useState(false);
   const [progress, setProgress] = React.useState<BatchProgress | null>(null);
@@ -83,7 +87,11 @@ export function GenerateLetterDialog({
   // the default is the last type used rather than whatever sorts first.
   const typePath = form.type || (lastTemplate() && templates.some((t) => t.path === lastTemplate()) ? lastTemplate()! : templates[0]?.path) || "";
   const template = templates.find((t) => t.path === typePath);
-  const snap = JSON.stringify({ e: subjectPath, t: typePath, i: form.inputs });
+  // The letterhead catalogue, fetched only once the dialog is open. Empty - no catalogue, or no
+  // `letterhead-logos.read` - means no picker, and the template's own choice still stands server-side.
+  const letterheads = useLetterheadLogos({ enabled: open });
+  const logo = form.logo ?? template?.letterhead ?? "";
+  const snap = JSON.stringify({ e: subjectPath, t: typePath, i: form.inputs, l: logo });
   const stale = !!preview && preview.snap !== snap;
 
   // One object URL at a time, and none left behind when the dialog closes.
@@ -132,8 +140,9 @@ export function GenerateLetterDialog({
         verb: "previewLetter",
         body: {
           employee: subjectPath,
-          template: { id: template.path, label: template.label, inputs: template.inputs, blocks: template.blocks },
+          template: { id: template.path, label: template.label, letterhead: template.letterhead, inputs: template.inputs, blocks: template.blocks },
           ...(template.inputs?.length ? { input: form.inputs } : {}),
+          letterhead: logo,
         },
       });
       setPreview((p) => { if (p) URL.revokeObjectURL(p.url); return { url, snap }; });
@@ -151,6 +160,7 @@ export function GenerateLetterDialog({
         employee: path,
         letter_type: typePath,
         ...(template?.inputs?.length ? { input: form.inputs } : {}),
+        letterhead: logo,
         ...(form.esign !== null ? { esign: form.esign } : {}),
       }),
     });
@@ -243,7 +253,7 @@ export function GenerateLetterDialog({
             </p>
           )}
           <Field label="Letter type" hint={template?.category ? `${template.category} letter, built from the record and your letter defaults.` : "Built from the employee's record, compensation and your letter defaults."}>
-            <Select value={typePath} onValueChange={(v) => { rememberTemplate(v); setForm({ ...form, type: v, inputs: {}, esign: null }); }}>
+            <Select value={typePath} onValueChange={(v) => { rememberTemplate(v); setForm({ ...form, type: v, inputs: {}, logo: null, esign: null }); }}>
               <SelectTrigger><SelectValue placeholder="Select a letter…" /></SelectTrigger>
               <SelectContent>
                 {groupByCategory(templates).map((g) => (
@@ -255,6 +265,25 @@ export function GenerateLetterDialog({
               </SelectContent>
             </Select>
           </Field>
+          {/* Only shown when there is something to choose between: with no catalogue (or no access to it) every
+              letter carries the organization logo and a picker would be a control with one option. */}
+          {letterheads.length > 0 && (
+            <Field
+              label="Letterhead"
+              hint={form.logo === null ? "This letter type's own letterhead. Change it for just this document." : "Overriding this letter type, for this document only."}
+            >
+              <Select
+                value={letterheads.some((l) => l.path === logo) ? logo : "__org"}
+                onValueChange={(v) => setForm({ ...form, logo: v === "__org" ? "" : v })}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__org">Organization logo</SelectItem>
+                  {letterheads.map((l) => <SelectItem key={l.path} value={l.path!}>{l.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           {duplicate && (
             <p className="-mt-1 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">
               <TriangleAlert className="mr-1 inline h-3.5 w-3.5" />

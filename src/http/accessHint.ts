@@ -73,6 +73,8 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   // it. That is also how the ticket list's bulk Resolve/Close learn whether the caller may act on a row - they
   // read those verb names out of `access.can`. Verb rules validate by name (policyValidate), not against this map.
   "bank-formats": ["update", "uploadTemplate"],
+  // The artwork is a second object behind the row: `image` reads it, `uploadImage` replaces it.
+  "letterhead-logos": ["update", "delete", "uploadImage", "image"],
   payslips: ["preview", "download"],
   "org-documents": ["update", "delete", "download", "acknowledge", "remindAck"],
   "personal-documents": ["update", "delete", "download", "sign", "refreshEsign"],
@@ -127,6 +129,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "remindAck", // nudge whoever still owes a signature on a policy's current version (org-documents)
   "run", // run a queued job (operations) or fire a cron tick on demand (cron-runs)
   "uploadTemplate", // upload a bank's blank bulk-payment .xlsx (bank-formats)
+  "uploadImage", "image", // upload / read a letterhead's artwork (letterhead-logos)
   "award", // award a flat bonus across a scope (bonuses)
   "respond", "upvote", "downvote", // suggestion box: HR triage (status + reply) + peer up/down vote (suggestions); `respond` is also an attendee's RSVP (events)
   "merge", // fold a duplicate suggestion into the one it repeats, taking its votes with it (suggestions)

@@ -101,6 +101,10 @@ export type LetterTemplate = {
   id: string;
   label: string;
   category?: string; // grouping for the editor + generate pickers (e.g. Onboarding, Compensation, Exit)
+  // Which letterhead this template is issued on, as a `letterhead-logos/<id>` ref (an org with several legal
+  // entities issues each one's letters on its own logo). Unset - or a logo since removed - falls back to the
+  // single organization logo. Overridable per generation.
+  letterhead?: string;
 
   filename?: string; // download filename template (without extension); supports placeholders
   inputs?: TemplateInput[]; // fields HR fills in at generation time

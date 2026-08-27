@@ -1151,8 +1151,20 @@ export function toLetterTemplateResource(r: any): Wire<"letter-template"> {
     label: r.label,
     category: r.category ?? undefined,
     filename: r.filename ?? undefined,
+    letterhead: ref("letterhead-logos", r.letterheadId),
     inputs: r.inputs ?? undefined,
     blocks: r.blocks ?? [],
+  };
+}
+
+export function toLetterheadLogoResource(r: any): Wire<"letterhead-logo"> {
+  return {
+    ...baseResource(r, "letterhead-logos"),
+    label: r.label,
+    content_type: r.contentType ?? undefined,
+    size_bytes: r.sizeBytes ?? undefined,
+    // Whether the artwork has actually been uploaded: a row with no image is a name the letters can't use yet.
+    has_image: !!r.r2Key,
   };
 }
 

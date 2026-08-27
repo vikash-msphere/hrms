@@ -560,6 +560,29 @@ components:
         plural: bank-formats
         patterns: ['bank-formats/{bank_format}']
         type: hrms.example.com/bank-format
+    letterhead-logo:
+      type: object
+      description: One logo in the org's letterhead catalogue - the logos letters are ISSUED on, one per legal entity or brand, distinct from the app's own branding logo. The artwork is uploaded separately (uploadImage) and stored in object storage.
+      required: [path, create_time, update_time, etag]
+      properties:
+        path: { type: string, readOnly: true }
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        label: { type: string, description: The entity or brand this letterhead belongs to. }
+        content_type: { type: string, readOnly: true, description: image/png or image/jpeg - the formats a PDF can embed. }
+        size_bytes: { type: integer, readOnly: true }
+        has_image: { type: boolean, readOnly: true, description: False until the artwork is uploaded; letters fall back to the organization logo. }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: letterhead-logo
+        plural: letterhead-logos
+        patterns:
+          - 'letterhead-logos/{letterhead_logo_id}'
+        type: hrms.example.com/letterhead-logo
     payroll-debit-account:
       type: object
       description: The employer's bulk-payment debit account + currency for one bank (super_admin only). Stored encrypted; the account number is returned masked.
@@ -1084,6 +1107,7 @@ components:
         label: { type: string }
         category: { type: string, nullable: true, description: Grouping for the editor + generate pickers. }
         filename: { type: string, nullable: true, description: Download filename template (placeholders ok). }
+        letterhead: { type: string, nullable: true, description: "Letterhead this type is issued on, e.g. letterhead-logos/abc123. Unset (or a logo since removed) falls back to the organization logo." }
         inputs: { type: array, nullable: true, items: { type: object, additionalProperties: true }, description: Fields HR fills in at generation time. }
         blocks: { type: array, items: { type: object, additionalProperties: true }, description: "Ordered content blocks (closed vocabulary, rendered server-side)." }
         access:
@@ -9317,6 +9341,7 @@ paths:
                 employee: { type: string, description: "The employee the letter is for, e.g. employees/abc123." }
                 letter_type: { type: string, description: "Template id of the letter to generate (from the letter-templates setting, e.g. offer, increment, appraisal, relieving, experience)." }
                 input: { type: object, additionalProperties: { type: string }, description: "HR-provided values for the template's input fields (e.g. subject, body)." }
+                letterhead: { type: string, description: "Letterhead for this one generation, e.g. letterhead-logos/abc123, overriding the template's own. Empty string = the plain organization logo." }
                 esign: { type: boolean, description: "Force e-signature on/off for this one generation, overriding the esign setting's per-template default." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/personal-document' } } } }
@@ -9374,8 +9399,9 @@ paths:
               required: [employee, template]
               properties:
                 employee: { type: string, description: "The employee to render the draft against, e.g. employees/abc123." }
-                template: { type: object, description: "The draft template (id, label, filename, inputs, blocks)." }
+                template: { type: object, description: "The draft template (id, label, filename, letterhead, inputs, blocks)." }
                 input: { type: object, additionalProperties: { type: string }, description: "Sample values for the template's input fields." }
+                letterhead: { type: string, description: "Letterhead for this preview, e.g. letterhead-logos/abc123, overriding the draft's own. Empty string = the plain organization logo." }
       responses:
         '200': { description: The rendered PDF, content: { application/pdf: { schema: { type: string, format: binary } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -10643,6 +10669,90 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { type: object } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+  /v1/letterhead-logos:
+    get:
+      description: List method for letterhead-logo.
+      operationId: ListLetterheadLogos
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/letterhead-logo' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for letterhead-logo. Creates the catalogue entry; upload its artwork with :uploadImage.
+      operationId: CreateLetterheadLogo
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/letterhead-logos/{letterhead_logo_id}:
+    parameters: [ { in: path, name: letterhead_logo_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for letterhead-logo.
+      operationId: GetLetterheadLogo
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Update method for letterhead-logo - rename it. The id never changes, so templates keep pointing at it.
+      operationId: UpdateLetterheadLogo
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for letterhead-logo. Templates keep their letterhead; a deleted one falls back to the organization logo.
+      operationId: DeleteLetterheadLogo
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/letterhead-logos/{letterhead_logo_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreLetterheadLogo"
+      parameters: [ { in: path, name: letterhead_logo_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/letterhead-logos/{letterhead_logo_id}:uploadImage:
+    post:
+      description: "Custom method uploadImage: store this letterhead's artwork (PNG or JPEG, max 256 KB) in object storage."
+      operationId: ":UploadImageLetterheadLogo"
+      parameters:
+        - { in: path, name: letterhead_logo_id, required: true, schema: { type: string } }
+        - { in: query, name: content_type, schema: { type: string } }
+        - { in: query, name: file_name, schema: { type: string } }
+      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/letterhead-logos/{letterhead_logo_id}:image:
+    post:
+      description: "Custom method image: the letterhead's artwork bytes, for the branding editor's preview."
+      operationId: ":ImageLetterheadLogo"
+      parameters:
+        - { in: path, name: letterhead_logo_id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Successful response, content: { image/png: { schema: { type: string, format: binary } }, image/jpeg: { schema: { type: string, format: binary } } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/payroll-debit-accounts:
     get:
       description: List method for payroll-debit-account (super_admin only).

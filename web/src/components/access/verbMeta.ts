@@ -98,6 +98,10 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
   },
   "tax-declarations": { verify: { label: "Verify", description: "Accept the declared investment with its proof." } },
   "bank-formats": { uploadTemplate: { label: "Upload template", description: "Replace the bank file template." } },
+  "letterhead-logos": {
+    uploadImage: { label: "Upload artwork", description: "Replace the letterhead's logo image." },
+    image: { label: "View artwork", description: "See the logo image itself, not just its name." },
+  },
   operations: { run: { label: "Run", description: "Execute the maintenance job." } },
   "cron-runs": { run: { label: "Run now", description: "Fire a scheduled tick on demand." } },
   automations: {

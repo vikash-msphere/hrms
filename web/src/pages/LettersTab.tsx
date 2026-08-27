@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Eye, FileSignature, KeyRound, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useLetterheadLogos } from "@/lib/letterheadLogos";
 import { cn, idOf } from "@/lib/utils";
 import type { Employee } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,7 +38,7 @@ type Block = {
 };
 type TemplateInput = { key: string; label: string; type?: "text" | "multiline"; placeholder?: string; required?: boolean };
 // `id` holds the resource PATH (letter-templates/{id}); `etag` rides along for optimistic-concurrency saves.
-type Template = { id: string; etag?: string; label: string; category?: string; filename?: string; inputs?: TemplateInput[]; blocks: Block[]; access?: { can?: string[] } };
+type Template = { id: string; etag?: string; label: string; category?: string; filename?: string; letterhead?: string; inputs?: TemplateInput[]; blocks: Block[]; access?: { can?: string[] } };
 
 // Group templates by category (first-seen order); untyped go under "Other".
 function groupTemplates(ts: Template[]): { category: string; items: Template[] }[] {
@@ -166,7 +167,10 @@ export default function LettersTab({ toast }: { toast: Toast }) {
     if (employeesState === "error") toast({ title: "Couldn't load employees", description: "The preview picker may be empty. Try reloading.", variant: "destructive" });
   }, [employeesState, toast]);
   // Letter templates are a real collection now (each an addressable object -> per-template access icon).
-  const { rows: rows, reload } = useCollection<{ path: string; etag?: string; label: string; category?: string; filename?: string; inputs?: TemplateInput[]; blocks: Block[]; access?: { can?: string[] } }>("letter-templates");
+  const { rows: rows, reload } = useCollection<{ path: string; etag?: string; label: string; category?: string; filename?: string; letterhead?: string; inputs?: TemplateInput[]; blocks: Block[]; access?: { can?: string[] } }>("letter-templates");
+  // The letterhead catalogue, for the per-template default. Names only - the Preview tab is what shows the
+  // artwork, on the letter itself.
+  const letterheads = useLetterheadLogos();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selId, setSelId] = useState<string>("");
   const [dirty, setDirty] = useState(false);
@@ -180,7 +184,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
   // Sync server rows -> local editable copies (skip while there are unsaved edits, so a refetch can't clobber).
   useEffect(() => {
     if (dirty) return;
-    const t: Template[] = rows.map((r) => ({ id: r.path, etag: r.etag, label: r.label, category: r.category, filename: r.filename, inputs: r.inputs, blocks: r.blocks ?? [], access: r.access }));
+    const t: Template[] = rows.map((r) => ({ id: r.path, etag: r.etag, label: r.label, category: r.category, filename: r.filename, letterhead: r.letterhead, inputs: r.inputs, blocks: r.blocks ?? [], access: r.access }));
     setTemplates(t);
     setSelId((cur) => (t.some((x) => x.id === cur) ? cur : t[0]?.id ?? ""));
   }, [rows, dirty]);
@@ -241,7 +245,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
     try {
       // Normalize: trim blank bullet lines so empty bullets never render. Saves only the selected row.
       const blocks = selected.blocks.map((b) => (b.kind === "bullets" ? { ...b, items: (b.items ?? []).filter((x) => x.trim()) } : b));
-      await patch(selected.id, { label: selected.label, category: selected.category ?? null, filename: selected.filename ?? null, inputs: selected.inputs ?? null, blocks }, selected.etag);
+      await patch(selected.id, { label: selected.label, category: selected.category ?? null, filename: selected.filename ?? null, letterhead: selected.letterhead ?? null, inputs: selected.inputs ?? null, blocks }, selected.etag);
       setDirty(false);
       await reload();
       toast({ title: "Letter template saved", variant: "success" });
@@ -263,7 +267,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
     try {
       // Sample values for any input fields, so an HR-filled template still previews with placeholder text.
       const input = Object.fromEntries((selected.inputs ?? []).map((f) => [f.key, f.placeholder || `[${f.label}]`]));
-      const tpl = { id: selected.id, label: selected.label, filename: selected.filename, inputs: selected.inputs, blocks: selected.blocks };
+      const tpl = { id: selected.id, label: selected.label, filename: selected.filename, letterhead: selected.letterhead, inputs: selected.inputs, blocks: selected.blocks };
       const res = await fetch("/v1/personal-documents:previewLetter", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa" },
@@ -339,6 +343,15 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                 <Field label="Category" hint="Groups the letter in the list and pickers.">
                   <Input list="letter-categories" value={selected.category ?? ""} onChange={(e) => mutateSelected((t) => ({ ...t, category: e.target.value }))} placeholder="e.g. Onboarding" />
                   <datalist id="letter-categories">{categories.map((c) => <option key={c} value={c} />)}</datalist>
+                </Field>
+                <Field label="Letterhead" hint="Which logo this letter type is issued on. Whoever generates one can switch it for that document.">
+                  <Select value={selected.letterhead || "__org"} onValueChange={(v) => mutateSelected((t) => ({ ...t, letterhead: v === "__org" ? undefined : v }))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__org">Organization logo</SelectItem>
+                      {letterheads.map((l) => <SelectItem key={l.path} value={l.path!}>{l.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
                 </Field>
                 <div className="sm:col-span-2">
                   <Field label="Download filename" hint="Supports placeholders; .pdf is added automatically.">

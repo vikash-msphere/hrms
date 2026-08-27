@@ -12,6 +12,7 @@ export type LetterTemplateInput = {
   label?: string;
   category?: string | null;
   filename?: string | null;
+  letterhead?: string | null; // `letterhead-logos/<id>` ref (decoded at the edge) or null
   inputs?: TemplateInput[] | null;
   blocks?: TemplateBlock[];
 };
@@ -25,6 +26,7 @@ export function rowToLetterTemplate(row: typeof schema.letterTemplates.$inferSel
     label: row.label,
     category: row.category ?? undefined,
     filename: row.filename ?? undefined,
+    letterhead: row.letterheadId ? `letterhead-logos/${row.letterheadId}` : undefined,
     inputs: (row.inputs as TemplateInput[] | null) ?? undefined,
     blocks: (row.blocks as TemplateBlock[] | null) ?? [],
   };
@@ -50,6 +52,7 @@ export const letterTemplateSpec: CrudSpec<LetterTemplateInput, typeof schema.let
       label: input.label,
       category: input.category?.trim() || null,
       filename: input.filename?.trim() || null,
+      letterheadId: idFromPath(input.letterhead) ?? null,
       inputs: input.inputs ?? null,
       blocks: input.blocks ?? [],
     };
@@ -59,6 +62,7 @@ export const letterTemplateSpec: CrudSpec<LetterTemplateInput, typeof schema.let
     if (has(patch, "label")) { if (!patch.label) throw invalidArgument("label cannot be empty"); set.label = patch.label; }
     if (has(patch, "category")) set.category = patch.category?.trim() || null;
     if (has(patch, "filename")) set.filename = patch.filename?.trim() || null;
+    if (has(patch, "letterhead")) set.letterheadId = idFromPath(patch.letterhead) ?? null;
     if (has(patch, "inputs")) set.inputs = patch.inputs ?? null;
     if (has(patch, "blocks")) set.blocks = patch.blocks ?? [];
     return set;

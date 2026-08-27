@@ -1179,6 +1179,7 @@ CREATE TABLE `letter_templates` (
 	`label` text NOT NULL,
 	`category` text,
 	`filename` text,
+	`letterhead_id` text,
 	`inputs` text,
 	`blocks` text NOT NULL,
 	`delete_time` integer,
@@ -1187,6 +1188,19 @@ CREATE TABLE `letter_templates` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `letter_templates_code_unique` ON `letter_templates` (`code`);--> statement-breakpoint
+CREATE TABLE `letterhead_logos` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`code` text,
+	`label` text NOT NULL,
+	`r2_key` text,
+	`content_type` text,
+	`size_bytes` integer,
+	`delete_time` integer,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `letterhead_logos_code_unique` ON `letterhead_logos` (`code`);--> statement-breakpoint
 CREATE TABLE `loan_repayments` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`loan_id` text NOT NULL,
@@ -3875,6 +3889,18 @@ END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_d_letter_templates" AFTER DELETE ON "letter_templates" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('letter-templates', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_letterhead_logos" AFTER INSERT ON "letterhead_logos" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterhead-logos', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_letterhead_logos" AFTER UPDATE ON "letterhead_logos" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterhead-logos', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_letterhead_logos" AFTER DELETE ON "letterhead_logos" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterhead-logos', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_i_loans" AFTER INSERT ON "loans" BEGIN
