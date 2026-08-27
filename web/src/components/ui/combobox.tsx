@@ -19,6 +19,7 @@ export function Combobox({
   className,
   disabled,
   autoFocus,
+  id,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -28,6 +29,9 @@ export function Combobox({
   emptyText?: string;
   className?: string;
   disabled?: boolean;
+  // Lands on the TRIGGER (a button, which is labelable), so a <Field> can point its <label for> at this
+  // control the same way it does at an <input>. Field sets it automatically - see components/common/Field.tsx.
+  id?: string;
   // Focus the trigger on mount, so a dialog whose first decision is a person can be opened straight into. It
   // focuses the trigger, not the list - opening the popover for the author would be a decision they didn't ask
   // for yet.
@@ -63,6 +67,7 @@ export function Combobox({
       <PopoverTrigger asChild>
         <button
           type="button"
+          id={id}
           disabled={disabled}
           autoFocus={autoFocus}
           className={cn(
@@ -135,3 +140,7 @@ export function Combobox({
     </Popover>
   );
 }
+
+// Set explicitly: <Field> identifies the controls it may bind its label to by displayName, and a minified
+// production build mangles Function.name. See components/common/Field.tsx.
+Combobox.displayName = "Combobox";

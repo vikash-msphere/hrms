@@ -38,6 +38,37 @@ export function FormArm({ armed, fieldErrors, children }: { armed: number; field
 // A stable identity, so a form with no server errors doesn't re-render every Field on every keystroke.
 const EMPTY_FIELD_ERRORS: Record<string, string> = {};
 
+// Which controls a Field may point its `<label for>` at.
+//
+// A label has to name the control, and `for` only means anything when it resolves to a LABELABLE element -
+// an input, a textarea, a select, a button. Callers were expected to pass `htmlFor` and hand the same id to
+// the control themselves; across ~126 fields almost nobody did, so most labels in the app named nothing and
+// were invisible to a screen reader (and to `getByLabel` in a test). Threading ids through every call site
+// would just be the same opportunity to forget, so Field mints one and binds it here.
+//
+// The list is deliberately a list rather than "clone whatever the child is". Cloning blindly would put the id
+// on a `<div>` wrapper or a Radix `<Select>` root that drops unknown props, and a `for` pointing at a
+// non-labelable element - or at nothing at all - is worse than no `for`: it claims an association the browser
+// will not honour. Anything not named here keeps the old behaviour (no association) until it is taught to
+// accept an id, which is a visible gap rather than a silent lie.
+//
+// Matched on displayName because a minified build mangles Function.name - hence the explicit assignments in
+// ui/combobox.tsx and friends.
+const LABELABLE = new Set(["input", "textarea", "select", "button", "Input", "Textarea", "Combobox"]);
+
+function useLabelledControl(children: React.ReactNode, htmlFor?: string): [React.ReactNode, string | undefined] {
+  const generated = React.useId();
+  if (htmlFor) return [children, htmlFor]; // the caller wired it up itself
+  const child = React.Children.count(children) === 1 ? React.Children.toArray(children)[0] : null;
+  if (!React.isValidElement(child)) return [children, undefined];
+  const type = child.type as string | { displayName?: string };
+  const name = typeof type === "string" ? type : type.displayName;
+  if (!name || !LABELABLE.has(name)) return [children, undefined];
+  const existing = (child.props as { id?: string }).id;
+  if (existing) return [children, existing]; // the control already has an identity; name that one
+  return [React.cloneElement(child as React.ReactElement<{ id?: string }>, { id: generated }), generated];
+}
+
 export function Field({
   label,
   htmlFor,
@@ -87,6 +118,7 @@ export function Field({
   // that the field only takes its natural height and the control inside it never fills.
   const armedAll = React.useContext(ArmCtx);
   const [blurred, setBlurred] = React.useState(false);
+  const [control, controlId] = useLabelledControl(children, htmlFor);
   // Re-arming on every submit attempt is what makes a second failed Save re-surface the same messages.
   const armed = eager || blurred || armedAll > 0;
   // The server's own verdict on this field, from the last failed submit. It wins over the local rule: the local
@@ -102,7 +134,7 @@ export function Field({
       onBlurCapture={() => setBlurred(true)}
     >
       <div className="flex items-center gap-1.5">
-        <Label htmlFor={htmlFor} className={cn(shown && "text-destructive")}>{label}</Label>
+        <Label htmlFor={controlId} className={cn(shown && "text-destructive")}>{label}</Label>
         {info && <InfoHint text={info} />}
         <FieldAccess field={field} label={label} accessTarget={accessTarget} />
         {action && <div className="ml-auto flex items-center">{action}</div>}
@@ -110,7 +142,7 @@ export function Field({
       {/* On error, redden the contained control's border so the field reads as invalid without callers
           restyling each input. */}
       <div className={cn(grow && "min-h-0 flex-1", shown && "[&_input]:border-destructive [&_input]:focus-visible:ring-destructive [&_textarea]:border-destructive [&_textarea]:focus-visible:ring-destructive")}>
-        {children}
+        {control}
       </div>
       {shown ? (
         <p role="alert" className="text-xs font-medium text-destructive">{shown}</p>
