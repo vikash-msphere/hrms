@@ -7,7 +7,7 @@ import { usePermission } from "@/lib/perm";
 import { useApprovals } from "@/lib/approvals";
 import { leaveBalanceOf, leaveDecisionContext, leaveOverlapCount, leaveSummary } from "@/lib/leaveApproval";
 import { useIntent } from "@/lib/intent";
-import { formatDate, idOf, cn } from "@/lib/utils";
+import { formatDate, idOf, cn, personName } from "@/lib/utils";
 import { leaveColor } from "@/lib/leaveColors";
 import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
 import { useRoutedTab } from "@/lib/routedTabs";
@@ -200,10 +200,7 @@ export default function Leaves({ me }: { me: Me }) {
     () => (me.employee_id ? employees.find((e) => idOf(e.path) === me.employee_id) : undefined),
     [employees, me.employee_id],
   );
-  const empName = (p?: string) => {
-    const e = empOf(p);
-    return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : "-";
-  };
+  const empName = (p?: string) => personName(employees, p, "-") || "-";
 
   const today = new Date().toLocaleDateString("en-CA");
   const yearStart = `${today.slice(0, 4)}-01-01`;

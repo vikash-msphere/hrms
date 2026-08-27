@@ -330,12 +330,12 @@ function CandidateDialog({ candidate, pool, apps, stageLabel, sources, onClose, 
   async function submit() {
     const body = {
       name: form.name.trim(),
-      email: form.email.trim() || null,
-      phone: form.phone.trim() || null,
-      source: form.source || null,
-      source_detail: form.source_detail.trim() || null,
-      tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean).join(", ") || null,
-      notes: form.notes.trim() || null,
+      email: form.email.trim(),
+      phone: form.phone.trim(),
+      source: form.source,
+      source_detail: form.source_detail.trim(),
+      tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean).join(", "),
+      notes: form.notes.trim(),
     };
     let path: string;
     if (editing) {

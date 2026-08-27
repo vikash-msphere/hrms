@@ -3,7 +3,7 @@ import { Plus, Trash2, ArrowRight } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
-import { formatDate, idOf } from "@/lib/utils";
+import { formatDate, idOf, personName } from "@/lib/utils";
 import type { ApprovalDelegation, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -37,7 +37,7 @@ export default function Delegations({ me }: { me: Me }) {
   const [form, setForm] = useState(EMPTY);
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
+  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
 
   const today = todayStr();
   const activeCount = useMemo(() => rows.filter((r) => r.from_date <= today && r.to_date >= today).length, [rows, today]);

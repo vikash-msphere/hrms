@@ -131,7 +131,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
         // TDS + PT are engine-computed (no rate); EPF defaults 12%, ESI 0.75%, EDLI/admin charges 0.5% each.
         rate: isTax || isPt ? null : isEpf ? (form.rate ? Number(form.rate) : 12) : isEsi ? (form.rate ? Number(form.rate) : (form.kind === "employer_contribution" ? 3.25 : 0.75)) : isPfCharge ? (form.rate ? Number(form.rate) : 0.5) : form.rate ? Number(form.rate) : null,
         cap: isEpf || isPfCharge ? (form.cap ? Number(form.cap) : null) : isEsi ? (form.cap ? Number(form.cap) : 21000) : null,
-        regime: isTax ? form.regime : null,
+        regime: isTax ? form.regime : "",
         recurring: form.recurring,
         // Which side of CTC an employer contribution lands on. Only meaningful for that kind; the server pins
         // everything else to "inside CTC".

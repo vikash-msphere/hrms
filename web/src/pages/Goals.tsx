@@ -341,13 +341,14 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   async function submit() {
     const body = {
       title: form.title.trim(),
-      description: form.description.trim() || null,
+      description: form.description.trim(),
       weight: form.weight === "" ? 0 : Number(form.weight),
       status: form.status,
-      due_date: form.due_date || null,
-      parent: form.parent === "none" ? null : form.parent,
+      // A date field is `format: date` in the contract, and "" is not a date - an empty one is left out.
+      ...(form.due_date ? { due_date: form.due_date } : {}),
+      parent: form.parent === "none" ? "" : form.parent,
       // The measure travels whole, so clearing the target really does hand the goal back to manual progress.
-      unit: form.unit.trim() || null,
+      unit: form.unit.trim(),
       baseline_value: num(form.baseline) ?? null,
       target_value: num(form.target) ?? null,
       current_value: num(form.current) ?? null,
@@ -405,7 +406,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
       for (const g of list) {
         const copy = await create<Goal>("goals", {
           title: g.title,
-          description: g.description ?? null,
+          description: g.description ?? "",
           weight: g.weight ?? 0,
           progress: g.progress ?? 0,
           status: g.status,
@@ -1174,10 +1175,12 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
           {goal.weight ? <span className="text-muted-foreground">· weight {goal.weight}</span> : null}
         </div>
         {owner && !mine && (
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          // A div, not a <p>: PhotoAvatar renders a div, and a div inside a <p> is invalid HTML the browser
+          // silently reparents (React says so as a validateDOMNesting warning).
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <PhotoAvatar employeeId={idOf(owner.path)} name={`${owner.first_name} ${owner.last_name}`} photo={owner.photo} className="h-6 w-6" />
             {owner.first_name} {owner.last_name}
-          </p>
+          </div>
         )}
       </SheetHeader>
       <SheetBody className="space-y-5">
@@ -1493,10 +1496,10 @@ function GoalCard({ goal, owner, parentTitle, onOpen, onEdit, onDelete, onProgre
         <div className="min-w-0 flex-1">
           <h3 className={cn("truncate font-semibold", goal.status === "cancelled" && "text-muted-foreground line-through")} title={goal.title}>{goal.title}</h3>
           {owner && (
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
               <PhotoAvatar employeeId={idOf(owner.path)} name={`${owner.first_name} ${owner.last_name}`} photo={owner.photo} className="h-6 w-6" />
               <span className="truncate">{owner.first_name} {owner.last_name}</span>
-            </p>
+            </div>
           )}
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
             <Badge variant={badge.variant}>{badge.label}</Badge>

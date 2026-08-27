@@ -603,8 +603,8 @@ function ApplicationDialog({ candidates, apps, reqs, stages, sources, defaultReq
       candidate: `candidates/${form.candidate}`,
       requisition: `job-requisitions/${form.req}`,
       stage: form.stage,
-      source: form.source || null,
-      applied_date: form.applied || null,
+      source: form.source,
+      ...(form.applied ? { applied_date: form.applied } : {}),
     });
     toast({ title: "Application added", variant: "success" });
     onSaved();

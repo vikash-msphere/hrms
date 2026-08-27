@@ -87,7 +87,7 @@ export function makeDocumentService(cfg: Cfg) {
       documentType: input.document_type as DocType,
       title: input.display_name,
       r2Key,
-      contentType: input.content_type ?? null,
+      contentType: input.content_type?.trim() || null,
       sizeBytes: input.size_bytes ?? null,
       expireTime: input.expire_time ? new Date(input.expire_time) : null,
     };
@@ -151,7 +151,7 @@ export function makeDocumentService(cfg: Cfg) {
     const has = (k: keyof CreateInput) => Object.prototype.hasOwnProperty.call(patch, k);
     if (has("display_name")) set.title = patch.display_name;
     if (has("document_type")) set.documentType = patch.document_type;
-    if (has("content_type")) set.contentType = patch.content_type ?? null;
+    if (has("content_type")) set.contentType = patch.content_type?.trim() || null;
     if (has("size_bytes")) set.sizeBytes = patch.size_bytes ?? null;
     if (has("expire_time")) set.expireTime = patch.expire_time ? new Date(patch.expire_time) : null;
     if (acknowledgeable && has("requires_ack")) {

@@ -4,7 +4,7 @@ import { create, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
-import { cn, formatDate, idOf } from "@/lib/utils";
+import { cn, formatDate, idOf, personName } from "@/lib/utils";
 import { navigate, navigateTab } from "@/router";
 import { Card } from "@/components/ui/card";
 import type { ApprovalDelegation, RemoteWorkRequest, Employee, Me } from "@/types";
@@ -54,7 +54,7 @@ export default function RemoteWork({ me }: { me: Me }) {
   const [form, setForm] = useState({ employee: "", start_date: todayStr(), end_date: todayStr(), startSession: 1, endSession: 2, location: "Home", reason: "" });
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
+  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
 
   const pendingTotal = useMemo(() => rows.filter((r) => upper(r.state) === "PENDING").length, [rows]);
   // Who's working remotely today (approved request covering today), and my approved days starting this month.
@@ -108,8 +108,11 @@ export default function RemoteWork({ me }: { me: Me }) {
     if (!managerRef) return null;
     const today = todayStr();
     const active = delegations.find((d) => d.delegator && idOf(d.delegator) === idOf(managerRef) && (d.from_date ?? "") <= today && (d.to_date ?? "") >= today);
-    const covering = active?.delegate ? empName(active.delegate) : null;
-    return covering ? { name: covering, coveringFor: empName(managerRef) } : { name: empName(managerRef) };
+    // An ordinary employee cannot read their own manager's row, so the name often will not resolve. The
+    // sentence still has to be true and readable, hence "your manager" rather than a raw id.
+    const manager = empName(managerRef, "your manager");
+    const covering = active?.delegate ? empName(active.delegate, "whoever covers for them") : null;
+    return covering ? { name: covering, coveringFor: manager } : { name: manager };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.employee, employees, delegations]);
 
@@ -117,13 +120,13 @@ export default function RemoteWork({ me }: { me: Me }) {
   // to answer, so WriteDialog keeps it in the form rather than in a toast.
   async function submit() {
     await create("remote-work-requests", {
-      employee: form.employee || null,
+      employee: form.employee,
       start_date: form.start_date,
       end_date: form.end_date,
       start_session: form.startSession,
       end_session: form.endSession,
-      location: form.location.trim() || null,
-      reason: form.reason.trim() || null,
+      location: form.location.trim(),
+      reason: form.reason.trim(),
     });
     toast({ title: "Remote work requested", variant: "success" });
     reload();

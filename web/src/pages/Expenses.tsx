@@ -215,10 +215,10 @@ export default function Expenses({ me }: { me: Me }) {
     setQuickErr(null);
     try {
       const row = await create<Expense>("expenses", {
-        category: quick.category || null,
+        category: quick.category,
         amount: Number(quick.amount),
         incurred_on: todayStr(),
-        description: quick.description || null,
+        description: quick.description,
       });
       if (quickFile) await upload(`expenses/${idOf(row.path)}`, quickFile);
       await invoke("expenses/" + idOf(row.path), "submit", row.etag);
@@ -434,18 +434,19 @@ export default function Expenses({ me }: { me: Me }) {
     setBusy(true);
     try {
       const body: Record<string, unknown> = {
-        vendor: form.vendor || null,
-        category: form.category || null,
-        department: form.department || null,
+        vendor: form.vendor,
+        category: form.category,
+        department: form.department,
         amount: Number(form.amount),
         tax_amount: form.tax_amount ? Number(form.tax_amount) : 0,
-        incurred_on: form.incurred_on || null,
-        invoice_number: form.invoice_number || null,
-        description: form.description || null,
+        // Date fields are `format: date`, and "" is not a date - an empty one is left out.
+        ...(form.incurred_on ? { incurred_on: form.incurred_on } : {}),
+        invoice_number: form.invoice_number,
+        description: form.description,
         reimbursable: form.reimbursable,
         recurring: form.recurring,
-        recurrence_rule: form.recurring ? form.recurrence_rule : null,
-        next_occurrence_on: form.recurring ? form.next_occurrence_on || null : null,
+        recurrence_rule: form.recurring ? form.recurrence_rule : "",
+        ...(form.recurring && form.next_occurrence_on ? { next_occurrence_on: form.next_occurrence_on } : {}),
       };
       // Who fronted it: only settable at create, and only by someone recording on another's behalf.
       if (!editing && form.employee) body.employee = form.employee;

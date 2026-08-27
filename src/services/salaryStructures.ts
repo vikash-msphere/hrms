@@ -68,14 +68,14 @@ export const salaryStructureSpec: CrudSpec<SalaryStructureInput, typeof schema.s
     if (!input.display_name) throw invalidArgument("display_name is required");
     return {
       name: input.display_name,
-      description: input.description ?? null,
+      description: input.description?.trim() || null,
       linesJson: JSON.stringify(await normalizeLines(deps, input.lines ?? [])),
     };
   },
   patch: async (patch, _row, deps) => {
     const set: SetOf<typeof schema.salaryStructures> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
-    if (has(patch, "description")) set.description = patch.description ?? null;
+    if (has(patch, "description")) set.description = patch.description?.trim() || null;
     if (has(patch, "lines")) set.linesJson = JSON.stringify(await normalizeLines(deps, patch.lines ?? []));
     return set;
   },

@@ -10,7 +10,8 @@ const RESUME = "resume"; // the attachment slot for a candidate's resume
 
 const writeSchema = z
   .object({
-    name: z.string().nullable().optional(),
+    // NOT nullable: `candidates.name` is a NOT NULL column the serializer emits on every response.
+    name: z.string().optional(),
     email: z.string().nullable().optional(),
     phone: z.string().nullable().optional(),
     source: z.string().nullable().optional(),

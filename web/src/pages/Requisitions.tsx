@@ -351,13 +351,13 @@ function RequisitionDialog({ req, cloneOf, reqs, hiredCount, employees, departme
   async function submit() {
     const body = {
       title: form.title.trim(),
-      department: form.dept ? `departments/${form.dept}` : null,
-      hiring_manager: form.manager ? `employees/${form.manager}` : null,
-      location: form.location.trim() || null,
-      employment_type: form.type || null,
+      department: form.dept ? `departments/${form.dept}` : "",
+      hiring_manager: form.manager ? `employees/${form.manager}` : "",
+      location: form.location.trim(),
+      employment_type: form.type,
       openings,
-      pay_grade: form.grade ? `pay-grades/${form.grade}` : null,
-      description: form.description.trim() || null,
+      pay_grade: form.grade ? `pay-grades/${form.grade}` : "",
+      description: form.description.trim(),
       status: form.status,
     };
     if (editing) {

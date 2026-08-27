@@ -466,9 +466,10 @@ function InterviewDialog({ interview, defaultApplication, apps, interviews, cand
     const body: Record<string, unknown> = {
       title: form.title.trim(),
       mode: form.mode,
-      scheduled_start_time: form.start || null,
-      scheduled_end_time: form.end || null,
-      location: form.location.trim() || null,
+      // `format: date-time` fields, and "" is not one - an unscheduled slot leaves them out.
+      ...(form.start ? { scheduled_start_time: form.start } : {}),
+      ...(form.end ? { scheduled_end_time: form.end } : {}),
+      location: form.location.trim(),
       interviewers: form.panel.map((id) => `employees/${id}`),
     };
     if (editing) {
@@ -791,8 +792,8 @@ function ScorecardDialog({ interview, me, criteria, blind, empName, candName, jo
       interview: `interviews/${idOf(interview.path)}`,
       ratings: form.ratings,
       overall_rating: form.overall ? Number(form.overall) : null,
-      recommendation: form.rec || null,
-      comment: form.comment.trim() || null,
+      recommendation: form.rec,
+      comment: form.comment.trim(),
     };
     if (mine) {
       try {

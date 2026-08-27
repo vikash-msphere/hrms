@@ -111,7 +111,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
     try {
       const body = {
         display_name: form.name.trim(),
-        description: form.description.trim() || null,
+        description: form.description.trim(),
         lines: form.lines.map((l) => ({ component: l.component, rate: l.rate.trim() === "" ? null : Number(l.rate) })),
       };
       if (editing) {

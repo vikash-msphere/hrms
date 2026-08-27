@@ -129,8 +129,9 @@ export function EmployeeAssets({
       // request type takes (and it keeps a plain employee off the owner-ref gate entirely).
       ...(isSelf ? {} : { employee: empRef }),
       category: reqForm.category,
-      needed_by: reqForm.neededBy || null,
-      justification: reqForm.justification.trim() || null,
+      // `format: date`, and "" is not a date - "no deadline" leaves it out.
+      ...(reqForm.neededBy ? { needed_by: reqForm.neededBy } : {}),
+      justification: reqForm.justification.trim(),
     });
     toast({ title: "Request filed", description: "Your manager (or HR) decides it next.", variant: "success" });
     load();

@@ -11,13 +11,15 @@ const RESUME = "resume"; // the attachment slot for a candidate's resume
 const writeSchema = z
   .object({
     referrer: z.string().nullable().optional(),
-    candidate_name: z.string().nullable().optional(),
+    // candidate_name and status are NOT NULL columns (status defaults to "submitted") that the serializer
+    // emits on every response: null is not a value they can hold.
+    candidate_name: z.string().optional(),
     candidate_email: z.string().nullable().optional(),
     candidate_phone: z.string().nullable().optional(),
     position_title: z.string().nullable().optional(),
     department: z.string().nullable().optional(),
     notes: z.string().nullable().optional(),
-    status: z.string().nullable().optional(),
+    status: z.string().optional(),
     hired_employee: z.string().nullable().optional(),
     bonus_amount: z.number().positive().nullable().optional(),
   })

@@ -14,7 +14,9 @@ const writeSchema = z.object({
   kind: z.enum(["onboarding", "offboarding"]).optional(),
   template: z.string().nullable().optional(),
   anchor_date: z.string().nullable().optional(),
-  name: z.string().nullable().optional(),
+  // NOT nullable: `transitions.name` is a NOT NULL column the serializer emits on every response, so null is
+  // not a value this field can hold - it was only ever accepted, never stored.
+  name: z.string().optional(),
 }).strict();
 
 const appendTaskSchema = z.object({

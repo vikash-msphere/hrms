@@ -88,12 +88,12 @@ export const complianceRuleSpec: CrudSpec<ComplianceRuleInput, typeof schema.com
     validate(input);
     return {
       title: input.title,
-      category: input.category ?? null,
+      category: input.category?.trim() || null,
       frequency: input.frequency ?? "monthly",
       dueDay: input.due_day,
       anchorMonth: input.anchor_month ?? null,
       assigneeId: idFromPath(input.assignee) ?? null,
-      notes: input.notes ?? null,
+      notes: input.notes?.trim() || null,
       active: input.active ?? true,
     };
   },
@@ -101,12 +101,12 @@ export const complianceRuleSpec: CrudSpec<ComplianceRuleInput, typeof schema.com
     validate(patch);
     const set: SetOf<typeof schema.complianceRules> = {};
     if (has(patch, "title")) { if (!patch.title) throw invalidArgument("title cannot be empty"); set.title = patch.title; }
-    if (has(patch, "category")) set.category = patch.category ?? null;
+    if (has(patch, "category")) set.category = patch.category?.trim() || null;
     if (has(patch, "frequency")) set.frequency = patch.frequency;
     if (has(patch, "due_day") && patch.due_day) set.dueDay = patch.due_day;
     if (has(patch, "anchor_month")) set.anchorMonth = patch.anchor_month ?? null;
     if (has(patch, "assignee")) set.assigneeId = idFromPath(patch.assignee) ?? null;
-    if (has(patch, "notes")) set.notes = patch.notes ?? null;
+    if (has(patch, "notes")) set.notes = patch.notes?.trim() || null;
     if (has(patch, "active")) set.active = !!patch.active;
     return set;
   },

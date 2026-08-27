@@ -235,12 +235,13 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
       // is simply not sent, and only a typed override travels.
       ...(form.asset_tag.trim() ? { asset_tag: form.asset_tag.trim() } : {}),
       name: form.name.trim(),
-      category: form.category || null,
-      serial_number: form.serial_number.trim() || null,
-      assigned_to: form.assigned_to || null,
-      assigned_on: form.assigned_to ? (form.assigned_on || null) : null,
-      purchase_date: form.purchase_date || null,
-      notes: form.notes.trim() || null,
+      category: form.category,
+      serial_number: form.serial_number.trim(),
+      assigned_to: form.assigned_to,
+      // Date fields are `format: date`, and "" is not a date - an empty one is left out.
+      ...(form.assigned_to && form.assigned_on ? { assigned_on: form.assigned_on } : {}),
+      ...(form.purchase_date ? { purchase_date: form.purchase_date } : {}),
+      notes: form.notes.trim(),
       // A new asset has no status to send: it lands awaiting a check-in scan, or - if it is being handed
       // straight to somebody - awaiting that person's. Only an existing row can be moved to repair/retired.
       ...(editing ? { status: form.status } : {}),

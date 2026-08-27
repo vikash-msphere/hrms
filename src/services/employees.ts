@@ -104,9 +104,11 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
       ...(id ? { id } : {}),
       firstName: input.first_name,
       lastName: input.last_name,
-      legalName: input.legal_name ?? null,
+      // Empty string clears, like an omitted field: the SPA sends "" for a text box the user left blank
+      // (nothing on the wire is ever null - see web/src/api.ts).
+      legalName: input.legal_name?.trim() || null,
       workEmail: input.work_email,
-      jobTitle: input.job_title ?? null,
+      jobTitle: input.job_title?.trim() || null,
       employeeNumber,
       code: await allocUnderDept(deps, idFromPath(input.department) ?? null, CODE_WIDTH.employee),
       departmentId: idFromPath(input.department),
@@ -141,9 +143,9 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   const has = (k: keyof EmployeeInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("first_name")) set.firstName = patch.first_name;
   if (has("last_name")) set.lastName = patch.last_name;
-  if (has("legal_name")) set.legalName = patch.legal_name ?? null;
+  if (has("legal_name")) set.legalName = patch.legal_name?.trim() || null;
   if (has("work_email")) set.workEmail = patch.work_email;
-  if (has("job_title")) set.jobTitle = patch.job_title ?? null;
+  if (has("job_title")) set.jobTitle = patch.job_title?.trim() || null;
   if (has("employee_number")) {
     const n = patch.employee_number?.trim();
     if (!n) throw invalidArgument("employee_number can't be blank");

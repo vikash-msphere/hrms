@@ -4,7 +4,7 @@ import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { formatDate, idOf } from "@/lib/utils";
+import { formatDate, idOf, personName } from "@/lib/utils";
 import type { BackgroundCheck, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -82,7 +82,7 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
 
   const empById = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
   const emp = (p?: string) => (p ? empById.get(idOf(p)) : undefined);
-  const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
+  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
 
   const stats = useMemo(() => {
     const live = rows.filter((c) => !c.delete_time);
@@ -128,11 +128,14 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
       () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
     );
   }
-  function bodyFromForm(checkType: string, document: string | null) {
+  function bodyFromForm(checkType: string, document: string) {
     return {
       employee: form.employee, check_type: checkType, status: form.status,
-      vendor: form.vendor.trim() || null, reference_no: form.reference_no.trim() || null,
-      initiated_date: form.initiated_date || null, completed_date: form.completed_date || null, notes: form.notes.trim() || null,
+      vendor: form.vendor.trim(), reference_no: form.reference_no.trim(),
+      // `format: date` fields, and "" is not a date - an empty one is left out.
+      ...(form.initiated_date ? { initiated_date: form.initiated_date } : {}),
+      ...(form.completed_date ? { completed_date: form.completed_date } : {}),
+      notes: form.notes.trim(),
       document,
     };
   }
@@ -144,13 +147,13 @@ export default function BackgroundChecks({ me, openId }: { me: Me; openId?: stri
           title: `${humanize(form.check_type)} verification${form.vendor.trim() ? ` - ${form.vendor.trim()}` : ""}`,
           employee: form.employee,
         })
-      : form.document || null;
+      : form.document;
     if (editing) {
       await patch("background-checks/" + idOf(editing.path), bodyFromForm(form.check_type, document), editing.etag);
       toast({ title: "Check updated", variant: "success" });
     } else if (standardSet) {
       // One vendor, one initiation date, four checks: what actually gets ordered for a new joiner.
-      for (const t of STANDARD_SET) await create("background-checks", bodyFromForm(t, t === form.check_type ? document : null));
+      for (const t of STANDARD_SET) await create("background-checks", bodyFromForm(t, t === form.check_type ? document : ""));
       toast({ title: `${STANDARD_SET.length} checks added`, description: STANDARD_SET.map(humanize).join(", "), variant: "success" });
     } else {
       await create("background-checks", bodyFromForm(form.check_type, document));

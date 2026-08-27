@@ -63,11 +63,11 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
   async function change() {
     await create("positions", {
       employee: "employees/" + employeeId,
-      job_title: form.job_title.trim() || null,
-      department: form.department === NONE ? null : form.department,
-      location: form.location.trim() || null,
+      job_title: form.job_title.trim(),
+      department: form.department === NONE ? "" : form.department,
+      location: form.location.trim(),
       effective_from: form.effective_from,
-      note: form.note.trim() || null,
+      note: form.note.trim(),
     });
     toast({ title: "Role updated" });
     await load();

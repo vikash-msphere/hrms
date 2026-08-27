@@ -7,13 +7,16 @@ import { toInterviewResource } from "../http/serialize";
 const writeSchema = z
   .object({
     application: z.string().nullable().optional(),
-    title: z.string().nullable().optional(),
-    mode: z.string().nullable().optional(),
+    // title, mode and status are NOT NULL columns (defaults "video" / "scheduled") that the serializer emits on
+    // every response: null is not a value they can hold. `interviewers` stays clearable - its column is a
+    // nullable JSON array, so null really does mean "no panel yet".
+    title: z.string().optional(),
+    mode: z.string().optional(),
     scheduled_start_time: z.string().nullable().optional(),
     scheduled_end_time: z.string().nullable().optional(),
     interviewers: z.array(z.string()).nullable().optional(),
     location: z.string().nullable().optional(),
-    status: z.string().nullable().optional(),
+    status: z.string().optional(),
   })
   .strict();
 

@@ -173,12 +173,13 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
       () => toast({ title: "Couldn't copy the link", variant: "destructive" }),
     );
   }
-  function eventBody(document: string | null) {
+  function eventBody(document: string) {
     return {
-      title: form.title.trim(), category: form.category.trim() || null, frequency: form.frequency,
-      due_date: form.due_date, period_label: form.period_label.trim() || null, status: form.status,
-      filed_date: form.status === "filed" ? form.filed_date || null : null,
-      reference: form.reference.trim() || null, assignee: form.assignee === NONE ? null : form.assignee, notes: form.notes.trim() || null,
+      title: form.title.trim(), category: form.category.trim(), frequency: form.frequency,
+      due_date: form.due_date, period_label: form.period_label.trim(), status: form.status,
+      // `format: date`, and "" is not a date - an unfiled item leaves it out.
+      ...(form.status === "filed" && form.filed_date ? { filed_date: form.filed_date } : {}),
+      reference: form.reference.trim(), assignee: form.assignee === NONE ? "" : form.assignee, notes: form.notes.trim(),
       document,
     };
   }
@@ -189,7 +190,7 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
     // receipt someone just attached.
     const document = proof
       ? await fileProof({ file: proof, title: `${form.title.trim()}${form.period_label.trim() ? ` - ${form.period_label.trim()}` : ""} (proof)` })
-      : form.document || null;
+      : form.document;
     if (editing) { await patch("compliance-events/" + idOf(editing.path), eventBody(document), editing.etag); toast({ title: "Compliance item updated", variant: "success" }); }
     else { await create("compliance-events", eventBody(document)); toast({ title: "Compliance item added", variant: "success" }); }
     setProof(null);

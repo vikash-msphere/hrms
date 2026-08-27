@@ -6,7 +6,7 @@ import { DEFAULT_TRANSITION_TEMPLATES, type TransitionTemplate } from "@/lib/tra
 import { Checkbox } from "@/components/ui/checkbox";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { cn, formatDate, idOf, humanize } from "@/lib/utils";
+import { cn, formatDate, idOf, humanize, personName } from "@/lib/utils";
 import type { NoticePeriod, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -85,7 +85,7 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
   const chosenTemplate = offboardingTemplates.find((t) => t.id === form.template);
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
+  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
 
   const isServing = (n: NoticePeriod) => !n.delete_time && n.status === "serving";
   const isThisMonth = (n: NoticePeriod) => isServing(n) && n.last_working_day.slice(0, 7) === todayStr().slice(0, 7);

@@ -63,7 +63,8 @@ export async function createReimbursement(deps: Deps, actor: AppUser, input: Rei
       categoryId,
       amount: round2(amount),
       incurredOn: Number.isNaN(incurred) ? null : new Date(incurred),
-      description: input.description ?? null,
+      // Empty string clears, like an omitted field (see web/src/api.ts: nothing on the wire is ever null).
+      description: input.description?.trim() || null,
       state: "PENDING",
     })
     .returning())[0]!;

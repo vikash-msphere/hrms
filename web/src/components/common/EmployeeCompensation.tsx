@@ -281,8 +281,8 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
         employee: "employees/" + employeeId,
         annual_ctc: Math.round(Number(form.ctc) * 100) / 100,
         effective_from: form.effective_from,
-        pay_grade: form.pay_grade.trim() || null,
-        salary_structure: form.salary_structure.trim() || null,
+        pay_grade: form.pay_grade.trim(),
+        salary_structure: form.salary_structure.trim(),
       });
       toast({ title: "Compensation revised" });
       setOpen(false);

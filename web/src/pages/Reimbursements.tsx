@@ -124,10 +124,11 @@ export default function Reimbursements({ me }: { me: Me }) {
     setErr(null);
     try {
       const claim = await create<Reimbursement>("reimbursements", {
-        category: form.category || null,
+        category: form.category,
         amount: Number(form.amount),
-        incurred_on: form.incurred_on || null,
-        description: form.description || null,
+        // `format: date`, and "" is not a date - an empty one is left out.
+        ...(form.incurred_on ? { incurred_on: form.incurred_on } : {}),
+        description: form.description,
       });
       if (file) await upload(`reimbursements/${idOf(claim.path)}`, file);
       toast({ title: "Claim submitted", variant: "success" });

@@ -666,7 +666,10 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
           return (
             // 86vw on a phone: the column all but fills the screen, with a sliver of the next one showing so
             // it is obvious the board continues. A fixed 288px column on a 390px screen reads as a mistake.
-            <div key={col.key} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
+            // Named group: the column's heading is a plain span inside its header row, so without a name on
+            // the column itself the board reads as one undifferentiated pile of cards with nothing saying
+            // which column any of them is in.
+            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
               <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="truncate text-sm font-medium">{col.label}</span>
@@ -1155,15 +1158,16 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   async function save() {
     const body: Record<string, unknown> = {
       title: title.trim(),
-      description: description.trim() || null,
+      description: description.trim(),
       priority,
-      assignee: assignee ? `employees/${assignee}` : null,
-      goal: goal ? `goals/${goal}` : null,
+      assignee: assignee ? `employees/${assignee}` : "",
+      goal: goal ? `goals/${goal}` : "",
       labels,
       documents: docs.map((id) => `org-documents/${id}`),
       size: size ? Number(size) : null,
-      due_date: due || null,
-      ...(board.swimlane_mode === "custom" ? { swimlane_key: swimlane || null } : {}),
+      // `format: date`, and "" is not a date - an undated card leaves it out.
+      ...(due ? { due_date: due } : {}),
+      ...(board.swimlane_mode === "custom" ? { swimlane_key: swimlane } : {}),
     };
     // "" = untouched new card -> omit so the server applies the org default. Otherwise send the choice.
     if (department !== "") body.department = department === NO_DEPT ? null : `departments/${department}`;
@@ -1718,7 +1722,7 @@ function NewBoardDialog({ existing, onClose, onSaved }: { existing: Board[]; onC
     const prefix = previewPrefix(form.name, form.prefix);
     const b = await create<Board>("boards", {
       name: form.name.trim(),
-      description: form.description.trim() || null,
+      description: form.description.trim(),
       mode: source ? source.mode : form.mode,
       ...(form.prefix.trim() ? { task_prefix: prefix } : {}),
       // Structure only. Cards, sprints and who the board is shared with are deliberately not copied: the first
@@ -2179,7 +2183,10 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
             return (
               // 86vw on a phone: the column all but fills the screen, with a sliver of the next one showing so
             // it is obvious the board continues. A fixed 288px column on a 390px screen reads as a mistake.
-            <div key={col.key} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
+            // Named group: the column's heading is a plain span inside its header row, so without a name on
+            // the column itself the board reads as one undifferentiated pile of cards with nothing saying
+            // which column any of them is in.
+            <div key={col.key} role="group" aria-label={col.label} className="flex min-h-0 w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-muted/20 sm:w-72 sm:max-w-none">
                 <div className="flex items-center justify-between border-b px-3 py-2">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-sm font-medium">{col.label}</span>
@@ -2313,9 +2320,10 @@ function NewSprintDialog({ board, sprints, cards, onClose, onSaved }: { board: B
     const s = await create<Sprint>("sprints", {
       board: board.path,
       name: form.name.trim(),
-      goal: form.goal.trim() || null,
-      start_date: form.start || null,
-      end_date: form.end || null,
+      goal: form.goal.trim(),
+      // `format: date` fields, and "" is not a date - an undated sprint leaves them out.
+      ...(form.start ? { start_date: form.start } : {}),
+      ...(form.end ? { end_date: form.end } : {}),
     });
     toast({ title: "Sprint created", variant: "success" });
     onSaved(idOf(s.path));

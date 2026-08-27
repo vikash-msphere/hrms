@@ -122,9 +122,11 @@ export async function createExpense(deps: Deps, actor: AppUser, input: ExpenseIn
       amount: round2(amount),
       taxAmount: round2(tax),
       incurredOn: dayDate(input.incurred_on),
-      description: input.description ?? null,
-      invoiceNumber: input.invoice_number ?? null,
-      paymentMethod: input.payment_method ?? null,
+      // Empty string clears, like an omitted field: the SPA sends "" for a text box the user left blank and
+      // never sends null (see web/src/api.ts).
+      description: input.description?.trim() || null,
+      invoiceNumber: input.invoice_number?.trim() || null,
+      paymentMethod: input.payment_method ?? null, // an enum: no empty-string form, so it is omitted instead
       reimbursable: !!input.reimbursable,
       state: "DRAFT",
       isRecurring: recurring,
@@ -156,8 +158,9 @@ export async function updateExpense(deps: Deps, actor: AppUser, id: string, patc
   if (has("category")) set.categoryId = await resolveRef(deps, schema.expenseCategories, patch.category, "expense category");
   if (has("department")) set.departmentId = await resolveRef(deps, schema.departments, patch.department, "department");
   if (has("incurred_on")) set.incurredOn = dayDate(patch.incurred_on);
-  if (has("description")) set.description = patch.description ?? null;
-  if (has("invoice_number")) set.invoiceNumber = patch.invoice_number ?? null;
+  if (has("description")) set.description = patch.description?.trim() || null;
+  if (has("invoice_number")) set.invoiceNumber = patch.invoice_number?.trim() || null;
+  // An enum, so there is no empty-string form of it: a caller who has no value omits the field.
   if (has("payment_method")) set.paymentMethod = patch.payment_method ?? null;
   if (has("reimbursable")) set.reimbursable = !!patch.reimbursable;
   // Cadence is editable on a template (change rent from monthly to quarterly without rebuilding the schedule);

@@ -403,13 +403,14 @@ export default function Directory({ me }: { me: Me }) {
         {
           first_name: form.first_name,
           last_name: form.last_name,
-          legal_name: form.legal_name.trim() || null,
+          legal_name: form.legal_name.trim(),
           employee_number: form.employee_number.trim() || undefined,
-          job_title: form.job_title || null,
+          job_title: form.job_title,
           department: dept,
           manager: mgr,
-          start_date: form.start_date || null,
-          probation_end_date: form.probation_end_date || null,
+          // `format: date` fields, and "" is not a date - an empty one is left out.
+          ...(form.start_date ? { start_date: form.start_date } : {}),
+          ...(form.probation_end_date ? { probation_end_date: form.probation_end_date } : {}),
         },
         editing.etag
       );

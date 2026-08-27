@@ -203,12 +203,12 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
       {
         first_name: core.first_name,
         last_name: core.last_name,
-        legal_name: core.legal_name.trim() || null,
+        legal_name: core.legal_name.trim(),
         employee_number: core.employee_number.trim() || undefined,
         work_email: core.work_email,
-        job_title: core.job_title || null,
-        department: core.department === NONE ? null : core.department,
-        manager: core.manager === NONE ? null : core.manager,
+        job_title: core.job_title,
+        department: core.department === NONE ? "" : core.department,
+        manager: core.manager === NONE ? "" : core.manager,
       },
       "Profile updated",
     );

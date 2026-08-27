@@ -387,10 +387,11 @@ function OfferDialog({ offer, defaultApplication, apps, label, candFor, onClose,
     const body: Record<string, unknown> = {
       base_comp: form.comp ? Number(form.comp) : null,
       currency_code: currency,
-      offer_date: form.offerDate || null,
-      join_date: form.joinDate || null,
-      expiry_date: form.expiry || null,
-      notes: form.notes.trim() || null,
+      // Dates are `format: date-time` in the contract, and "" is not one - an empty date is left out.
+      ...(form.offerDate ? { offer_date: form.offerDate } : {}),
+      ...(form.joinDate ? { join_date: form.joinDate } : {}),
+      ...(form.expiry ? { expiry_date: form.expiry } : {}),
+      notes: form.notes.trim(),
     };
     if (editing) {
       try {

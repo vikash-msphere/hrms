@@ -294,7 +294,7 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
   async function submit() {
     const body: Record<string, unknown> = {
       display_name: draft.name.trim(),
-      description: draft.description.trim() || null,
+      description: draft.description.trim(),
       scope: {
         collections: draft.allCollections ? "*" : draft.collections,
         max_level: draft.maxLevel,
@@ -330,7 +330,7 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
       // generations apart.
       const body: Record<string, unknown> = {
         display_name: k.display_name,
-        description: k.description ?? null,
+        description: k.description ?? "",
         scope: { collections: s?.collections ?? "*", max_level: s?.max_level ?? "read", verbs: s?.verbs ?? [] },
       };
       // Carry the old key's remaining life forward as a fresh window of the same length, so rotating does not

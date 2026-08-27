@@ -96,7 +96,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
         band_mid: num(form.band_mid),
         band_max: num(form.band_max),
         currency_code: form.currency_code.trim() || undefined,
-        description: form.description.trim() || null,
+        description: form.description.trim(),
       };
       if (editing) {
         await patch("pay-grades/" + idOf(editing.path), body, editing.etag);

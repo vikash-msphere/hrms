@@ -85,7 +85,7 @@ export async function createAutomation(deps: Deps, actor: AppUser, input: Automa
       code: await allocFlatCode(deps, schema.automations),
       ...(id ? { uuid: id } : {}),
       name: a.name,
-      description: input.description ?? null,
+      description: input.description?.trim() || null,
       triggerType: a.triggerType,
       conditionJson: a.condition ? JSON.stringify(a.condition) : null,
       actionsJson: JSON.stringify(a.actions),
@@ -120,7 +120,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
   assertMayAuthorActions(actor, merged.actions);
   const set: SetOf<typeof schema.automations> = { updatedAt: new Date() };
   if (has("name")) set.name = merged.name;
-  if (has("description")) set.description = patch.description ?? null;
+  if (has("description")) set.description = patch.description?.trim() || null;
   if (has("trigger_type")) set.triggerType = merged.triggerType;
   if (has("condition")) set.conditionJson = merged.condition ? JSON.stringify(merged.condition) : null;
   if (has("actions")) set.actionsJson = JSON.stringify(merged.actions);

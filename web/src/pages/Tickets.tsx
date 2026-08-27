@@ -309,7 +309,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     const raised = await create<Ticket>("tickets", {
       category: form.category,
       subject: form.subject,
-      description: form.description || null,
+      description: form.description,
       priority: form.priority,
       ...(form.department ? { department: form.department } : {}), // omit -> server derives from the category
       ...(initial_todos.length ? { initial_todos } : {}),

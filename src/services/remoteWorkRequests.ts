@@ -60,7 +60,7 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
   if (!employeeId) throw invalidArgument("employee is required");
   const row = (await deps.db
     .insert(schema.remoteWorkRequests)
-    .values({ code: await allocOwnedCode(deps, schema.remoteWorkRequests, schema.remoteWorkRequests.employeeId, employeeId), employeeId, startDate: new Date(start), endDate: new Date(end), startSession, endSession, location: input.location ?? null, reason: input.reason ?? null, state: "PENDING" })
+    .values({ code: await allocOwnedCode(deps, schema.remoteWorkRequests, schema.remoteWorkRequests.employeeId, employeeId), employeeId, startDate: new Date(start), endDate: new Date(end), startSession, endSession, location: input.location?.trim() || null, reason: input.reason?.trim() || null, state: "PENDING" })
     .returning())[0]!;
   await audit(deps, actor, "remote_work_request.create", "remote-work-requests", row.uuid, undefined, row);
   await notifyManager(deps, employeeId, { type: "remote.requested", noun: "remote work request" });

@@ -84,7 +84,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       min_balance_retained_days: Number(form.minRetained) || 0,
       carry_forward: form.carryForward,
       carry_forward_cap_days: form.carryForwardCap.trim() === "" ? null : Number(form.carryForwardCap),
-      color: form.color || null,
+      color: form.color,
     };
     if (editing) {
       await patch("leave-types/" + idOf(editing.path), body, editing.etag);

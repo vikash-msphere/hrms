@@ -20,8 +20,7 @@ export async function fileProof(opts: { file: File; title: string; employee?: st
   const doc = await createDocument({
     display_name: opts.title,
     document_type: opts.documentType ?? "OTHER",
-    employee: opts.employee ?? null,
-    expire_time: null,
+    employee: opts.employee ?? "",
   });
   await upload(doc.path, opts.file);
   return doc.path;

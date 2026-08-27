@@ -188,7 +188,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       employeeId,
       columnKey,
       departmentId,
-      swimlaneKey: idFromPath(input.swimlane_key) ?? input.swimlane_key ?? null,
+      swimlaneKey: idFromPath(input.swimlane_key) ?? (input.swimlane_key?.trim() || null),
       rank,
       title: input.title.trim(),
       description: input.description?.trim() || null,

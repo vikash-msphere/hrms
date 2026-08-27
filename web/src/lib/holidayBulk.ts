@@ -135,7 +135,7 @@ export function planYearCopy(
         name: h.name,
         kind: h.kind === "optional" ? ("optional" as const) : ("fixed" as const),
         half_day: !!h.half_day,
-        location: h.location ?? null,
+        location: h.location ?? "",
         sourceDate: h.date.slice(0, 10),
         landsOn,
         wasted: !workDays.includes(landsOn),

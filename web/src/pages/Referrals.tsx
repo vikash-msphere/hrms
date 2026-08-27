@@ -146,8 +146,8 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
     try {
       await create<Candidate>("candidates", {
         name: r.candidate_name,
-        email: r.candidate_email || null,
-        phone: r.candidate_phone || null,
+        email: r.candidate_email ?? "",
+        phone: r.candidate_phone ?? "",
         source: "referral",
         referral: r.path,
       });
@@ -401,15 +401,15 @@ function ReferralDialog({ referral, referrals, candidates, employees, department
   async function submit() {
     const base = {
       candidate_name: form.name.trim(),
-      candidate_email: form.email.trim() || null,
-      candidate_phone: form.phone.trim() || null,
-      position_title: form.position.trim() || null,
-      department: form.dept ? `departments/${form.dept}` : null,
-      notes: form.notes.trim() || null,
+      candidate_email: form.email.trim(),
+      candidate_phone: form.phone.trim(),
+      position_title: form.position.trim(),
+      department: form.dept ? `departments/${form.dept}` : "",
+      notes: form.notes.trim(),
     };
     const manage = canManage ? {
       status: form.status,
-      hired_employee: form.hired ? `employees/${form.hired}` : null,
+      hired_employee: form.hired ? `employees/${form.hired}` : "",
       bonus_amount: form.bonusAmount.trim() ? Number(form.bonusAmount) : null,
     } : {};
     let path: string;

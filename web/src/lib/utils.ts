@@ -10,6 +10,29 @@ export function idOf(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
+/**
+ * The name of the person a resource ref points at, given whatever slice of the directory the caller can read.
+ *
+ * The FALLBACK is the point of this helper. Every page that shows "whose request is this" reads `employees`
+ * under its own access, so a ref to somebody outside that slice resolves to nothing - an ordinary employee
+ * cannot read their own manager's row, for one. Six pages each open-coded this and each fell back to the raw
+ * internal id, which put a 26-character uuid on screen in place of a name ("Goes to 5q5an4xdav8t… for
+ * approval"): meaningless to the reader, and an internal identifier leaked into the UI.
+ *
+ * So an unresolvable ref reads as `unknown` - which callers set to whatever their sentence needs ("your
+ * manager", "-") - and an absent ref is empty, because there is no person to name at all.
+ */
+export function personName(
+  people: { path: string; first_name?: string | null; last_name?: string | null }[],
+  ref?: string | null,
+  unknown = "Someone",
+): string {
+  if (!ref) return "";
+  const person = people.find((p) => idOf(p.path) === idOf(ref));
+  if (!person) return unknown;
+  return [person.first_name, person.last_name].filter(Boolean).join(" ") || unknown;
+}
+
 /** Title-case a SCREAMING_SNAKE or kebab/snake token for display. */
 export function humanize(value: string): string {
   return value

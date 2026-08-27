@@ -36,25 +36,27 @@ export const vendorSpec: CrudSpec<VendorInput, typeof schema.vendors> = {
     if (!input.display_name) throw invalidArgument("display_name is required");
     return {
       name: input.display_name,
-      contactEmail: input.contact_email ?? null,
-      contactPhone: input.contact_phone ?? null,
-      taxId: input.tax_id ?? null,
-      paymentTerms: input.payment_terms ?? null,
-      bankDetails: input.bank_details ?? null,
+      // Empty string clears, like an omitted field: the SPA sends "" for a text box the user left blank and
+      // never puts a null on the wire (web/src/api.ts).
+      contactEmail: input.contact_email?.trim() || null,
+      contactPhone: input.contact_phone?.trim() || null,
+      taxId: input.tax_id?.trim() || null,
+      paymentTerms: input.payment_terms?.trim() || null,
+      bankDetails: input.bank_details?.trim() || null,
       defaultCategoryId: await resolveCategory(deps, input.default_category),
-      notes: input.notes ?? null,
+      notes: input.notes?.trim() || null,
     };
   },
   patch: async (patch, _row, deps) => {
     const set: SetOf<typeof schema.vendors> = {};
     if (has(patch, "display_name")) set.name = patch.display_name;
-    if (has(patch, "contact_email")) set.contactEmail = patch.contact_email ?? null;
-    if (has(patch, "contact_phone")) set.contactPhone = patch.contact_phone ?? null;
-    if (has(patch, "tax_id")) set.taxId = patch.tax_id ?? null;
-    if (has(patch, "payment_terms")) set.paymentTerms = patch.payment_terms ?? null;
-    if (has(patch, "bank_details")) set.bankDetails = patch.bank_details ?? null;
+    if (has(patch, "contact_email")) set.contactEmail = patch.contact_email?.trim() || null;
+    if (has(patch, "contact_phone")) set.contactPhone = patch.contact_phone?.trim() || null;
+    if (has(patch, "tax_id")) set.taxId = patch.tax_id?.trim() || null;
+    if (has(patch, "payment_terms")) set.paymentTerms = patch.payment_terms?.trim() || null;
+    if (has(patch, "bank_details")) set.bankDetails = patch.bank_details?.trim() || null;
     if (has(patch, "default_category")) set.defaultCategoryId = await resolveCategory(deps, patch.default_category);
-    if (has(patch, "notes")) set.notes = patch.notes ?? null;
+    if (has(patch, "notes")) set.notes = patch.notes?.trim() || null;
     return set;
   },
 };

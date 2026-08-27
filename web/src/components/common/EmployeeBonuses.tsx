@@ -57,9 +57,9 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
       await create("bonuses", {
         employee: "employees/" + employeeId,
         amount: Math.round(Number(form.amount) * 100) / 100,
-        kind: form.kind.trim() || null,
+        kind: form.kind.trim(),
         award_date: form.award_date,
-        reason: form.reason.trim() || null,
+        reason: form.reason.trim(),
       });
       toast({ title: "Award recorded" });
       setOpen(false);

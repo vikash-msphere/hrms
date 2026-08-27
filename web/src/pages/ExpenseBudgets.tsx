@@ -363,7 +363,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
     setErr(null);
     try {
       const body = {
-        department: form.department || null, category: form.category || null,
+        department: form.department, category: form.category,
         period_type: form.period_type, period_key: form.period_key.trim(), amount: amountNum,
         recurring: form.recurring,
       };
@@ -427,8 +427,8 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
         const amount = Number(l.amount);
         if (!Number.isFinite(amount) || amount <= 0) continue;
         await create("expense-budgets", {
-          department: l.source.department ? `departments/${idOf(l.source.department)}` : null,
-          category: l.source.category ? `expense-categories/${idOf(l.source.category)}` : null,
+          department: l.source.department ? `departments/${idOf(l.source.department)}` : "",
+          category: l.source.category ? `expense-categories/${idOf(l.source.category)}` : "",
           period_type: l.source.period_type, period_key: l.key, amount,
           recurring: l.source.recurring, // a repeating cap's copy repeats too
         });

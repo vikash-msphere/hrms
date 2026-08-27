@@ -57,30 +57,31 @@ export const complianceEventSpec: CrudSpec<ComplianceEventInput, typeof schema.c
     const status = input.status ?? "pending";
     return {
       title: input.title,
-      category: input.category ?? null,
+      // Empty string clears, like an omitted field (see web/src/api.ts: nothing on the wire is ever null).
+      category: input.category?.trim() || null,
       frequency: input.frequency ?? "one_time",
       dueDate: parseDate(input.due_date, "due_date"),
-      periodLabel: input.period_label ?? null,
+      periodLabel: input.period_label?.trim() || null,
       status,
       // Stamp today when created already-filed without an explicit date.
       filedDate: input.filed_date ? parseDate(input.filed_date, "filed_date") : status === "filed" ? new Date() : null,
-      reference: input.reference ?? null,
+      reference: input.reference?.trim() || null,
       documentId: idFromPath(input.document) ?? null,
       assigneeId: idFromPath(input.assignee) ?? null,
-      notes: input.notes ?? null,
+      notes: input.notes?.trim() || null,
     };
   },
   patch: (patch, row) => {
     const set: SetOf<typeof schema.complianceEvents> = {};
     if (has(patch, "title")) { if (!patch.title) throw invalidArgument("title cannot be empty"); set.title = patch.title; }
-    if (has(patch, "category")) set.category = patch.category ?? null;
+    if (has(patch, "category")) set.category = patch.category?.trim() || null;
     if (has(patch, "frequency")) { if (patch.frequency && !FREQUENCIES.includes(patch.frequency)) throw invalidArgument("invalid frequency"); set.frequency = patch.frequency; }
     if (has(patch, "due_date") && patch.due_date) set.dueDate = parseDate(patch.due_date, "due_date");
-    if (has(patch, "period_label")) set.periodLabel = patch.period_label ?? null;
-    if (has(patch, "reference")) set.reference = patch.reference ?? null;
+    if (has(patch, "period_label")) set.periodLabel = patch.period_label?.trim() || null;
+    if (has(patch, "reference")) set.reference = patch.reference?.trim() || null;
     if (has(patch, "document")) set.documentId = idFromPath(patch.document) ?? null;
     if (has(patch, "assignee")) set.assigneeId = idFromPath(patch.assignee) ?? null;
-    if (has(patch, "notes")) set.notes = patch.notes ?? null;
+    if (has(patch, "notes")) set.notes = patch.notes?.trim() || null;
     if (has(patch, "status")) {
       if (patch.status && !STATUSES.includes(patch.status)) throw invalidArgument("invalid status");
       set.status = patch.status;

@@ -40,7 +40,7 @@ export const payGradeSpec: CrudSpec<PayGradeInput, typeof schema.payGrades> = {
       bandMid: input.band_mid ?? null,
       bandMax: input.band_max ?? null,
       currency: input.currency_code?.trim() || "INR",
-      description: input.description ?? null,
+      description: input.description?.trim() || null,
     };
   },
   patch: (patch, row) => {
@@ -51,7 +51,7 @@ export const payGradeSpec: CrudSpec<PayGradeInput, typeof schema.payGrades> = {
     if (has(patch, "band_mid")) set.bandMid = patch.band_mid ?? null;
     if (has(patch, "band_max")) set.bandMax = patch.band_max ?? null;
     if (has(patch, "currency_code")) set.currency = patch.currency_code?.trim() || "INR";
-    if (has(patch, "description")) set.description = patch.description ?? null;
+    if (has(patch, "description")) set.description = patch.description?.trim() || null;
     // Validate the band as it WILL be, merging the patch over the stored row - a lone band_min still has to
     // respect a mid/max it never mentions.
     validateBand({

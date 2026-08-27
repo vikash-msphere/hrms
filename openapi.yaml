@@ -1672,10 +1672,10 @@ components:
         progress: { type: integer, description: "Completion 0-100. Computed from the measure whenever `target_value` and `current_value` are both set - a value sent alongside them is ignored." }
         status: { type: string, enum: [not_started, in_progress, completed, cancelled], description: "Lifecycle of the goal. Default not_started. Reaching the target completes the goal." }
         due_date: { type: string, format: date }
-        unit: { type: string, maxLength: 24, description: "What the measure counts: `customers`, `%`, `days`. Label only." }
-        baseline_value: { type: number, description: "Where the measure started. Defaults to 0 when absent; set it for goals that begin above zero (churn 8% to 4%)." }
-        target_value: { type: number, description: "Where it has to get to. A target below the baseline counts down." }
-        current_value: { type: number, description: "Where it is now. Moving this recomputes `progress`." }
+        unit: { type: string, maxLength: 24, nullable: true, description: "What the measure counts: `customers`, `%`, `days`. Label only. Null clears it." }
+        baseline_value: { type: number, nullable: true, description: "Where the measure started. Defaults to 0 when absent; set it for goals that begin above zero (churn 8% to 4%). Null clears it." }
+        target_value: { type: number, nullable: true, description: "Where it has to get to. A target below the baseline counts down. Null clears it, handing progress back to manual." }
+        current_value: { type: number, nullable: true, description: "Where it is now. Moving this recomputes `progress`. Null clears it." }
         measured: { type: boolean, readOnly: true, description: "True when `progress` is derived from the measure rather than set by hand." }
         linked_tasks: { type: integer, readOnly: true, description: "How many board tasks are linked to this goal. Resolved once per page, so a list of goals can show its delivery rollup without the client reading the whole cards collection." }
         delivered_tasks: { type: integer, readOnly: true, description: "How many of `linked_tasks` are delivered." }
@@ -3424,6 +3424,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/api-keys/{api_key_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreApiKey"
+      parameters: [ { in: path, name: api_key_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/api-key' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/api-keys/{api_key_id}:revoke:
     post:
       description: "Custom method revoke for api-key. Stops the credential working immediately, keeping the row so the audit trail still resolves it."
@@ -6439,6 +6448,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/letter-templates/{letter_template_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreLetterTemplate"
+      parameters: [ { in: path, name: letter_template_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letter-template' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/compensation:
     get:
       description: List compensation records (salary history), optionally for one employee. Access-scoped (payroll + super).
@@ -6779,6 +6797,8 @@ paths:
     delete:
       description: Abandon a count (soft delete; :restore brings it back). ?force=true purges it.
       operationId: DeleteStocktake
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
       responses:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Problem' }
@@ -7423,7 +7443,7 @@ paths:
       description: "Custom method respond: HR sets status + an optional public reply."
       operationId: ":RespondSuggestion"
       parameters: [ { in: path, name: suggestion_id, required: true, schema: { type: string } } ]
-      requestBody: { content: { application/json: { schema: { type: object, properties: { status: { type: string }, response: { type: string } } } } } }
+      requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { status: { type: string }, response: { type: string } } } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/suggestion' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7614,6 +7634,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories/{category_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreAssetCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/reimbursement-categories:
     get:
       description: List method for reimbursement-category.
@@ -7666,6 +7695,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/reimbursement-categories/{category_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreReimbursementCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/ticket-checklists:
     get:
       description: List method for ticket-checklist.
@@ -7718,6 +7756,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/ticket-checklists/{checklist_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreTicketChecklist"
+      parameters: [ { in: path, name: checklist_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket-checklist' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/reimbursements:
     get:
       description: List method for reimbursement.
@@ -7899,6 +7946,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/expense-categories/{category_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreExpenseCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/vendors:
     get:
       description: List method for vendor.
@@ -7951,6 +8007,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/vendors/{vendor_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreVendor"
+      parameters: [ { in: path, name: vendor_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/expense-budgets:
     get:
       description: List method for expense-budget.
@@ -8033,6 +8098,15 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/expense-budgets/{budget_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreExpenseBudget"
+      parameters: [ { in: path, name: budget_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-budget' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/expenses:
     get:
       description: List method for expense.
@@ -9171,6 +9245,7 @@ paths:
       operationId: ":RemindAckOrgDocument"
       parameters: [ { in: path, name: org_document_id, required: true, schema: { type: string } } ]
       requestBody:
+        required: false
         content:
           application/json:
             schema:

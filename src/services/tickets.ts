@@ -179,7 +179,7 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
       departmentId,
       assigneeId, // stamped from the category's default; reassignable via :assign
       subject,
-      description: input.description ?? null,
+      description: input.description?.trim() || null,
       priority,
       state: "OPEN",
     })

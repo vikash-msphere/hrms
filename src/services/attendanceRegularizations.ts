@@ -65,7 +65,7 @@ export async function createRegularization(deps: Deps, actor: AppUser, input: Re
   if (!employeeId) throw invalidArgument("employee is required");
   const row = (await deps.db
     .insert(schema.attendanceRegularizations)
-    .values({ code: await allocOwnedCode(deps, schema.attendanceRegularizations, schema.attendanceRegularizations.employeeId, employeeId), employeeId, date: new Date(date), sessions, reason: input.reason ?? null, state: "PENDING" })
+    .values({ code: await allocOwnedCode(deps, schema.attendanceRegularizations, schema.attendanceRegularizations.employeeId, employeeId), employeeId, date: new Date(date), sessions, reason: input.reason?.trim() || null, state: "PENDING" })
     .returning())[0]!;
   await audit(deps, actor, "attendance-regularization.create", "attendance-regularizations", row.uuid, { employee: `employees/${employeeId}`, date: new Date(date).toISOString().slice(0, 10), sessions, ...(input.reason ? { reason: input.reason } : {}) }, row);
   await notifyManager(deps, employeeId, { type: "regularization.requested", noun: "attendance regularization" });

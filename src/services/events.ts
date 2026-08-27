@@ -65,8 +65,8 @@ export const eventSpec: CrudSpec<EventInput, typeof schema.events> = {
       allDay,
       countAsWork: !!input.count_as_work,
       requiresClockIn: !!input.requires_clock_in,
-      color: input.color ?? null,
-      description: input.description ?? null,
+      color: input.color?.trim() || null,
+      description: input.description?.trim() || null,
       attendeeIds: attendeesJson(input.attendees),
       repeat: input.repeat ?? null,
     };
@@ -78,8 +78,8 @@ export const eventSpec: CrudSpec<EventInput, typeof schema.events> = {
       if (!title) throw invalidArgument("title cannot be empty");
       set.title = title;
     }
-    if (has(patch, "color")) set.color = patch.color ?? null;
-    if (has(patch, "description")) set.description = patch.description ?? null;
+    if (has(patch, "color")) set.color = patch.color?.trim() || null;
+    if (has(patch, "description")) set.description = patch.description?.trim() || null;
     if (has(patch, "count_as_work")) set.countAsWork = !!patch.count_as_work;
     if (has(patch, "requires_clock_in")) set.requiresClockIn = !!patch.requires_clock_in;
     if (has(patch, "attendees")) set.attendeeIds = attendeesJson(patch.attendees);

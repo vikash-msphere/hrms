@@ -57,7 +57,8 @@ describe("planYearCopy", () => {
   it("shifts the year, keeping kind, half-day and location", () => {
     const plan = planYearCopy(existing, "2026", "2027");
     expect(plan.map((r) => [r.date, r.name, r.kind, r.half_day, r.location])).toEqual([
-      ["2027-01-26", "Republic Day", "fixed", false, null],
+      // A holiday with no location carries "" - the SPA never puts a null on the wire (web/src/api.ts).
+      ["2027-01-26", "Republic Day", "fixed", false, ""],
       ["2027-03-04", "Holi", "optional", true, "Mumbai"],
     ]);
   });

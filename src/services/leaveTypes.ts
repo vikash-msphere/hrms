@@ -35,7 +35,7 @@ export const leaveTypeSpec: CrudSpec<LeaveTypeInput, typeof schema.leaveTypes> =
       accrualDaysPerYear: input.accrual_days_per_year ?? 0,
       accrualFrequency: frequency(input.accrual_frequency),
       paid: input.paid ?? true,
-      color: input.color ?? null,
+      color: input.color?.trim() || null,
       availableDuringProbation: input.available_during_probation ?? true,
       probationAccrualDaysPerYear: input.probation_accrual_days_per_year ?? 0,
       probationCapDays: input.probation_cap_days ?? null,
@@ -52,7 +52,7 @@ export const leaveTypeSpec: CrudSpec<LeaveTypeInput, typeof schema.leaveTypes> =
     if (has(patch, "accrual_days_per_year")) set.accrualDaysPerYear = patch.accrual_days_per_year;
     if (has(patch, "accrual_frequency")) set.accrualFrequency = frequency(patch.accrual_frequency);
     if (has(patch, "paid")) set.paid = patch.paid;
-    if (has(patch, "color")) set.color = patch.color;
+    if (has(patch, "color")) set.color = patch.color?.trim() || null;
     if (has(patch, "available_during_probation")) set.availableDuringProbation = patch.available_during_probation;
     if (has(patch, "probation_accrual_days_per_year")) set.probationAccrualDaysPerYear = patch.probation_accrual_days_per_year;
     if (has(patch, "probation_cap_days")) set.probationCapDays = patch.probation_cap_days;

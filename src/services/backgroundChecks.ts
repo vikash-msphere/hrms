@@ -63,11 +63,12 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
       employeeId,
       checkType: input.check_type ?? "identity",
       status,
-      vendor: input.vendor ?? null,
-      referenceNo: input.reference_no ?? null,
+      // Empty string clears, like an omitted field (see web/src/api.ts: nothing on the wire is ever null).
+      vendor: input.vendor?.trim() || null,
+      referenceNo: input.reference_no?.trim() || null,
       initiatedDate: input.initiated_date ? parseDate(input.initiated_date, "initiated_date") : new Date(),
       completedDate: input.completed_date ? parseDate(input.completed_date, "completed_date") : isFinal(status) ? new Date() : null,
-      notes: input.notes ?? null,
+      notes: input.notes?.trim() || null,
       documentId: idFromPath(input.document) ?? null,
     };
   },
@@ -80,11 +81,11 @@ export const backgroundCheckSpec: CrudSpec<BackgroundCheckInput, typeof schema.b
       set.employeeId = e;
     }
     if (has(patch, "check_type")) set.checkType = patch.check_type;
-    if (has(patch, "vendor")) set.vendor = patch.vendor ?? null;
-    if (has(patch, "reference_no")) set.referenceNo = patch.reference_no ?? null;
+    if (has(patch, "vendor")) set.vendor = patch.vendor?.trim() || null;
+    if (has(patch, "reference_no")) set.referenceNo = patch.reference_no?.trim() || null;
     if (has(patch, "initiated_date")) set.initiatedDate = patch.initiated_date ? parseDate(patch.initiated_date, "initiated_date") : null;
     if (has(patch, "completed_date")) set.completedDate = patch.completed_date ? parseDate(patch.completed_date, "completed_date") : null;
-    if (has(patch, "notes")) set.notes = patch.notes ?? null;
+    if (has(patch, "notes")) set.notes = patch.notes?.trim() || null;
     if (has(patch, "document")) set.documentId = idFromPath(patch.document) ?? null;
     if (has(patch, "status")) {
       set.status = patch.status;

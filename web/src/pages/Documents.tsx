@@ -267,8 +267,9 @@ export default function Documents({ me }: { me: Me }) {
     return {
       display_name: title,
       document_type: form.type,
-      employee: form.employee === ORG ? null : form.employee,
-      expire_time: form.expire || null,
+      employee: form.employee === ORG ? "" : form.employee,
+      // `expire_time` is `format: date-time`, and "" is not one - an empty expiry is left out.
+      ...(form.expire ? { expire_time: form.expire } : {}),
       // Acknowledgement applies to org-wide documents of any type; the server ignores it on personal docs.
       requires_ack: form.employee === ORG ? form.requireAck : false,
       // Ack signing method + signature-box placement (required together with requires_ack, server-enforced).

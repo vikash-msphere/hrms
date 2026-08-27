@@ -116,7 +116,7 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
         labels: labelCat.map((l) => ({ ...l, key: slug(l.key || l.label) })),
         hide_empty_lanes: hideEmpty,
         reassign_lane_on_move: reassignLane,
-        no_lane_label: mode === "custom" ? (noLaneLabel.trim() || null) : board.no_lane_label ?? null,
+        no_lane_label: mode === "custom" ? noLaneLabel.trim() : board.no_lane_label ?? "",
       });
       markSaved();
       toast({ title: "Board configured", variant: "success" });

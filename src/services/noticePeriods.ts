@@ -77,8 +77,10 @@ export async function createNoticePeriod(deps: Deps, actor: AppUser, input: Noti
       noticeDate: new Date(notice),
       lastWorkingDay: new Date(lwd),
       status: input.status ?? "serving",
-      reason: input.reason ?? null,
-      notes: input.notes ?? null,
+      // Empty string clears, like an omitted field: the SPA sends "" for a text box the user left blank
+      // (nothing on the wire is ever null - see web/src/api.ts).
+      reason: input.reason?.trim() || null,
+      notes: input.notes?.trim() || null,
     })
     .returning())[0]!;
   // Tell the employee's manager a report has entered their notice period.
@@ -112,8 +114,8 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   if (has("notice_date") && patch.notice_date) set.noticeDate = new Date(dayMs(patch.notice_date, "notice_date"));
   if (has("last_working_day") && patch.last_working_day) set.lastWorkingDay = new Date(dayMs(patch.last_working_day, "last_working_day"));
   if (has("status")) set.status = patch.status;
-  if (has("reason")) set.reason = patch.reason ?? null;
-  if (has("notes")) set.notes = patch.notes ?? null;
+  if (has("reason")) set.reason = patch.reason?.trim() || null;
+  if (has("notes")) set.notes = patch.notes?.trim() || null;
   // Guard the date ordering against either field changing.
   const notice = +new Date((set.noticeDate as Date) ?? row.noticeDate);
   const lwd = +new Date((set.lastWorkingDay as Date) ?? row.lastWorkingDay);

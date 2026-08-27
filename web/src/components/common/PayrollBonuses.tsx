@@ -119,8 +119,8 @@ export function PayrollBonuses() {
         ...(form.scope === "department" ? { department: form.department } : {}),
         ...(form.scope === "individual" ? { employee: form.employee } : {}),
         amount,
-        kind: form.kind || null,
-        reason: form.reason || null,
+        kind: form.kind,
+        reason: form.reason,
         award_date: form.award_date,
       });
       toast({ title: "Bonus awarded", variant: "success" });

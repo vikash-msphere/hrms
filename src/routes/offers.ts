@@ -14,7 +14,9 @@ const writeSchema = z
   .object({
     application: z.string().nullable().optional(),
     base_comp: z.number().nullable().optional(),
-    currency_code: z.string().nullable().optional(),
+    // NOT nullable: the currency column is NOT NULL defaulting to the org currency, and the serializer emits it
+    // on every response.
+    currency_code: z.string().optional(),
     offer_date: z.string().nullable().optional(),
     join_date: z.string().nullable().optional(),
     expiry_date: z.string().nullable().optional(),

@@ -7,7 +7,7 @@ import { hhmmToMin, localDay, localMinutes, zonedInstant } from "@/lib/attendanc
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useDiscardGuard } from "@/hooks/useDiscardGuard";
-import { formatDate, idOf } from "@/lib/utils";
+import { formatDate, idOf, personName } from "@/lib/utils";
 import { navigate, navigateTab } from "@/router";
 import type { OvertimeRequest, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -64,7 +64,7 @@ export default function Overtime({ me }: { me: Me }) {
   const [seedNonce, setSeedNonce] = useState(0); // bumped when the range is filled in programmatically
 
   const emp = (p?: string) => (p ? employees.find((e) => idOf(e.path) === idOf(p)) : undefined);
-  const empName = (p?: string) => { const e = emp(p); return e ? `${e.first_name} ${e.last_name}` : p ? idOf(p) : ""; };
+  const empName = (p?: string, unknown?: string) => personName(employees, p, unknown);
   const isSelf = !!me.employee_id && !!form.employee && idOf(form.employee) === me.employee_id;
 
   const pendingTotal = useMemo(() => rows.filter((r) => upper(r.state) === "PENDING").length, [rows]);
@@ -161,10 +161,10 @@ export default function Overtime({ me }: { me: Me }) {
 
   async function submit() {
     await create("overtime-requests", {
-      employee: form.employee || null,
+      employee: form.employee,
       start_time: form.start_time,
       end_time: form.end_time,
-      reason: form.reason.trim() || null,
+      reason: form.reason.trim(),
     });
     toast({ title: "Overtime logged", variant: "success" });
     reload();

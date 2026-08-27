@@ -11,8 +11,10 @@ const writeSchema = z
   .object({
     candidate: z.string().nullable().optional(),
     requisition: z.string().nullable().optional(),
-    stage: z.string().nullable().optional(),
-    status: z.string().nullable().optional(),
+    // stage and status are NOT NULL columns (defaults "applied" / "active") that the serializer emits on every
+    // response: null is not a value they can hold. Move them with :advance / :reject, or send a new value.
+    stage: z.string().optional(),
+    status: z.string().optional(),
     source: z.string().nullable().optional(),
     referral: z.string().nullable().optional(),
     applied_date: z.string().nullable().optional(),

@@ -122,7 +122,7 @@ export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComp
       // TDS + Professional Tax are engine-computed (no rate); PT slabs live in settings.
       rate: method === "income_tax" || method === "pt" ? null : input.rate ?? null,
       cap: CAPPED_METHODS(method) ? input.cap ?? null : null, // wage ceiling: PF wage cap / ESI eligibility
-      regime: method === "income_tax" ? input.regime ?? null : null,
+      regime: method === "income_tax" ? input.regime?.trim() || null : null,
       recurring: input.recurring ?? true,
       // The CTC side is only a question for the employer's own contributions; everything else is inside CTC by
       // construction, so it is pinned true rather than left to say something meaningless.
@@ -139,13 +139,13 @@ export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComp
     if (has(patch, "method")) set.method = patch.method;
     if (has(patch, "rate")) set.rate = patch.rate ?? null;
     if (has(patch, "cap")) set.cap = patch.cap ?? null;
-    if (has(patch, "regime")) set.regime = patch.regime ?? null;
+    if (has(patch, "regime")) set.regime = patch.regime?.trim() || null;
     if (has(patch, "recurring")) set.recurring = patch.recurring;
     // Validate the effective post-write state for TDS (method/kind/regime) and EPF (method/kind).
     const eff = {
       method: (has(patch, "method") ? patch.method : row.method) ?? row.method,
       kind: (has(patch, "kind") ? patch.kind : row.kind) ?? row.kind,
-      regime: has(patch, "regime") ? patch.regime ?? null : row.regime,
+      regime: has(patch, "regime") ? patch.regime?.trim() || null : row.regime,
     };
     await validateIncomeTax(deps, eff, row.uuid);
     await validateEpf(deps, eff, row.uuid);

@@ -579,7 +579,7 @@ export function PostComposer({
     const reach = showPublishing
       ? {
           audience_scope: form.audienceScope,
-          audience_department: form.audienceScope === "department" ? form.audienceDept : null,
+          audience_department: form.audienceScope === "department" ? form.audienceDept : "",
           email_audience: form.audienceScope === "none" ? false : form.emailIt,
         }
       : {};

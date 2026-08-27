@@ -332,7 +332,7 @@ export function RequestLeaveDialog({
         end_date: form.end_date,
         start_session: form.startSession,
         end_session: form.endSession,
-        reason: form.reason || null,
+        reason: form.reason,
       });
       // The bytes can only hang off a filed request, so the attachment is a second call. A failure here leaves
       // a perfectly good request behind - say so rather than implying the whole thing failed.

@@ -111,10 +111,11 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
   async function submit() {
     const body = {
       name: form.name.trim(),
-      period_start: form.period_start || null,
-      period_end: form.period_end || null,
-      self_due_date: form.self_due_date || null,
-      manager_due_date: form.manager_due_date || null,
+      // Date fields are `format: date`, and "" is not a date - an empty one is left out.
+      ...(form.period_start ? { period_start: form.period_start } : {}),
+      ...(form.period_end ? { period_end: form.period_end } : {}),
+      ...(form.self_due_date ? { self_due_date: form.self_due_date } : {}),
+      ...(form.manager_due_date ? { manager_due_date: form.manager_due_date } : {}),
     };
     if (editing) await patch(`review-cycles/${idOf(editing.path)}`, body, editing.etag);
     else await create("review-cycles", body);

@@ -55,7 +55,7 @@ export async function createOvertimeRequest(deps: Deps, actor: AppUser, input: O
   if (!employeeId) throw invalidArgument("employee is required");
   const row = (await deps.db
     .insert(schema.overtimeRequests)
-    .values({ code: await allocOwnedCode(deps, schema.overtimeRequests, schema.overtimeRequests.employeeId, employeeId), employeeId, date: new Date(dateMs), startTime: new Date(start), endTime: new Date(end), reason: input.reason ?? null, state: "PENDING" })
+    .values({ code: await allocOwnedCode(deps, schema.overtimeRequests, schema.overtimeRequests.employeeId, employeeId), employeeId, date: new Date(dateMs), startTime: new Date(start), endTime: new Date(end), reason: input.reason?.trim() || null, state: "PENDING" })
     .returning())[0]!;
   await audit(deps, actor, "overtime_request.create", "overtime-requests", row.uuid, undefined, row);
   await notifyManager(deps, employeeId, { type: "overtime.requested", noun: "overtime request" });

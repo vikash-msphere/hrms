@@ -21,7 +21,9 @@ const writeSchema = z
     category: z.string().nullable().optional(),
     department: z.string().nullable().optional(),
     amount: z.number().positive(),
-    tax_amount: z.number().nonnegative().nullable().optional(),
+    // NOT nullable: `expenses.tax_amount` is NOT NULL defaulting to 0, and the serializer emits it on every
+    // response. "No tax" is 0, not null.
+    tax_amount: z.number().nonnegative().optional(),
     incurred_on: z.string().nullable().optional(),
     description: z.string().nullable().optional(),
     invoice_number: z.string().nullable().optional(),

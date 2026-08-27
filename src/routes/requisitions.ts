@@ -7,15 +7,17 @@ import { toRequisitionResource } from "../http/serialize";
 
 const writeSchema = z
   .object({
-    title: z.string().nullable().optional(),
+    // title, openings and status are NOT NULL columns (openings defaults to 1, status to "draft") that the
+    // serializer emits on every response: null is not a value they can hold. The rest are genuinely clearable.
+    title: z.string().optional(),
     department: z.string().nullable().optional(),
     hiring_manager: z.string().nullable().optional(),
     location: z.string().nullable().optional(),
     employment_type: z.string().nullable().optional(),
-    openings: z.number().int().positive().nullable().optional(),
+    openings: z.number().int().positive().optional(),
     description: z.string().nullable().optional(),
     pay_grade: z.string().nullable().optional(),
-    status: z.string().nullable().optional(),
+    status: z.string().optional(),
     opened_date: z.string().nullable().optional(),
     closed_date: z.string().nullable().optional(),
   })

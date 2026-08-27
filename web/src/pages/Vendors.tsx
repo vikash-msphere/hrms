@@ -81,9 +81,9 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
     setErr(null);
     try {
       const body = {
-        display_name: form.name, contact_email: form.contact_email || null, contact_phone: form.contact_phone || null,
-        tax_id: form.tax_id || null, payment_terms: form.payment_terms || null, bank_details: form.bank_details || null,
-        default_category: form.default_category || null, notes: form.notes || null,
+        display_name: form.name, contact_email: form.contact_email, contact_phone: form.contact_phone,
+        tax_id: form.tax_id, payment_terms: form.payment_terms, bank_details: form.bank_details,
+        default_category: form.default_category, notes: form.notes,
       };
       if (editing) {
         await patch("vendors/" + idOf(editing.path), body, editing.etag);

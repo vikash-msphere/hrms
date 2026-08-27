@@ -192,7 +192,7 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   }
   const row = (await deps.db
     .insert(schema.leaveRequests)
-    .values({ code: await allocOwnedCode(deps, schema.leaveRequests, schema.leaveRequests.employeeId, employeeId), employeeId, leaveTypeId, startDate: new Date(start), endDate: new Date(end), days, startSession, endSession, reason: input.reason ?? null, state: "PENDING" })
+    .values({ code: await allocOwnedCode(deps, schema.leaveRequests, schema.leaveRequests.employeeId, employeeId), employeeId, leaveTypeId, startDate: new Date(start), endDate: new Date(end), days, startSession, endSession, reason: input.reason?.trim() || null, state: "PENDING" })
     .returning())[0]!;
   // Reserve the balance at request time; released if later rejected/cancelled. For a paid (entitlement) type
   // decrement CONDITIONALLY (WHERE balance_days >= days) so two concurrent requests can't both clear the
