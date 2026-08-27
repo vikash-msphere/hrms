@@ -24,11 +24,15 @@ const badgeVariants = cva(
 );
 
 export interface BadgeProps
-  extends React.HTMLAttributes<HTMLDivElement>,
+  extends React.HTMLAttributes<HTMLSpanElement>,
     VariantProps<typeof badgeVariants> {}
 
+// A SPAN, not a div. A badge is inline content - it trails a heading, a row label, a sentence - and half its
+// call sites put it inside a <p>. A <div> there is invalid nesting: the browser closes the paragraph before
+// the badge and reopens one after, which silently splits the row it was part of. `inline-flex` above already
+// does the layout, so the element itself may as well be one that is legal wherever a badge reads naturally.
 function Badge({ className, variant, ...props }: BadgeProps) {
-  return <div className={cn(badgeVariants({ variant }), className)} {...props} />;
+  return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
 }
 
 export { Badge, badgeVariants };
