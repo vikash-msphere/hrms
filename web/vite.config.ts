@@ -357,8 +357,17 @@ function prepareForPrism(proxyReq: ClientRequest) {
   proxyReq.setHeader("Cf-Access-Jwt-Assertion", "dev");
 }
 
+// This directory (`<repo>/web/`), resolved from the CONFIG FILE rather than from the current working
+// directory. `root: "./web"` read correctly only when the build was started from the repo root; started from
+// inside `web/` it resolved to `web/web`, and because Rollup runs `closeBundle` even on a FAILED build, the
+// entry-not-found error still left 198 pdf.js data files behind in `web/web/dist/assets/pdfjs`. That
+// directory is not covered by `.gitignore` (which lists `web/dist`), so a later `git add -A` would have
+// committed several megabytes of wasm and font binaries. Absolute, so the config behaves identically
+// wherever it is invoked from. `loadEnv` and the `@` alias already resolve this way.
+const WEB_ROOT = fileURLToPath(new URL(".", import.meta.url));
+
 export default defineConfig(({ mode }) => ({
-  root: "./web",
+  root: WEB_ROOT,
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -393,7 +402,10 @@ export default defineConfig(({ mode }) => ({
             // (VITE_APP_VERSION -> `release` in web/src/instrument.ts) or the maps are uploaded against a
             // release no event ever claims, and traces stay minified with nothing to explain why.
             release: { name: process.env.VITE_APP_VERSION },
-            sourcemaps: { filesToDeleteAfterUpload: ["./web/dist/**/*.map"] },
+            // Absolute, for the same reason as `root` above: a cwd-relative glob here deletes nothing when
+            // the build is started from anywhere but the repo root, which would leave the unminified source
+            // maps sitting in the output to be uploaded to Cloudflare as public assets.
+            sourcemaps: { filesToDeleteAfterUpload: [resolve(WEB_ROOT, "dist/**/*.map")] },
           }),
         ]
       : []),
@@ -408,7 +420,10 @@ export default defineConfig(({ mode }) => ({
     // "hidden" rather than true: the maps are emitted for the upload but no `//# sourceMappingURL=` comment is
     // written into the bundle, so a browser never goes looking for one.
     sourcemap: process.env.SENTRY_AUTH_TOKEN ? "hidden" : false,
-    outDir: "../web/dist",
+    // Relative to `root`, which is this directory - so plain "dist" is `<repo>/web/dist`. It was
+    // "../web/dist", which resolved to the same place but only by leaving the root and coming back into it,
+    // and that round trip is what made the doubled `web/web` hard to spot.
+    outDir: "dist",
     emptyOutDir: true,
     // Don't emit the inline module-preload polyfill: an inline <script> would force the SPA CSP to allow
     // 'unsafe-inline' scripts. Modern browsers support modulepreload natively, so the polyfill is unneeded.
