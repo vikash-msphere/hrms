@@ -355,7 +355,8 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     };
     if (editing) {
       try {
-        await patch(`goals/${idOf(editing.path)}`, body, etag ?? editing.etag);
+        const saved = await patch<Goal>(`goals/${idOf(editing.path)}`, body, etag ?? editing.etag);
+        setEtag(saved.etag);
       } catch (e) {
         // Lost race: the owner moved progress (or a manager edited the goal) while this dialog was open. Take
         // their etag so the next press goes through, and say so - "etag mismatch" tells nobody anything.

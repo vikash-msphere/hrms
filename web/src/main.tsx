@@ -1,3 +1,7 @@
+// FIRST, ahead of React and every app module: Sentry can only instrument what is loaded after it, so an error
+// thrown while the rest of this file's imports evaluate is only captured if init has already run. See
+// instrument.ts - it is inert unless the build carries a VITE_SENTRY_DSN.
+import "./instrument";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 // The UI font (Inter), self-hosted via @fontsource - see the note in index.css for why these are the

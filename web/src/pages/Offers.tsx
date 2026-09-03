@@ -4,6 +4,7 @@ import { create, get, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, idOf } from "@/lib/utils";
 import { useMoney, useOrg } from "@/lib/org";
+import { useHasPrintVersion } from "@/lib/letterheads";
 import { isConflict } from "@/lib/formError";
 import { navigate, recordUrl, setRouteRecord } from "@/router";
 import type { Me, Offer, Application, Candidate, JobRequisition, PayGrade } from "@/types";
@@ -78,6 +79,7 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
   // The offer letter, read in the app before it goes anywhere: rendered from the offer itself, so the letter
   // and the record cannot disagree.
   const [letter, setLetter] = useState<PdfSource | null>(null);
+  const offerHasPrint = useHasPrintVersion("offer");
   function openLetter(o: Offer) {
     const l = label(o.application);
     setLetter({
@@ -87,6 +89,7 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
       description: "Rendered from this offer - the figure, the dates and the signatory come from the record and the org's letter defaults.",
       fileName: `${l.cand} - Offer letter.pdf`,
       allowSave: true,
+      hasPrintVariant: offerHasPrint, // only when the offer letterhead actually has a print version to show
     });
   }
   // "Make an offer" on the pipeline drawer lands here with the form open on that candidate.

@@ -5,8 +5,9 @@
 export const COLLECTIONS: ReadonlySet<string> = new Set([
   // code-bearing resources (mirror authzResolve TABLES) + the config collections
   "letter-templates",
-  // the logos letters are ISSUED on (one per legal entity/brand), distinct from the app's own branding logo
-  "letterhead-logos",
+  // the stationery documents are ISSUED on (one per legal entity/brand), page design and all, distinct from
+  // the app's own branding logo
+  "letterheads",
   // machine credentials (super-only by default): an API key acts as its owner, narrowed by its scope
   "api-keys",
   "employees", "departments", "leave-requests", "leave-types", "leave-balances", "holidays",

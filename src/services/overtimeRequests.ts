@@ -6,7 +6,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
@@ -57,7 +57,7 @@ export async function createOvertimeRequest(deps: Deps, actor: AppUser, input: O
     .insert(schema.overtimeRequests)
     .values({ code: await allocOwnedCode(deps, schema.overtimeRequests, schema.overtimeRequests.employeeId, employeeId), employeeId, date: new Date(dateMs), startTime: new Date(start), endTime: new Date(end), reason: input.reason?.trim() || null, state: "PENDING" })
     .returning())[0]!;
-  await audit(deps, actor, "overtime_request.create", "overtime-requests", row.uuid, undefined, row);
+  await audit(deps, actor, "overtime_request.create", "overtime-requests", row.uuid, createdMeta(row, "overtime-requests"), row);
   await notifyManager(deps, employeeId, { type: "overtime.requested", noun: "overtime request" });
   await emitEvent(deps, actor, "overtime.requested", { subject: `overtime-requests/${row.uuid}`, employeeId, payload: { hours: (end - start) / 3_600_000 } });
   return row;
@@ -74,7 +74,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     .where(and(eq(schema.overtimeRequests.uuid, id), eq(schema.overtimeRequests.state, "PENDING")))
     .returning();
   if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
-  await audit(deps, actor, `overtime_request.${to.toLowerCase()}`, "overtime-requests", id);
+  await audit(deps, actor, `overtime_request.${to.toLowerCase()}`, "overtime-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `overtime.${to.toLowerCase()}`, title: `Overtime ${to.toLowerCase()}`, body: `Your overtime request was ${to.toLowerCase()}.`, link: "overtime/history", subject: `overtime-requests/${id}`, actorId: actor.employeeId });
   }

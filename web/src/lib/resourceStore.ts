@@ -25,7 +25,7 @@ const TTL_CATALOG_MS = 5 * 60_000;
 const CATALOG_COLLECTIONS = new Set([
   "departments", "leave-types", "pay-components", "pay-grades", "salary-structures", "pay-periods", "holidays",
   "projects", "shifts", "asset-categories", "expense-categories", "reimbursement-categories", "vendors",
-  "benefit-plans", "letter-templates", "letterhead-logos", "bank-formats", "ticket-checklists", "roles", "compliance-rules",
+  "benefit-plans", "letter-templates", "letterheads", "bank-formats", "ticket-checklists", "roles", "compliance-rules",
   "leave-encashment-rules", "board-templates",
 ]);
 const SEMI_COLLECTIONS = new Set(["employees"]);

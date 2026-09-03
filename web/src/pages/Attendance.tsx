@@ -454,7 +454,7 @@ export default function Attendance({ me }: { me: Me }) {
         s?.earlyByMin ?? 0,
       ];
     });
-    void exportTable(`attendance-${fromYmd}-to-${toYmd}`, headers, data, format);
+    void exportTable(`attendance-${fromYmd}-to-${toYmd}`, headers, data, format, "attendance");
   }
 
   // Manager/HR: everyone's standing right now, from the sessions already fetched for the clock card (no extra
@@ -1436,7 +1436,7 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
       r.stats.avgDay ? fmtDurationShort(r.stats.avgDay) : "",
       signed(r.stats.doneMinutes - r.stats.expectedMinutes),
     ]);
-    void exportTable(`team-attendance-${windowLabel.replace(/\s+/g, "-").toLowerCase()}`, headers, data, format);
+    void exportTable(`team-attendance-${windowLabel.replace(/\s+/g, "-").toLowerCase()}`, headers, data, format, "attendance");
   }
 
   return (

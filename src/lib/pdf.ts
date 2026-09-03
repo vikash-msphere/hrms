@@ -1,5 +1,7 @@
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb, type Color } from "pdf-lib";
 import { DARK, SLATE, MUTED, LABEL, HAIR, FAINT, PAGE_W, PAGE_H, enc, money, amountInWords, embedLogo } from "./pdfPrimitives";
+import { buildPageFrame } from "./pageFrame";
+import { STOCK_LETTERHEAD, type LetterheadDesign, type LetterheadSlot } from "../domain/letterhead";
 import {
   DEFAULT_PAYSLIP_TEMPLATE, PAYSLIP_ATTENDANCE_CELLS, substTokens,
   type PayslipAttendanceCell, type PayslipBlock, type PayslipBlockStyle, type PayslipTemplate,
@@ -44,26 +46,56 @@ function hexColor(hex: string | undefined, fallback: Color): Color {
   return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
 }
 
-export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate = DEFAULT_PAYSLIP_TEMPLATE): Promise<Uint8Array> {
+export async function renderPayslipPdf(
+  d: PayslipData,
+  template: PayslipTemplate = DEFAULT_PAYSLIP_TEMPLATE,
+  /**
+   * Print this payslip on a LETTERHEAD instead of on its own page. The body below is unchanged - the same
+   * blocks the payslip designer builds - but the sheet around it (size, margins, stationery, header band,
+   * footer band, watermark) comes from the letterhead, exactly as a letter's would. Absent = the payslip
+   * designer's own page, which is the default and what every payslip used before.
+   */
+  letterhead?: { design: LetterheadDesign; artwork?: Partial<Record<LetterheadSlot, string>> }
+): Promise<Uint8Array> {
   const dp = Math.min(4, Math.max(0, Math.trunc(d.decimals ?? 2))); // currency display precision
   const opt = template.options ?? {};
   // Page geometry + palette are document-level config; every value falls back to the stock design, so an
-  // unstyled template renders byte-identically to the built-in one.
-  const pw = opt.pageSize === "letter" ? LETTER_W : PAGE_W;
-  const ph = opt.pageSize === "letter" ? LETTER_H : PAGE_H;
-  const margin = opt.margin ?? DEFAULT_MARGIN;
-  const ML = margin; // left margin
-  const MR = Math.round(pw - margin); // right edge of content (whole points; A4 at the default margin = 547)
-  const TOP = ph - margin - 2; // first baseline on a page
-  const BOTTOM = Math.max(24, margin + 8); // break to a new page rather than draw below this
+  // unstyled template renders byte-identically to the built-in one. On a letterhead the SHEET is the
+  // letterhead's - its size, its margins, its content box - and only the body inside remains the payslip's.
   const S = opt.scale ?? 1; // multiplies DEFAULT sizes only - an explicit block size wins
   const ds = (n: number) => n * S;
   const doc = await PDFDocument.create();
   // Serif (Times) reads like a formal statement; sans (Helvetica) is the alternative. Money always uses the
-  // monospaced face so columns align like a ledger.
-  const serif = template.options?.font !== "sans";
+  // monospaced face so columns align like a ledger. On a letterhead the PAGE decides the typeface, so the
+  // sheet and the figures on it are not set in two different faces.
+  const serif = letterhead ? { ...STOCK_LETTERHEAD.page, ...letterhead.design.page }.font !== "sans" : template.options?.font !== "sans";
   const font = await doc.embedFont(serif ? StandardFonts.TimesRoman : StandardFonts.Helvetica);
   const bold = await doc.embedFont(serif ? StandardFonts.TimesRomanBold : StandardFonts.HelveticaBold);
+  // The letterhead's sheet, built once the document and its fonts exist.
+  const frame = letterhead
+    ? await buildPageFrame({
+        doc,
+        design: letterhead.design,
+        org: d.org,
+        images: letterhead.artwork,
+        tokens: {
+          org_name: d.org.name,
+          legal_name: d.org.name,
+          address: (d.org.address ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(", "),
+          date: d.periodLabel,
+        },
+        font,
+        bold,
+        stock: { ink: DARK, muted: MUTED, hairline: HAIR },
+      })
+    : undefined;
+  const pw = frame?.pw ?? (opt.pageSize === "letter" ? LETTER_W : PAGE_W);
+  const ph = frame?.ph ?? (opt.pageSize === "letter" ? LETTER_H : PAGE_H);
+  const margin = opt.margin ?? DEFAULT_MARGIN;
+  const ML = frame?.left ?? margin; // left margin
+  const MR = frame?.right ?? Math.round(pw - margin); // right edge of content (A4 at the default margin = 547)
+  const TOP = frame ? frame.top(1) : ph - margin - 2; // first baseline on a page
+  const BOTTOM = frame?.bottom ?? Math.max(24, margin + 8); // break to a new page rather than draw below this
   const mono = await doc.embedFont(StandardFonts.Courier);
   const monoBold = await doc.embedFont(StandardFonts.CourierBold);
   const logo = await embedLogo(doc, d.org.logo);
@@ -77,8 +109,15 @@ export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate
   const LINE = hexColor(opt.hairline, HAIR);
   const LINE_FAINT = hexColor(opt.hairline, FAINT);
 
+  // On a letterhead every sheet gets its stationery and header band before the body touches it, and the body
+  // starts wherever that band ended - so a payslip clears a printed masthead the same way a letter does.
+  let pageNo = 1;
   let page: PDFPage = doc.addPage([pw, ph]);
   let y = TOP;
+  if (frame) {
+    frame.backdrop(page, pageNo);
+    y = frame.header(page, pageNo);
+  }
 
   type Opt = { f?: PDFFont; size?: number; color?: Color };
   const w = (s: string, f: PDFFont, size: number) => f.widthOfTextAtSize(s, size);
@@ -91,7 +130,12 @@ export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate
   const room = (need: number) => {
     if (y - need >= BOTTOM) return;
     page = doc.addPage([pw, ph]);
+    pageNo += 1;
     y = TOP;
+    if (frame) {
+      frame.backdrop(page, pageNo);
+      y = frame.header(page, pageNo);
+    }
   };
 
   // ── Per-block style resolution ────────────────────────────────────────────────────────────────────
@@ -341,6 +385,10 @@ export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate
   }
 
   for (const b of template.blocks) {
+    // On a letterhead the sheet already carries a masthead and a footer band, so the blocks that would draw
+    // them AGAIN are skipped rather than stacked on top. Everything else - the figures, which is what a
+    // payslip is - draws exactly as designed.
+    if (frame && (b.kind === "orgHeader" || b.kind === "footer")) continue;
     // Shared spacing: `spaceBefore` is consumed before the block claims room, `spaceAfter` after it draws.
     if (b.kind !== "gap" && b.style?.spaceBefore) y -= b.style.spaceBefore;
     switch (b.kind) {
@@ -365,5 +413,6 @@ export async function renderPayslipPdf(d: PayslipData, template: PayslipTemplate
     if (b.kind !== "gap" && b.style?.spaceAfter) y -= b.style.spaceAfter;
   }
 
+  frame?.footers(doc); // once the page count is known, so {{page}} of {{pages}} is honest
   return await doc.save();
 }

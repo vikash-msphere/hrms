@@ -474,7 +474,8 @@ function InterviewDialog({ interview, defaultApplication, apps, interviews, cand
     };
     if (editing) {
       try {
-        await patch(`interviews/${idOf(interview!.path)}`, body, etag ?? interview!.etag);
+        const saved = await patch<Interview>(`interviews/${idOf(interview!.path)}`, body, etag ?? interview!.etag);
+        setEtag(saved.etag); // a second Save from a dialog left open must not send the first one's etag
       } catch (e) {
         // Lost race: somebody else moved the slot or changed the panel. Take their etag so the next press is a
         // deliberate overwrite.
@@ -797,7 +798,8 @@ function ScorecardDialog({ interview, me, criteria, blind, empName, candName, jo
     };
     if (mine) {
       try {
-        await patch(`interview-feedback/${idOf(mine.path)}`, body, etag ?? mine.etag);
+        const saved = await patch<InterviewFeedback>(`interview-feedback/${idOf(mine.path)}`, body, etag ?? mine.etag);
+        setEtag(saved.etag);
       } catch (e) {
         if (isConflict(e)) {
           const fresh = await get<InterviewFeedback>(`interview-feedback/${idOf(mine.path)}`).catch(() => null);

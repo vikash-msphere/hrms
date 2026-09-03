@@ -98,7 +98,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
   const yearDone = d.total_tax > 0 && collected >= d.total_tax;
 
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="tax" label="Tax">
@@ -244,7 +244,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
       </CardContent>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent onEnterSubmit={() => { if (!saving) save(); }}>
+        <DialogContent className="sentry-mask" onEnterSubmit={() => { if (!saving) save(); }}>
           <AccessScope collection="employees">
           <DialogHeader>
             <DialogTitle>Income from a previous employer (this financial year)</DialogTitle>

@@ -2,8 +2,8 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 // lazyPage, not React.lazy: a failed import must stay retryable (see lib/lazyPage.tsx and the crash boundary).
 import { lazyPage as lazy } from "@/lib/lazyPage";
 import { navigate } from "@/router";
-import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Type, Image as ImageIcon } from "lucide-react";
-import { get, patch, create, remove, list, upload, blobUrl } from "@/api";
+import { Plus, Trash2, Save, Building, X, ChevronDown, Users, User, Search, ArrowLeft, ArrowUp, ArrowDown, Check, Globe, Palette, Type, Image as ImageIcon } from "lucide-react";
+import { get, patch, create, remove, list, dataUrl } from "@/api";
 import { SETTINGS_REGISTRY, SETTINGS_GROUPS, SETTINGS_LEGACY, settingsEntry, entryScope, type SettingsEntry } from "@/settings/registry";
 import { hasCapability } from "@/lib/perm";
 import { APP_NAME } from "@/lib/brand";
@@ -14,11 +14,13 @@ import { KPI_ICONS, CATEGORY_ICONS } from "@/lib/kpiIcons";
 import { usePermission } from "@/lib/perm";
 import { useOrg, currencyDecimals, orgNameFontStack, orgNameWeight, orgNameSizePx, NAME_FONTS, NAME_WEIGHTS, NAME_SIZES, type LetterDefaults } from "@/lib/org";
 import { useCollection } from "@/hooks/useCollection";
+import { useLetterheads } from "@/lib/letterheads";
+import { LetterheadDesigner } from "@/components/settings/LetterheadDesigner";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, LetterheadLogo, Me, AtsConfig, AtsStage, Automation } from "@/types";
+import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Letterhead, Me, AtsConfig, AtsStage, Automation } from "@/types";
 import { DEFAULT_ATS_CONFIG } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -1569,18 +1571,27 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
 //
 // Unlike the identity form (one blob, one Save), each row here writes on its own - and the artwork goes to
 // object storage, not into the settings blob that nearly every request reads.
-function LetterheadLogosPanel({ toast }: { toast: Toast }) {
-  const { rows, reload } = useCollection<LetterheadLogo>("letterhead-logos");
+// A letterhead is a PAGE, and a page is designed, not uploaded. So "Add letterhead" makes an empty one and
+// opens the designer on it straight away: name it, design it, and add artwork only if the design wants any (a
+// header rule and a typeface make a perfectly good letterhead on their own). The row has to exist first
+// because the live preview renders through `letterheads/<id>:preview` and artwork lands in object storage
+// under that id - so a designer closed without ever saving takes its brand-new row with it (`isNew` below),
+// leaving no empty rows behind.
+function LetterheadsPanel({ toast }: { toast: Toast }) {
+  const { rows, reload } = useCollection<Letterhead>("letterheads");
   const [adding, setAdding] = useState(false);
+  const [designing, setDesigning] = useState<{ row: Letterhead; isNew: boolean } | null>(null);
+  // The open dialog follows the RELOADED row, not the one clicked: uploading artwork writes the row, so a
+  // snapshot's etag would be stale by the time the design is saved. The clicked row stands in until the reload
+  // that follows a create has landed.
+  const designingRow = designing && (rows.find((r) => r.path === designing.row.path) ?? designing.row);
 
-  // Two calls, because the row and its artwork are two objects: create the entry, then put the bytes in object
-  // storage under it. A failed upload leaves a named letterhead with no image, which the row says plainly.
-  async function add(file: File) {
+  async function add() {
     setAdding(true);
     try {
-      const row = await create<LetterheadLogo>("letterhead-logos", { label: file.name.replace(/\.[^.]+$/, "") || "New letterhead" });
-      await upload<LetterheadLogo>(row.path!, file, { verb: "uploadImage" });
+      const row = await create<Letterhead>("letterheads", { label: "New letterhead" });
       reload();
+      setDesigning({ row, isNew: true });
     } catch (e) {
       toast({ title: "Couldn't add letterhead", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -1592,102 +1603,75 @@ function LetterheadLogosPanel({ toast }: { toast: Toast }) {
     <Card className="mt-5">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">
-          <AccessAction collection="letterhead-logos" label="Letterhead logos"><span>Letterhead logos</span></AccessAction>
+          <AccessAction collection="letterheads" label="Letterheads"><span>Letterheads</span></AccessAction>
         </CardTitle>
-        <AccessAction collection="letterhead-logos" create label="Add letterhead">
-          <LetterheadPicker label="Add letterhead" busy={adding} onPick={add} toast={toast} />
+        <AccessAction collection="letterheads" create label="Add letterhead">
+          <Button variant="outline" size="sm" onClick={add} disabled={adding}><Plus className="h-4 w-4" /> Add letterhead</Button>
         </AccessAction>
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="text-sm text-muted-foreground">
-          The logos letters can be issued on - one per legal entity or brand. A letter template picks its own, and whoever generates a letter can
-          switch it for that document. Nothing here changes the app's own branding. PNG or JPG, under 256 KB (a PDF can't embed an SVG).
+          The stationery documents are issued on - one per legal entity or brand. Each is a page design: margins, typeface, palette, a header band,
+          a footer band and a watermark, with optional artwork used either as the header mark or as full-page stationery. A letter template picks
+          its own letterhead, whoever generates a letter can switch it for that document, and the section above sets one per document kind. Nothing
+          here changes the app's own branding.
         </p>
-        {rows.length === 0 && <p className="text-sm text-muted-foreground">No letterheads yet. Letters use the square mark above.</p>}
-        {rows.map((l) => <LetterheadRow key={l.path} logo={l} reload={reload} toast={toast} />)}
+        {rows.length === 0 && <p className="text-sm text-muted-foreground">No letterheads yet. Documents print on the stock page with the square mark above.</p>}
+        {rows.map((l) => <LetterheadRow key={l.path} logo={l} reload={reload} toast={toast} onDesign={() => setDesigning({ row: l, isNew: false })} />)}
       </CardContent>
+      {designing && designingRow && (
+        <LetterheadDesigner
+          // Keyed by row, so following a "Save as a copy" onto the copy remounts the editor against it rather
+          // than leaving the previous letterhead's name and design in the fields.
+          key={designingRow.path}
+          open
+          isNew={designing.isNew}
+          logo={designingRow}
+          reload={reload}
+          onSwitchTo={(row) => setDesigning({ row, isNew: false })}
+          onClose={() => setDesigning(null)}
+        />
+      )}
     </Card>
   );
 }
 
-// A file input styled as a button, shared by "Add letterhead" and a row's "Replace". Refuses oversize or
-// unembeddable artwork here rather than at the server, where it would arrive as a failed upload on a row that
-// already exists.
-function LetterheadPicker({ label, busy, onPick, toast }: { label: string; busy?: boolean; onPick: (file: File) => void; toast: Toast }) {
-  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    e.target.value = ""; // so re-picking the same file still fires a change
-    if (!f) return;
-    if (!/^image\/(png|jpeg)$/.test(f.type)) {
-      toast({ variant: "destructive", title: "Use a PNG or JPG", description: "A PDF letterhead can only embed PNG or JPEG artwork." });
-      return;
-    }
-    if (f.size > MAX_LOGO_BYTES) {
-      toast({ variant: "destructive", title: "Image too large", description: `Use a file under ${Math.round(MAX_LOGO_BYTES / 1024)} KB.` });
-      return;
-    }
-    onPick(f);
-  }
-  return (
-    <label className={cn("inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-accent", busy && "pointer-events-none opacity-60")}>
-      <Plus className="h-4 w-4" /> {label}
-      <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={onFile} />
-    </label>
-  );
-}
 
-// One letterhead: its artwork, its name, replace/remove. Renaming keeps the row, so every template pointing at
-// it keeps working. The image is a second fetch (it lives in object storage), so it loads per row, here, where
-// somebody is actually looking at the artwork - the generate picker lists names only.
-function LetterheadRow({ logo, reload, toast }: { logo: LetterheadLogo; reload: () => void; toast: Toast }) {
+// One letterhead in the list: what it looks like, what it is called, and the way into the designer - which is
+// where the name, the page and the artwork are all edited. The row itself edits nothing, so there is one place
+// to change a letterhead rather than three.
+//
+// The thumbnail is a second fetch (the artwork lives in object storage), so it loads per row, here, where
+// somebody is actually looking at artwork - the generate picker lists names only.
+function LetterheadRow({ logo, reload, toast, onDesign }: { logo: Letterhead; reload: () => void; toast: Toast; onDesign: () => void }) {
   const confirm = useConfirm();
   const path = logo.path!; // always present on a served row (readOnly, so the shared wire type has it optional)
-  const [label, setLabel] = useState(logo.label ?? "");
   const [busy, setBusy] = useState(false);
   const [art, setArt] = useState<string | null>(null);
-  const dirty = label.trim() !== (logo.label ?? "");
-  useUnsavedTracker(dirty, () => (label.trim() ? save() : undefined));
 
-  // Re-fetched whenever the stored artwork changes (update_time moves on every replace), and revoked on the way
-  // out so a settings visit doesn't leak an object URL per logo.
+  // The list shows ONE image per row - whichever the page leads with (its stationery, else its mark), since a
+  // thumbnail of four is a thumbnail of none. Images are held per version; the row previews the SCREEN
+  // version, leading with its stationery if it has any, since that is what the page mostly looks like.
+  //
+  // A DATA url, not an object URL: this re-fetches whenever the row changes (every upload moves update_time),
+  // and an object URL's cleanup revokes the one the <img> is still showing, which blanks the thumbnail.
+  const assets = (logo.assets ?? {}) as Record<string, Record<string, unknown> | undefined>;
+  const screenSlots = Object.keys(assets.screen ?? {});
+  const printSlots = Object.keys(assets.print ?? {});
+  const thumbSlot = screenSlots.includes("stationery") ? "stationery" : screenSlots[0];
   useEffect(() => {
-    if (!logo.has_image) { setArt(null); return; }
-    let url: string | undefined;
+    if (!thumbSlot) { setArt(null); return; }
     let dropped = false;
-    void blobUrl(path, { verb: "image" })
-      .then((u) => { if (dropped) { URL.revokeObjectURL(u); return; } url = u; setArt(u); })
-      .catch(() => setArt(null)); // no access to the artwork, or it's gone - the row still names it
-    return () => { dropped = true; if (url) URL.revokeObjectURL(url); };
-  }, [path, logo.has_image, logo.update_time]);
+    void dataUrl(path, { verb: "image", params: { slot: thumbSlot, variant: "screen" } })
+      .then((src) => { if (!dropped) setArt(src); })
+      .catch(() => { if (!dropped) setArt(null); }); // no access to the artwork, or it's gone - the row still names it
+    return () => { dropped = true; };
+  }, [path, thumbSlot, logo.update_time]);
 
-  async function save() {
-    setBusy(true);
-    try {
-      await patch(path, { label: label.trim() }, logo.etag);
-      reload();
-      toast({ title: "Letterhead saved", variant: "success" });
-    } catch (e) {
-      toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function replaceArt(file: File) {
-    setBusy(true);
-    try {
-      await upload<LetterheadLogo>(path, file, { verb: "uploadImage" });
-      reload();
-      toast({ title: "Letterhead updated", variant: "success" });
-    } catch (e) {
-      toast({ title: "Couldn't upload", description: (e as Error).message, variant: "destructive" });
-    } finally {
-      setBusy(false);
-    }
-  }
   async function del() {
     const ok = await confirm({
       title: "Remove this letterhead?",
-      description: `Templates set to "${logo.label}" fall back to the organization logo. Letters already generated keep the logo they were rendered with.`,
+      description: `Anything set to "${logo.label}" falls back to the stock page with the organization logo. Documents already generated keep the page they were rendered on.`,
       confirmLabel: "Remove",
       destructive: true,
     });
@@ -1709,14 +1693,21 @@ function LetterheadRow({ logo, reload, toast }: { logo: LetterheadLogo; reload: 
         {art ? <img src={art} alt="" className="h-full w-full object-contain p-2" /> : <Building className="h-6 w-6 text-muted-foreground" />}
       </div>
       <div className="flex min-w-0 flex-1 basis-48 items-center gap-2">
-        <Input value={label} placeholder="e.g. Acme Technologies Pvt Ltd" onChange={(e) => setLabel(e.target.value)} aria-label="Letterhead name" />
-        <AccessTarget target={{ collection: "letterhead-logos", objectPath: path, label: logo.label, can: logo.access?.can }} />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{logo.label}</p>
+          <p className="text-xs text-muted-foreground">
+            {[
+              logo.design ? "Custom page" : "Stock page",
+              `${screenSlots.length || "no"} screen image${screenSlots.length === 1 ? "" : "s"}`,
+              logo.print_design || printSlots.length ? `own print version (${printSlots.length || "no"} image${printSlots.length === 1 ? "" : "s"})` : null,
+            ].filter(Boolean).join(" · ")}
+          </p>
+        </div>
+        <AccessTarget target={{ collection: "letterheads", objectPath: path, label: logo.label, can: logo.access?.can }} />
       </div>
       <div className="flex items-center gap-2">
-        {!logo.has_image && <span className="text-xs text-warning">No artwork yet</span>}
-        {dirty && <Button size="sm" onClick={() => save()} disabled={busy || !label.trim()}><Save className="h-4 w-4" /> Save</Button>}
-        <AccessAction collection="letterhead-logos" verb="uploadImage" objectPath={path} can={logo.access?.can} label="Replace artwork">
-          <LetterheadPicker label="Replace" busy={busy} onPick={replaceArt} toast={toast} />
+        <AccessAction collection="letterheads" verb="preview" objectPath={path} can={logo.access?.can} label="Design the page">
+          <Button variant="outline" size="sm" onClick={onDesign} disabled={busy}><Palette className="h-4 w-4" /> Design</Button>
         </AccessAction>
         <Button variant="ghost" size="icon" onClick={del} disabled={busy} aria-label="Remove letterhead"><Trash2 className="h-4 w-4" /></Button>
       </div>
@@ -1959,6 +1950,17 @@ function BrandImageField({
   );
 }
 
+// Every generated PDF picks a letterhead the same way, and only the letter engine has a per-template and a
+// per-document choice to make it with - the rest are org-wide, so they are chosen here. Keys match
+// services/letterheads.ts DOCUMENT_KINDS; the server rejects any other key.
+const DOCUMENT_LETTERHEADS = [
+  { key: "letter", label: "Letters", hint: "Used by a letter type that doesn't name its own." },
+  { key: "payslip", label: "Payslips", hint: "Applies from the next payslip generated." },
+  { key: "form16", label: "Form 16", hint: "The annual TDS certificate." },
+  { key: "offer", label: "Offer letters", hint: "Issued from a candidate's offer." },
+  { key: "review", label: "Review summaries", hint: "The exported performance review PDF." },
+] as const;
+
 function OrgIdentityPanel({ toast }: { toast: Toast }) {
   const { blob, save, saving } = useOrgBlob(toast);
   const [name, setName] = useState("");
@@ -1977,7 +1979,9 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
   const [defaultDept, setDefaultDept] = useState("none"); // org-wide default department for cards + tickets
   const [primaryColor, setPrimaryColor] = useState("#1D4C91"); // brand accent (email header/buttons; hex)
   const [emailLogoUrl, setEmailLogoUrl] = useState(""); // public https logo for email headers (the app logo is a data URL, which email clients strip)
+  const [docLogos, setDocLogos] = useState<Record<string, string>>({}); // document kind -> letterhead ref; absent = the square mark
   const { rows: departments } = useCollection<Department>("departments");
+  const letterheads = useLetterheads();
 
   const [ready, setReady] = useState(false);
   const hydrated = useRef(false);
@@ -2001,16 +2005,17 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
     if (blob.default_department) setDefaultDept(blob.default_department);
     if (blob.primary_color) setPrimaryColor(blob.primary_color);
     if (blob.email_logo_url) setEmailLogoUrl(blob.email_logo_url);
+    if (blob.document_logos) setDocLogos(blob.document_logos);
   }, [blob]);
 
   const { markSaved } = useUnsaved(
-    { name, legalName, logo, logoDark, wordmark, wordmarkDark, favicon, logoText, nameFont, nameWeight, nameSize, address, incorporationDate, defaultDept, primaryColor, emailLogoUrl },
+    { name, legalName, logo, logoDark, wordmark, wordmarkDark, favicon, logoText, nameFont, nameWeight, nameSize, address, incorporationDate, defaultDept, primaryColor, emailLogoUrl, docLogos },
     ready,
     saveIdentity,
   );
   async function saveIdentity() {
     const ok = await save(
-      { name: name.trim(), legal_name: legalName.trim() || null, logo: logo ?? null, logo_dark: logoDark ?? null, wordmark: wordmark ?? null, wordmark_dark: wordmarkDark ?? null, favicon: favicon ?? null, logo_text: logoText.trim() || null, name_font: nameFont, name_weight: nameWeight, name_size: nameSize, address: address.trim() || null, incorporation_date: incorporationDate || null, default_department: defaultDept === "none" ? null : defaultDept, primary_color: primaryColor || null, email_logo_url: emailLogoUrl.trim() || null },
+      { name: name.trim(), legal_name: legalName.trim() || null, logo: logo ?? null, logo_dark: logoDark ?? null, wordmark: wordmark ?? null, wordmark_dark: wordmarkDark ?? null, favicon: favicon ?? null, logo_text: logoText.trim() || null, name_font: nameFont, name_weight: nameWeight, name_size: nameSize, address: address.trim() || null, incorporation_date: incorporationDate || null, default_department: defaultDept === "none" ? null : defaultDept, primary_color: primaryColor || null, email_logo_url: emailLogoUrl.trim() || null, document_logos: docLogos },
       "Organization saved",
     );
     if (ok) markSaved();
@@ -2023,6 +2028,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
       <Tabs defaultValue="logos">
         <TabsList>
           <TabsTrigger value="logos"><ImageIcon className="h-4 w-4" /> Logos</TabsTrigger>
+          <TabsTrigger value="letterheads"><Palette className="h-4 w-4" /> Letterheads</TabsTrigger>
           <TabsTrigger value="name"><Type className="h-4 w-4" /> Name</TabsTrigger>
           <TabsTrigger value="details"><Building className="h-4 w-4" /> Company details</TabsTrigger>
         </TabsList>
@@ -2045,7 +2051,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                     value={logoDark}
                     onChange={setLogoDark}
                     choose="Choose dark logo"
-                    hint="Optional. Used while the dark theme is on. Blank = the logo beside it."
+                    hint="Optional. Used while the dark theme is on."
                     maxBytes={MAX_LOGO_BYTES}
                     dark
                     icon={Building}
@@ -2058,7 +2064,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                   <p className="text-sm font-medium">Wordmark</p>
                   <p className="text-xs text-muted-foreground">Wide artwork carrying the name. Set one and it spans the sidebar in place of the square mark and the name text; the collapsed rail keeps using the square mark.</p>
                 </div>
-                <div className="space-y-5">
+                <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
                   <BrandImageField
                     value={wordmark}
                     onChange={setWordmark}
@@ -2073,7 +2079,7 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
                     value={wordmarkDark}
                     onChange={setWordmarkDark}
                     choose="Choose dark wordmark"
-                    hint="Optional. Used while the dark theme is on. Blank = the wordmark above."
+                    hint="Optional. Used while the dark theme is on."
                     maxBytes={MAX_LOGO_BYTES}
                     dark
                     wide
@@ -2108,7 +2114,43 @@ function OrgIdentityPanel({ toast }: { toast: Toast }) {
               </div>
             </CardContent>
           </Card>
-          <LetterheadLogosPanel toast={toast} />
+        </TabsContent>
+        {/* Letterheads are their own subject - a catalogue of pages, and which document kind prints on which -
+            so they get a tab rather than a third section under the app's own branding marks. The assignment
+            grid shares this panel's Save; the catalogue below it writes its own rows as they are edited. */}
+        <TabsContent value="letterheads">
+          <Card>
+            <CardContent className="space-y-3 pt-4 sm:pt-6">
+              <div>
+                <p className="text-sm font-medium">Document letterheads</p>
+                <p className="text-xs text-muted-foreground">
+                  Which letterhead each generated PDF prints on. A letter type that names its own letterhead, and a single letter generated on
+                  another, both still win over this.
+                </p>
+              </div>
+              {letterheads.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Nothing to choose between yet - add a letterhead below and these become pickers.</p>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  {DOCUMENT_LETTERHEADS.map((k) => (
+                    <Field key={k.key} label={k.label} hint={k.hint}>
+                      <Select
+                        value={letterheads.some((l) => l.path === docLogos[k.key]) ? docLogos[k.key]! : "__org"}
+                        onValueChange={(v) => setDocLogos(({ [k.key]: _drop, ...rest }) => (v === "__org" ? rest : { ...rest, [k.key]: v }))}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__org">Square mark</SelectItem>
+                          {letterheads.map((l) => <SelectItem key={l.path} value={l.path!}>{l.label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+          <LetterheadsPanel toast={toast} />
         </TabsContent>
         <TabsContent value="name">
           <Card>

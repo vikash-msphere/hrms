@@ -31,6 +31,8 @@ import { refLeaveTypes, refHolidays } from "./lib/refData";
 // The scheduled triggers this Worker handles (must mirror wrangler.toml `crons`). Exported so the manual
 // trigger (cron-runs:run) can validate the requested expression against the real, dispatchable set.
 export const KNOWN_CRONS = ["*/5 * * * *", "0 2 * * *"] as const;
+/** The nightly run (accrual, reminders, digests) - the one with a Sentry cron monitor on it (src/index.ts). */
+export const NIGHTLY_CRON = "0 2 * * *";
 
 // Each tick records a cron_runs row (running -> done/error + duration + summary) so the schedule is
 // observable. Split into start/finish so the manual trigger can return the "running" row immediately and
@@ -81,6 +83,10 @@ export async function finishCronRun(cron: string, deps: Deps, runId: string, sta
 // own lifetime). Returns the row id.
 export async function runScheduled(cron: string, deps: Deps): Promise<string> {
   const { runId, start } = await startCronRun(cron, deps);
+  // The tick names itself for the whole run: every audit entry it writes is a scheduled job's, not a person's,
+  // and one trace ties the night's writes together the way a request's does for a human act.
+  deps.actingAs = { kind: "cron", name: cron, ref: `cron-runs/${runId}` };
+  deps.trace ??= runId;
   await finishCronRun(cron, deps, runId, start);
   return runId;
 }
@@ -124,7 +130,7 @@ async function dispatchCron(cron: string, deps: Deps): Promise<{ summary: Record
     const drained = await run("drainJobs", () => drainJobs(deps, 20));
     return { summary: { drained, announcementsPublished }, failures };
   }
-  if (cron === "0 2 * * *") {
+  if (cron === NIGHTLY_CRON) {
     // Carry-forward runs BEFORE accrual so it caps last year's balance before the new year accrues on top.
     // Both are best-effort like everything else here: leave balances are the most consequential thing the tick
     // touches, but an exception in accrual is not a reason to also skip reminders, digests and e-sign
@@ -224,6 +230,17 @@ async function notifyJobDeadLetter(deps: Deps, job: JobRow, error: string): Prom
 // Run one job through its state machine. Returns "requeued" if an LRO asked to resume next tick (state
 // unchanged from the queue's perspective), "skipped" if another drain claimed it first, else "done"/"error".
 // Idempotent per call; never throws.
+/** The correlation id an enqueued job carries, when it carries one. Best-effort: an unreadable payload is the
+ *  job's own problem and must not stop it running. */
+function jobTrace(payload: string): string | undefined {
+  try {
+    const v = JSON.parse(payload) as { correlationId?: unknown };
+    return typeof v?.correlationId === "string" ? v.correlationId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" | "requeued" | "skipped"> {
   // GUARDED CLAIM, not a bare flip: the `queued` predicate is what makes at-most-one-runner true. Two drains
   // overlap for real - `cron-runs:run` fires a tick on demand (routes/cronTrigger.ts) with no lock against the
@@ -236,6 +253,14 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
     .where(and(eq(schema.jobs.uuid, job.uuid), eq(schema.jobs.status, "queued")))
     .returning({ uuid: schema.jobs.uuid });
   if (!claim.length) return "skipped";
+  // The job belongs to the ACT that enqueued it, not to the tick that happens to drain it. Publishing a run
+  // and the payslips that publish generated are one thing a person did; without this they land under two
+  // different traces - the request's and the cron's - and the async half of every long operation is orphaned
+  // from the action it came from. The engine already threads this through its own deferred jobs; the same
+  // rule now covers every kind.
+  const enqueuedTrace = jobTrace(job.payload);
+  const tickTrace = deps.trace;
+  if (enqueuedTrace) deps.trace = enqueuedTrace;
   try {
     if (job.kind === "payslip.generateRun") {
       const res = await processPayslipRunJob(deps, job.uuid, JSON.parse(job.payload));
@@ -270,6 +295,9 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
     // A retry is queue-neutral, like an LRO that asked to resume: the row is back in `queued` and this tick
     // advanced nothing, so it is not counted as processed.
     return retry ? "requeued" : "error";
+  } finally {
+    // The next job in this drain is a different act, and the tick's own writes are the tick's.
+    deps.trace = tickTrace;
   }
 }
 

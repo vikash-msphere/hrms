@@ -541,6 +541,10 @@ export const personalDocuments = sqliteTable("personal_documents", {
   // flagged here so the owner is prompted to sign. Signing re-renders the frozen letter with their signature
   // image embedded at the placeholder (in place), then stamps signedTime + the typed-name attestation + locks.
   requiresSignature: integer("requires_signature", { mode: "boolean" }).notNull().default(false),
+  // The letterhead this document was rendered on (letterheads.uuid), for documents this app laid out. Kept on
+  // the row, not dug out of the frozen content sidecar, so a LIST can answer "does this one also have a print
+  // version?" with one extra query instead of an R2 read per document. Null for uploads.
+  letterheadId: text("letterhead_id"),
   signedTime: integer("signed_time", { mode: "timestamp_ms" }),
   signatureName: text("signature_name"), // typed full name = the e-signature attestation
   // Year-end tax docs (Form 16): the financial year the doc covers ("2025-26"), and whether it's the OFFICIAL
@@ -1226,12 +1230,41 @@ export const auditLog = sqliteTable("audit_log", {
   // actually asks, and the one that decides whether revoking it is safe - has no answer. `meta.via_api_key`
   // carries the key's point-in-time name for display; this column is what makes it queryable.
   apiKeyId: text("api_key_id"),
+  // The role the actor held AS OF the event. Roles are data and they change, so "who approved this settlement"
+  // reads differently once the approver is no longer payroll_admin - the same point-in-time argument
+  // `actor_name` is snapshotted for.
+  actorRole: text("actor_role"),
+  // What one ACT was. A single request writes many entries - accepting an offer creates the employee, their
+  // compensation, the hire and the transition's tasks - and without this they are six unrelated lines that
+  // happen to share a timestamp. The trace is minted per request (middleware) or per cron tick, and the
+  // workflow engine already threads the SAME id through event_log / automation_runs / workflow_instances
+  // (`correlation_id` there), so an automation's writes join to the run that caused them and to the human
+  // request that set the whole thing off.
+  correlationId: text("correlation_id"),
+  // WHO the entry is about, as opposed to who performed it. The two differ in exactly the cases that matter -
+  // a manager approving somebody else's leave, payroll revising somebody else's pay - and without this the
+  // question "everything that happened to Asha" spans a dozen collections with no index behind it. Populated
+  // from the `employee` ref the meta already carries, so it costs no call site anything.
+  subjectId: text("subject_id"),
+  // The SITTING. A correlation id groups one act; this groups every act of one login - "what did they do while
+  // signed in from that address on Tuesday", which is the question an incident review actually opens with and
+  // which per-request traces cannot answer. Derived from the session cookie's issue instant, so it is stable
+  // for the life of a session and changes on the next sign-in. Null on lanes that carry no session (an API
+  // key, a Cloudflare Access assertion, the dev bypass, cron).
+  sessionId: text("session_id"),
   ip: text("ip"), // request IP (cf-connecting-ip / x-forwarded-for), when available
   userAgent: text("user_agent"), // request User-Agent, when available
   at: integer("at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 }, (t) => ({
   entIdx: index("audit_entity_idx").on(t.entity, t.entityId), // per-entity feed
   atIdx: index("audit_at_idx").on(t.at), // org-wide feed (newest-first keyset paging)
+  // "Everything that happened in this one act", the query the correlation id exists to answer. Partial: an
+  // entry written outside any traced request carries none, and indexing those would be indexing nulls.
+  corrIdx: index("audit_corr_idx").on(t.correlationId, t.at).where(sql`${t.correlationId} is not null`),
+  // One person's whole timeline, across every collection. Partial for the same reason as the two above: most
+  // entries are about a record rather than a person, and indexing their nulls buys nothing.
+  subjIdx: index("audit_subject_idx").on(t.subjectId, t.at).where(sql`${t.subjectId} is not null`),
+  sessIdx: index("audit_session_idx").on(t.sessionId, t.at).where(sql`${t.sessionId} is not null`),
   // Partial: nearly every row is a human's, so indexing only the key-borne ones keeps this tiny and costs
   // almost nothing on the write path that every audited request pays.
   keyIdx: index("audit_api_key_idx").on(t.apiKeyId, t.at).where(sql`${t.apiKeyId} is not null`),
@@ -1348,10 +1381,13 @@ export const workflowInstances = sqliteTable("workflow_instances", {
 export const automationRuns = sqliteTable("automation_runs", {
   uuid: pk(),
   code: codeCol(),
-  automationId: text("automation_id").notNull().references((): AnySQLiteColumn => automations.uuid),
+  // Nullable for exactly one case: a `dropped` row, which records that the per-request dispatch budget was
+  // exhausted and events went unprocessed. No single rule caused that and none was even loaded, so there is
+  // no automation to point at. Every other status names its rule.
+  automationId: text("automation_id").references((): AnySQLiteColumn => automations.uuid),
   eventId: text("event_id").references((): AnySQLiteColumn => eventLog.uuid),
   eventType: text("event_type").notNull(),
-  status: text("status", { enum: ["done", "partial", "error", "skipped"] }).notNull(),
+  status: text("status", { enum: ["done", "partial", "error", "skipped", "dropped"] }).notNull(),
   resultJson: text("result_json"), // per-action outcome array
   // Denormalized from the triggering event so a run shows WHAT/WHO it was about without a join, and shares the
   // workflow execution's trace id for grouping.
@@ -1398,12 +1434,19 @@ export const compensation = sqliteTable("compensation", {
   arrearsPaidAt: integer("arrears_paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-  // At most ONE open (current) row per employee, enforced by the DB. A revision closes the open row and inserts
-  // a new one in two statements; two concurrent revisions would otherwise both close the same row and leave TWO
-  // open rows - an ambiguous current salary, and arrears computed (and paid) twice off the same delta.
+  // Soft delete: a revision entered by mistake is taken OUT OF THE TIMELINE but kept as a row, so the audit
+  // trail - and any published payslip that was priced against it - still resolves to something. Removing a row
+  // heals the chain: the preceding revision absorbs the removed window, and reopens if the removed row was the
+  // current one. Every timeline read therefore filters on `delete_time is null`.
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  // At most ONE open (current) LIVE row per employee, enforced by the DB. A revision closes the open row and
+  // inserts a new one in two statements; two concurrent revisions would otherwise both close the same row and
+  // leave TWO open rows - an ambiguous current salary, and arrears computed (and paid) twice off the same delta.
+  // Soft-deleted rows are outside the predicate, so removing the current revision (which reopens its
+  // predecessor) and correcting a row's dates never trip the constraint on a row nobody can see.
 }, (t) => ({
   empIdx: index("comp_emp_idx").on(t.employeeId),
-  openUniq: uniqueIndex("comp_open_idx").on(t.employeeId).where(sql`${t.effectiveTo} is null`),
+  openUniq: uniqueIndex("comp_open_idx").on(t.employeeId).where(sql`${t.effectiveTo} is null and ${t.deleteTime} is null`),
 }));
 
 // Effective-dated role history (designation + department + location). A promotion or transfer is a NEW row
@@ -2195,18 +2238,26 @@ export const noticePeriods = sqliteTable("notice_periods", {
 // per-template access uses the real engine - READ = who may generate this letter type, WRITE =
 // who may edit it. Private by default; seed widens read+write to hr_admin. `blocks`/`inputs` are the editable
 // template content (see src/domain/letters.ts), stored as JSON.
-// The org's letterhead catalogue: the logos letters can be ISSUED on, one per legal entity or brand, distinct
-// from the single app-branding logo in settings/organization. A letter template names one as its default and a
-// generation can override it. The artwork itself lives in R2 (`letterhead-logos/<uuid>`), never in a settings
-// blob - lib/refData.ts snapshots the whole settings table on the first settings read of a request, so an image
-// parked there would be bytes read on nearly every request.
-export const letterheadLogos = sqliteTable("letterhead_logos", {
+// The org's letterhead catalogue: the stationery documents are ISSUED on, one per legal entity or brand,
+// distinct from the single app-branding logo in settings/organization. `design_json` is the page itself
+// (domain/letterhead.ts): margins, typeface, palette, header band, footer band, watermark. A letter template
+// names one as its default and a generation can override it. The artwork lives in R2 (`letterheads/<uuid>`),
+// never in a settings blob - lib/refData.ts snapshots the whole settings table on the first settings read of a
+// request, so an image parked there would be bytes read on nearly every request.
+export const letterheads = sqliteTable("letterheads", {
   uuid: pk(),
   code: codeCol(),
   label: text("label").notNull(), // the entity/brand this letterhead belongs to
-  r2Key: text("r2_key"), // where the artwork lives; null until an image is uploaded
-  contentType: text("content_type"), // image/png | image/jpeg - the two pdf-lib can embed
-  sizeBytes: integer("size_bytes"),
+  // The letterhead's IMAGES, by slot (domain/letterhead.ts LETTERHEAD_SLOTS): a header mark, screen
+  // stationery, print stationery, a watermark. `{ [slot]: { key, content_type, size_bytes } }` - the bytes
+  // themselves live in R2 under `letterheads/<uuid>/<slot>`, never in the row. A JSON column rather than a
+  // child table because the whole set is read together, always, and never queried across rows.
+  assetsJson: text("assets_json"),
+  designJson: text("design_json"), // the page design (domain/letterhead.ts); null = the stock page
+  // The same letterhead as it should come out of a printer - typically the screen page minus the flooded
+  // background, or with the header band off because the paper is already pre-printed. Null = documents print
+  // exactly as they render on screen, which is what a single-design letterhead means.
+  printDesignJson: text("print_design_json"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -2218,8 +2269,8 @@ export const letterTemplates = sqliteTable("letter_templates", {
   label: text("label").notNull(),
   category: text("category"), // grouping for the editor + generate pickers (Onboarding, Compensation, ...)
   filename: text("filename"), // download filename template (placeholders ok)
-  // Which letterhead this type is issued on (letterhead_logos.uuid). Null - or a logo since removed - falls
-  // back to the single organization logo, so a deleted letterhead degrades the letter rather than breaking it.
+  // Which letterhead this type is issued on (letterheads.uuid). Null - or one since removed - falls back to the
+  // org-wide default for letters, so a deleted letterhead degrades the letter rather than breaking it.
   letterheadId: text("letterhead_id"),
   inputs: text("inputs", { mode: "json" }).$type<unknown[]>(), // fields HR fills in at generation time
   blocks: text("blocks", { mode: "json" }).$type<unknown[]>().notNull(), // ordered content blocks
@@ -2338,6 +2389,16 @@ export const tickets = sqliteTable("tickets", {
   // no life of its own - it is readable exactly when its ticket is, dies with it, and is never listed, shared
   // or granted on separately. Screenshots are how support tickets get answered, so this is not an extra.
   attachmentsJson: text("attachments_json").notNull().default("[]"),
+  // Session recordings on this ticket: a JSON array of {id,created_at,by}, oldest first. `id` is a Sentry
+  // replay id (32 hex) - an id, not a URL, because the org slug that completes the link is deploy
+  // configuration (VITE_SENTRY_ORG) and baking a third party's URL shape into rows would outlive the vendor.
+  //
+  // An ARRAY, not one id, and for the same reason attachments are: a ticket is a conversation, and "can you
+  // show me that again?" is the commonest thing support says. The first recording arrives with the report;
+  // later ones are added from the ticket itself (`:attachRecording`). A JSON column rather than a child
+  // collection because a recording has no life of its own - it is readable exactly when its ticket is, dies
+  // with it, and is never listed or granted on separately.
+  sessionReplaysJson: text("session_replays_json").notNull().default("[]"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),

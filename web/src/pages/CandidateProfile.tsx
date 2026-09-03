@@ -231,7 +231,11 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
               </Button>
             )}
 
-            {candidate && <ActivitySection resource={candidate.path} className="border-t pt-4" />}
+            {/* Two trails, and the second is the one a recruiter means. `resource` is edits to the CANDIDATE
+                record; the case walks the whole hire - the requisition, the application, every interview and
+                its feedback, the offer, and the employee it produced - which no single record's trail sees. */}
+            {candidate && <ActivitySection caseRoot={candidate.path} label="Hiring story" className="border-t pt-4" />}
+            {candidate && <ActivitySection resource={candidate.path} label="Changes to this candidate" />}
           </div>
         )}
       </DataState>

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { esignFor, DEFAULT_ESIGN, type EsignConfig } from "../src/domain/esign";
-import { getProvider, providerIds, providerMeta } from "../src/services/esign";
+import { getProvider, providerIds, providerMeta, assertProviderConfigured } from "../src/services/esign";
 import { internalProvider } from "../src/services/esign/internal";
 import { cashfreeProvider } from "../src/services/esign/cashfree";
 
@@ -118,5 +118,41 @@ describe("cashfree createRequest input guards (fail before any network call)", (
   });
   it("still requires configured secrets", async () => {
     await expect(cashfreeProvider.createRequest({ pdf: pdfHeader, fileName: "x.pdf", signers: [], docId: "d", cfg: {}, secrets: {} })).rejects.toThrow(/not configured/);
+  });
+});
+
+// The app ships with NO vendor credentials on purpose - in-app signature signing needs none - so an
+// unconfigured external provider is the normal state. It has to fail as a readable precondition at selection
+// time. Before this gate, the first sign of a missing secret was the vendor adapter throwing a bare Error
+// from inside createRequest: an opaque 500, and in letterGenerate's case only after the document row and its
+// R2 object had already been written (then unwound).
+describe("assertProviderConfigured - an unconfigured vendor is refused up front", () => {
+  it("passes the internal driver, which needs no secrets at all", () => {
+    expect(internalProvider.requiredSecrets ?? []).toEqual([]);
+    expect(() => assertProviderConfigured(internalProvider, undefined)).not.toThrow();
+    expect(() => assertProviderConfigured(internalProvider, {})).not.toThrow();
+  });
+
+  it("refuses cashfree with no secrets, naming the env vars to set", () => {
+    expect(() => assertProviderConfigured(cashfreeProvider, undefined)).toThrow(
+      /ESIGN_CASHFREE_CLIENT_ID and ESIGN_CASHFREE_CLIENT_SECRET/,
+    );
+  });
+
+  it("refuses a half-configured cashfree, naming only what is missing", () => {
+    let msg = "";
+    try {
+      assertProviderConfigured(cashfreeProvider, { apiKey: "id-only" });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toContain("ESIGN_CASHFREE_CLIENT_SECRET");
+    expect(msg).not.toContain("ESIGN_CASHFREE_CLIENT_ID");
+  });
+
+  it("passes cashfree once the id and secret are both present - the public key is optional", () => {
+    // ESIGN_CASHFREE_PUBLIC_KEY is only needed for the production 2FA header, so its absence is a valid
+    // sandbox / client-secret-only setup and must not block signing.
+    expect(() => assertProviderConfigured(cashfreeProvider, { apiKey: "id", apiSecret: "secret" })).not.toThrow();
   });
 });

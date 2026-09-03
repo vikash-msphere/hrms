@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, Copy, Eye, FileSignature, KeyRound, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Eye, FileSignature, KeyRound, PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
-import { useLetterheadLogos } from "@/lib/letterheadLogos";
+import { useLetterheads } from "@/lib/letterheads";
 import { cn, idOf } from "@/lib/utils";
 import type { Employee } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,6 +20,24 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useUnsavedTracker } from "@/components/common/UnsavedChanges";
 
 type Toast = (t: { title: string; description?: string; variant?: "success" | "destructive" }) => void;
+
+const RAIL_KEY = "hrms.letters.rail";
+
+// The one control that folds the letter-type rail away. It sits in the rail's own heading while the rail is
+// open, and hops into the editor heading once the rail is gone.
+function RailToggle({ open, onClick }: { open: boolean; onClick: () => void }) {
+  const label = open ? "Hide the letter type list" : "Show the letter type list";
+  // aria-controls only while the list is mounted: pointing at an id that isn't in the DOM is worse than
+  // leaving it off, and aria-expanded alone already tells a screen reader what the button does.
+  return (
+    <Button
+      variant="ghost" size="icon" className="-my-1 h-7 w-7 shrink-0 text-muted-foreground"
+      onClick={onClick} aria-expanded={open} aria-controls={open ? "letter-type-list" : undefined} aria-label={label} title={label}
+    >
+      {open ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+    </Button>
+  );
+}
 
 // Mirrors src/domain/letters.ts TemplateBlock (the editable subset). Kept loose - the server validates.
 type Block = {
@@ -170,12 +188,22 @@ export default function LettersTab({ toast }: { toast: Toast }) {
   const { rows: rows, reload } = useCollection<{ path: string; etag?: string; label: string; category?: string; filename?: string; letterhead?: string; inputs?: TemplateInput[]; blocks: Block[]; access?: { can?: string[] } }>("letter-templates");
   // The letterhead catalogue, for the per-template default. Names only - the Preview tab is what shows the
   // artwork, on the letter itself.
-  const letterheads = useLetterheadLogos();
+  const letterheads = useLetterheads();
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selId, setSelId] = useState<string>("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newLabel, setNewLabel] = useState("");
+  // The type rail folds away to give the block editor the full width - a per-browser convenience, so it is
+  // remembered in localStorage rather than a synced preference (and a blocked/absent store just means open).
+  const [railOpen, setRailOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(RAIL_KEY) !== "0"; } catch { return true; }
+  });
+  function toggleRail() {
+    const next = !railOpen;
+    setRailOpen(next);
+    try { localStorage.setItem(RAIL_KEY, next ? "1" : "0"); } catch { /* private mode: fold stays session-only */ }
+  }
 
   const [previewEmp, setPreviewEmp] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -296,11 +324,17 @@ export default function LettersTab({ toast }: { toast: Toast }) {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
+      {/* Folded, the rail is gone entirely - no leftover strip - and its toggle moves into the editor header,
+          which is the only place left that is always on screen. */}
+      <div className={cn("grid gap-4", railOpen && "lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[340px_minmax(0,1fr)]")}>
         {/* Template list */}
+        {railOpen && (
         <Card className="h-fit">
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Letter types</CardTitle></CardHeader>
-          <CardContent className="space-y-2">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-sm">Letter types</CardTitle>
+            <RailToggle open onClick={toggleRail} />
+          </CardHeader>
+          <CardContent id="letter-type-list" className="space-y-2">
             <div className="space-y-2">
               {groupTemplates(templates).map((g) => (
                 <div key={g.category} className="space-y-0.5">
@@ -326,6 +360,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
             </div>
           </CardContent>
         </Card>
+        )}
 
         {/* Editor */}
         {selected ? (
@@ -333,6 +368,7 @@ export default function LettersTab({ toast }: { toast: Toast }) {
             <Card>
               <CardHeader className="flex flex-row items-center justify-between pb-3">
                 <CardTitle className="flex items-center gap-2 text-sm">
+                  {!railOpen && <RailToggle open={false} onClick={toggleRail} />}
                   {selected.label}
                   <AccessTarget target={{ collection: "letter-templates", objectPath: selected.id, can: selected.access?.can, label: selected.label }} />
                 </CardTitle>
@@ -348,7 +384,9 @@ export default function LettersTab({ toast }: { toast: Toast }) {
                   <Select value={selected.letterhead || "__org"} onValueChange={(v) => mutateSelected((t) => ({ ...t, letterhead: v === "__org" ? undefined : v }))}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__org">Organization logo</SelectItem>
+                      {/* Not "the square mark": leaving this unset defers to the org-wide letter letterhead
+                          (Settings -> Company -> Logos), which is the square mark only if that is unset too. */}
+                      <SelectItem value="__org">Default for letters</SelectItem>
                       {letterheads.map((l) => <SelectItem key={l.path} value={l.path!}>{l.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
@@ -551,7 +589,12 @@ export default function LettersTab({ toast }: { toast: Toast }) {
             </Tabs>
           </div>
         ) : (
-          <Card><CardContent className="py-10 text-center text-sm text-muted-foreground sm:py-10">Select or add a letter type to edit.</CardContent></Card>
+          <Card>
+            <CardContent className="space-y-2 py-10 text-center text-sm text-muted-foreground sm:py-10">
+              <p>Select or add a letter type to edit.</p>
+              {!railOpen && <Button variant="outline" size="sm" onClick={toggleRail}><PanelLeftOpen className="h-4 w-4" /> Letter types</Button>}
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>

@@ -5,7 +5,8 @@ import { documentFileName } from "@/lib/documents";
 import { runSequential, batchSummary, type BatchProgress } from "@/lib/batchRun";
 import { EmployeePicker } from "@/components/common/EmployeePicker";
 import { useLetterTemplates, groupByCategory, type LetterTemplateOption } from "@/lib/letterTemplates";
-import { useLetterheadLogos } from "@/lib/letterheadLogos";
+import { useLetterheads } from "@/lib/letterheads";
+import { useOrg } from "@/lib/org";
 import { LetterInputFields, missingRequiredInputs } from "@/components/common/LetterInputFields";
 import { Field } from "@/components/common/Field";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -56,14 +57,15 @@ export function GenerateLetterDialog({
   onGenerated?: () => void;
 }) {
   const templates = useLetterTemplates();
+  const { org } = useOrg();
   const { toast } = useToast();
   // Only what the reader actually chose lives in state; the defaults (the fixed employee, the first template)
   // are derived below. That matters for the discard guard: a value written into state by an effect AFTER the
   // dialog opened would read as an edit, and cancelling an untouched form would ask to discard nothing.
   // `more` holds the extra recipients of a batch (increment letters go out to forty people at once); `employee`
   // is still the primary one, and the only one the preview renders.
-  // `logo` is the letterhead for THIS run: null = whatever the template is set to, "" = the plain organization
-  // logo, otherwise a `letterhead-logos/<id>` ref. An org with several legal entities issues a letter on the
+  // `logo` is the letterhead for THIS run: null = whatever the letter type resolves to, "" = the plain square
+  // mark, otherwise a `letterheads/<id>` ref. An org with several legal entities issues a letter on the
   // right entity's letterhead, and the same template gets used for all of them.
   const EMPTY = { employee: "", more: [] as string[], type: "", inputs: {} as Record<string, string>, logo: null as string | null, esign: null as boolean | null };
   const [form, setForm] = React.useState(EMPTY);
@@ -88,10 +90,13 @@ export function GenerateLetterDialog({
   const typePath = form.type || (lastTemplate() && templates.some((t) => t.path === lastTemplate()) ? lastTemplate()! : templates[0]?.path) || "";
   const template = templates.find((t) => t.path === typePath);
   // The letterhead catalogue, fetched only once the dialog is open. Empty - no catalogue, or no
-  // `letterhead-logos.read` - means no picker, and the template's own choice still stands server-side.
-  const letterheads = useLetterheadLogos({ enabled: open });
-  const logo = form.logo ?? template?.letterhead ?? "";
-  const snap = JSON.stringify({ e: subjectPath, t: typePath, i: form.inputs, l: logo });
+  // `letterheads.read` - means no picker, and the template's own choice still stands server-side.
+  const letterheads = useLetterheads({ enabled: open });
+  // What the picker SHOWS: this letter type's own letterhead, else the org-wide one for letters (Settings ->
+  // Company -> Logos), else the square mark. What it SENDS is `form.logo` - only a real choice, so an untouched
+  // picker leaves the server's own template -> org-wide -> square mark chain to run.
+  const logo = form.logo ?? template?.letterhead ?? org.document_logos?.letter ?? "";
+  const snap = JSON.stringify({ e: subjectPath, t: typePath, i: form.inputs, l: form.logo });
   const stale = !!preview && preview.snap !== snap;
 
   // One object URL at a time, and none left behind when the dialog closes.
@@ -142,7 +147,7 @@ export function GenerateLetterDialog({
           employee: subjectPath,
           template: { id: template.path, label: template.label, letterhead: template.letterhead, inputs: template.inputs, blocks: template.blocks },
           ...(template.inputs?.length ? { input: form.inputs } : {}),
-          letterhead: logo,
+          ...(form.logo !== null ? { letterhead: form.logo } : {}),
         },
       });
       setPreview((p) => { if (p) URL.revokeObjectURL(p.url); return { url, snap }; });
@@ -160,7 +165,7 @@ export function GenerateLetterDialog({
         employee: path,
         letter_type: typePath,
         ...(template?.inputs?.length ? { input: form.inputs } : {}),
-        letterhead: logo,
+        ...(form.logo !== null ? { letterhead: form.logo } : {}),
         ...(form.esign !== null ? { esign: form.esign } : {}),
       }),
     });
@@ -270,7 +275,7 @@ export function GenerateLetterDialog({
           {letterheads.length > 0 && (
             <Field
               label="Letterhead"
-              hint={form.logo === null ? "This letter type's own letterhead. Change it for just this document." : "Overriding this letter type, for this document only."}
+              hint={form.logo === null ? "What this letter type is set to. Change it for just this document." : "Overriding this letter type, for this document only."}
             >
               <Select
                 value={letterheads.some((l) => l.path === logo) ? logo : "__org"}
@@ -278,7 +283,7 @@ export function GenerateLetterDialog({
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__org">Organization logo</SelectItem>
+                  <SelectItem value="__org">Square mark</SelectItem>
                   {letterheads.map((l) => <SelectItem key={l.path} value={l.path!}>{l.label}</SelectItem>)}
                 </SelectContent>
               </Select>

@@ -321,7 +321,10 @@ function TransitionCard({ transition: tr, focus, subjectName, empName, acting, o
               {can.includes("delete") && <Button size="sm" variant="ghost" className="text-destructive" loading={acting === `${tr.path}:delete`} onClick={onDelete}><Trash2 className="h-3.5 w-3.5" /> Delete</Button>}
             </div>
           )}
-          <ActivitySection resource={tr.path} className="mt-3 border-t pt-3" />
+          {/* The transition's own edits, and beneath it the whole departure/arrival: its tasks and the notice
+              period, which are separate records with separate trails. */}
+          <ActivitySection resource={tr.path} className="mt-3 border-t pt-3" label="Changes to this transition" />
+          <ActivitySection caseRoot={tr.path} label={`The whole ${tr.kind}`} />
         </div>
       )}
     </Card>

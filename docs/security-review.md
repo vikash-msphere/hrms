@@ -1,9 +1,12 @@
 # Security Review — HRMS (archived snapshot)
 
 > **Archived.** This is the 2026-07-04 review and its remediation ledger, kept for the record of what was
-> found and how it was fixed. It describes the codebase as it stood then (497 tests; Cloudflare Access was
-> the only auth mode). For the current posture, the pre-launch punch list and the open ops items, read
-> `production-readiness.md` in the repo root.
+> found and how it was fixed. It describes the codebase as it stood then: 497 tests, Cloudflare Access as the
+> only auth mode, and neither the scoped API-key lane nor direct Google sign-in in existence yet. Read it for
+> the reasoning behind a control, not for what is deployed.
+>
+> For the current posture, the pre-launch punch list and the open ops items, read `production-readiness.md`
+> in the repo root. For the operational controls themselves, `docs/deploy-security.md`.
 
 Date: 2026-07-04
 Scope: full repository (server `src/**`, web `web/src/**`, config, seed/bootstrap). Greenfield, not yet deployed.

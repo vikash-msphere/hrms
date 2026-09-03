@@ -78,7 +78,7 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
   const missing = fields.filter((f) => f.mandatory && !f.denied && !(form[f.key] ?? "").trim() && !(f.sensitive && f.has_value));
 
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="identity" label="Identity">
@@ -124,6 +124,7 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
       </CardContent>
 
       <WriteDialog
+      className="sentry-mask"
         open={open}
         onClose={() => setOpen(false)}
         title="Edit identity details"

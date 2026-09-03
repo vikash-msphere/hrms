@@ -6,7 +6,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
@@ -71,7 +71,7 @@ export async function createAssetRequest(deps: Deps, actor: AppUser, input: Asse
       state: "PENDING",
     })
     .returning())[0]!;
-  await audit(deps, actor, "asset_request.create", "asset-requests", row.uuid, undefined, row);
+  await audit(deps, actor, "asset_request.create", "asset-requests", row.uuid, createdMeta(row, "asset-requests"), row);
   // Notification types are grouped by their first segment (domain/notificationConfig.ts), so these ride in the
   // existing "asset" category rather than inventing one nobody can configure.
   await notifyManager(deps, employeeId, { type: "asset.requested", noun: "asset request" });
@@ -90,7 +90,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     .where(and(eq(schema.assetRequests.uuid, id), eq(schema.assetRequests.state, "PENDING")))
     .returning();
   if (!updated) throw failedPrecondition(stuck);
-  await audit(deps, actor, `asset_request.${to.toLowerCase()}`, "asset-requests", id);
+  await audit(deps, actor, `asset_request.${to.toLowerCase()}`, "asset-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, {
       recipient: row.employeeId,

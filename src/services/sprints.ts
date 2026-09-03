@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -55,7 +55,7 @@ export async function createSprint(deps: Deps, actor: AppUser, input: SprintInpu
       endDate: dateOrNull(input.end_date),
     })
     .returning())[0]!;
-  await audit(deps, actor, "sprint.create", "sprints", row.uuid, undefined, row);
+  await audit(deps, actor, "sprint.create", "sprints", row.uuid, createdMeta(row, "sprints"), row);
   return row;
 }
 
@@ -73,7 +73,7 @@ export async function updateSprint(deps: Deps, actor: AppUser, id: string, patch
   if (has("start_date")) set.startDate = dateOrNull(patch.start_date);
   if (has("end_date")) set.endDate = dateOrNull(patch.end_date);
   const updated = (await deps.db.update(schema.sprints).set(set).where(eq(schema.sprints.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "sprint.update", "sprints", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "sprint.update", "sprints", id, diffMeta(row, updated, set, "sprints"), updated);
   return updated;
 }
 

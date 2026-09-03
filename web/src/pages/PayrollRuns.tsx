@@ -928,7 +928,11 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
             )}
             </div>
           )}
-          {reviewRun && <ActivitySection resource={reviewRun.path} className="border-t pt-3" />}
+          {/* The run's own trail says it was created, built, approved, published. The case says what it PAID:
+              every bonus, encashment, overtime claim, reimbursement, retro-arrears revision and loan it
+              settled - each with the approval that authorised the money, which no payslip links back to. */}
+          {reviewRun && <ActivitySection resource={reviewRun.path} className="border-t pt-3" label="Changes to this run" />}
+          {reviewRun && <ActivitySection caseRoot={reviewRun.path} label="What this run paid, and who approved it" />}
           </AccessScope>
         </DialogContent>
       </Dialog>

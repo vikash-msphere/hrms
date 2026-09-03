@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
@@ -191,7 +191,7 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
   if (kind === "poll") {
     await deps.db.insert(schema.announcementPollOptions).values(options.map((label, i) => ({ announcementId: row.uuid, label, position: i })));
   }
-  await audit(deps, actor, `${kind}.create`, "announcements", row.uuid, undefined, row);
+  await audit(deps, actor, `${kind}.create`, "announcements", row.uuid, createdMeta(row, "announcements"), row);
   // Tell the recognized party (the kudos post itself is the link target): one recipient, or every member of
   // the department (fanned out, excluding the giver if they're in it).
   if (isKudos && recipientId) await notify(deps, { recipient: recipientId, type: "kudos.received", title: "You received kudos", body: richExcerpt(message, 200), link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}`, actorId: authorId });
@@ -382,7 +382,7 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
     }
   }
   const updated = (await deps.db.update(schema.announcements).set(set).where(eq(schema.announcements.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set, "announcements"), updated);
   // An edit notifies the people it NEWLY names (the old body is the baseline, so nobody hears about the same
   // mention twice). A draft stays silent - publishing is what tells anyone anything about it.
   if (updated.published) await notifyMentions(deps, actor, { ...announcementMention(id), body: updated.body, previousBody: row.body, title: updated.title });
@@ -401,7 +401,7 @@ export async function setPinned(deps: Deps, actor: AppUser, id: string, pinned: 
     .set({ pinnedAt: pinned ? new Date() : null, updatedAt: new Date() })
     .where(eq(schema.announcements.uuid, id))
     .returning())[0]!;
-  await audit(deps, actor, `announcement.${pinned ? "pin" : "unpin"}`, "announcements", id, undefined, updated);
+  await audit(deps, actor, `announcement.${pinned ? "pin" : "unpin"}`, "announcements", id, { diff: { pinnedAt: { from: row.pinnedAt, to: updated.pinnedAt } } }, updated);
   return updated;
 }
 
@@ -519,7 +519,7 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
   const row = await getAnnouncement(deps, id);
   assertNotLocked(row);
   await deps.db.insert(schema.announcementReplies).values({ announcementId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "announcement.reply", "announcements", id);
+  await audit(deps, actor, "announcement.reply", "announcements", id, { note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, row);
   // Notify the post's author that someone replied (skip replying to your own post).
   if (row.authorEmployeeId && row.authorEmployeeId !== actor.employeeId)
     await notify(deps, { recipient: row.authorEmployeeId, type: "announcement.reply", title: "New reply to your post", body: richExcerpt(text, 120), link: boardPostLink(id), subject: `announcements/${id}`, actorId: actor.employeeId });

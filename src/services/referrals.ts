@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { notify } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { recordBonus } from "./bonuses";
@@ -72,7 +72,7 @@ export async function createReferral(deps: Deps, actor: AppUser, input: Referral
       status: "submitted",
     })
     .returning())[0]!;
-  await audit(deps, actor, "referral.create", "referrals", row.uuid, undefined, row);
+  await audit(deps, actor, "referral.create", "referrals", row.uuid, createdMeta(row, "referrals"), row);
   return row;
 }
 
@@ -94,7 +94,7 @@ export async function updateReferral(deps: Deps, actor: AppUser, id: string, pat
     set.bonusAmount = patch.bonus_amount ?? null;
   }
   const updated = (await deps.db.update(schema.referrals).set(set).where(eq(schema.referrals.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "referral.update", "referrals", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "referral.update", "referrals", id, diffMeta(row, updated, set, "referrals"), updated);
   // Keep the referrer in the loop as recruiting moves their candidate along (skip a no-op or self-update).
   if (patch.status !== undefined && updated.status !== row.status && row.referrerId !== actor.employeeId)
     await notify(deps, { recipient: row.referrerId, type: "referral.status", title: "Referral update", body: `${updated.candidateName} is now ${updated.status.replace(/_/g, " ")}.`, link: "referrals", subject: `referrals/${id}`, actorId: actor.employeeId });

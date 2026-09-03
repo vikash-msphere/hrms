@@ -18,7 +18,7 @@ import { computeAndStoreEncashment, approveEncashment, cancelEncashment, approve
 import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement } from "../src/services/reimbursements";
 import { computeAndStoreSettlement } from "../src/services/settlements";
 import { createSalaryStructure } from "../src/services/salaryStructures";
-import { reviseCompensation, reapplySplitCurrent, splitStatus, listCompensation, decorateCompensation } from "../src/services/compensation";
+import { reviseCompensation, updateCompensation, deleteCompensation, reapplySplitCurrent, splitStatus, listCompensation, decorateCompensation } from "../src/services/compensation";
 import { toCompensationResource } from "../src/http/serialize";
 import { createPayComponent, updatePayComponent } from "../src/services/payComponents";
 import { createPayPeriod } from "../src/services/payPeriods";
@@ -711,6 +711,17 @@ describe("compensation split re-apply (propagating a component change to existin
     expect(res.updated).toBe(1);
     expect((await splitStatus(deps)).stale).toBe(0);
 
+    // A re-apply re-solves what somebody is paid, so it lands on THEIR compensation record - not only as an
+    // org-wide tally, which is invisible from the one place a person actually looks.
+    const entries = (await deps.db.select().from(schema.auditLog)).filter((r) => r.action === "compensation.reapplySplit");
+    const perRow = entries.filter((r) => r.entityId === before.uuid);
+    expect(perRow).toHaveLength(1);
+    const diff = (JSON.parse(perRow[0]!.meta!) as { diff: Record<string, { from: number; to: number }> }).diff;
+    expect(diff.specialAllowance!.from).toBe(before.specialAllowance);
+    expect(diff.specialAllowance!.to).toBeLessThan(before.specialAllowance); // absorbed the new gratuity cost
+    // The tally still gets its own entry: "how much of the company did this move" is about the ACTION.
+    expect(entries.filter((r) => !r.entityId)).toHaveLength(1);
+
     // Annual CTC (the promise) is untouched; the Special Allowance shrank to absorb the new gratuity cost.
     const after = await compRow();
     expect(after.ctcAnnual).toBe(before.ctcAnnual);
@@ -1017,6 +1028,158 @@ describe("compensation: only one open row per employee", () => {
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     const open = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).filter((c) => c.effectiveTo === null);
     expect(open).toHaveLength(1); // never two "current" salaries
+  });
+});
+
+// The timeline is editable: a salary entered wrong is a mistake, and every one of these writes is audited.
+// What must hold after any of them is the same invariant payroll depends on - one contiguous chain of
+// half-open intervals per employee, with exactly one open row.
+describe("compensation: the timeline can be added to, corrected and pruned", () => {
+  // Every LIVE revision, oldest first, as [from, to) day strings - the shape each case asserts on.
+  const chain = async (emp: string) =>
+    (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp)))
+      .filter((c) => !c.deleteTime)
+      .sort((a, b) => +new Date(a.effectiveFrom) - +new Date(b.effectiveFrom))
+      .map((c) => [c.effectiveFrom.toISOString().slice(0, 10), c.effectiveTo?.toISOString().slice(0, 10) ?? null]);
+
+  it("inserts a revision INSIDE the history: the one before it closes at the new date, the one after is untouched", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", "2026-01-01");
+    await seedCompRow(emp, 50000, "2026-01-01", null);
+
+    const mid = await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 480000, effective_from: "2025-07-01" });
+    expect(mid.effectiveTo?.toISOString().slice(0, 10)).toBe("2026-01-01"); // ends where the next revision starts
+    expect(await chain(emp)).toEqual([
+      ["2025-01-01", "2025-07-01"],
+      ["2025-07-01", "2026-01-01"],
+      ["2026-01-01", null], // still the current salary - a middle insert does not reopen anything
+    ]);
+  });
+
+  it("refuses a second revision starting the same day (that is a correction, not an addition)", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", null);
+    await expect(reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 600000, effective_from: "2025-01-01" }))
+      .rejects.toThrow(/already takes effect/);
+  });
+
+  it("corrects a CTC in place, re-deriving the split", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    const row = await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 360000, effective_from: "2025-01-01" });
+    const fixed = await updateCompensation(deps, actor, row.uuid, { annual_ctc: 720000 });
+    expect(fixed.ctcAnnual).toBe(720000);
+    expect(fixed.basePay).toBeGreaterThan(row.basePay); // the cached basic followed the corrected CTC
+  });
+
+  it("moves a date within its slot, dragging the previous revision's end with it", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", "2026-01-01");
+    await seedCompRow(emp, 50000, "2026-01-01", null);
+    const open = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).find((c) => !c.effectiveTo)!;
+
+    await updateCompensation(deps, actor, open.uuid, { effective_from: "2025-09-01" });
+    expect(await chain(emp)).toEqual([["2025-01-01", "2025-09-01"], ["2025-09-01", null]]); // no gap, no overlap
+  });
+
+  it("refuses a date that would cross a neighbouring revision", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", "2026-01-01");
+    await seedCompRow(emp, 50000, "2026-01-01", null);
+    const open = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).find((c) => !c.effectiveTo)!;
+    await expect(updateCompensation(deps, actor, open.uuid, { effective_from: "2024-06-01" })).rejects.toThrow(/between this employee's neighbouring revisions/);
+  });
+
+  it("removing the current revision reopens the one before it", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", "2026-01-01");
+    await seedCompRow(emp, 50000, "2026-01-01", null);
+    const open = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).find((c) => !c.effectiveTo)!;
+
+    await deleteCompensation(deps, actor, open.uuid);
+    expect(await chain(emp)).toEqual([["2025-01-01", null]]); // the predecessor is the current salary again
+    // Soft: the row is still there, just out of the timeline (audit links and past payslips still resolve).
+    const all = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp));
+    expect(all).toHaveLength(2);
+    expect(all.find((c) => c.uuid === open.uuid)!.deleteTime).toBeTruthy();
+  });
+
+  it("removing a middle revision hands its window to the one before it", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", "2025-07-01");
+    await seedCompRow(emp, 40000, "2025-07-01", "2026-01-01");
+    await seedCompRow(emp, 50000, "2026-01-01", null);
+    const middle = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp)))
+      .find((c) => c.effectiveFrom.toISOString().startsWith("2025-07"))!;
+
+    await deleteCompensation(deps, actor, middle.uuid);
+    expect(await chain(emp)).toEqual([["2025-01-01", "2026-01-01"], ["2026-01-01", null]]);
+  });
+
+  it("refuses to remove a revision whose retro arrears a run already paid", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", null);
+    const row = await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 720000, effective_from: "2025-06-01" });
+    await deps.db.update(schema.compensation).set({ arrearsPaidAt: new Date() }).where(eq(schema.compensation.uuid, row.uuid));
+    await expect(deleteCompensation(deps, actor, row.uuid)).rejects.toThrow(/already been paid out/);
+  });
+
+  it("keeps already-paid arrears at the disbursed amount when the revision is corrected", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 30000, "2025-01-01", null);
+    const row = await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 720000, effective_from: "2025-06-01" });
+    await deps.db.update(schema.compensation).set({ arrearsAmount: 12345, arrearsPaidAt: new Date() }).where(eq(schema.compensation.uuid, row.uuid));
+    const fixed = await updateCompensation(deps, actor, row.uuid, { annual_ctc: 900000 });
+    expect(fixed.ctcAnnual).toBe(900000); // the salary itself is corrected
+    expect(fixed.arrearsAmount).toBe(12345); // but not the record of what was actually paid out
+  });
+
+  it("records the old and new figures on every timeline write, so the trail says what changed", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    // The audit meta for the newest row about this record - the shape ActivityFeed renders as "x → y".
+    const lastMeta = async (id: string, action: string) => {
+      const rows = await deps.db.select().from(schema.auditLog).where(eq(schema.auditLog.entityId, id));
+      const row = rows.filter((r) => r.action === action).sort((a, b) => +new Date(b.at) - +new Date(a.at))[0]!;
+      return { meta: JSON.parse(row.meta!) as { diff?: Record<string, { from: unknown; to: unknown }> }, entityName: row.entityName };
+    };
+
+    const first = await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 360000, effective_from: "2025-01-01" });
+    expect((await lastMeta(first.uuid, "compensation.revise")).meta.diff!.ctcAnnual).toEqual({ from: null, to: 360000 }); // first ever: no prior salary
+    expect((await lastMeta(first.uuid, "compensation.revise")).entityName).toBeTruthy(); // labelled by its effective date
+
+    const raise = await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 720000, effective_from: "2026-01-01" });
+    expect((await lastMeta(raise.uuid, "compensation.revise")).meta.diff!.ctcAnnual).toEqual({ from: 360000, to: 720000 });
+
+    await updateCompensation(deps, actor, raise.uuid, { annual_ctc: 800000 });
+    expect((await lastMeta(raise.uuid, "compensation.update")).meta.diff!.ctcAnnual).toEqual({ from: 720000, to: 800000 });
+
+    await deleteCompensation(deps, actor, raise.uuid);
+    // A removal states what left the timeline and the salary the employee falls back to.
+    expect((await lastMeta(raise.uuid, "compensation.delete")).meta.diff!.ctcAnnual).toEqual({ from: 800000, to: 360000 });
+  });
+
+  it("keeps a removed revision out of payroll pricing", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedCompRow(emp, 40000, "2025-06-01", "2026-01-01");
+    await seedCompRow(emp, 90000, "2026-01-01", null); // the wrong figure, entered by mistake
+    const wrong = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp))).find((c) => !c.effectiveTo)!;
+    await deleteCompensation(deps, actor, wrong.uuid);
+
+    const jan = await seedPeriodRange("Jan 2026", "2026-01-01", "2026-01-31");
+    const run = await createRun(deps, actor, `pay-periods/${jan}`);
+    await buildRunItems(deps, actor, run.uuid);
+    const basic = (await listRunItems(deps, run.uuid))[0]!.lines.find((l) => l.code === "BASIC")!.amount;
+    expect(basic).toBe(40000); // priced at the revision that took the window back, not the removed one
   });
 });
 

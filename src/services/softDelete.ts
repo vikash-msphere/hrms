@@ -4,7 +4,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, removedMeta } from "../lib/audit";
 import { notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lockGuard";
@@ -65,7 +65,9 @@ export async function softDeleteRow(
     .where(atVersion(table, row))
     .returning({ uuid: table.uuid });
   if (!marked.length) await versionConflict(deps, table, singular, id);
-  await audit(deps, actor, `${singular}.delete`, collection, id, undefined, row);
+  // What was removed. A soft delete is recoverable from the row itself, but a PURGE is not, and neither is
+  // readable from a trail that records only that something went.
+  await audit(deps, actor, `${singular}.delete`, collection, id, removedMeta(row, collection), row);
 }
 
 /** Restore a soft-deleted row (only meaningful if currently deleted). */
@@ -89,6 +91,8 @@ export async function restoreRow(
     .where(atVersion(table, row))
     .returning()) as Row[])[0];
   if (!updated) await versionConflict(deps, table, singular, id);
+  // No meta: a restore puts the row back exactly as the matching delete entry recorded it, so the values live
+  // there and repeating them here would only invite the two to disagree.
   await audit(deps, actor, `${singular}.restore`, collection, id, undefined, updated);
   return updated;
 }
@@ -115,5 +119,6 @@ export async function purgeRow(
   if (onPurge) await onPurge(row);
   const purged = await deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid });
   if (!purged.length) await versionConflict(deps, table, singular, id);
-  await audit(deps, actor, `${singular}.purge`, collection, id, undefined, row);
+  // The row is gone for good after this, so its values survive only here.
+  await audit(deps, actor, `${singular}.purge`, collection, id, removedMeta(row, collection), row);
 }

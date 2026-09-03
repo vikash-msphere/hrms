@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
@@ -60,7 +60,7 @@ export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEnt
     description: input.description?.trim() || null,
     billable: input.billable ?? true,
   }).returning())[0]!;
-  await audit(deps, actor, "time-entry.create", "time-entries", row.uuid, undefined, row);
+  await audit(deps, actor, "time-entry.create", "time-entries", row.uuid, createdMeta(row, "time-entries"), row);
   return row;
 }
 
@@ -77,7 +77,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   if (has("description")) set.description = patch.description?.trim() || null;
   if (has("billable")) set.billable = !!patch.billable;
   const updated = (await deps.db.update(schema.timeEntries).set(set).where(eq(schema.timeEntries.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "time-entry.update", "time-entries", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "time-entry.update", "time-entries", id, diffMeta(row, updated, set, "time-entries"), updated);
   return updated;
 }
 
@@ -89,7 +89,7 @@ async function transition(deps: Deps, actor: AppUser, id: string, allowedFrom: S
   // Guard the flip on the read status so the transition is EXACTLY-ONCE (0 rows = a concurrent call moved it).
   const updated = (await deps.db.update(schema.timeEntries).set({ status: to, ...(decided ? { decidedBy: actor.uuid } : {}), updatedAt: new Date() }).where(and(eq(schema.timeEntries.uuid, id), eq(schema.timeEntries.status, row.status))).returning())[0];
   if (!updated) throw failedPrecondition(`a ${row.status.toLowerCase()} entry can't move to ${to.toLowerCase()}`);
-  await audit(deps, actor, `time-entry.${to.toLowerCase()}`, "time-entries", id);
+  await audit(deps, actor, `time-entry.${to.toLowerCase()}`, "time-entries", id, stateMeta(row.status, to, { employee: `employees/${row.employeeId}` }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `timesheet.${to.toLowerCase()}`, title: `Timesheet ${to.toLowerCase()}`, body: `Your time entry was ${to.toLowerCase()}.`, link: "timesheets", actorId: actor.employeeId });
   } else if (to === "SUBMITTED") {

@@ -231,6 +231,12 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       pathname = url.pathname;
       // Per-request client metadata for the audit trail (this user object is request-scoped; audit() reads it).
       user.reqMeta = { ip: c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? undefined, ua: c.req.header("user-agent") ?? undefined };
+      // One trace for the whole request, so every audit entry it writes is recognisable as ONE act. Minted
+      // here and not in audit(): the workflow engine reads `deps.trace` too (emitEvent treats a set trace as
+      // "already inside an execution"), so an event this request emits, the automation it runs and the writes
+      // that automation makes all inherit the request's id instead of each starting a trace of their own.
+      // Never overwritten - an internal apiCall re-dispatch reuses this Deps and belongs to the outer act.
+      deps.trace ??= crypto.randomUUID();
       // Reset the per-request audit flag (batch reuses one shared user object across sub-requests). audit() sets
       // it true when the handler logs its own activity row; the write backstop after next() reads it to dedupe.
       user.audited = false;
@@ -362,6 +368,11 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     const adeps = c.get("deps");
     const auser = c.get("user");
     const dec: Decision = decision ?? { allow: false, reason: "unresolved request (fail-closed)" };
+    // The pattern that authorized this request, parked on the request-scoped user so EVERY audit row the
+    // handler writes carries it - not just the two the middleware writes itself. Same trick as `reqMeta` and
+    // for the same reason: the alternative is threading a decision through every service signature in the app
+    // to record one string. Overwritten per sub-request in a batch, exactly like `audited` above.
+    if (auser) auser.authorizedBy = dec.allow ? dec.via : undefined;
     // Own-record read? The item's resolved code equals (employees) or is a child of (owner-embedded rows like
     // payslips/compensation) the caller's employee code. Used to skip auditing self-views of sensitive data.
     const ec = auser?.employeeCode;

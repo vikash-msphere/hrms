@@ -8,6 +8,7 @@ import {
   RefreshCw, ExternalLink, ShieldCheck, Copy, CalendarClock, BellRing, Eye,
 } from "lucide-react";
 import { api, get, upload, patch, invoke, download as downloadFile } from "@/api";
+import { documentDownloadItems, useDocumentDownload } from "@/components/common/DocumentDownload";
 import { useDocuments, createDocument, docCollection, documentFileName } from "@/lib/documents";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
@@ -35,6 +36,7 @@ import { stateColumn } from "@/components/common/stateColumn";
 import { metaColumns } from "@/components/common/metaColumns";
 import { RowActions, type RowAction } from "@/components/common/RowActions";
 import { ActivityFeed } from "@/components/common/ActivityFeed";
+import { ActivitySection } from "@/components/common/ActivitySection";
 import { Field, FieldRow } from "@/components/common/Field";
 import { FileDropField } from "@/components/common/FileDropField";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -362,13 +364,10 @@ export default function Documents({ me }: { me: Me }) {
     }
   }
 
-  async function onDownload(d: DocumentResource) {
-    try {
-      await downloadFile(d.path, documentFileName(d));
-    } catch (e) {
-      toast({ title: "Download failed", description: (e as Error).message, variant: "destructive" });
-    }
-  }
+  // Downloading is shared with the profile's Documents tab, so both offer the print version on exactly the
+  // documents that have one - and neither offers it on the ones that don't.
+  const { run: runDownload } = useDocumentDownload();
+  const onDownload = (d: DocumentResource) => void runDownload(d, "screen");
 
   const today = todayStr();
   // Expiry tracking: a doc is "Expiring soon" within 30 days of its expire_time, "Expired" once past.
@@ -494,8 +493,9 @@ export default function Documents({ me }: { me: Me }) {
           if (writable) items.push({ label: "Restore", icon: <RotateCcw className="h-4 w-4" />, onClick: () => sd(d).restore(d) });
           if (canPurge) items.push({ label: "Delete permanently", icon: <ShieldX className="h-4 w-4" />, onClick: () => sd(d).permanentlyDelete(d), destructive: true });
         } else {
-          // Download stays available even when locked (it's a read).
-          if (d.size_bytes) items.push({ label: "Download", icon: <Download className="h-4 w-4" />, onClick: () => onDownload(d) });
+          // Download stays available even when locked (it's a read). One entry, or two when this document's
+          // letterhead has a print version as well - decided by the row, not by the document type.
+          items.push(...documentDownloadItems(d, (doc, v) => void runDownload(doc, v)));
           // On a signed copy, offer the clean source policy too (the original it was generated from).
           const original = d.source_document ? originalByPath.get(d.source_document) : undefined;
           if (original) items.push({ label: "Download original", icon: <ScrollText className="h-4 w-4" />, onClick: () => onDownload(original) });
@@ -974,11 +974,15 @@ export default function Documents({ me }: { me: Me }) {
         </DialogContent>
       </Dialog>
 
-      {/* Document activity: changes, sign/ack, downloads and sensitive reads for this document. */}
+      {/* Document activity: changes, sign/ack, downloads and sensitive reads for this document - and beneath
+          it the whole document story, which is three records deep. "Was this policy signed, by whom, and when"
+          reads as one question and lives across the policy, each acknowledgement, and the signed copy each one
+          produced; the document's own trail is the first of those three. */}
       <Dialog open={!!activityDoc} onOpenChange={(o) => !o && setActivityDoc(null)}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader><DialogTitle>Activity</DialogTitle></DialogHeader>
           {activityDoc && <ActivityFeed resource={activityDoc.path} />}
+          {activityDoc && <ActivitySection caseRoot={activityDoc.path} label="Acknowledgements and signed copies" className="border-t pt-3" />}
         </DialogContent>
       </Dialog>
 

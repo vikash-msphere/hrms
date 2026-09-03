@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta, fieldDiff } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -79,7 +79,7 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
       labelsJson: JSON.stringify(input.labels != null ? asArgError(() => normalizeLabels(input.labels)) : []),
     })
     .returning())[0]!;
-  await audit(deps, actor, "board.create", "boards", row.uuid, undefined, row);
+  await audit(deps, actor, "board.create", "boards", row.uuid, createdMeta(row, "boards"), row);
   return row;
 }
 
@@ -97,7 +97,7 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
   if (has("task_prefix")) set.taskPrefix = normalizePrefix(patch.task_prefix);
   if (has("mode")) set.mode = patch.mode === "scrum" ? "scrum" : "kanban";
   const updated = (await deps.db.update(schema.boards).set(set).where(eq(schema.boards.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "board.update", "boards", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "board.update", "boards", id, diffMeta(row, updated, set, "boards"), updated);
   return updated;
 }
 
@@ -119,18 +119,12 @@ export async function configureBoard(deps: Deps, actor: AppUser, id: string, inp
   if (has("reassign_lane_on_move")) set.reassignLaneOnMove = !!input.reassign_lane_on_move;
   if (has("no_lane_label")) set.noLaneLabel = (input.no_lane_label ?? "").toString().trim() || null;
   const updated = (await deps.db.update(schema.boards).set(set).where(eq(schema.boards.uuid, row.uuid)).returning())[0]!;
-  // Log only the fields that ACTUALLY changed value (not every field the form submitted). Scalars (toggles,
-  // mode, label) carry a from→to so the feed shows "hide empty lanes: no → yes"; the large JSON blobs
-  // (columns/swimlanes/labels) are name-only — a from→to of them would be unreadable.
-  const BLOBS = new Set(["columnsJson", "swimlanesJson", "labelsJson"]);
-  const diff: Record<string, { from: unknown; to: unknown }> = {};
-  const changed: string[] = [];
-  for (const [k, v] of Object.entries(fieldDiff(row, updated, Object.keys(set)))) {
-    if (BLOBS.has(k)) changed.push(k);
-    else diff[k] = v;
-  }
-  const meta = Object.keys(diff).length || changed.length ? { ...(Object.keys(diff).length ? { diff } : {}), ...(changed.length ? { changed } : {}) } : undefined;
-  await audit(deps, actor, "board.configure", "boards", row.uuid, meta, updated);
+  // Log only the fields that ACTUALLY changed value (not every field the form submitted). Scalars carry a
+  // from→to so the feed reads "hide empty lanes: no → yes"; the columns/swimlanes/labels blobs used to be
+  // recorded name-only here, because a from→to of a whole JSON array is unreadable - lib/audit now expands
+  // those three into per-key entries (`columns.in_progress`, `columns.order`), so a rename or a reorder is
+  // legible and this needs no special case of its own.
+  await audit(deps, actor, "board.configure", "boards", row.uuid, diffMeta(row, updated, set, "boards"), updated);
   return updated;
 }
 

@@ -6,7 +6,7 @@ import {
   listTickets, getTicketWithComments, createTicket,
   transitionTicket, assignTicket, routeTicket, setTicketPriority, commentTicket,
   addTodos, toggleTodo, removeTodo,
-  attachToTicket, detachFromTicket, readTicketAttachment,
+  attachToTicket, detachFromTicket, readTicketAttachment, attachRecordingToTicket,
   type TicketInput,
 } from "../services/tickets";
 import { toTicketResource } from "../http/serialize";
@@ -20,6 +20,7 @@ const createSchema = z
     description: z.string().nullable().optional(),
     priority: z.enum(["low", "medium", "high"]).optional(),
     initial_todos: z.array(z.string()).optional(), // optional checklist to seed (custom items and/or a copied checklist)
+    session_replay_id: z.string().nullable().optional(), // opt-in Sentry replay of the minute before raising
   })
   .strict();
 
@@ -32,6 +33,7 @@ const addTodosSchema = z.object({ texts: z.array(z.string()) }).strict();
 const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).strict();
 const removeTodoSchema = z.object({ todo: z.string() }).strict();
 const detachSchema = z.object({ key: z.string() }).strict();
+const attachRecordingSchema = z.object({ session_replay_id: z.string() }).strict();
 
 // Helpdesk tickets. A ticket is never edited or deleted through the API - it moves through its state machine
 // and accumulates comments - so there is no PATCH and, despite the table's delete_time (which exists for the
@@ -72,6 +74,9 @@ export const tickets = collectionRoutes<TicketInput, typeof schema.tickets>({
         attachToTicket(deps, user, id, await c.req.arrayBuffer(), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
     },
     detach: { schema: detachSchema, run: (deps, user, id, body) => detachFromTicket(deps, user, id, body.key) },
+    // Add a session recording after the fact. The create body still takes the first one; this is how the
+    // second and third get there, which is what "can you show me that again?" needs.
+    attachRecording: { schema: attachRecordingSchema, run: (deps, user, id, body) => attachRecordingToTicket(deps, user, id, body.session_replay_id) },
     attachment: {
       raw: async (c, id) => {
         const { bytes, fileName } = await readTicketAttachment(c.get("deps"), c.get("user"), id, c.req.query("key"));

@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, fieldDiff } from "../lib/audit";
+import { audit, createdMeta, fieldDiff } from "../lib/audit";
 import { getDefaultDepartmentId } from "./settings";
 import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -101,7 +101,7 @@ export async function commentCard(deps: Deps, actor: AppUser, id: string, body?:
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("a comment body is required");
   await deps.db.insert(schema.cardComments).values({ cardId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "card.comment", "cards", id);
+  await audit(deps, actor, "card.comment", "cards", id, { note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, card);
   // Naming someone in a comment is how work gets handed over on a board, so it tells them. A mention is a
   // notification and nothing more: if they cannot see this board, they still cannot - see services/mentions.ts.
   await notifyMentions(deps, actor, { subject: `cards/${id}`, link: "boards", type: "board.mention", body: text, title: card.title });
@@ -122,7 +122,7 @@ export async function addCardTodos(deps: Deps, actor: AppUser, id: string, texts
   if (!items.length) throw invalidArgument("a checklist item is required");
   await deps.db.insert(schema.cardTodos).values(items.map((text) => ({ cardId: id, text })));
   await touchCard(deps, id);
-  await audit(deps, actor, "card.addTodos", "cards", id);
+  await audit(deps, actor, "card.addTodos", "cards", id, { fields: items.slice(0, 12) });
   return getCardWithComments(deps, actor, id);
 }
 
@@ -134,7 +134,7 @@ export async function toggleCardTodo(deps: Deps, actor: AppUser, id: string, tod
   if (!item) throw notFound("checklist item not found");
   await deps.db.update(schema.cardTodos).set({ done: !!done, updatedAt: new Date() }).where(eq(schema.cardTodos.uuid, tid));
   await touchCard(deps, id);
-  await audit(deps, actor, "card.toggleTodo", "cards", id);
+  await audit(deps, actor, "card.toggleTodo", "cards", id, { note: item.text, diff: { done: { from: item.done, to: !!done } } });
   return getCardWithComments(deps, actor, id);
 }
 
@@ -146,7 +146,7 @@ export async function removeCardTodo(deps: Deps, actor: AppUser, id: string, tod
   if (!item) throw notFound("checklist item not found");
   await deps.db.delete(schema.cardTodos).where(eq(schema.cardTodos.uuid, tid));
   await touchCard(deps, id);
-  await audit(deps, actor, "card.removeTodo", "cards", id);
+  await audit(deps, actor, "card.removeTodo", "cards", id, { note: item.text });
   return getCardWithComments(deps, actor, id);
 }
 
@@ -205,7 +205,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
   // Optional checklist seeded at creation (custom items and/or a template the dialog expanded to texts).
   const initialTodos = (input.initial_todos ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
   if (initialTodos.length) await deps.db.insert(schema.cardTodos).values(initialTodos.map((text) => ({ cardId: row.uuid, text })));
-  await audit(deps, actor, "card.create", "cards", row.uuid, undefined, row);
+  await audit(deps, actor, "card.create", "cards", row.uuid, createdMeta(row, "cards"), row);
   await notifyCardAssigned(deps, actor, row, null);
   await emitEvent(deps, actor, "card.created", { subject: `cards/${row.uuid}`, employeeId, payload: { board: `boards/${boardId}`, column: columnKey, priority: row.priority } });
   await recomputeGoalProgress(deps, actor, row.goalId); // a new linked task lowers its goal's delivered share

@@ -107,10 +107,10 @@ export type BankFormatColumn = Wire<"bank-format-column">;
 
 export type BankFormat = Wire<"bank-format">;
 
-// One logo in the org's letterhead catalogue (one per legal entity/brand), picked per letter template and per
-// generation. The image is stored in object storage, not in the settings blob, and rides inline as a data URL
-// only when the list is read with `include=image`.
-export type LetterheadLogo = Wire<"letterhead-logo">;
+// One letterhead in the org's catalogue (one per legal entity/brand), picked per document kind, per letter
+// template and per generation. `design` is the whole page - margins, typeface, palette, header band, footer
+// band, watermark. The artwork lives in object storage, not in the row, and is fetched per row (`:image`).
+export type Letterhead = Wire<"letterhead">;
 
 // The employer's debit account + currency for one bank (super_admin only). The account number is stored
 // encrypted and returned masked; writes send the full number.
@@ -185,6 +185,9 @@ export type Activity = {
   actor?: string;
   actor_email: string;
   actor_name?: string; // resolved actor employee name (server-enriched; falls back to email)
+  actor_role?: string; // the role the act was performed under, as of the event
+  correlation_id?: string; // the ACT this entry was part of; pass back as ?correlation for the rest of it
+  session_id?: string; // the SITTING (one login) this entry was written in; pass back as ?session
   create_time: string;
   ip?: string;
   user_agent?: string;

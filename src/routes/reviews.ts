@@ -62,7 +62,8 @@ export const reviews = collectionRoutes({
     nudge: { run: (deps, user, id) => nudgeReview(deps, user, id) },
     pdf: {
       raw: async (c, id) => {
-        const { bytes, fileName } = await renderReviewPdf(c.get("deps"), c.get("user"), id);
+        // `?variant=print` renders it on the letterhead's print page; nothing is filed either way.
+        const { bytes, fileName } = await renderReviewPdf(c.get("deps"), c.get("user"), id, c.req.query("variant") === "print" ? "print" : "screen");
         // pdf-lib returns a Uint8Array over an ArrayBufferLike; hand Hono a plain ArrayBuffer copy.
         return c.body(bytes.slice().buffer, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
       },

@@ -12,7 +12,7 @@ import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { allocFlatCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { notFound, aborted, alreadyExists, unimplemented, invalidArgument, errorChainText } from "../lib/errors";
 
 // The shape of an internal resource id: 8 random bytes in Crockford base32 (lib/idCodec genId). The only id a
@@ -203,7 +203,9 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
         if (id && /UNIQUE|PRIMARY KEY|constraint/i.test(errorChainText(e))) throw alreadyExists(`${collection}/${id} already exists`);
         throw e;
       }
-      await audit(deps, actor, `${auditName}.create`, collection, row.uuid, undefined, row);
+      // What the record was made AS, not just that it was made. A create used to be the one write in the app
+      // whose trail said nothing about its content, which is the write you most often want to read back.
+      await audit(deps, actor, `${auditName}.create`, collection, row.uuid, createdMeta(row, collection), row);
       if (spec.afterCreate) await spec.afterCreate(deps, actor, row, input);
       // The factory decorates the response like a read, so a write answers with the same resource shape a GET
       // would - a derived field (an expense budget's spend, a holiday's own selection) is never missing.
@@ -246,7 +248,7 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
         if (!still) throw notFound(spec.notFound);
         throw aborted("the record changed since it was read; re-read it and try again");
       }
-      await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set), updated);
+      await audit(deps, actor, `${auditName}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
       if (spec.afterUpdate) await spec.afterUpdate(deps, actor, updated, row, patch);
       return updated;
     },

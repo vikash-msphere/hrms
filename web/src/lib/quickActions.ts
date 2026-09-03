@@ -1,10 +1,11 @@
 import {
   CalendarPlus, ReceiptText, LifeBuoy, Sparkles, Megaphone,
   Target, Timer, House, MessagesSquare, UserPlus, Lightbulb, Upload, KanbanSquare, Clock,
-  HandCoins, FileCheck, UserSearch, Briefcase, UserRoundPlus, Zap, Laptop,
+  HandCoins, FileCheck, UserSearch, Briefcase, UserRoundPlus, Zap, Laptop, Bug,
   type LucideIcon,
 } from "lucide-react";
 import { navigate } from "@/router";
+import { sentryEnabled } from "@/instrument";
 import { hasCapability } from "@/lib/perm";
 import { fireIntent } from "@/lib/intent";
 import type { Me } from "@/types";
@@ -24,6 +25,7 @@ export type QuickAction = {
   id: string;
   label: string;
   icon: LucideIcon;
+  /** Page the action navigates to before firing its intent. Empty = open in place, wherever the caller is. */
   route: string;
   intent: string;
   group: QuickActionGroup;
@@ -45,6 +47,13 @@ export const QUICK_ACTIONS: QuickAction[] = [
   { id: "new-referral", label: "Refer someone", icon: UserPlus, route: "referrals", intent: "new-referral", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "referrals.write") },
   { id: "new-suggestion", label: "Submit a suggestion", icon: Lightbulb, route: "suggestions", intent: "new-suggestion", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "suggestions.write") },
   { id: "new-ticket", label: "Raise a support ticket", icon: LifeBuoy, route: "tickets", intent: "new-ticket", group: "Request", visible: (me) => !!me.employee_id && hasCapability(me.capabilities, "tickets.write") },
+  // "Something is broken", as distinct from "I need something". Raises a ticket like the above, but from a
+  // dialog that opens IN PLACE - no route, deliberately: sending someone to the Tickets page to report a bug
+  // takes away the screen the bug is on, and half of a useful report is what was on it. It also attaches the
+  // session recording, which is the whole reason it is a separate entry point rather than a category on the
+  // normal raise form. Hidden without Sentry: there would be no recording to attach, and it would then be the
+  // raise-a-ticket flow wearing a different label.
+  { id: "report-problem", label: "Report a problem", icon: Bug, route: "", intent: "report-problem", group: "Request", visible: (me) => sentryEnabled && !!me.employee_id && hasCapability(me.capabilities, "tickets.write") },
   // Punching is state-dependent, so it can't be a "New ..." menu item: the top-bar clock chip is its real
   // affordance. This entry exists so ⌘K can reach it too - it opens Attendance and punches the way that
   // matches the caller's current state.
@@ -67,8 +76,9 @@ export const QUICK_ACTIONS: QuickAction[] = [
 // and every "+" menu resolve path (but still appear in the ⌘K palette).
 export const KUDOS_ACTION_ID = "give-kudos";
 export const TICKET_ACTION_ID = "new-ticket";
+export const REPORT_PROBLEM_ACTION_ID = "report-problem";
 export const CLOCK_ACTION_ID = "clock-toggle";
-export const STANDALONE_ACTION_IDS = new Set([KUDOS_ACTION_ID, TICKET_ACTION_ID, CLOCK_ACTION_ID]);
+export const STANDALONE_ACTION_IDS = new Set([KUDOS_ACTION_ID, TICKET_ACTION_ID, REPORT_PROBLEM_ACTION_ID, CLOCK_ACTION_ID]);
 
 // Actions the org can arrange into menu sections (everything except the standalone top-bar buttons).
 export const CONFIGURABLE_QUICK_ACTIONS = QUICK_ACTIONS.filter((a) => !STANDALONE_ACTION_IDS.has(a.id));
@@ -140,6 +150,8 @@ export function resolveQuickActionList(me: Me, raw?: { groups?: QuickMenuGroup[]
 }
 
 export function runQuickAction(a: QuickAction) {
-  navigate(a.route);
+  // A routeless action opens where the caller already is (report-problem). Navigating to "" would land on the
+  // dashboard, which for a bug report throws away the screen being reported.
+  if (a.route) navigate(a.route);
   fireIntent(a.intent);
 }

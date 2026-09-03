@@ -3,6 +3,7 @@ import { accessAudit, mutationAudit, READ_VERBS } from "../src/domain/auditAcces
 import { AUDIT } from "../src/domain/manifests";
 import { COLLECTIONS } from "../src/domain/collections";
 import type { Decision } from "../src/domain/permissions";
+import { decide, resolveRequest } from "../src/domain/permissions";
 
 // Audit coverage: the middleware records every denial + every sensitive allowed read, and nothing else.
 const ALLOW: Decision = { allow: true };
@@ -183,5 +184,38 @@ describe("mutationAudit", () => {
   });
   it("skips caller-owned sub-resources (notification-prefs) regardless of parent", () => {
     expect(mutationAudit("PATCH", "/v1/employees/abc123/notification-prefs")).toBeNull();
+  });
+});
+
+// A denial has always named the pattern that refused it. Until now a PERMISSION named nothing, so "which grant
+// let them do that" - the question an access review exists to ask - had an answer on only one side.
+describe("decide() names the pattern that allowed a request, not only the one that refused it", () => {
+  const grant = { levels: { "compensation.**": "write", "leave-requests.me.**": "read" }, allow: ["payroll-runs.*.publish"] } as never;
+  const self = { employeeCode: "04-002" };
+
+  it("reports the pattern that carried a standard method", () => {
+    const d = decide(grant, resolveRequest("GET", "/v1/compensation/abc123"), self);
+    expect(d.allow).toBe(true);
+    expect(d.allow && d.via).toBe("compensation.**");
+  });
+
+  it("reports the pattern that carried a custom method", () => {
+    const d = decide(grant, resolveRequest("POST", "/v1/payroll-runs/abc123:publish"), self);
+    expect(d.allow).toBe(true);
+    expect(d.allow && d.via).toBe("payroll-runs.*.publish");
+  });
+
+  it("still explains a refusal, and offers no pattern for one", () => {
+    const d = decide(grant, resolveRequest("DELETE", "/v1/employees/abc123"), self);
+    expect(d.allow).toBe(false);
+    expect(!d.allow && d.reason).toMatch(/need/);
+  });
+
+  it("names the pattern that actually reached the required level, not a weaker earlier match", () => {
+    // `employees.**` grants read; only `employees.me.**` reaches write. A write must be credited to the one
+    // that got there - crediting the first match would name a grant that could not have allowed it.
+    const laddered = { levels: { "employees.**": "read", "employees.me.**": "admin" }, allow: [] } as never;
+    const d = decide(laddered, resolveRequest("PATCH", "/v1/employees/abc123"), { employeeCode: "abc123" });
+    expect(d.allow && d.via).toBe("employees.me.**");
   });
 });

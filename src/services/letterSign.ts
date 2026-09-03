@@ -12,6 +12,7 @@ import { audit } from "../lib/audit";
 import { notFound, invalidArgument, forbidden, failedPrecondition } from "../lib/errors";
 import { renderLetterPdf, type LetterContent } from "../lib/letterPdf";
 import { formatLongDate } from "../lib/pdfPrimitives";
+import { rehydrateLetterhead } from "./letterheads";
 
 export async function signLetter(deps: Deps, actor: AppUser, id: string) {
   const row = (await deps.db.select().from(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, id)).limit(1))[0];
@@ -44,6 +45,9 @@ export async function signLetter(deps: Deps, actor: AppUser, id: string) {
   for (const b of content.blocks) {
     if (b.kind === "esignature") { b.signature = sigBytes; b.name = name; b.date = date; }
   }
+  // The sidecar froze the letterhead's DESIGN but not its artwork (megabytes per document); fetch the image
+  // back from the letterhead row so the signed page carries the same masthead the recipient saw.
+  await rehydrateLetterhead(deps, content);
   const { bytes: pdf } = await renderLetterPdf(content);
   await deps.docs.put(row.r2Key, pdf, "application/pdf");
 
@@ -52,6 +56,8 @@ export async function signLetter(deps: Deps, actor: AppUser, id: string) {
     .set({ sizeBytes: pdf.byteLength, signedTime: new Date(), signatureName: name, locked: true, updatedAt: new Date() })
     .where(eq(schema.personalDocuments.uuid, id))
     .returning();
-  await audit(deps, actor, "personal-document.sign", "personal-documents", id);
+  // That it was signed and when, never the attestation name itself: lib/audit strips `signature*` from any
+  // meta, and this trail is read more widely than the signed document is.
+  await audit(deps, actor, "personal-document.sign", "personal-documents", id, { diff: { signedTime: { from: row.signedTime, to: updated!.signedTime }, locked: { from: row.locked, to: true } } }, updated);
   return updated!;
 }

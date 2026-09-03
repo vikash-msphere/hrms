@@ -12,7 +12,8 @@ import { securityHeaders } from "./middleware/securityHeaders";
 import { bodyLimit } from "./middleware/bodyLimit";
 import { errorHandler } from "./middleware/errorHandler";
 import { requestId } from "./middleware/requestId";
-import { runScheduled } from "./cron";
+import * as Sentry from "@sentry/cloudflare";
+import { runScheduled, NIGHTLY_CRON } from "./cron";
 
 import { users } from "./routes/users";
 import { apiKeys } from "./routes/apiKeys";
@@ -95,12 +96,14 @@ import { dashboardSummaryRoute } from "./routes/dashboardSummary";
 import { peopleAnalyticsRoute } from "./routes/peopleAnalytics";
 import { approvalsSummaryRoute } from "./routes/approvalsSummary";
 import { bankFormats } from "./routes/bankFormats";
-import { letterheadLogos } from "./routes/letterheadLogos";
+import { letterheads } from "./routes/letterheads";
 import { payrollDebit } from "./routes/payrollDebit";
 import { compensation } from "./routes/compensation";
 import { compensationReapply } from "./routes/compensationReapply";
+import { exportRecord } from "./routes/exportRecord";
 import { esignCallback } from "./routes/esignCallback";
 import { found } from "./routes/found";
+import { diag } from "./routes/diag";
 import { holidayFeed } from "./routes/holidayFeed";
 import { positions } from "./routes/positions";
 import { bonuses, bonusAward } from "./routes/bonuses";
@@ -140,11 +143,23 @@ app.use("*", bodyLimit); // refuse an oversized body from Content-Length, before
 // Unauthenticated health checks for uptime monitors / load balancers (everything under /v1 needs an Access
 // JWT, so there must be something to probe without one). /healthz is pure liveness; /readyz also pings D1.
 app.get("/healthz", (c) => c.json({ status: "ok" }));
+
+// A READY answer is cached in the isolate for a few seconds. /readyz is unauthenticated and touches D1, so
+// without this every caller - an uptime monitor on a tight interval, or anyone who finds the path - spends a
+// D1 read per request, and on the free plan's 100k/day allowance that is a cheap way to exhaust the quota
+// the app itself needs. A few seconds is well inside any monitor's tolerance for detecting an outage, and
+// only the positive answer is cached: a FAILING probe re-checks every time, so recovery is reported at once
+// and a stale "ready" can never outlive the database being down by more than the window.
+const READY_TTL_MS = 5_000;
+let readyUntil = 0;
 app.get("/readyz", async (c) => {
+  if (Date.now() < readyUntil) return c.json({ status: "ready" });
   try {
     await c.env.DB.prepare("SELECT 1").first();
+    readyUntil = Date.now() + READY_TTL_MS;
     return c.json({ status: "ready" });
   } catch {
+    readyUntil = 0;
     return c.json({ status: "unavailable" }, 503);
   }
 });
@@ -173,6 +188,13 @@ app.use("/esign/*", securityHeaders);
 // Public e-sign provider webhook, OUTSIDE /v1 so the session auth/authz/csrf middleware below does not apply -
 // it is authenticated by the provider's HMAC signature inside the driver. Mounted before the /v1 middleware.
 app.route("/esign", esignCallback);
+
+// Diagnostics relay for the SPA's error tracker. OUTSIDE /v1: the SDK sends no session and no CSRF header,
+// and a report from a signed-out or half-broken page is the one most worth having. It forwards to exactly one
+// configured project and refuses everything else - see routes/diag.ts for why it is shaped that way, and why
+// the path says nothing about the vendor.
+app.use("/diag", securityHeaders);
+app.route("/diag", diag);
 
 app.use("/v1/*", securityHeaders); // set response security headers on every /v1 response (incl. errors)
 app.use("/v1/*", dbContext);
@@ -269,9 +291,10 @@ app.route("/v1/expense-categories", expenseCategories);
 app.route("/v1/vendors", vendors);
 app.route("/v1/expense-budgets", expenseBudgets);
 app.route("/v1/bank-formats", bankFormats);
-app.route("/v1/letterhead-logos", letterheadLogos);
+app.route("/v1/letterheads", letterheads);
 app.route("/v1/payroll-debit-accounts", payrollDebit);
 app.route("/v1/compensation:reapplySplit", compensationReapply); // collection custom method, before the compensation mount
+app.route("/v1/export:record", exportRecord); // the audit entry for a browser-side bulk export
 app.route("/v1/compensation", compensation);
 app.route("/v1/positions", positions);
 app.route("/v1/bonuses:award", bonusAward); // collection custom method, before the bonuses mount
@@ -313,7 +336,7 @@ const LOOKS_LIKE_A_FILE = /\/[^/]+\.[a-z0-9]+$/i;
  *  ahead of the assets, and this decides how a miss among them is answered. test/spaFallback.test.ts pins
  *  the two together, because a prefix added to one and not the other fails in a way nothing else catches:
  *  the route starts replying 200 with the app shell instead of its 404. */
-export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar"];
+export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag"];
 
 // Everything the asset layer could not serve arrives here, because `not_found_handling` is "none" - the
 // SPA fallback is this function's job rather than the platform's.
@@ -354,7 +377,11 @@ export function getCodec(env: AppEnv["Bindings"]) {
 // Only referenced inside the batch handler (runtime), so the index<->batch import cycle is safe.
 export { app };
 
-export default {
+// Slug for the nightly job's Sentry cron monitor. Named, not derived from the expression, because the monitor
+// has to survive a schedule change: renaming it would orphan the history and silence the alert.
+const NIGHTLY_MONITOR = "hrms-nightly";
+
+const handler = {
   // Inbound edge: decode wire tokens -> internal ids BEFORE Hono routes, so params/services/authz are
   // id-native. Outbound encoding is the encodeWireIds middleware. Non-/v1 paths pass through unchanged.
   async fetch(request: Request, env: AppEnv["Bindings"], ctx: ExecutionContext) {
@@ -363,6 +390,46 @@ export default {
   },
   // Non-/v1 paths are served from web/dist by the platform (SPA fallback).
   async scheduled(event: ScheduledController, env: AppEnv["Bindings"], ctx: ExecutionContext) {
-    ctx.waitUntil(runScheduled(event.cron, makeDeps(env)));
+    // The 5-minute drain is chatty and self-correcting - a missed one is made up by the next. The NIGHTLY run
+    // is the one worth a check-in: it does leave accrual, reminders and digests, and if it silently stops
+    // nobody finds out until a leave balance is wrong weeks later. `withMonitor` opens a check-in before the
+    // run and closes it with ok/error, so Sentry alerts on a run that fails AND on one that never arrives -
+    // the second being the failure that has no error to catch.
+    const run = () => runScheduled(event.cron, makeDeps(env));
+    ctx.waitUntil(
+      event.cron === NIGHTLY_CRON
+        ? Sentry.withMonitor(NIGHTLY_MONITOR, run, {
+            schedule: { type: "crontab", value: NIGHTLY_CRON },
+            checkinMargin: 10, // minutes late before it counts as missed
+            maxRuntime: 30, // minutes running before it counts as stuck
+            timezone: "Etc/UTC", // the cron expression is UTC; saying so keeps the monitor's clock honest
+          })
+        : run(),
+    );
   },
 };
+
+// Wrapped LAST, around the finished handler: `withSentry` initializes the SDK per request and instruments
+// both `fetch` and `scheduled`, so an unhandled throw anywhere in the Worker becomes an issue instead of a
+// bare 500 nobody sees. It also continues the trace the SPA started - the browser sends `sentry-trace` on
+// every /v1 call (tracePropagationTargets in web/src/instrument.ts) - so one trace spans the click, the API
+// call and the D1 work behind it.
+//
+// Returns undefined when SENTRY_DSN is unset, which is `withSentry`'s documented way of staying inert: no
+// client, no overhead, and local development is unchanged.
+export default Sentry.withSentry(
+  (env: AppEnv["Bindings"]) =>
+    env.SENTRY_DSN
+      ? {
+          dsn: env.SENTRY_DSN,
+          release: env.SENTRY_RELEASE,
+          environment: env.SENTRY_ENVIRONMENT ?? "production",
+          // Matches the SPA's rate so a distributed trace is not sampled in on one side and out on the other.
+          tracesSampleRate: 0.2,
+          // The server half of the same rule the browser follows: this is an HR system, and request bodies
+          // are payroll and personal data. Nothing here needs them to report an error.
+          sendDefaultPii: false,
+        }
+      : undefined,
+  handler,
+);

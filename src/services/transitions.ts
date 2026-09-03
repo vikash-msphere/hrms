@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
@@ -131,7 +131,7 @@ export async function createTransition(deps: Deps, actor: AppUser, input: Transi
   }).returning())[0]!;
 
   if (tpl) await instantiateTemplate(deps, actor, tpl, row.uuid, subjectId, subject.managerId ?? null, anchorMs);
-  await audit(deps, actor, `transition.create.${kind}`, "transitions", row.uuid, undefined, row);
+  await audit(deps, actor, `transition.create.${kind}`, "transitions", row.uuid, createdMeta(row, "transitions"), row);
   // Welcome/goodbye the subject: one summary notification (their individual tasks are surfaced in-app).
   if (subjectId !== actor.employeeId)
     await notify(deps, { recipient: subjectId, type: `transition.${kind}_started`, title: kind === "onboarding" ? "Welcome aboard!" : "Your offboarding has started", body: `${name} is underway. Check your tasks.`, link: "transitions", subject: `transitions/${row.uuid}`, actorId: actor.employeeId });
@@ -168,7 +168,7 @@ export async function updateTransition(deps: Deps, actor: AppUser, id: string, p
     const subject = (await deps.db.select({ managerId: schema.employees.managerId }).from(schema.employees).where(eq(schema.employees.uuid, row.employeeId)).limit(1))[0];
     await instantiateTemplate(deps, actor, tpl, id, row.employeeId, subject?.managerId ?? null, updated.anchorDate ? +new Date(updated.anchorDate) : NaN);
   }
-  await audit(deps, actor, "transition.update", "transitions", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "transition.update", "transitions", id, diffMeta(row, updated, set, "transitions"), updated);
   return updated;
 }
 
@@ -177,7 +177,7 @@ export async function setTransitionState(deps: Deps, actor: AppUser, id: string,
   if (state === "ACTIVE" && row.state === "ACTIVE") throw failedPrecondition("the transition is already active");
   if (state !== "ACTIVE" && row.state !== "ACTIVE") throw failedPrecondition("only an active transition can be completed or cancelled");
   const updated = (await deps.db.update(schema.transitions).set({ state, updatedAt: new Date() }).where(eq(schema.transitions.uuid, id)).returning())[0]!;
-  await audit(deps, actor, `transition.${state.toLowerCase()}`, "transitions", id);
+  await audit(deps, actor, `transition.${state.toLowerCase()}`, "transitions", id, stateMeta(row.state, state, { employee: `employees/${row.employeeId}` }), updated);
   // Completing an offboarding terminates the employee: mark terminated/disabled with the last working day as the
   // end date and disable their login. NOT reversed on reopen (HR reactivates manually if a departure is rescinded).
   if (state === "COMPLETED" && row.kind === "offboarding") {
@@ -205,7 +205,7 @@ export async function appendTransitionTask(deps: Deps, actor: AppUser, transitio
   const assigneeId = idFromPath(input.assignee) ?? row.employeeId;
   const maxPos = Math.max(-1, ...(await deps.db.select({ p: schema.transitionTasks.position }).from(schema.transitionTasks).where(eq(schema.transitionTasks.transitionId, transitionId))).map((t) => t.p));
   await insertTask(deps, transitionId, row.employeeId, assigneeId, input.title.trim(), input.description?.trim() || null, input.due_date ? new Date(dayMs(input.due_date)) : null, maxPos + 1);
-  await audit(deps, actor, "transition.appendTask", "transitions", transitionId);
+  await audit(deps, actor, "transition.appendTask", "transitions", transitionId, { employee: `employees/${row.employeeId}`, diff: { title: { from: null, to: input.title.trim() } } }, row);
   return row;
 }
 

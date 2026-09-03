@@ -25,7 +25,9 @@ export function RowActivityButton({ resource, label = "Activity", size = "icon" 
         </Button>
       )}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+        {/* Wider than the default: the trail is a table now (who / action / change / when), and at `max-w-lg`
+            the change chips wrap to a column one word wide. */}
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader><DialogTitle>Activity</DialogTitle></DialogHeader>
           {open && <ActivityFeed resource={resource} />}
         </DialogContent>

@@ -253,7 +253,8 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
     const body = { title: form.title, all_day: form.all_day, count_as_work: form.count_as_work, requires_clock_in: form.count_as_work && form.requires_clock_in, ...times, color: form.color, description: form.description || null, attendees, repeat: (form.repeat || null) as EventRepeat | null };
     if (editing) {
       try {
-        await patch(`events/${idOf(editing.path)}`, body, etag ?? editing.etag);
+        const saved = await patch<Event>(`events/${idOf(editing.path)}`, body, etag ?? editing.etag);
+        setEtag(saved.etag);
       } catch (e) {
         // Lost race: somebody else moved this event or changed its attendees. Take their version's etag so the
         // next press goes through deliberately, instead of reporting "etag mismatch" at the reader.

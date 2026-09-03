@@ -4,7 +4,7 @@
 // draw on: the placeholder/derived-clause set, inline `**bold**`, block-level `requires` gating, and the
 // named `computed` blocks (CTC annexure, increment table). The renderer (src/lib/letterPdf.ts) turns the
 // resolved blocks into a PDF; src/services/letterData.ts assembles the LetterContext from DB + settings.
-import type { LetterContent, LetterBlock, LetterTable, Run } from "../lib/letterPdf";
+import type { LetterContent, LetterBlock, LetterTable, LetterheadSpec, Run } from "../lib/letterPdf";
 import type { EsignMethod } from "./esign";
 import { amountInWords, moneyWhole } from "../lib/pdfPrimitives";
 
@@ -33,7 +33,11 @@ export type LetterDefaults = {
 };
 
 export type LetterContext = {
-  org: { name: string; address?: string; logo?: string };
+  org: { name: string; address?: string; logo?: string; legalName?: string };
+  /** The page this letter prints on, resolved by services/letterheads. Absent = the stock page. */
+  letterhead?: LetterheadSpec;
+  /** Which letterhead that was (`letterheads/<id>`), carried into the frozen content for re-renders. */
+  letterheadRef?: string;
   defaults: LetterDefaults;
   today: Date;
   employee: {
@@ -101,9 +105,9 @@ export type LetterTemplate = {
   id: string;
   label: string;
   category?: string; // grouping for the editor + generate pickers (e.g. Onboarding, Compensation, Exit)
-  // Which letterhead this template is issued on, as a `letterhead-logos/<id>` ref (an org with several legal
-  // entities issues each one's letters on its own logo). Unset - or a logo since removed - falls back to the
-  // single organization logo. Overridable per generation.
+  // Which letterhead this template is issued on, as a `letterheads/<id>` ref (an org with several legal
+  // entities issues each one's letters on its own stationery). Unset - or one since removed - falls back to the
+  // org-wide default for letters. Overridable per generation.
   letterhead?: string;
 
   filename?: string; // download filename template (without extension); supports placeholders
@@ -354,6 +358,8 @@ export function resolveLetter(template: LetterTemplate, ctx: LetterContext, inpu
   }
   const content: LetterContent = {
     org: ctx.org,
+    ...(ctx.letterhead ? { letterhead: ctx.letterhead } : {}),
+    ...(ctx.letterheadRef ? { letterheadRef: ctx.letterheadRef } : {}),
     date: v.date!,
     to: { name: ctx.employee.fullName, lines: ctx.employee.designation ? [ctx.employee.designation] : [] },
     blocks,

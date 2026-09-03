@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight } from "lucide-react";
-import { get, create } from "@/api";
+import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight, Pencil, Trash2 } from "lucide-react";
+import { get, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatMoney, cn, idOf, round2 as r2 } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
@@ -16,6 +16,8 @@ import { MoneyInput } from "@/components/common/MoneyInput";
 import { DetailSkeleton } from "@/components/common/Skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDialogGuard } from "@/components/common/dialogGuard";
+import { useConfirm } from "@/components/common/confirm";
+import { RowActivityButton } from "@/components/common/RowActivityButton";
 import { AccessScope } from "@/components/access/AccessScope";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -82,10 +84,14 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   const [monthlyTds, setMonthlyTds] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
+  // Set while the dialog is CORRECTING an existing revision rather than adding one. Both write the same five
+  // fields, so they share one form; only the verb, the copy and the date bounds differ.
+  const [editing, setEditing] = useState<Compensation | null>(null);
   const [form, setForm] = useState({ ctc: "", effective_from: todayYmd(), pay_grade: "", salary_structure: "" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const guard = useDialogGuard(open, form, () => setOpen(false), { label: "revision" });
+  const confirm = useConfirm();
+  const guard = useDialogGuard(open, form, () => { setOpen(false); setEditing(null); }, { label: editing ? "correction" : "revision" });
   // Monthly/annual display toggle for the breakdown figures (annual = ×12); CTC is stored annual.
   const [unit, setUnit] = useState<"monthly" | "annual">("monthly");
   const mult = unit === "annual" ? 12 : 1;
@@ -248,6 +254,22 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   // three conditions the footer and the Enter key both need, so they read it from one place.
   const canSave = !busy && !!form.effective_from && Number(form.ctc) > 0 && !!splitPreview(Number(form.ctc), form.salary_structure || undefined);
 
+  // The revisions on either side of `row` in the timeline (`rows` is newest first). A correction may move a
+  // date only BETWEEN these two - past a neighbour it would silently re-order which revision supersedes which
+  // - so they bound the date input, and the server enforces the same window.
+  const neighbours = useCallback((row: Compensation) => {
+    const asc = [...rows].sort((a, b) => a.effective_from.localeCompare(b.effective_from));
+    const i = asc.findIndex((r) => r.path === row.path);
+    return { prev: i > 0 ? asc[i - 1] : undefined, next: i >= 0 && i < asc.length - 1 ? asc[i + 1] : undefined };
+  }, [rows]);
+  // Exclusive bounds as INCLUSIVE input attributes: the day after the previous revision, the day before the next.
+  const dayShift = (ymd: string, days: number) => new Date(Date.parse(ymd + "T00:00:00Z") + days * 86_400_000).toISOString().slice(0, 10);
+  const dateBounds = useMemo(() => {
+    if (!editing) return {};
+    const { prev, next } = neighbours(editing);
+    return { min: prev ? dayShift(prev.effective_from, 1) : undefined, max: next ? dayShift(next.effective_from, -1) : undefined };
+  }, [editing, neighbours]);
+
   // Live band feedback for the revise dialog: the selected grade's annual-CTC range + where the entered CTC
   // sits in it. Bands are guardrails, so this just informs - it never blocks saving.
   const selectedBand = useMemo(() => {
@@ -272,20 +294,35 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     </div>
   );
 
-  async function revise() {
+  // Open the dialog to ADD a revision (prefilled from the current salary, as a raise usually starts there), or
+  // to CORRECT `row` (prefilled from that row).
+  function openDialog(row?: Compensation) {
+    setEditing(row ?? null);
+    setForm(row
+      ? { ctc: String(row.annual_ctc), effective_from: row.effective_from, pay_grade: row.pay_grade ?? "", salary_structure: row.salary_structure ?? "" }
+      : { ctc: current ? String(current.annual_ctc) : "", effective_from: todayYmd(), pay_grade: current?.pay_grade ?? "", salary_structure: current?.salary_structure ?? "" });
+    setErr(null);
+    setOpen(true);
+  }
+
+  async function save() {
     setBusy(true);
     setErr(null);
     try {
-      // Comp is set as an annual CTC; the server derives the monthly basic + Special Allowance plug.
-      await create("compensation", {
-        employee: "employees/" + employeeId,
+      // Comp is set as an annual CTC; the server derives the monthly basic + Special Allowance plug. A
+      // correction sends the same fields to the row's own path, and the server re-solves the split (and the
+      // arrears, unless they have already been paid out).
+      const body = {
         annual_ctc: Math.round(Number(form.ctc) * 100) / 100,
         effective_from: form.effective_from,
         pay_grade: form.pay_grade.trim(),
         salary_structure: form.salary_structure.trim(),
-      });
-      toast({ title: "Compensation revised" });
+      };
+      if (editing) await patch(editing.path, body, editing.etag);
+      else await create("compensation", { employee: "employees/" + employeeId, ...body });
+      toast({ title: editing ? "Revision corrected" : "Compensation revised" });
       setOpen(false);
+      setEditing(null);
       setForm({ ctc: "", effective_from: todayYmd(), pay_grade: "", salary_structure: "" });
       await load();
     } catch (e) {
@@ -295,8 +332,31 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     }
   }
 
+  // Removing a revision is not "delete a record": the preceding revision takes the window back and, for the
+  // current row, becomes the salary again. Say which salary the employee ends up on, since that is the part
+  // the caller has to be right about.
+  async function removeRevision(row: Compensation) {
+    const { prev } = neighbours(row);
+    const ok = await confirm({
+      title: `Remove the revision effective ${row.effective_from}?`,
+      description: prev
+        ? `The previous revision (${money(prev.annual_ctc, prev.currency_code)} from ${prev.effective_from}) takes over this period${row.current ? " and becomes the current salary again" : ""}. Payroll reprices any editable run that covered it.`
+        : "This is the only revision on record, so the employee will be left with no compensation and payroll cannot price them until one is set.",
+      confirmLabel: "Remove revision",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await remove(row.path, row.etag);
+      toast({ title: "Revision removed" });
+      await load();
+    } catch (e) {
+      toast({ variant: "destructive", title: "Couldn't remove the revision", description: (e as Error).message });
+    }
+  }
+
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="compensation" label="Compensation">
@@ -310,7 +370,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
           </div>
           {canEdit && (
             <AccessAction collection="compensation" create label="Revise compensation">
-              <Button size="sm" onClick={() => { setForm({ ctc: current ? String(current.annual_ctc) : "", effective_from: todayYmd(), pay_grade: current?.pay_grade ?? "", salary_structure: current?.salary_structure ?? "" }); setErr(null); setOpen(true); }}><Plus className="h-4 w-4" /> Revise</Button>
+              <Button size="sm" onClick={() => openDialog()}><Plus className="h-4 w-4" /> Revise</Button>
             </AccessAction>
           )}
         </div>
@@ -467,7 +527,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
             {/* One labelled block per revision on a phone, five columns from `sm` up. */}
             <div className="scroll-shadow-x -mx-1 overflow-x-auto px-1 [--scroll-ground:hsl(var(--card))]">
             <table className="table-stack w-full text-sm sm:min-w-[32rem]">
-              <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Effective</th><th className="py-2 pr-3 font-medium">CTC ({unit})</th><th className="py-2 pr-3 font-medium">Change</th><th className="py-2 pr-3 font-medium">Grade</th><th className="py-2 font-medium">Until</th></tr></thead>
+              <thead><tr className="border-b text-left text-muted-foreground"><th className="py-2 pr-3 font-medium">Effective</th><th className="py-2 pr-3 font-medium">CTC ({unit})</th><th className="py-2 pr-3 font-medium">Change</th><th className="py-2 pr-3 font-medium">Grade</th><th className="py-2 pr-3 font-medium">Until</th><th className="py-2 font-medium"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
                 {rows.map((r) => {
                   const delta = deltaByPath.get(r.path);
@@ -488,7 +548,35 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                           <span className="flex flex-wrap items-center gap-1.5">{r.pay_grade_name}<BandBadge row={r} /></span>
                         ) : "-"}
                       </td>
-                      <td data-label="Until" className="py-2 text-muted-foreground">{r.current ? <Badge variant="success">current</Badge> : r.effective_to ?? "-"}</td>
+                      <td data-label="Until" className="py-2 pr-3 text-muted-foreground">{r.current ? <Badge variant="success">current</Badge> : r.effective_to ?? "-"}</td>
+                      {/* Correct or remove this revision. Both are gated on the row's own server-computed
+                          `access.can`, so a reader who may only look never sees them. Removing a revision whose
+                          arrears a payroll run already paid is refused server-side - say so on the button
+                          rather than letting the confirm end in an error. */}
+                      {/* No `data-label`: an action cell stacks as a plain block on a phone (index.css). */}
+                      <td className="py-2">
+                        <div className="flex items-center justify-end gap-0.5">
+                          {/* The trail for THIS revision: who set it, what it was before, what it became, and
+                              who corrected or removed it. Renders only for a caller with the activity grant. */}
+                          <RowActivityButton resource={r.path} label="Revision history" />
+                          <AccessAction collection="compensation" verb="update" objectPath={r.path} can={r.access?.can} label="Correct revision">
+                            <Button size="icon" variant="ghost" className="h-7 w-7" title="Correct this revision" aria-label={`Correct the revision effective ${r.effective_from}`} onClick={() => openDialog(r)}><Pencil className="h-3.5 w-3.5" /></Button>
+                          </AccessAction>
+                          <AccessAction collection="compensation" verb="delete" objectPath={r.path} can={r.access?.can} label="Remove revision">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7 text-destructive hover:text-destructive"
+                              disabled={!!r.arrears_paid}
+                              title={r.arrears_paid ? "Its retro arrears have already been paid - reverse that payroll run first" : "Remove this revision"}
+                              aria-label={`Remove the revision effective ${r.effective_from}`}
+                              onClick={() => void removeRevision(r)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </AccessAction>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -500,12 +588,14 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
       </CardContent>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (canSave) void revise(); }}>
+        <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (canSave) void save(); }}>
           <AccessScope collection="compensation">
           <DialogHeader>
-            <DialogTitle>Revise compensation</DialogTitle>
+            <DialogTitle>{editing ? "Correct revision" : "Revise compensation"}</DialogTitle>
             <DialogDescription>
-              Enter the new annual CTC; basic and allowances are derived from it. The revision takes effect on the date you choose, and payroll picks it up from its next run.
+              {editing
+                ? "Fix what was entered wrong. The basic/allowance split and any retro arrears are re-derived from the corrected figures - except arrears a payroll run has already paid, which stay at the amount that was actually disbursed."
+                : "Enter the new annual CTC; basic and allowances are derived from it. The revision takes effect on the date you choose, and payroll picks it up from its next run."}
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
@@ -521,13 +611,23 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
             <Field label="Annual CTC" hint={`Basic = ${ctcCfg.basic_pct}% of CTC; a Special Allowance balances the rest.`}>
               <MoneyInput value={form.ctc} onChange={(v) => setForm({ ...form, ctc: v })} min={1} autoFocus suffix="a year" />
             </Field>
-            <Field label="Effective from" hint={form.effective_from < todayYmd() ? "Backdated - payroll prices past periods at the new rate when they're rebuilt." : undefined}>
-              <Input type="date" value={form.effective_from} onChange={(e) => setForm({ ...form, effective_from: e.target.value })} />
+            {/* A date anywhere is allowed on a new revision, including one that lands inside the existing
+                history (a salary that was never entered). A correction may only move within its own slot, so
+                the input is bounded by the neighbouring revisions and the hint names the window. */}
+            <Field
+              label="Effective from"
+              hint={editing
+                ? `Between the neighbouring revisions${dateBounds.min ? `, from ${dateBounds.min}` : ""}${dateBounds.max ? ` to ${dateBounds.max}` : ""}. To move it further, remove this revision and add it at the new date.`
+                : form.effective_from < todayYmd()
+                  ? "Backdated - payroll prices past periods at the new rate when they're rebuilt, and already-published periods are owed the difference as arrears."
+                  : undefined}
+            >
+              <Input type="date" min={dateBounds.min} max={dateBounds.max} value={form.effective_from} onChange={(e) => setForm({ ...form, effective_from: e.target.value })} />
             </Field>
           </FieldRow>
           {/* A revision is nearly always expressed as a raise, so the raise is what the form shows back: the
               delta against what they earn today, and one-tap chips for the usual increments. */}
-          {current && (
+          {!editing && current && (
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs text-muted-foreground">Raise</span>
               {[5, 10, 15, 20, 30].map((pct) => {
@@ -548,7 +648,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
               })}
             </div>
           )}
-          {current && Number(form.ctc) > 0 && Number(form.ctc) !== current.annual_ctc && (
+          {!editing && current && Number(form.ctc) > 0 && Number(form.ctc) !== current.annual_ctc && (
             <p className="text-sm">
               <span className={cn("font-medium tabular-nums", Number(form.ctc) > current.annual_ctc ? "text-success" : "text-destructive")}>
                 {Number(form.ctc) > current.annual_ctc ? "+" : "−"}{money(Math.abs(Number(form.ctc) - current.annual_ctc))}
@@ -591,7 +691,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
           </DialogBody>
           <DialogFooter>
             <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
-            <Button onClick={revise} loading={busy} disabled={!canSave}>Save revision</Button>
+            <Button onClick={save} loading={busy} disabled={!canSave}>{editing ? "Save correction" : "Save revision"}</Button>
           </DialogFooter>
           </AccessScope>
         </DialogContent>

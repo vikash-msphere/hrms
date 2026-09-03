@@ -7,6 +7,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
+import { documentLetterhead, documentLetterheadRef, type OrgWithDocumentLogos } from "./letterheads";
 import { loadTaxConfig, fyWindow, finalizedTotals, settlementTotals, verifiedDeductions, readDeclarations, tdsComponent } from "./taxProjection";
 import { computeAnnualTax, allowedDeductions, assertSupportedRegime } from "../domain/incomeTax";
 import { renderLetterPdf, type LetterContent, type LetterBlock } from "../lib/letterPdf";
@@ -28,7 +29,9 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
   if (!emp || emp.deleteTime) throw notFound("employee not found");
 
-  const org = await getSettingValue<{ name?: string; address?: string; logo?: string; default_currency?: string; currency_decimals?: CurrencyDecimals }>(deps, "organization", {});
+  const org = await getSettingValue<{ name?: string; legal_name?: string; address?: string; logo?: string; default_currency?: string; currency_decimals?: CurrencyDecimals } & OrgWithDocumentLogos>(deps, "organization", {});
+  const letterheadRef = documentLetterheadRef(org, "form16");
+  const letterhead = await documentLetterhead(deps, org, "form16");
   // Figures render in the org currency's precision (whole rupees for INR by default).
   const money = (n: number) => fmtMoney(n, decimalsFor(org.default_currency, org.currency_decimals));
   const cfg = await loadTaxConfig(deps);
@@ -85,7 +88,9 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
   blocks.push({ kind: "para", runs: [`System-generated Part B summary under the ${regimeCfg.label.toLowerCase()} from finalized payroll and settlements for the year. Please verify against Form 26AS / AIS before filing.`] });
 
   const content: LetterContent = {
-    org: { name: org.name ?? "", address: org.address, logo: org.logo },
+    org: { name: org.name ?? "", address: org.address, logo: org.logo, legalName: org.legal_name || undefined },
+    ...(letterhead ? { letterhead } : {}),
+    ...(letterheadRef ? { letterheadRef } : {}),
     date: formatLongDate(new Date()),
     ref: `Form No. 16 · Part B · FY ${fy.financialYear}`,
     to: { name: `${emp.firstName} ${emp.lastName}`, lines: [emp.code ? `Employee code: ${emp.code}` : "", emp.jobTitle ?? ""].filter(Boolean) },
@@ -93,5 +98,7 @@ export async function assembleForm16(deps: Deps, employeeId: string, financialYe
   };
 
   const { bytes: pdf } = await renderLetterPdf(content);
-  return { pdf, title: `Form 16 (Part B) — FY ${fy.financialYear}`, fileName: `Form16-${fy.financialYear}-${emp.code ?? employeeId}.pdf`, financialYear: fy.financialYear };
+  // `content` goes back with the PDF so the caller can freeze it: a filed Form 16 is re-renderable on the
+  // letterhead's print page exactly like a letter (services/letterPrint.ts).
+  return { pdf, content, title: `Form 16 (Part B) — FY ${fy.financialYear}`, fileName: `Form16-${fy.financialYear}-${emp.code ?? employeeId}.pdf`, financialYear: fy.financialYear };
 }

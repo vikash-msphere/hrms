@@ -30,17 +30,35 @@ export type RegimeConfig = {
   sectionCaps?: Record<string, number>;
 };
 export type TaxConfig = {
+  // The VINTAGE STAMP of the slab table below: which financial year this Budget legislated for, and its
+  // assessment year. It is NOT the year being withheld for - that is always derived from the payroll period's
+  // own dates (`fyWindow`), so a config left at last Budget's vintage still withholds against the right
+  // window. What the stamp is for is telling a human WHICH Budget's numbers are loaded, so a stale table is
+  // visible instead of silent. `fyLabels` builds both strings from one start year; never hand-write them
+  // separately, or the pair drifts.
   assessmentYear: string; // e.g. "2026-27"
   financialYear: string; // e.g. "2025-26"
   regimes: Record<string, RegimeConfig>;
 };
 
+// India financial year labels for a year starting 1 April `startYear`: FY "2025-26" and its AY "2026-27".
+// One function so the two strings can never disagree, wherever they are produced (this seed, `fyWindow`,
+// the bootstrap generator, preflight).
+export function fyLabels(startYear: number): { financialYear: string; assessmentYear: string } {
+  const yy = (n: number) => String(n % 100).padStart(2, "0");
+  return { financialYear: `${startYear}-${yy(startYear + 1)}`, assessmentYear: `${startYear + 1}-${yy(startYear + 2)}` };
+}
+
+// Which Budget's slab table is hardcoded below. Bump it in the SAME edit that changes the slabs, rebate,
+// standard deduction or surcharge bands - the stamp is only useful if it is true. `scripts/preflight.ts`
+// compares it against the financial year being deployed into and warns when the table is a year behind.
+export const DEFAULT_TAX_FY_START_YEAR = 2025; // Budget 2025 -> FY 2025-26 / AY 2026-27
+
 // Seed / fail-closed fallback - the latest concrete new-regime slabs (FY 2025-26 / AY 2026-27). The DB
 // `tax-config` settings row is the runtime source of truth; identical values so a missing row never changes
 // behavior. Update this (and the row) each Budget; add an `old` regime here when it's implemented.
 export const DEFAULT_TAX_CONFIG: TaxConfig = {
-  assessmentYear: "2026-27",
-  financialYear: "2025-26",
+  ...fyLabels(DEFAULT_TAX_FY_START_YEAR),
   regimes: {
     new: {
       label: "New regime",

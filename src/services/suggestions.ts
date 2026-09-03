@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
@@ -83,7 +83,7 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
     .insert(schema.suggestions)
     .values({ code: await allocOwnedCode(deps, schema.suggestions, schema.suggestions.submitterId, submitterId), submitterId, anonymous: !!input.anonymous, category: input.category?.trim() || null, title, body })
     .returning())[0]!;
-  await audit(deps, actor, "suggestion.create", "suggestions", row.uuid, undefined, row);
+  await audit(deps, actor, "suggestion.create", "suggestions", row.uuid, createdMeta(row, "suggestions"), row);
   await emitEvent(deps, actor, "suggestion.submitted", { subject: `suggestions/${row.uuid}`, employeeId: submitterId, payload: { anonymous: !!input.anonymous, category: row.category } });
   // Nudge the reviewers so a new idea doesn't sit unseen. Respect anonymity: no actor face on an anonymous
   // submission (the title is the suggestion's own content, which reviewers see regardless).
@@ -109,7 +109,7 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   if (has("category")) set.category = patch.category?.trim() || null;
   if (has("anonymous")) set.anonymous = !!patch.anonymous;
   const updated = (await deps.db.update(schema.suggestions).set(set).where(eq(schema.suggestions.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "suggestion.update", "suggestions", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
   return updated;
 }
 

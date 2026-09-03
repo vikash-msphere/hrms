@@ -86,7 +86,8 @@ export async function upsertSetting(deps: Deps, actor: AppUser, key: string, val
   }
   const [inserted] = await deps.db.insert(schema.settings).values({ key, value: json }).returning();
   bustRef(deps, "settings");
-  await audit(deps, actor, "setting.create", "settings", key);
+  // A first save has no previous value to diff against, so the whole of what it set IS the change.
+  await audit(deps, actor, "setting.create", "settings", key, { diff: { value: { from: null, to: json.length > 140 ? `${json.slice(0, 140)}…` : json } } }, inserted);
   return inserted!;
 }
 

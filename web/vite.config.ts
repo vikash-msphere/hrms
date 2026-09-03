@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { sentryVitePlugin } from "@sentry/vite-plugin";
 import { fileURLToPath, URL } from "node:url";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
@@ -373,8 +374,40 @@ export default defineConfig(({ mode }) => ({
     dropFinderJunk(),
     react(),
     pwaManifest(mode),
+    // Source maps, uploaded to the error tracker and then DELETED from the build.
+    //
+    // Without them a production stack trace is `index-a1b2c3.js:1:48213`, which names nothing - every issue
+    // this app has ever reported was only readable because it came from the dev server. The maps are built
+    // (`sourcemap: "hidden"` below), uploaded here, and removed from web/dist afterwards, so they never ship:
+    // a .map served publicly hands the whole unminified source to anyone who asks for it.
+    //
+    // Only active with SENTRY_AUTH_TOKEN in the environment, which is a CI secret and never committed. A local
+    // `npm run build` has no token, skips the plugin entirely, and is unchanged.
+    ...(process.env.SENTRY_AUTH_TOKEN
+      ? [
+          sentryVitePlugin({
+            org: process.env.SENTRY_ORG,
+            project: process.env.SENTRY_PROJECT,
+            authToken: process.env.SENTRY_AUTH_TOKEN,
+            // The release the maps belong to. MUST match what the bundle reports at runtime
+            // (VITE_APP_VERSION -> `release` in web/src/instrument.ts) or the maps are uploaded against a
+            // release no event ever claims, and traces stay minified with nothing to explain why.
+            release: { name: process.env.VITE_APP_VERSION },
+            sourcemaps: { filesToDeleteAfterUpload: ["./web/dist/**/*.map"] },
+          }),
+        ]
+      : []),
   ],
   build: {
+    // Maps are generated ONLY when there is a token to upload them with, and the two conditions are the same
+    // expression on purpose. Generating them unconditionally left 30 .map files sitting in web/dist on any
+    // build without a token - and web/dist is what gets uploaded to Cloudflare, so a plain `npm run build &&
+    // wrangler deploy` would have served the entire unminified source to anyone who asked for it. The plugin's
+    // `filesToDeleteAfterUpload` cleans them up, but the plugin only runs when the token is set.
+    //
+    // "hidden" rather than true: the maps are emitted for the upload but no `//# sourceMappingURL=` comment is
+    // written into the bundle, so a browser never goes looking for one.
+    sourcemap: process.env.SENTRY_AUTH_TOKEN ? "hidden" : false,
     outDir: "../web/dist",
     emptyOutDir: true,
     // Don't emit the inline module-preload polyfill: an inline <script> would force the SPA CSP to allow
@@ -406,6 +439,14 @@ export default defineConfig(({ mode }) => ({
             if (face && face[1] !== "inter" && id.split("?")[0]!.endsWith(".css")) return `font-${face[1]}`;
             if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "react-vendor";
             if (id.includes("@radix-ui")) return "radix";
+            // Same reasoning as react/radix: instrument.ts is imported by the entry, so the whole SDK is on
+            // the critical path whatever we do here - naming it keeps ~92 kB gz of code that changes only
+            // when the SDK is upgraded out of the app's own entry chunk, which rehashes every deploy.
+            // 41 kB of that is session replay's recorder. It cannot be deferred to a later chunk: replay runs
+            // in buffer mode (see instrument.ts), so it has to be recording BEFORE the error it explains, and
+            // a dynamic import of @sentry/react would be merged back into this chunk anyway - Rollup inlines a
+            // module that is also statically imported.
+            if (id.includes("@sentry")) return "sentry";
             // pdf.js and the module that exports its worker's URL (`pdf.worker.min.mjs?url`, all of 120 bytes)
             // load at the same moment - the stub is only read to point pdf.js at its worker. One chunk, not two.
             if (id.includes("pdfjs-dist")) return "pdfjs";
@@ -467,7 +508,11 @@ export default defineConfig(({ mode }) => ({
       // The worker owns more than /v1 (WORKER_OWNED_PREFIXES in src/index.ts), and none of these paths are in
       // openapi.yaml, so they cannot go through Prism. Unproxied they fall through to the SPA's index.html,
       // which turns a sign-in redirect into the app reloading itself.
-      "^/(auth|esign|found|calendar)(/|$)": WORKER_ORIGIN,
+      // /diag is here for the same reason and for one of its own: it carries COMPRESSED BINARY (a session
+      // replay's recording item), so it could not go through Prism even if it were in the contract - Prism
+      // re-encodes a binary body as text, which is precisely the corruption the relay itself was just fixed
+      // for. Straight to the Worker, bytes intact.
+      "^/(auth|esign|found|calendar|diag)(/|$)": WORKER_ORIGIN,
     },
   },
 }));

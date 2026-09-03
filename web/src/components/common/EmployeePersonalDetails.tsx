@@ -54,7 +54,7 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   const d = data ?? {};
 
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="personal-info" label="Contact details">
@@ -74,6 +74,7 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
       </CardContent>
 
       <WriteDialog
+      className="sentry-mask"
         open={open}
         onClose={() => setOpen(false)}
         title="Edit contact details"

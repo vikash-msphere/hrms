@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -42,7 +42,7 @@ export async function createTicketChecklist(deps: Deps, actor: AppUser, input: T
       items: JSON.stringify(cleanItems(input.items)),
     })
     .returning())[0]!;
-  await audit(deps, actor, "ticket_checklist.create", "ticket-checklists", row.uuid, undefined, row);
+  await audit(deps, actor, "ticket_checklist.create", "ticket-checklists", row.uuid, createdMeta(row, "ticket-checklists"), row);
   return row;
 }
 
@@ -59,7 +59,7 @@ export async function updateTicketChecklist(deps: Deps, actor: AppUser, id: stri
   }
   if (has("items")) set.items = JSON.stringify(cleanItems(patch.items));
   const updated = (await deps.db.update(schema.ticketChecklists).set(set).where(eq(schema.ticketChecklists.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "ticket_checklist.update", "ticket-checklists", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "ticket_checklist.update", "ticket-checklists", id, diffMeta(row, updated, set, "ticket-checklists"), updated);
   return updated;
 }
 

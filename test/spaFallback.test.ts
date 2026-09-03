@@ -16,6 +16,10 @@ const wranglerToml = Object.values(
   import.meta.glob("../wrangler.toml", { query: "?raw", import: "default", eager: true }) as Record<string, string>
 )[0]!;
 
+const viteConfig = Object.values(
+  import.meta.glob("../web/vite.config.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>
+)[0]!;
+
 describe("SPA fallback", () => {
   // wrangler.toml decides which paths reach the Worker at all; WORKER_OWNED_PREFIXES decides how a miss among
   // them is answered. A prefix in one and not the other is invisible until that route starts serving HTML.
@@ -28,6 +32,21 @@ describe("SPA fallback", () => {
         .sort();
       expect(prefixes).toEqual([...WORKER_OWNED_PREFIXES].sort());
     }
+  });
+
+  // The THIRD list. A worker-owned path has to be named in three places that cannot see each other:
+  // run_worker_first (so Cloudflare's asset layer does not answer it), WORKER_OWNED_PREFIXES (so a miss under
+  // it 404s instead of serving the shell), and the Vite dev proxy (so it reaches the Worker at all in local
+  // development). The first two already had this guard; the third did not, and adding /diag without it meant
+  // the route worked in production and 404'd on every developer's machine - the SPA's own index.html
+  // answering a POST, which looks exactly like the route not existing.
+  it("the Vite dev proxy forwards every worker-owned prefix", () => {
+    const alternation = viteConfig.match(/\^\/\(([a-z|]+)\)\(\/\|\$\)/);
+    expect(alternation).not.toBeNull();
+    const proxied = alternation![1]!.split("|").map((p) => `/${p}`);
+    // /v1 is excluded here on purpose: it has its own two proxy entries above (Prism, plus the binary custom
+    // methods that must bypass it), so it is never part of this alternation.
+    expect(proxied.sort()).toEqual(WORKER_OWNED_PREFIXES.filter((p) => p !== "/v1").sort());
   });
 
   // Guards the classification itself. The regex has to catch a hashed asset without catching an app route

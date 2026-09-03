@@ -12,7 +12,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { aborted, invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { getSettingValue, getDefaultDepartmentId } from "./settings";
 import { assertUploadSize, isAllowedUpload } from "./documentsCommon";
@@ -20,23 +20,10 @@ import { parseAttachments, safeAttachmentName, MAX_TICKET_ATTACHMENTS, type Tick
 import { DEFAULT_TICKET_WORKFLOW, transitionFor } from "../domain/stateMachines";
 import { shareTicketWith, grantTicketRead, revokeTicketRead, usersForEmployees } from "./ticketShares";
 
-// `members` are extra employees (beyond the assignee) who can see EVERY ticket in this category - the basis
-// of category-based visibility. Stored as "employees/<id>" refs alongside the assignee. `department` is the
-// category's default servicing department ("departments/<id>"), stamped onto new tickets and re-routable.
-export type TicketCategory = { key: string; name: string; assignee?: string | null; members?: string[]; department?: string | null };
-export type TicketCategoriesConfig = { categories: TicketCategory[] };
-// Sensible starter categories so tickets work out of the box (HR sets assignees/members in Settings). Keys are
-// stable lowercase ids referenced by the UI dropdown and by automations (e.g. the new-hire provisioning rule).
-const DEFAULT_CATEGORIES: TicketCategoriesConfig = {
-  categories: [
-    { key: "it", name: "IT & Systems" },
-    { key: "facilities", name: "Facilities" },
-    { key: "hr", name: "HR" },
-    { key: "payroll", name: "Payroll" },
-    { key: "general", name: "General" },
-  ],
-};
-
+// The shape and the starter list live in domain/tickets.ts, so bootstrap can seed the settings row from the
+// same constant this falls back to. See the note there on why the two must not drift.
+import { DEFAULT_TICKET_CATEGORIES, MAX_TICKET_RECORDINGS, REPLAY_ID_RE, parseRecordings, type TicketCategoriesConfig } from "../domain/tickets";
+export type { TicketCategory, TicketCategoriesConfig } from "../domain/tickets";
 
 type TicketState = typeof schema.tickets.$inferSelect.state;
 type TicketPriority = typeof schema.tickets.$inferSelect.priority;
@@ -49,6 +36,7 @@ export type TicketInput = {
   description?: string | null;
   priority?: string | null;
   initial_todos?: string[]; // optional checklist to seed at creation (the dialog expands any chosen checklist to texts)
+  session_replay_id?: string | null; // Sentry replay of the minute before the ticket, when the requester opted in
 };
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -113,7 +101,7 @@ export async function getTicketWithComments(deps: Deps, actor: AppUser, id: stri
 
 // Resolve a category key against the settings blob; returns its configured default assignee's employee id.
 async function categoryAssignee(deps: Deps, key: string): Promise<{ ok: boolean; assigneeId: string | null }> {
-  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_CATEGORIES);
+  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_TICKET_CATEGORIES);
   const cat = (cfg.categories ?? []).find((c) => c.key === key);
   if (!cat) return { ok: false, assigneeId: null };
   return { ok: true, assigneeId: cat.assignee ? idFromPath(cat.assignee)! : null };
@@ -122,7 +110,7 @@ async function categoryAssignee(deps: Deps, key: string): Promise<{ ok: boolean;
 // Everyone who may see EVERY ticket in a category: its assignee + configured members (employee ids).
 async function categoryViewers(deps: Deps, key?: string | null): Promise<string[]> {
   if (!key) return [];
-  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_CATEGORIES);
+  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_TICKET_CATEGORIES);
   const cat = (cfg.categories ?? []).find((c) => c.key === key);
   if (!cat) return [];
   const refs = [cat.assignee, ...(cat.members ?? [])].filter((r): r is string => !!r);
@@ -132,7 +120,7 @@ async function categoryViewers(deps: Deps, key?: string | null): Promise<string[
 // The category's configured default servicing department (uuid), or null.
 async function categoryDepartment(deps: Deps, key?: string | null): Promise<string | null> {
   if (!key) return null;
-  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_CATEGORIES);
+  const cfg = await getSettingValue<TicketCategoriesConfig>(deps, "ticket-categories", DEFAULT_TICKET_CATEGORIES);
   const cat = (cfg.categories ?? []).find((c) => c.key === key);
   return cat?.department ? idFromPath(cat.department)! : null;
 }
@@ -167,6 +155,10 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
   const { ok, assigneeId } = await categoryAssignee(deps, categoryKey);
   if (!ok) throw invalidArgument("that ticket category is unavailable");
 
+  // The recording that came with the report, if there was one. Same shape as the ones added later.
+  const firstReplay = input.session_replay_id?.trim() || null;
+  if (firstReplay && !REPLAY_ID_RE.test(firstReplay)) throw invalidArgument("session_replay_id must be a 32-character hex replay id");
+
   // Servicing department: explicit override, else the category's configured default, else the org default.
   const departmentId = idFromPath(input.department) ?? (await categoryDepartment(deps, categoryKey)) ?? (await getDefaultDepartmentId(deps));
 
@@ -182,6 +174,7 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
       description: input.description?.trim() || null,
       priority,
       state: "OPEN",
+      sessionReplaysJson: JSON.stringify(firstReplay ? [{ id: firstReplay, created_at: Date.now(), by: employeeId }] : []),
     })
     .returning())[0]!;
   // Optional checklist seeded at creation (custom items and/or a checklist the dialog expanded to texts).
@@ -191,7 +184,7 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
   // managers. The requester is excluded - they already see their own ticket via the owner scope.
   const viewers = [...new Set([...(await categoryViewers(deps, categoryKey)), ...(await departmentManagers(deps, departmentId))])].filter((e) => e !== employeeId);
   await shareTicketWith(deps, row.code!, viewers);
-  await audit(deps, actor, "ticket.create", "tickets", row.uuid, undefined, row);
+  await audit(deps, actor, "ticket.create", "tickets", row.uuid, createdMeta(row, "tickets"), row);
   await emitEvent(deps, actor, "ticket.created", { subject: `tickets/${row.uuid}`, employeeId, payload: { category: categoryKey, priority } });
   // Nudge whoever services this ticket (its assignee + category members + the servicing department's managers -
   // the same set just granted visibility) so a new request doesn't sit unseen. The requester is already excluded.
@@ -218,7 +211,7 @@ export async function transitionTicket(deps: Deps, actor: AppUser, id: string, v
   // no double resolve/close/reopen notification to the requester.
   const [updated] = await deps.db.update(schema.tickets).set({ state: t.to as TicketState, updatedAt: new Date() }).where(and(eq(schema.tickets.uuid, id), eq(schema.tickets.state, row.state))).returning();
   if (!updated) throw failedPrecondition(`a ${row.state.toLowerCase()} ticket cannot be ${verb}ed`);
-  await audit(deps, actor, `ticket.${verb}`, "tickets", id);
+  await audit(deps, actor, `ticket.${verb}`, "tickets", id, stateMeta(row.state, t.to, { employee: `employees/${row.employeeId}` }), updated);
   // Tell the requester when their ticket is resolved/closed/reopened.
   if (verb === "resolve" || verb === "close" || verb === "reopen") {
     await notify(deps, { recipient: row.employeeId, type: `ticket.${verb}`, title: `Ticket ${t.to.toLowerCase().replace("_", " ")}`, body: row.subject, link: "tickets", actorId: actor.employeeId });
@@ -249,7 +242,7 @@ export async function assignTicket(deps: Deps, actor: AppUser, id: string, assig
       for (const u of await usersForEmployees(deps, [prev])) await revokeTicketRead(deps, row.code!, u);
     }
   }
-  await audit(deps, actor, "ticket.assign", "tickets", id);
+  await audit(deps, actor, "ticket.assign", "tickets", id, { diff: { assignee: { from: prev ? `employees/${prev}` : null, to: assigneeId ? `employees/${assigneeId}` : null } } }, updated);
   return updated!;
 }
 
@@ -277,11 +270,11 @@ export async function routeTicket(deps: Deps, actor: AppUser, id: string, depart
 }
 
 export async function setTicketPriority(deps: Deps, actor: AppUser, id: string, priority?: string | null) {
-  await getTicket(deps, actor, id); // gate + existence
+  const row = await getTicket(deps, actor, id); // gate + existence, and the priority this replaces
   const p = (priority ?? "") as TicketPriority;
   if (!PRIORITIES.has(p)) throw invalidArgument("priority must be low, medium or high");
   const [updated] = await deps.db.update(schema.tickets).set({ priority: p, updatedAt: new Date() }).where(eq(schema.tickets.uuid, id)).returning();
-  await audit(deps, actor, "ticket.prioritize", "tickets", id);
+  await audit(deps, actor, "ticket.prioritize", "tickets", id, { diff: { priority: { from: row.priority, to: p } } }, updated);
   return updated!;
 }
 
@@ -292,7 +285,7 @@ export async function commentTicket(deps: Deps, actor: AppUser, id: string, body
   await deps.db.insert(schema.ticketComments).values({ ticketId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
   // Touch the ticket so its update_time reflects the latest activity.
   await deps.db.update(schema.tickets).set({ updatedAt: new Date() }).where(eq(schema.tickets.uuid, id));
-  await audit(deps, actor, "ticket.comment", "tickets", id);
+  await audit(deps, actor, "ticket.comment", "tickets", id, { note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, t);
   // Notify the other party (requester <-> assignee) that there's a new comment on the thread.
   for (const rid of [t.employeeId, t.assigneeId].filter((r): r is string => !!r && r !== actor.employeeId))
     await notify(deps, { recipient: rid, type: "ticket.comment", title: "New comment on a ticket", body: t.subject, link: "tickets", subject: `tickets/${id}`, actorId: actor.employeeId });
@@ -337,6 +330,38 @@ async function writeAttachments(deps: Deps, id: string, step: (current: TicketAt
 }
 
 /** Attach one uploaded file. The R2 key is generated here - a client-supplied key would be a path to anywhere. */
+/**
+ * Add a session recording to an existing ticket.
+ *
+ * The recording that arrives with a report is the one the reporter happened to make at the time; support's
+ * next question is nearly always "can you show me that again?", and before this there was nowhere for the
+ * answer to go. Appends rather than replaces, so a ticket accumulates the attempts in order.
+ *
+ * Anyone who can WRITE the ticket may add one - the requester demonstrating again, or an agent who reproduced
+ * it themselves. The verb's own grant decides that; nothing here re-derives it.
+ */
+export async function attachRecordingToTicket(deps: Deps, actor: AppUser, id: string, replayId: string) {
+  const t = await getTicket(deps, actor, id); // gate + existence
+  const clean = (replayId ?? "").trim();
+  if (!REPLAY_ID_RE.test(clean)) throw invalidArgument("session_replay_id must be a 32-character hex replay id");
+
+  const existing = parseRecordings(t.sessionReplaysJson);
+  // Idempotent: a double-tapped button, or a retry after a dropped response, must not list the same recording
+  // twice. Returning the ticket unchanged is the honest answer - it is already attached.
+  if (existing.some((r) => r.id === clean)) return t;
+  if (existing.length >= MAX_TICKET_RECORDINGS)
+    throw invalidArgument(`a ticket can hold ${MAX_TICKET_RECORDINGS} recordings`);
+
+  const next = [...existing, { id: clean, created_at: Date.now(), by: actor.employeeId ?? null }];
+  const row = (await deps.db
+    .update(schema.tickets)
+    .set({ sessionReplaysJson: JSON.stringify(next), updatedAt: new Date() })
+    .where(eq(schema.tickets.uuid, id))
+    .returning())[0]!;
+  await audit(deps, actor, "ticket.attachRecording", "tickets", id, { diff: { recordings: { from: next.length - 1, to: next.length } } }, row);
+  return row;
+}
+
 export async function attachToTicket(
   deps: Deps,
   actor: AppUser,
@@ -409,7 +434,7 @@ export async function addTodos(deps: Deps, actor: AppUser, id: string, texts?: s
   if (!items.length) throw invalidArgument("a checklist item is required");
   await deps.db.insert(schema.ticketTodos).values(items.map((text) => ({ ticketId: id, text })));
   await touchTicket(deps, id);
-  await audit(deps, actor, "ticket.addTodos", "tickets", id);
+  await audit(deps, actor, "ticket.addTodos", "tickets", id, { fields: items.slice(0, 12) });
   return getTicketWithComments(deps, actor, id);
 }
 
@@ -421,7 +446,7 @@ export async function toggleTodo(deps: Deps, actor: AppUser, id: string, todoId?
   if (!item) throw notFound("checklist item not found");
   await deps.db.update(schema.ticketTodos).set({ done: !!done, updatedAt: new Date() }).where(eq(schema.ticketTodos.uuid, tid));
   await touchTicket(deps, id);
-  await audit(deps, actor, "ticket.toggleTodo", "tickets", id);
+  await audit(deps, actor, "ticket.toggleTodo", "tickets", id, { note: item.text, diff: { done: { from: item.done, to: !!done } } });
   return getTicketWithComments(deps, actor, id);
 }
 
@@ -433,6 +458,6 @@ export async function removeTodo(deps: Deps, actor: AppUser, id: string, todoId?
   if (!item) throw notFound("checklist item not found");
   await deps.db.delete(schema.ticketTodos).where(eq(schema.ticketTodos.uuid, tid));
   await touchTicket(deps, id);
-  await audit(deps, actor, "ticket.removeTodo", "tickets", id);
+  await audit(deps, actor, "ticket.removeTodo", "tickets", id, { note: item.text });
   return getTicketWithComments(deps, actor, id);
 }

@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, removedMeta } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { paginate } from "../http/pagination";
@@ -57,7 +57,9 @@ export async function createHolidaySelection(deps: Deps, actor: AppUser, holiday
   if (thisYear.length >= max_optional)
     throw failedPrecondition(`you can select at most ${max_optional} optional holiday${max_optional === 1 ? "" : "s"} in ${year}`);
   const [row] = await deps.db.insert(schema.holidaySelections).values({ code: await allocOwnedCode(deps, schema.holidaySelections, schema.holidaySelections.employeeId, actor.employeeId), employeeId: actor.employeeId, holidayId }).returning();
-  await audit(deps, actor, "holiday.select", "holiday-selections", row!.uuid);
+  // WHICH holiday. A selection row is nothing but its two foreign keys, so an entry without them says only
+  // that a person picked something.
+  await audit(deps, actor, "holiday.select", "holiday-selections", row!.uuid, { diff: { holiday: { from: null, to: byId.get(holidayId)?.name ?? `holidays/${holidayId}` } } }, row);
   return row!;
 }
 
@@ -66,5 +68,6 @@ export async function deleteHolidaySelection(deps: Deps, actor: AppUser, id: str
   if (!row) throw notFound("selection not found");
   if (row.employeeId !== actor.employeeId) throw forbidden("not your selection");
   await deps.db.delete(schema.holidaySelections).where(eq(schema.holidaySelections.uuid, id));
-  await audit(deps, actor, "holiday.deselect", "holiday-selections", id);
+  // Hard delete: the row is gone, so which holiday was given up survives only here.
+  await audit(deps, actor, "holiday.deselect", "holiday-selections", id, removedMeta(row, "holiday-selections"), row);
 }

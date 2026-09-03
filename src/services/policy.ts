@@ -25,11 +25,16 @@ export async function getPolicy(deps: Deps, key: string) {
 export async function updatePolicy(deps: Deps, actor: AppUser, key: string, value: unknown) {
   if (key === "manifest") validateManifest(value); // strict; rejects malformed (the read path never fails open)
   const json = JSON.stringify(value ?? {});
-  const existing = (await deps.db.select({ k: schema.policy.key }).from(schema.policy).where(eq(schema.policy.key, key)).limit(1))[0];
+  // The stored value too, not just the key: it is the "before" half of the audit diff below.
+  const existing = (await deps.db.select({ k: schema.policy.key, valueJson: schema.policy.valueJson }).from(schema.policy).where(eq(schema.policy.key, key)).limit(1))[0];
+  const prev = existing?.valueJson ?? null;
+  const existingJson = prev && prev.length > 140 ? `${prev.slice(0, 140)}…` : prev;
   const [row] = existing
     ? await deps.db.update(schema.policy).set({ valueJson: json, updatedAt: new Date() }).where(eq(schema.policy.key, key)).returning()
     : await deps.db.insert(schema.policy).values({ key, valueJson: json }).returning();
   if (key === "manifest") clearCache("manifest");
-  await audit(deps, actor, "policy.update", "policy", key);
+  // The access manifest is the app's highest-leverage config: "who changed the protected-field list" has to be
+  // answerable from the trail alone, and the key plus a timestamp does not answer it.
+  await audit(deps, actor, "policy.update", "policy", key, { diff: { value: { from: existingJson, to: json.length > 140 ? `${json.slice(0, 140)}…` : json } } }, row);
   return row!;
 }

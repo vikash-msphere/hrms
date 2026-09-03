@@ -130,6 +130,11 @@ export const cashfreeProvider: EsignProvider = {
   // that must submit a full Aadhaar up front.
   requiresAadhaar: false,
   supportsWebhook: true,
+  // ESIGN_CASHFREE_CLIENT_ID / _CLIENT_SECRET. The app ships with these unset (in-app signing needs no
+  // vendor), so this is the normal state, and choosing "Aadhaar e-Sign" then has to fail as a readable
+  // precondition rather than as a 500 from inside createRequest. ESIGN_CASHFREE_PUBLIC_KEY is NOT listed: it
+  // is only needed for the production 2FA header, and its absence is a valid sandbox/client-secret setup.
+  requiredSecrets: ["apiKey", "apiSecret"],
   configFields: [
     { key: "api_base", label: "API base URL", type: "text", placeholder: DEFAULT_BASE, hint: "Sandbox: https://sandbox.cashfree.com/verification" },
     { key: "expiry_days", label: "Request expiry (days)", type: "number", hint: "How long the signing link stays valid (max 15)." },

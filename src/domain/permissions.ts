@@ -51,7 +51,17 @@ export type Grant = {
 
 export type SelfContext = { employeeCode: string | null }; // caller's employee code, from the JWT
 
-export type Decision = { allow: true } | { allow: false; reason: string };
+/**
+ * `via` is the PATTERN that allowed it - `compensation.**`, `leave-requests.me.*` - recorded so the trail can
+ * say what authorized an action, not only what refused one. A denial has named its pattern in `reason` since
+ * this file was written; the asymmetry was that a permission explained nothing.
+ *
+ * The pattern, deliberately, and not the access-rule id: by the time a decision is made the grant is a
+ * COMPILED projection, so several rules have collapsed into one pattern and the row ids are gone. Carrying
+ * provenance through compilation would change the cached blob, mergeGrants and the API-key clamp; the pattern
+ * costs one field and narrows "which rule was this?" to a handful, answerable with one query when asked.
+ */
+export type Decision = { allow: true; via?: string } | { allow: false; reason: string };
 
 // The level ladder. Exported because the API-key ceiling (domain/keyScope.ts) must clamp granted levels
 // against the SAME ordering the matcher decides with - a second, drifting copy of this ladder would be an
@@ -176,6 +186,9 @@ export function decide(grant: Grant, r: Resolved, self: SelfContext): Decision {
 
   if (r.kind === "standard") {
     let max = 0;
+    // The pattern that got the level highest. The ladder takes the max, so the last one to raise it is the one
+    // that actually authorized the request - an earlier weaker match did not.
+    let via: string | undefined;
     const need = LVL[r.level];
     for (const list of [idx.levelsByNs.get(ns), idx.levelsAny]) {
       if (!list) continue;
@@ -185,15 +198,16 @@ export function decide(grant: Grant, r: Resolved, self: SelfContext): Decision {
         if (lvl <= max) continue;
         if (matchTokens(p.tokens, resourceTokens, self)) {
           max = lvl;
-          if (max >= need) return { allow: true }; // nothing above the need can change the answer
+          via = p.pattern;
+          if (max >= need) return { allow: true, via: p.pattern }; // nothing above the need can change the answer
         }
       }
     }
-    return max >= need ? { allow: true } : { allow: false, reason: `need ${r.level} on ${r.resource}` };
+    return max >= need ? { allow: true, via } : { allow: false, reason: `need ${r.level} on ${r.resource}` };
   }
   for (const list of [idx.allowByNs.get(ns), idx.allowAny]) {
     if (!list) continue;
-    for (const a of list) if (matchTokens(a.tokens, keyTokens, self)) return { allow: true };
+    for (const a of list) if (matchTokens(a.tokens, keyTokens, self)) return { allow: true, via: a.pattern };
   }
   return { allow: false, reason: `no grant for ${r.resource}.${r.verb}` };
 }

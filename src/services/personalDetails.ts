@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 
 // Personal contact + emergency info. Stored as an encrypted JSON blob; returned in full to the
@@ -69,7 +69,7 @@ export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId:
   }
   const enc = await deps.encryptor.encrypt(JSON.stringify(next));
   await deps.db.update(schema.employees).set({ personalDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
-  // Audit the change, never the values.
-  await audit(deps, actor, "employee.personal_details.update", "employees", emp.uuid);
+  // Field names only, never the values (see bankDetails): a home address and a date of birth are the record.
+  await audit(deps, actor, "employee.personal_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
   return next;
 }

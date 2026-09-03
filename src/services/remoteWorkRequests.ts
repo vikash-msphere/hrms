@@ -7,7 +7,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
@@ -62,7 +62,7 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
     .insert(schema.remoteWorkRequests)
     .values({ code: await allocOwnedCode(deps, schema.remoteWorkRequests, schema.remoteWorkRequests.employeeId, employeeId), employeeId, startDate: new Date(start), endDate: new Date(end), startSession, endSession, location: input.location?.trim() || null, reason: input.reason?.trim() || null, state: "PENDING" })
     .returning())[0]!;
-  await audit(deps, actor, "remote_work_request.create", "remote-work-requests", row.uuid, undefined, row);
+  await audit(deps, actor, "remote_work_request.create", "remote-work-requests", row.uuid, createdMeta(row, "remote-work-requests"), row);
   await notifyManager(deps, employeeId, { type: "remote.requested", noun: "remote work request" });
   await emitEvent(deps, actor, "remoteWork.requested", { subject: `remote-work-requests/${row.uuid}`, employeeId, payload: { from: new Date(start).toISOString(), to: new Date(end).toISOString() } });
   return row;
@@ -78,7 +78,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     .where(and(eq(schema.remoteWorkRequests.uuid, id), eq(schema.remoteWorkRequests.state, "PENDING")))
     .returning();
   if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending requests can be cancelled" : "request is not pending");
-  await audit(deps, actor, `remote_work_request.${to.toLowerCase()}`, "remote-work-requests", id);
+  await audit(deps, actor, `remote_work_request.${to.toLowerCase()}`, "remote-work-requests", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}`, ...(note ? { reason: note } : {}) }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `remote.${to.toLowerCase()}`, title: `Remote work ${to.toLowerCase()}`, body: `Your remote work request was ${to.toLowerCase()}.`, link: "remote-work/history", subject: `remote-work-requests/${id}`, actorId: actor.employeeId });
   }

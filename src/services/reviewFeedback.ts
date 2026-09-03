@@ -5,7 +5,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition, forbidden } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { notify } from "./notifications";
@@ -51,7 +51,7 @@ export async function nominateFeedback(deps: Deps, actor: AppUser, reviewId: str
     const fb = (await deps.db.insert(schema.reviewFeedback).values({ code, reviewId, revieweeId: review.employeeId, authorId }).returning())[0]!;
     await notify(deps, { recipient: authorId, type: "review.feedback_requested", title: "Feedback requested", body: `You've been asked to give feedback on ${revieweeName}.`, link: "reviews", subject: `review-feedback/${fb.uuid}`, action: "respond", actorId: actor.employeeId });
   }
-  await audit(deps, actor, "review.nominate", "reviews", reviewId);
+  await audit(deps, actor, "review.nominate", "reviews", reviewId, { employee: `employees/${review.employeeId}`, fields: ids.slice(0, 12) }, review);
   return review;
 }
 
@@ -72,7 +72,7 @@ export async function submitFeedback(deps: Deps, actor: AppUser, id: string, inp
     .set({ comment: input.comment?.trim() || null, overallRating: input.overall_rating ?? null, state: "SUBMITTED", updatedAt: new Date() })
     .where(and(eq(schema.reviewFeedback.uuid, id), eq(schema.reviewFeedback.state, "REQUESTED"))).returning())[0];
   if (!updated) throw failedPrecondition("this feedback has already been submitted or declined");
-  await audit(deps, actor, "review-feedback.submit", "review-feedback", id);
+  await audit(deps, actor, "review-feedback.submit", "review-feedback", id, stateMeta("REQUESTED", "SUBMITTED", { employee: `employees/${row.revieweeId}` }), updated);
   return updated;
 }
 
@@ -84,7 +84,7 @@ export async function declineFeedback(deps: Deps, actor: AppUser, id: string) {
   if (row.state !== "REQUESTED") throw failedPrecondition("this feedback request is no longer open");
   const updated = (await deps.db.update(schema.reviewFeedback).set({ state: "DECLINED", updatedAt: new Date() }).where(and(eq(schema.reviewFeedback.uuid, id), eq(schema.reviewFeedback.state, "REQUESTED"))).returning())[0];
   if (!updated) throw failedPrecondition("this feedback request is no longer open");
-  await audit(deps, actor, "review-feedback.decline", "review-feedback", id);
+  await audit(deps, actor, "review-feedback.decline", "review-feedback", id, stateMeta("REQUESTED", "DECLINED", { employee: `employees/${row.revieweeId}` }), updated);
   return updated;
 }
 

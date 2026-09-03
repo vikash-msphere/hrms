@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -60,7 +60,7 @@ export async function createReviewCycle(deps: Deps, actor: AppUser, input: Revie
       managerDueDate: dateOrNull(input.manager_due_date),
     })
     .returning())[0]!;
-  await audit(deps, actor, "review-cycle.create", "review-cycles", row.uuid, undefined, row);
+  await audit(deps, actor, "review-cycle.create", "review-cycles", row.uuid, createdMeta(row, "review-cycles"), row);
   return row;
 }
 
@@ -79,7 +79,7 @@ export async function updateReviewCycle(deps: Deps, actor: AppUser, id: string, 
   if (has("self_due_date")) set.selfDueDate = dateOrNull(patch.self_due_date);
   if (has("manager_due_date")) set.managerDueDate = dateOrNull(patch.manager_due_date);
   const updated = (await deps.db.update(schema.reviewCycles).set(set).where(eq(schema.reviewCycles.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "review-cycle.update", "review-cycles", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "review-cycle.update", "review-cycles", id, diffMeta(row, updated, set, "review-cycles"), updated);
   return updated;
 }
 
@@ -105,7 +105,7 @@ export async function launchReviewCycle(deps: Deps, actor: AppUser, id: string, 
   if (row.state !== "DRAFT") throw failedPrecondition("only a draft cycle can be launched");
   await addReviewees(deps, id, employees, actor, row.name);
   const updated = (await deps.db.update(schema.reviewCycles).set({ state: "ACTIVE", updatedAt: new Date() }).where(eq(schema.reviewCycles.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "review-cycle.launch", "review-cycles", id);
+  await audit(deps, actor, "review-cycle.launch", "review-cycles", id, stateMeta(row.state, "ACTIVE", { fields: employees.slice(0, 12) }), updated);
   return updated;
 }
 
@@ -114,7 +114,8 @@ export async function addRevieweesToCycle(deps: Deps, actor: AppUser, id: string
   const row = await getReviewCycle(deps, actor, id);
   if (row.state !== "ACTIVE") throw failedPrecondition("the cycle must be active to add reviewees");
   await addReviewees(deps, id, employees, actor, row.name);
-  await audit(deps, actor, "review-cycle.addReviewees", "review-cycles", id);
+  // WHO was added. "Someone was added to the cycle mid-flight" is the question this entry exists to answer.
+  await audit(deps, actor, "review-cycle.addReviewees", "review-cycles", id, { fields: employees.slice(0, 12) }, row);
   return row;
 }
 
@@ -123,7 +124,7 @@ export async function setReviewCycleState(deps: Deps, actor: AppUser, id: string
   if (state === "CLOSED" && row.state !== "ACTIVE") throw failedPrecondition("only an active cycle can be closed");
   if (state === "ACTIVE" && row.state !== "CLOSED") throw failedPrecondition("only a closed cycle can be reopened");
   const updated = (await deps.db.update(schema.reviewCycles).set({ state, updatedAt: new Date() }).where(eq(schema.reviewCycles.uuid, id)).returning())[0]!;
-  await audit(deps, actor, `review-cycle.${state === "CLOSED" ? "close" : "reopen"}`, "review-cycles", id);
+  await audit(deps, actor, `review-cycle.${state === "CLOSED" ? "close" : "reopen"}`, "review-cycles", id, stateMeta(row.state, state), updated);
   return updated;
 }
 

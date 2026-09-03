@@ -73,7 +73,7 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
   }
 
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="bonuses" label="Bonuses & incentives">
@@ -115,7 +115,7 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
         {/* scrollBody so Save stays on screen: the duplicate-award warning can appear mid-form and push the
             footer off the bottom of a phone. */}
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.amount && Number(form.amount) > 0 && form.award_date) record(); }}>
+        <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (!busy && form.amount && Number(form.amount) > 0 && form.award_date) record(); }}>
           <AccessScope collection="bonuses">
           <DialogHeader>
             <DialogTitle>Record bonus / incentive</DialogTitle>

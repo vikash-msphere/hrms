@@ -26,7 +26,17 @@ export type DB = ReturnType<typeof drizzle<typeof schema>>;
 // `trace` is the correlation id of the workflow execution currently running on this Deps. emitEvent mints it at
 // the ROOT emission and every event/run/instance in the synchronous fan-out (incl. apiCall re-dispatch, which
 // reuses this Deps) records it - so the UI can group one workflow's events/runs/waits together and show cause.
-export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string };
+export type Deps = { db: DB; refCache?: Map<string, Promise<unknown>>; clock: Clock; encryptor: Encryptor; idCodec: IdCodec; apiKeySigner: ApiKeySigner; email: EmailSender; docs: DocumentStore; webhook?: WebhookSender; push?: PushSender; dispatch?: Dispatch; esignSecrets?: Record<string, EsignSecrets>; automationBudget?: { n: number; dropped: number }; trace?: string; actingAs?: ActingAs };
+
+/**
+ * WHAT is acting, when the actor is not a person at the keyboard.
+ *
+ * Automation actions and internal dispatch run as `systemActor()`, which is honest about authority and useless
+ * as attribution: an audit entry reading "System" tells the person whose leave was auto-approved nothing about
+ * why. Parked on Deps for the duration of the rule (or the cron tick) exactly as `trace` is, so it survives the
+ * apiCall re-dispatch that reuses this Deps and reaches every audit entry the action writes.
+ */
+export type ActingAs = { kind: "automation" | "cron"; name: string; ref?: string };
 
 // Route the request's reads to the nearest D1 read replica when the runtime supports Sessions
 // (production); fall back to the plain binding where it doesn't (miniflare, the local/test runtime,

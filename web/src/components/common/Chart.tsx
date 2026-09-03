@@ -22,8 +22,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 // is fetched by the first chart that actually renders rather than by everybody's first paint.
 //
 // THEME. frappe bakes its colours in at construction, so a theme flip REBUILDS the chart (cheap - these are
-// tens of SVG nodes). Its own stylesheet hardcodes a light-mode ink and a black tooltip; both are overridden
-// against our tokens in index.css, which is also where the tooltip gets the app's popover surface.
+// tens of SVG nodes). Its stylesheet hardcodes one light-mode ink and a black tooltip; both are re-pointed at
+// our tokens in index.css, which is also where the tooltip is given the app's own tooltip surface. Those
+// overrides carry a doubled class deliberately - the library injects its sheet from JS, so it always lands
+// after ours and wins any tie. See the CHARTS block there before touching a chart colour.
 //
 // ACCESSIBILITY. An SVG of coloured paths is nothing to a screen reader, so every chart also emits its own
 // numbers as a table in the accessibility tree, and the figure carries a caption naming what it shows. Charts

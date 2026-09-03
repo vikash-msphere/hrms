@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 
 // Structured bank account, stored as an encrypted JSON blob in employees.bank_details_enc.
@@ -74,7 +74,9 @@ export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: str
   };
   const enc = await deps.encryptor.encrypt(JSON.stringify(stored));
   await deps.db.update(schema.employees).set({ bankDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
-  // Audit records that bank details changed - never the values themselves.
-  await audit(deps, actor, "employee.bank_details.update", "employees", emp.uuid);
+  // WHICH fields changed, never their values: an account number in a table read by everyone with the `audit`
+  // capability outlives the access control on the record it came from. `fieldsMeta` is the shape for exactly
+  // this - the trail says "they changed the account number", which is the whole of what it is owed.
+  await audit(deps, actor, "employee.bank_details.update", "employees", emp.uuid, fieldsMeta(stored), emp);
   return toMasked(stored);
 }

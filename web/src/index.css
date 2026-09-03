@@ -615,53 +615,6 @@
     }
   }
 
-  /* ============================================================================================
-     CHARTS. frappe-charts injects its own stylesheet, written for one light theme: a fixed grey ink
-     (#555b51) on the axes and labels, a fixed light gridline, and a black tooltip. All three are
-     wrong here on at least one of our two grounds, so the parts that carry COLOUR are re-pointed at
-     the app's tokens and the parts that carry SHAPE (stroke widths, dash patterns, text anchors) are
-     left exactly as the library drew them.
-
-     Selectors mirror the library's own specificity so no `!important` is needed, and the font is
-     inherited rather than restated - the app self-hosts its faces, and a chart falling back to the
-     system UI font is the one place text would suddenly look foreign.
-     ============================================================================================ */
-  .chart-container {
-    font-family: inherit;
-    @apply text-foreground;
-  }
-  .chart-container .axis,
-  .chart-container .chart-label {
-    fill: hsl(var(--muted-foreground));
-  }
-  .chart-container .axis line,
-  .chart-container .chart-label line {
-    stroke: hsl(var(--border));
-  }
-  .chart-container .legend-dataset-text {
-    fill: hsl(var(--muted-foreground));
-  }
-  /* Data points sit on the page's own surface, not on white: the ring around a dot is there to
-     separate it from the line under it, so it has to be the ground colour to do that job. */
-  .chart-container .dataset-units circle {
-    stroke: hsl(var(--card));
-  }
-  /* The tooltip is a popover like every other popover in the app - same surface, same border, same
-     elevation - rather than a black box that belongs to a different design language. */
-  .graph-svg-tip {
-    @apply rounded-md border text-popover-foreground;
-    background: hsl(var(--popover));
-    border-color: hsl(var(--border));
-    box-shadow: var(--shadow-pop);
-  }
-  .graph-svg-tip strong,
-  .graph-svg-tip .title {
-    @apply text-popover-foreground;
-  }
-  .graph-svg-tip .svg-pointer {
-    border-top-color: hsl(var(--popover));
-  }
-
   /* Elevation utilities backed by themeable tokens (see --shadow-* above). */
   .shadow-card {
     box-shadow: var(--shadow-card);
@@ -860,4 +813,83 @@
    width (`max-content`) the box resolves against empty contents and collapses. */
 .cal-scope {
   width: 100%;
+}
+
+/* ==============================================================================================
+   CHARTS (frappe-charts). Two things about this library decide how the block below has to be
+   written, and both of them silently delete a rule that looks perfectly correct.
+
+   ONE: IT IS NOT IN A @layer. Tailwind tree-shakes `@layer components` against the content globs -
+   a rule there survives only if a class in its selector appears somewhere in the scanned source.
+   Nothing in this app ever writes `graph-svg-tip` or `svg-pointer`; the library does, at runtime.
+   Written inside the layer, every tooltip rule here was dropped from the built stylesheet and the
+   tooltip stayed the library's black box with #959da5 text on both themes. Plain CSS, outside the
+   layer, always ships. Anything targeting a class only the library emits belongs down here.
+
+   TWO: THE DOUBLED CLASS. The library carries its stylesheet as a string and injects it from JS -
+   `styleInject` APPENDS a <style> to <head> when the module is imported, which here is lazily, long
+   after the app's own bundle is in the document. Its rules are therefore always the later ones, and
+   at equal specificity later wins: `.graph-svg-tip { background: ... }` loses no matter where in
+   this file it sits. `.graph-svg-tip.graph-svg-tip` matches exactly the same element and reads
+   exactly as loudly, one specificity step up - which is how a stylesheet beats a runtime-injected
+   one without `!important`. Each rule carries one class more than the library rule it answers, no
+   more, so two of ours never fight each other. Text the library colours with an inline `fill`
+   ATTRIBUTE instead (the heatmap's labels) needs no such help: an attribute loses to any rule.
+
+   Only COLOUR is re-pointed here. Everything that carries SHAPE - positioning, spacing, stroke
+   widths, dash patterns, text anchors - is the library's and is left alone. What is wrong with its
+   colours is that there is one set of them, written for a white page: a fixed grey ink (#555b51) on
+   the axes and labels, a fixed light gridline, and a black tooltip printing #959da5 text.
+   ============================================================================================== */
+.chart-container.chart-container {
+  /* Inherited rather than restated: the app self-hosts its faces, and a chart falling back to the
+     system UI font is the one place text would suddenly look foreign. */
+  font-family: inherit;
+  /* The tooltip is positioned against this box and the library gives it `z-index: 99999`.
+     `isolation` keeps that a private matter between the two: a chart tooltip must never be able to
+     paint over the top bar, a dialog or a toast. */
+  isolation: isolate;
+  color: hsl(var(--foreground));
+}
+.chart-container.chart-container .axis,
+.chart-container.chart-container .chart-label {
+  fill: hsl(var(--muted-foreground));
+}
+.chart-container.chart-container .axis line,
+.chart-container.chart-container .chart-label line {
+  stroke: hsl(var(--border));
+}
+.chart-container.chart-container .legend-dataset-text {
+  fill: hsl(var(--muted-foreground));
+}
+/* The heatmap's month strip, its weekday gutter and its Less/More key. The library has no rule for
+   these at all - it fills them inline - so one class is enough. */
+.chart-container .domain-name,
+.chart-container .subdomain-name {
+  fill: hsl(var(--muted-foreground));
+}
+/* Data points sit on the page's own surface, not on white: the ring around a dot is there to
+   separate it from the line under it, so it has to be the ground colour to do that job. */
+.chart-container.chart-container .dataset-units circle {
+  stroke: hsl(var(--card));
+}
+/* THE TOOLTIP wears the app's tooltip surface - the foreground colour as ground, the background
+   colour as ink, exactly what `components/ui/tooltip.tsx` paints - rather than the library's black
+   box with grey text, and rather than a popover: it is a tooltip, and it should read like the other
+   twenty a reader meets here. Inverting it is also what makes it legible, because this is the one
+   surface in the app that floats over ARBITRARY colour - gridlines, filled areas, the series
+   palette. A flat dark ground under near-white ink holds about 17:1 over all of it, and both tokens
+   flip with the theme. The nested rules only restate the colour the library hardcodes on those same
+   elements; everything else about them is its own. */
+.graph-svg-tip.graph-svg-tip {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+.graph-svg-tip.graph-svg-tip strong {
+  color: hsl(var(--background));
+}
+.graph-svg-tip.graph-svg-tip .svg-pointer {
+  border-top-color: hsl(var(--foreground));
 }

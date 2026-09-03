@@ -20,9 +20,10 @@ import { renderLetterPdf } from "../lib/letterPdf";
 import type { LetterDefaults } from "../domain/letters";
 import { failedPrecondition, notFound } from "../lib/errors";
 import { getSettingValue } from "./settings";
+import { documentLetterhead, type LetterheadMedia, type OrgWithDocumentLogos } from "./letterheads";
 import { amountInWords, moneyWhole } from "../lib/pdfPrimitives";
 
-type OrgSettings = { name?: string; logo?: string; address?: string; letter_defaults?: LetterDefaults; default_currency?: string };
+type OrgSettings = { name?: string; legal_name?: string; logo?: string; address?: string; letter_defaults?: LetterDefaults; default_currency?: string } & OrgWithDocumentLogos;
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const fmtDate = (d?: Date | null) => (d ? `${new Date(d).getUTCDate()} ${MONTHS[new Date(d).getUTCMonth()]} ${new Date(d).getUTCFullYear()}` : "___________");
@@ -31,7 +32,7 @@ const money = (n: number, code: string) => `${code} ${moneyWhole(n)}`;
 export type OfferLetter = { bytes: Uint8Array; fileName: string; title: string };
 
 /** Compose and render one offer's letter. Nothing is persisted - the caller streams or files the bytes. */
-export async function renderOfferLetter(deps: Deps, offerId: string): Promise<OfferLetter> {
+export async function renderOfferLetter(deps: Deps, offerId: string, media: LetterheadMedia = "screen"): Promise<OfferLetter> {
   const offer = (await deps.db.select().from(schema.offers).where(eq(schema.offers.uuid, offerId)).limit(1))[0];
   if (!offer || offer.deleteTime) throw notFound("offer not found");
   const app = (await deps.db.select().from(schema.applications).where(eq(schema.applications.uuid, offer.applicationId)).limit(1))[0];
@@ -44,6 +45,9 @@ export async function renderOfferLetter(deps: Deps, offerId: string): Promise<Of
     : undefined;
 
   const org = await getSettingValue<OrgSettings>(deps, "organization", {});
+  // Nothing is persisted for an offer letter, so there is no frozen content to re-render later: the print
+  // page is chosen HERE, at render time, by whoever asks for the printable copy.
+  const letterhead = await documentLetterhead(deps, org, "offer", [], media);
   const d = org.letter_defaults ?? {};
   const orgName = org.name?.trim() || "the Company";
   const currency = offer.currency || org.default_currency || "INR";
@@ -113,7 +117,8 @@ export async function renderOfferLetter(deps: Deps, offerId: string): Promise<Of
   blocks.push({ kind: "acceptance", name: cand.name });
 
   const content: LetterContent = {
-    org: { name: orgName, address: org.address, logo: org.logo },
+    org: { name: orgName, address: org.address, logo: org.logo, legalName: org.legal_name || undefined },
+    ...(letterhead ? { letterhead } : {}),
     date: fmtDate(offer.offerDate ?? deps.clock.now()),
     ref: offer.code ? `Ref: ${offer.code}` : undefined,
     to: { name: cand.name, lines: [cand.email, cand.phone].filter((x): x is string => !!x) },

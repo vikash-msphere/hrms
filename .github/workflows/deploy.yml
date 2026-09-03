@@ -22,6 +22,13 @@ jobs:
         with:
           node-version: "20"
       - run: npm ci
+      # Config gate FIRST: preflight catches a REPLACE_WITH_* placeholder, a [limits]/CF_PLAN mismatch and a
+      # malformed VAPID key - mistakes no build or test can see, and which otherwise only surface in
+      # production. `npm run deploy` chains it locally; this is the same gate for the CI path.
+      # CF_PLAN must match the Cloudflare plan this account is actually on ("paid" = Workers Standard).
+      - run: npm run preflight
+        env:
+          CF_PLAN: ${{ vars.CF_PLAN || 'paid' }}
       # Gate the deploy on the same checks as CI (spectral + tsc + vitest).
       - run: npm run verify
       # Build the SPA BEFORE any wrangler command: wrangler validates `[assets].directory` on every

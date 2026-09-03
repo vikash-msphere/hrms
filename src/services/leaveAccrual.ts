@@ -6,6 +6,7 @@ import { allocOwnedCode } from "./codeAlloc";
 import { getSettingValue } from "./settings";
 import { runBatch, type BatchStmt } from "../lib/dbBatch";
 import { refLeaveTypes } from "../lib/refData";
+import { audit } from "../lib/audit";
 
 // How accrued balances are rounded (settings/leave_accrual). "half" keeps balances in 0.5-day steps (the
 // default - prorated joining months otherwise produce values like 2.41); "day" = whole days; "none" = exact.
@@ -79,5 +80,23 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
     }
   }
   await runBatch(deps.db, updates);
+  // The nightly walk recorded NOTHING before this, and accrued leave is encashable - it is money that appears
+  // on people's balances while they sleep, and "why do I have 14.5 days" had no answer anywhere in the app.
+  //
+  // A summary rather than one entry per balance, and that IS the trade: this runs every night over every
+  // employee x every leave type, so per-row would put tens of thousands of entries a month into a D1 free-plan
+  // table to record, mostly, "+1.5 days as scheduled". The individual number stays derivable - the balance row
+  // carries `last_accrual_ym`, and a leave type's rate is its own record - where the fact that the run HAPPENED,
+  // covered this many people and moved this many balances is derivable from nothing else.
+  if (credited) {
+    await audit(deps, "system", "leave.accrue", "leave-balances", undefined, {
+      diff: {
+        balancesCredited: { from: null, to: credited },
+        employees: { from: null, to: employees.filter((e) => !e.deleteTime && e.startDate).length },
+        leaveTypes: { from: null, to: leaveTypes.filter((lt) => lt.accrualDaysPerYear && !lt.deleteTime && !lt.disabled).length },
+      },
+      ...(onlyLeaveTypeId ? { note: "a single leave type was re-accrued on request" } : {}),
+    });
+  }
   return credited;
 }

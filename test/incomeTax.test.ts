@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeAnnualTax, monthlyTds, allowedDeductions, COMMON_SECTION_CAPS, DEFAULT_TAX_CONFIG, type RegimeConfig } from "../src/domain/incomeTax";
+import { computeAnnualTax, monthlyTds, allowedDeductions, COMMON_SECTION_CAPS, DEFAULT_TAX_CONFIG, DEFAULT_TAX_FY_START_YEAR, fyLabels, type RegimeConfig } from "../src/domain/incomeTax";
 
 // New-regime numbers cross-checked against the official incometaxindia.gov.in calculator (AY 2026-27).
 const NEW = DEFAULT_TAX_CONFIG.regimes.new!;
@@ -83,5 +83,21 @@ describe("allowedDeductions", () => {
     expect(withNps.chapterVIA).toBe(100000);
     expect(withNps.taxableIncome).toBe(bare.taxableIncome - 100000);
     expect(withNps.totalTax).toBeLessThan(bare.totalTax);
+  });
+});
+
+// The slab table's vintage stamp. Two strings that must describe the SAME year: an assessment year is always
+// the financial year plus one, and hand-editing one without the other has already shipped once (a config
+// stamped FY 2025-26 / AY 2026-27 seeded beside FY 2026-27 pay periods). `fyLabels` is the single builder;
+// this pins that the seed actually goes through it.
+describe("DEFAULT_TAX_CONFIG - the slab vintage stamp", () => {
+  it("derives both labels from one start year, so FY and AY cannot disagree", () => {
+    expect(DEFAULT_TAX_CONFIG.financialYear).toBe(fyLabels(DEFAULT_TAX_FY_START_YEAR).financialYear);
+    expect(DEFAULT_TAX_CONFIG.assessmentYear).toBe(fyLabels(DEFAULT_TAX_FY_START_YEAR).assessmentYear);
+  });
+
+  it("builds an AY exactly one year after its FY, across a century roll", () => {
+    expect(fyLabels(2025)).toEqual({ financialYear: "2025-26", assessmentYear: "2026-27" });
+    expect(fyLabels(2099)).toEqual({ financialYear: "2099-00", assessmentYear: "2100-01" });
   });
 });

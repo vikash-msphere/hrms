@@ -36,6 +36,7 @@ export type SettingsEntry = {
   keywords?: string[]; // extra search terms beyond title/desc
   perm?: string; // capability required beyond settings.write (e.g. "leave-types.write")
   target?: AccessTargetRef; // manage-access affordance on the panel header (object scope fills objectPath at runtime)
+  wide?: boolean; // the inline Sheet opens wider than the 760px default - for panels that are a two-pane editor
 };
 
 export const entryScope = (e: SettingsEntry): SettingsScope => e.scope ?? "org";
@@ -46,7 +47,7 @@ const org = (label: string): AccessTargetRef => ({ collection: "settings", objec
 
 export const SETTINGS_REGISTRY: SettingsEntry[] = [
   // Company
-  { key: "identity", title: "Name & branding", desc: "Company name, legal name, logo, address and how the sidebar wordmark renders.", group: "Company", icon: Building2, keywords: ["logo", "brand", "company name", "address", "anniversary", "wordmark"], target: org("Organization identity") },
+  { key: "identity", title: "Name & branding", desc: "Company name, legal name, logo, address, the letterheads documents print on, and how the sidebar wordmark renders.", group: "Company", icon: Building2, keywords: ["logo", "brand", "company name", "address", "anniversary", "wordmark", "letterhead", "stationery", "watermark", "footer"], target: org("Organization identity") },
   { key: "banks-currency", title: "Banks & currency", desc: "Allowed currencies, the default currency, and the bank list used in pickers.", group: "Company", icon: Landmark, keywords: ["money", "inr", "usd", "fx"], target: org("Banks & currency") },
   { key: "defaults", title: "Probation & holiday defaults", desc: "Default probation length for new hires, the optional-holiday allowance and deadline, and the subscribable holiday calendar.", group: "Company", icon: SlidersHorizontal, keywords: ["probation months", "optional holidays", "pick deadline", "holiday feed", "subscribe", "ics", "webcal"], target: { collection: "settings", objectPath: "settings/probation", label: "Defaults" } },
   { key: "employee-ids", title: "Employee IDs", desc: "The EMP-0042 style scheme new hires are auto-numbered with.", group: "Company", icon: Hash, keywords: ["number", "emp", "id format", "sequence"], target: { collection: "settings", objectPath: "settings/employee-number", label: "Employee IDs" } },
@@ -85,7 +86,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "board-config", scope: "object", hostPage: "boards", title: "Board configuration", desc: "Columns, WIP limits, swimlanes and labels - set per board, on the board itself.", group: "Work management", icon: KanbanSquare, keywords: ["kanban", "scrum", "columns", "wip", "swimlane", "label", "sprint", "board"], target: { collection: "boards", verb: "configure", label: "Configure board" } },
 
   // Comms & support
-  { key: "letters", title: "Letter templates", desc: "The offer, appointment and HR letter templates, with a block editor and preview.", group: "Comms & support", icon: FileText, keywords: ["offer letter", "template", "contract", "document"], target: { collection: "letter-templates", label: "Letter templates" } },
+  { key: "letters", title: "Letter templates", desc: "The offer, appointment and HR letter templates, with a block editor and preview.", group: "Comms & support", icon: FileText, keywords: ["offer letter", "template", "contract", "document"], target: { collection: "letter-templates", label: "Letter templates" }, wide: true },
   { key: "letter-defaults", title: "Letter defaults", desc: "Signatory, HR contact and offer terms stamped into generated letters.", group: "Comms & support", icon: PenLine, keywords: ["signatory", "signature", "hr contact", "offer validity"], target: org("Letter defaults") },
   { key: "esign", title: "E-signature", desc: "Master switch + Aadhaar vendor settings; the signing method is chosen per template and per document.", group: "Comms & support", icon: FileSignature, keywords: ["esign", "aadhaar", "cashfree", "digital signature", "sign", "vendor", "in-app"], target: { collection: "settings", objectPath: "settings/esign", label: "E-signature" } },
   { key: "notifications", title: "Notifications", desc: "Which events notify people in-app, and at what priority.", group: "Comms & support", icon: Bell, keywords: ["bell", "alerts", "priority"], target: { collection: "settings", objectPath: "settings/notifications", label: "Notification settings" } },

@@ -473,7 +473,8 @@ function RuleDialog({ rule, rules, seed, onClose, onReload }: { rule: Automation
       toast({ title: "Rule created", variant: "success" });
     } else {
       try {
-        await patch(cur!.path, body, etag);
+        const saved = await patch<Automation>(cur!.path, body, etag);
+        setEtag(saved.etag);
       } catch (e) {
         // Lost race: another admin edited the same rule. Take their etag and say what happened - a rule is
         // shared infrastructure, so two people in the same builder is the ordinary case, not a rare one.
@@ -624,6 +625,9 @@ const STATUS_META: Record<string, { icon: typeof CheckCircle2; cls: string; labe
   partial: { icon: AlertTriangle, cls: "text-amber-600 dark:text-amber-400", label: "Partial" },
   error: { icon: XCircle, cls: "text-red-600 dark:text-red-400", label: "Error" },
   skipped: { icon: MinusCircle, cls: "text-muted-foreground", label: "Skipped" },
+  // The dispatch budget tripped: events went unprocessed. Amber, not grey - "skipped" is a rule deciding not
+  // to act, this is work that was silently refused.
+  dropped: { icon: AlertTriangle, cls: "text-amber-600 dark:text-amber-400", label: "Dropped" },
   suspended: { icon: Hourglass, cls: "text-amber-600 dark:text-amber-400", label: "Waiting" },
   waiting: { icon: Hourglass, cls: "text-amber-600 dark:text-amber-400", label: "Waiting" },
   expired: { icon: MinusCircle, cls: "text-muted-foreground", label: "Expired" },
@@ -699,7 +703,8 @@ function RunRow({ r, meta, ruleName, nameOf }: { r: AutomationRun; meta: Workflo
       <m.icon className={cn("mt-0.5 h-5 w-5 shrink-0", m.cls)} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="font-medium">{rule?.name ?? "(deleted rule)"}</span>
+          {/* A dropped run names no rule by design (none was loaded), so "(deleted rule)" would be a lie. */}
+          <span className="font-medium">{rule?.name ?? (r.status === "dropped" ? "Dispatch budget exhausted" : r.automation ? "(deleted rule)" : "(no rule)")}</span>
           <EventPill meta={meta} type={r.event_type} />
           <CauseTag employeeRef={r.employee} subject={r.subject} nameOf={nameOf} />
         </div>
@@ -739,7 +744,7 @@ function RunsTab() {
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        {(["done", "partial", "error", "skipped"] as const).filter((s) => counts[s]).map((s) => {
+        {(["done", "partial", "error", "skipped", "dropped"] as const).filter((s) => counts[s]).map((s) => {
           const m = statusMeta(s);
           return <span key={s} className="inline-flex items-center gap-1.5 rounded-lg border bg-card px-2.5 py-1 text-sm"><m.icon className={cn("h-4 w-4", m.cls)} />{m.label}<span className="font-semibold">{counts[s]}</span></span>;
         })}

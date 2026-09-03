@@ -149,7 +149,7 @@ export default function TeamAnalytics({ me }: { me: Me }) {
       deptName(p.department) ?? "",
       ...columns.map((c) => p.values[c.key] ?? ""),
     ]);
-    void exportTable(`team-analytics-${from}-to-${to}`, headers, rows, format);
+    void exportTable(`team-analytics-${from}-to-${to}`, headers, rows, format, "employees");
   };
 
   const windowDays = Math.round((Date.parse(to) - Date.parse(from)) / DAY_MS) + 1;

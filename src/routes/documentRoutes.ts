@@ -2,6 +2,7 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { contentDisposition } from "../http/contentDisposition";
 import { signLetter } from "../services/letterSign";
+import { printDocument } from "../services/letterPrint";
 import { remindAckPending } from "../services/documentAck";
 import { refreshEsign } from "../services/esign/callback";
 import type { makeDocumentService } from "../services/documentService";
@@ -80,6 +81,18 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
         // (or any other buffering route) reads it; the service's own byte assertion covers a chunked body.
         run: async (deps, user, id, _body, c) =>
           svc.upload(deps, user, id, await c.req.arrayBuffer(), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
+      },
+      // The print copy of a generated letter: the SAME letter - same words, same date, same signature - re-
+      // rendered on its letterhead's print page. Nothing is stored; the filed PDF stays the record of what was
+      // issued. A letter with no frozen content (an upload, an externally-signed PDF) has nothing to re-render
+      // and says so.
+      print: {
+        raw: async (c, id) => {
+          const { bytes, fileName } = await printDocument(c.get("deps"), id);
+          // pdf-lib hands back a Uint8Array; c.body wants a plain ArrayBuffer (same as the letter preview path).
+          const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          return c.body(body, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
+        },
       },
       download: {
         raw: async (c, id) => {

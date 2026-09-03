@@ -6,6 +6,7 @@ import { RESOURCE_COLLECTIONS } from "../lib/authzResolve";
 import { round2 } from "../domain/money";
 import { parseIllustrationLayout, parseRecipientLayout } from "../domain/illustration";
 import { parseScope, scopeToWire } from "../domain/keyScope";
+import { parseRecordings } from "../domain/tickets";
 import { parseAttachments } from "../domain/ticketAttachments";
 import { parseFound, parseScope as parseStocktakeScope } from "../domain/stocktake";
 import { maskedToken } from "../lib/apiKeyToken";
@@ -553,6 +554,15 @@ export function toActivityResource(r: any) {
     actor: ref("employees", r.actorId),
     actor_email: r.actorEmail,
     actor_name: r.actorName ?? undefined, // resolved actor employee name (falls back to email on the client)
+    actor_role: r.actorRole ?? undefined, // the authority the act was performed under, AS OF the event
+    // The act this entry was part of. Opaque on purpose - it is an equality key for "show me the rest of this
+    // act" (`GET /v1/activity?correlation=...`), never something to display.
+    correlation_id: r.correlationId ?? undefined,
+    // The sitting. Like correlation_id: an equality key for "the rest of this login", never a label.
+    session_id: r.sessionId ?? undefined,
+    // Who the entry is ABOUT (the actor is who did it). A wire ref, so the outbound edge tokenizes it and the
+    // client can pass it straight back as `?subject`.
+    subject: ref("employees", r.subjectId),
     create_time: iso(r.at),
     ...(r.ip ? { ip: r.ip } : {}),
     ...(r.userAgent ? { user_agent: r.userAgent } : {}),
@@ -1151,20 +1161,35 @@ export function toLetterTemplateResource(r: any): Wire<"letter-template"> {
     label: r.label,
     category: r.category ?? undefined,
     filename: r.filename ?? undefined,
-    letterhead: ref("letterhead-logos", r.letterheadId),
+    letterhead: ref("letterheads", r.letterheadId),
     inputs: r.inputs ?? undefined,
     blocks: r.blocks ?? [],
   };
 }
 
-export function toLetterheadLogoResource(r: any): Wire<"letterhead-logo"> {
+export function toLetterheadResource(r: any): Wire<"letterhead"> {
   return {
-    ...baseResource(r, "letterhead-logos"),
+    ...baseResource(r, "letterheads"),
     label: r.label,
-    content_type: r.contentType ?? undefined,
-    size_bytes: r.sizeBytes ?? undefined,
-    // Whether the artwork has actually been uploaded: a row with no image is a name the letters can't use yet.
-    has_image: !!r.r2Key,
+    // The images this letterhead holds, by VERSION then slot: `{ screen: { mark: { content_type, size_bytes }
+    // } }`. Two levels, matching how they are stored - flattening one level here is what once served
+    // `{ screen: {} }`, so an uploaded image was invisible to the editor while the renderer drew it fine. The
+    // bytes come from `:image?variant=&slot=`, never inline: a full sheet of stationery has no business in a
+    // list response. `r2Key` is deliberately dropped - the client addresses images by slot, not by key.
+    assets: r.assetsJson
+      ? Object.fromEntries(
+          Object.entries(JSON.parse(r.assetsJson) as Record<string, Record<string, { content_type?: string; size_bytes?: number }>>).map(
+            ([variant, slots]) => [
+              variant,
+              Object.fromEntries(Object.entries(slots).map(([slot, a]) => [slot, { content_type: a.content_type, size_bytes: a.size_bytes }])),
+            ]
+          )
+        )
+      : {},
+    // The stored page design, or undefined for a letterhead that prints on the stock page.
+    design: r.designJson ? (JSON.parse(r.designJson) as Record<string, unknown>) : undefined,
+    // The print page, when this letterhead has one; absent means it prints as it renders.
+    print_design: r.printDesignJson ? (JSON.parse(r.printDesignJson) as Record<string, unknown>) : undefined,
   };
 }
 
@@ -1449,6 +1474,13 @@ export function toTicketResource(r: any): Wire<"ticket"> {
     state: r.state,
     // Checklist progress on every ticket (list + get): from the loaded items when present (Get), else the
     // counts the list query attached. Lets the table show done/total without loading the full items.
+    // Oldest first, the order they were made in. The console link is built client-side from the configured org
+    // slug - the API stays free of a vendor URL.
+    session_replays: parseRecordings(r.sessionReplaysJson).map((x) => ({
+      id: x.id,
+      create_time: iso(new Date(x.created_at)),
+      by: x.by ? ref("employees", x.by) : undefined,
+    })),
     todo_done: Array.isArray(r.todos) ? r.todos.filter((x: any) => x.done).length : (r.todoDone ?? 0),
     todo_total: Array.isArray(r.todos) ? r.todos.length : (r.todoTotal ?? 0),
     // Attachments travel as metadata only - name, type, size and the storage key the :attachment verb takes.
@@ -1533,6 +1565,9 @@ export function toPersonalDocumentResource(r: any): Wire<"personal-document"> {
     employee: ref("employees", r.employeeId),
     source_document: ref("org-documents", r.sourceDocId),
     requires_signature: r.requiresSignature || undefined,
+    // True when this document's letterhead has a print version of its own, so the UI offers the two downloads
+    // as a choice. Absent = there is one version and one download.
+    print_variant: r.printVariant || undefined,
     signed_time: r.signedTime ? iso(r.signedTime) : undefined,
     signature_name: r.signatureName ?? undefined,
     esign_provider: r.esignProvider ?? undefined,
@@ -1710,10 +1745,10 @@ export function toAutomationResource(r: {
 // A recorded automation firing (observability, like cron-runs).
 export function toAutomationRunResource(r: {
   uuid: string;
-  automationId: string;
+  automationId: string | null;
   eventId: string | null;
   eventType: string;
-  status: "done" | "partial" | "error" | "skipped";
+  status: "done" | "partial" | "error" | "skipped" | "dropped";
   resultJson: string | null;
   subject?: string | null;
   employeeId?: string | null;
@@ -1731,7 +1766,8 @@ export function toAutomationRunResource(r: {
     create_time: iso(r.createdAt),
     update_time: iso(r.updatedAt),
     etag: etagOf(+new Date(r.updatedAt)),
-    automation: ref("automations", r.automationId),
+    // Absent on a `dropped` row - the budget was exhausted before any rule was loaded, so none is to blame.
+    ...(r.automationId ? { automation: ref("automations", r.automationId) } : {}),
     ...(r.eventId ? { event: ref("event-log", r.eventId) } : {}),
     event_type: r.eventType,
     status: r.status,

@@ -65,7 +65,7 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
   }
 
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">
           <AccessAction collection="settlements" label="Full & final settlement">
@@ -123,7 +123,7 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
         {/* scrollBody: a six-field form under a four-line description, so on a phone Compute was below the
             fold of its own dialog. */}
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy) void compute(); }}>
+        <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (!busy) void compute(); }}>
           <AccessScope collection="settlements">
           <DialogHeader>
             <DialogTitle>{latest ? "Recompute full & final settlement" : "Compute full & final settlement"}</DialogTitle>

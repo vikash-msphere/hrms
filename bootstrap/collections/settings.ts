@@ -11,6 +11,7 @@ import { DEFAULT_ATTENDANCE } from "../../src/domain/attendance";
 import { DEFAULT_TRANSITION_TEMPLATES } from "../../src/domain/transitions";
 import { BRAND } from "../../src/domain/brand";
 import { DEFAULT_ESIGN } from "../../src/domain/esign";
+import { DEFAULT_TICKET_CATEGORIES } from "../../src/domain/tickets";
 
 const ORGANIZATION = { name: "Your Company Pvt Ltd", address: "", logo: "", favicon: "", default_currency: "INR", letter_defaults: { hr_email: "" }, primary_color: BRAND.primary, email_logo_url: "" };
 
@@ -43,6 +44,13 @@ const SETTINGS: Array<[string, unknown]> = [
   // on, every access-rule write queues as a pending change a SECOND access admin has to approve
   // (services/accessRules.ts) - the row carries the pending state, so nothing takes effect meanwhile.
   ["access-approval", { enabled: false }],
+  // Help-desk categories. Seeded rather than left to the service's fallback because the two are not equivalent
+  // from the browser: the server falls back when the row is missing, but the SPA reads the settings row
+  // directly, so with no row every ticket dialog offered an empty category picker and a permanently disabled
+  // submit - the whole feature looked broken on a fresh install. Same constant either way, so the seeded rows
+  // and the fallback cannot disagree. Assignees, members and servicing departments stay unset: they are refs
+  // to people and departments this database does not have yet, and HR fills them in from Settings.
+  ["ticket-categories", DEFAULT_TICKET_CATEGORIES],
 ];
 
 export function settings(): string {

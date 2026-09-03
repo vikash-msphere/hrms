@@ -63,6 +63,6 @@ export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: 
 
   const updated = (await deps.db.update(schema.users).set(set).where(eq(schema.users.uuid, id)).returning())[0]!;
   // Only the fields whose value actually changed (from→to), not every field the form submitted.
-  await audit(deps, actor, "user.update", "users", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "user.update", "users", id, diffMeta(row, updated, set, "users"), updated);
   return updated;
 }

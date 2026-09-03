@@ -77,7 +77,7 @@ export async function listActivity(
 // `entity` narrows to one collection, `actor` matches actor email (LIKE). One indexed scan (audit_at_idx).
 export async function listAllActivity(
   deps: Deps,
-  opts: { limit?: number; before?: number; q?: string; tone?: string; entity?: string; actor?: string; actorId?: string; apiKeyId?: string } = {},
+  opts: { limit?: number; before?: number; q?: string; tone?: string; entity?: string; actor?: string; actorId?: string; apiKeyId?: string; correlationId?: string; subjectId?: string; sessionId?: string; entityIds?: { entity: string; id: string }[] } = {},
 ) {
   const limit = Math.max(1, Math.min(100, opts.limit ?? 25));
   const conds: SQL[] = [];
@@ -90,6 +90,21 @@ export async function listAllActivity(
   // Everything one credential did. Not an actor filter: a key acts AS a human, so its rows are attributed to
   // that person and are indistinguishable from what they did at a keyboard without this.
   if (opts.apiKeyId) conds.push(eq(schema.auditLog.apiKeyId, opts.apiKeyId));
+  // One ACT, whole: every entry the same request or cron tick wrote. Indexed (audit_corr_idx), so this is a
+  // seek rather than a scan even against a long history.
+  if (opts.correlationId) conds.push(eq(schema.auditLog.correlationId, opts.correlationId));
+  // Everything that happened TO one person, across every collection - their leave, their pay, their assets,
+  // their tickets. Distinct from `actorId`, which is who DID it; the two differ exactly where it matters (a
+  // manager approving someone else's leave). Indexed (audit_subject_idx).
+  if (opts.subjectId) conds.push(eq(schema.auditLog.subjectId, opts.subjectId));
+  // One SITTING: every act of one login. Indexed (audit_session_idx).
+  if (opts.sessionId) conds.push(eq(schema.auditLog.sessionId, opts.sessionId));
+  // A CASE: the records that make up one long-running story (a hire, an onboarding), assembled by walking the
+  // links between them - see services/activityCase.ts. Bounded there, so this OR-list stays small enough to
+  // seek on `audit_entity_idx` rather than degenerating into a scan.
+  if (opts.entityIds?.length) {
+    conds.push(or(...opts.entityIds.map((e) => and(eq(schema.auditLog.entity, e.entity), eq(schema.auditLog.entityId, e.id))!))!);
+  }
   const actor = opts.actor?.trim();
   if (actor) conds.push(like(schema.auditLog.actorEmail, `%${actor}%`)); // free-text actor-email match
   conds.push(...textAndToneConds(opts));

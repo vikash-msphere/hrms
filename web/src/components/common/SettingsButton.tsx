@@ -88,7 +88,9 @@ export function SettingsButton({
       <Button variant="outline" size="icon" title={entry.title} aria-label={entry.title} onClick={openSheet}>
         <Icon className="h-4 w-4" />
       </Button>
-      <SheetContent>
+      {/* A two-pane panel (list rail + editor) needs more than the 760px default, or the rail starves the
+          editor. Still capped by the viewport, so a laptop just gets the widest panel that fits. */}
+      <SheetContent className={entry.wide ? "sm:max-w-[min(1100px,95vw)]" : undefined}>
         <SheetHeader>
           <div className="flex items-center gap-1.5">
             <SheetTitle>{entry.title}</SheetTitle>

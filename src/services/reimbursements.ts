@@ -7,7 +7,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { round2 } from "../domain/money";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
@@ -68,7 +68,7 @@ export async function createReimbursement(deps: Deps, actor: AppUser, input: Rei
       state: "PENDING",
     })
     .returning())[0]!;
-  await audit(deps, actor, "reimbursement.create", "reimbursements", row.uuid, undefined, row);
+  await audit(deps, actor, "reimbursement.create", "reimbursements", row.uuid, createdMeta(row, "reimbursements"), row);
   await notifyManager(deps, employeeId, { type: "reimbursement.requested", noun: "reimbursement claim" });
   await emitEvent(deps, actor, "reimbursement.submitted", { subject: `reimbursements/${row.uuid}`, employeeId, payload: { amount: row.amount, categoryId } });
   return row;
@@ -88,7 +88,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     .where(and(eq(schema.reimbursements.uuid, id), eq(schema.reimbursements.state, "PENDING")))
     .returning();
   if (!updated) throw failedPrecondition(to === "CANCELLED" ? "only pending claims can be cancelled" : "claim is not pending");
-  await audit(deps, actor, `reimbursement.${to.toLowerCase()}`, "reimbursements", id);
+  await audit(deps, actor, `reimbursement.${to.toLowerCase()}`, "reimbursements", id, stateMeta(row.state, to, { employee: `employees/${row.employeeId}` }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `reimbursement.${to.toLowerCase()}`, title: `Reimbursement ${to.toLowerCase()}`, body: `Your reimbursement claim was ${to.toLowerCase()}.`, link: "reimbursements/history", subject: `reimbursements/${id}`, actorId: actor.employeeId });
     await emitEvent(deps, actor, `reimbursement.${to.toLowerCase()}`, { subject: `reimbursements/${id}`, employeeId: row.employeeId, payload: { amount: row.amount } });
@@ -129,7 +129,7 @@ export async function createApprovedReimbursementForExpense(
       decidedBy: actor.uuid,
     })
     .returning())[0]!;
-  await audit(deps, actor, "reimbursement.create", "reimbursements", row.uuid, undefined, row);
+  await audit(deps, actor, "reimbursement.create", "reimbursements", row.uuid, createdMeta(row, "reimbursements"), row);
   return row;
 }
 
@@ -211,7 +211,7 @@ export async function payReimbursement(deps: Deps, actor: AppUser, id: string) {
     .where(and(eq(schema.reimbursements.uuid, id), eq(schema.reimbursements.state, "APPROVED")))
     .returning();
   if (!updated) throw failedPrecondition("only approved claims can be marked paid");
-  await audit(deps, actor, "reimbursement.pay", "reimbursements", id);
+  await audit(deps, actor, "reimbursement.pay", "reimbursements", id, stateMeta(row.state, "PAID", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "reimbursement.paid", title: "Reimbursement paid", body: "Your approved reimbursement claim was paid.", link: "reimbursements/history", subject: `reimbursements/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "reimbursement.paid", { subject: `reimbursements/${id}`, employeeId: row.employeeId, payload: { amount: row.amount } });
   return updated;

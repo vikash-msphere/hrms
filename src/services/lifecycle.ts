@@ -39,6 +39,10 @@ async function set(deps: Deps, table: Table, id: string, fields: Record<string, 
   return fetchRow(deps, table, id);
 }
 
+// The three lifecycle verbs below record no meta, and that is the decision rather than an oversight: each
+// flips ONE boolean whose name is already the action ("disabled", "locked", "published"), so a diff would say
+// `disabled: false → true` under an entry that already reads "disabled". The snapshot is still passed, because
+// that is what gives the entry its point-in-time label.
 export async function setDisabled(deps: Deps, actor: AppUser, table: Table, singular: string, collection: string, id: string, disabled: boolean) {
   const row = await fetchRow(deps, table, id);
   if (!row) throw notFound(`${singular} not found`);

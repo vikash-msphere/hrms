@@ -64,7 +64,8 @@ push; PWA install; CSV/Excel export; saved table views; API keys for machine cal
 │  ├─ architecture-decisions.md   the "why" behind the stack and its boundaries
 │  ├─ deploy.md           provisioning, secrets, seeding, deploy, DR
 │  ├─ deploy-security.md  the security runbook for a deployment
-│  └─ security-review.md  archived 2026-07-04 review (superseded by production-readiness.md)
+│  ├─ security-review.md  archived 2026-07-04 review (superseded by production-readiness.md)
+│  └─ session-recording-notice.md   the employee notice for screen recording, and what to decide first
 ├─ src/                   the Worker (Hono + Drizzle, TypeScript)
 │  ├─ index.ts env.ts deps.ts cron.ts
 │  ├─ domain/             pure business logic and the authz engine (no I/O)
@@ -74,7 +75,7 @@ push; PWA install; CSV/Excel export; saved table views; API keys for machine cal
 │  ├─ middleware/         auth, authz (the single gate), CSRF, wire-id codec, errors
 │  ├─ lib/  ports/  db/   adapters: crypto, PDF, email, R2, cache, Drizzle schema + migrations
 ├─ web/                   the React SPA (Vite, Tailwind, shadcn-style primitives)
-├─ test/                  110 vitest files (pure domain + workerd-backed route/flow tests)
+├─ test/                  177 vitest files (pure domain + workerd-backed route/flow tests)
 ├─ bootstrap/             production catalog seed (bootstrap.sql) + demo overlay (demo.sql)
 ├─ scripts/               dev/demo seed, generators (search DDL, access rules, templates), start.sh
 └─ production-readiness.md   the current release-readiness state of the app

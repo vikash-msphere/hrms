@@ -1,8 +1,9 @@
 # Deployment security runbook
 
 Operational controls that live outside the application code. Complete these before the first production deploy.
-Current code-level posture and the open pre-launch items are in `production-readiness.md` (root);
-`docs/security-review.md` is the archived 2026-07-04 review that preceded it.
+Current code-level posture and the open pre-launch items are in `production-readiness.md` (repo root);
+`docs/security-review.md` is the archived 2026-07-04 review that preceded it, and predates both the scoped
+API-key lane and direct Google sign-in.
 
 ## 1. Rate limiting (WAF)
 
@@ -32,7 +33,7 @@ the plan is upgraded.
 
 | Field            | Value                                                                 |
 |------------------|-----------------------------------------------------------------------|
-| Match expression | `starts_with(http.request.uri.path, "/auth/") or http.request.uri.path contains "/esign/callback/"` |
+| Match expression | `starts_with(http.request.uri.path, "/auth/") or http.request.uri.path contains "/esign/callback/" or http.request.uri.path eq "/diag"` |
 | Count by         | IP source address (the only free-plan characteristic)                 |
 | Period           | 10 seconds (fixed)                                                    |
 | Requests         | **20** per 10s (≈120/min) — above any real sign-in or vendor retry rate |
@@ -42,11 +43,22 @@ the plan is upgraded.
 runs a provider lookup + HMAC compute before its signature check rejects, so this IP bound blunts a flood
 before either path burns budget.
 
+`/diag` is in that expression for a reason of its own: it is unauthenticated, accepts up to 1 MB, and makes an
+OUTBOUND request per call. The envelope's DSN is pinned to this project so it cannot be used to relay anywhere
+else (`src/routes/diag.ts`), but nothing in the Worker stops a flood from burning the Sentry event quota or the
+Worker's own egress. It is the only unauthenticated surface here that spends money per request.
+
 Three more unauthenticated surfaces deserve a rule the moment you have more than one: `/found/*` (the public
 asset-tag lookup, which hits D1 on every call and is exactly the shape a token-guessing sweep would hammer),
 `/calendar/holidays/*` (the subscribable holiday feed - same shape, and calendar clients poll it on their own
-schedule) and `/readyz` (an unauthenticated `SELECT 1` against D1, so an easy way to burn read quota). On Free,
-fold `/found/*` and `/calendar/*` into the single rule's match expression if either is enabled publicly.
+schedule) and `/readyz`. On Free, fold `/found/*` and `/calendar/*` into the single rule's match expression if
+either is enabled publicly.
+
+`/readyz` is the least urgent of the three: it is an unauthenticated `SELECT 1` against D1, but `src/index.ts`
+caches a READY answer in the isolate for 5 seconds, so a flood costs at most one D1 read per isolate per
+window rather than one per request. A failing probe is deliberately NOT cached - an outage is still reported
+on the first call after it starts, and recovery on the first call after it ends. A WAF rule on it is still
+worth having once rules are not scarce; it is no longer a quota risk on its own.
 
 ### Pro+ / Workers Standard
 
@@ -60,6 +72,7 @@ Add the per-identity rules below (per-minute windows) alongside the sign-in rule
 | `POST /v1/cron-runs:run`                        | triggers full scheduled jobs (super)  | ~5 / min                 |
 | `POST /v1/automations/*:test`                   | rule dry-run                          | ~30 / min / user         |
 | `GET /found/*`, `GET /calendar/holidays/*`, `GET /readyz` | unauthenticated, each touches D1 | ~30 / min / IP     |
+| `POST /diag`                                    | unauthenticated; 1 MB in, outbound fetch out | ~60 / min / IP    |
 
 ## 2. Secrets
 
@@ -118,6 +131,45 @@ It fences the two self-service punches only. HR attendance-regularizations are d
 missed punch stays correctable from anywhere, which is what keeps the fence from becoming an attendance
 outage.
 
+## 3c. Cutting off a session — the break-glass
+
+Sessions are **stateless**: the cookie is `payload.HMAC` signed with `AUTH_SESSION_KEY`, nothing is stored
+server-side, and there is no per-session revocation list. Read on its own that sounds like "a stolen cookie
+is good for 12 hours" (`SESSION_TTL_MS` in `src/routes/authRoutes.ts`). The real exposure is much narrower,
+because the cookie proves only *which email* is calling - never what that email may do:
+
+- `src/middleware/auth.ts` loads the `users` row on **every** request and throws `forbidden("user disabled")
+  ` when `status !== "active"`. So setting a user inactive takes effect on their **next call**, live cookie
+  or not.
+- Role and access rules are re-read on every request too (behind a seconds-long cache), so a demotion lands
+  just as fast. A cookie cannot carry stale authority, only a stale identity.
+- The scoped API-key lane goes through the same check against the key's **owner**, so disabling a person
+  kills every key they own, with no separate revocation step.
+
+**Cut off one person** (the normal case, effective immediately):
+
+```bash
+npx wrangler d1 execute hrms --remote \
+  --command "UPDATE users SET status='disabled' WHERE email='leaver@acme.com';"
+```
+
+Do it in the app (Users → set inactive) when you can; the SQL is for when the app is what you have lost
+access to. Revoke their Google Workspace account as well, or they can sign in again and be re-provisioned.
+
+**Cut off everyone** (suspected `AUTH_SESSION_KEY` compromise, or an unknown session to invalidate):
+
+```bash
+npx wrangler secret put AUTH_SESSION_KEY   # a fresh `openssl rand -base64 32`
+```
+
+Every existing cookie fails its HMAC check at once and every user signs in again. It is the blanket lever,
+it costs nothing but a re-login, and unlike the other two key rotations in §2 it destroys no data.
+
+The gap that genuinely remains: a stolen cookie belonging to a user who **should stay enabled** cannot be
+singled out - the choice is disable that user briefly, or rotate the key and sign everybody out. Both are
+seconds of work. A revocation list would close it at the cost of a D1 read on every request, which is the
+trade this design deliberately declines.
+
 ## 4. Demo / seed fixtures — never in production
 
 `scripts/seed.sql` and `bootstrap/demo.sql` create predictable accounts (e.g. `super@example.com` as
@@ -135,9 +187,252 @@ Assets / Pages honor `_headers`). `style-src` retains `'unsafe-inline'` for Reac
 `frame-src` allows `blob:` so the in-app PDF viewers (payslip preview, letter-template preview) can frame bytes
 the app fetched itself; `object-src` stays `'none'`.
 
-**No remote origin appears anywhere in the policy.** Every typeface — the UI font, the org wordmark and the
-faces a board post can be set in — is self-hosted from `@fontsource` and ships as a same-origin bundled asset,
-so `font-src` and `style-src` name no external host and `connect-src` stays `'self'`.
+**No remote origin appears anywhere in the policy.** Every typeface - the UI font, the org wordmark and the
+faces a board post can be set in - is self-hosted from `@fontsource` and ships as a same-origin bundled asset,
+so `font-src` and `style-src` name no external host. The error tracker is reached the same way: the browser
+posts every envelope to `/diag` on our own origin and the Worker forwards it (`src/routes/diag.ts`), so
+`connect-src` stays `'self'`.
+
+### Why telemetry goes through the Worker
+
+The SPA used to POST straight to `https://o<org>.ingest.<region>.sentry.io`. That host is on the default
+blocklist of every ad and tracking blocker (uBlock, AdGuard, Brave shields, Ghostery) and of most corporate
+DNS/MITM filters. A blocked cross-origin POST comes back with no `access-control-allow-origin`, so the browser
+reports `CORS Failed` and the SDK drops the event - **silently**. The failure mode is not "some reports are
+missing", it is "an unknown share of your users report nothing and no one finds out".
+
+Relaying through our own origin puts nothing blockable in the page's traffic. The path is `/diag` and says
+nothing about the vendor on purpose: blockers match paths as readily as hosts, and Sentry's own documented
+`/sentry-tunnel` is already a filter rule.
+
+The relay is the app's only unauthenticated write-shaped surface - it makes an outbound request on an
+anonymous caller's say-so - so it is written as one, and `test/diagRelay.test.ts` tests the refusals rather
+than the happy path:
+
+- **One destination.** The envelope's own `dsn` header is checked against the Worker's `SENTRY_DSN`, on host
+  *and* project id. Anything else is a 403. Without that check this is an open relay: a stranger's envelope
+  would be forwarded with our egress, at our quota, or bounced at a third party.
+- **A body cap** (1 MB), so it cannot be used as a general upload endpoint. Replay segments sit well under it.
+- **No client IP.** The relayed request presents the Worker, so the tracker records that rather than the
+  employee's address. Deliberate: an error report never needed one, and adding `X-Forwarded-For` would be
+  choosing to send staff IPs to a third party.
+- **Only the rate-limit headers come back** (`X-Sentry-Rate-Limits`, `Retry-After`) - the two the SDK reads to
+  honour a 429. Nothing else upstream returns reaches the browser.
+- **Off unless configured.** No `SENTRY_DSN` on the Worker and the route 404s.
+
+`SENTRY_DSN` is a plain `[vars]` entry, not a secret: a DSN only permits *writing* events and the same string
+is already baked into the bundle as `VITE_SENTRY_DSN`. The two must match, or the relay refuses what the SPA
+sends.
+
+`worker-src 'self' blob:` (and `child-src`, which is what Safari <= 15.4 reads instead) is there for the same
+SDK: session replay compresses its recording in a Web Worker constructed from a blob URL, and under
+`default-src 'self'` that constructor throws somewhere nothing catches it - replay silently records nothing
+while looking configured. The widening is small, because building a blob Worker already requires script
+execution in the page and `script-src` still governs that. Self-hosting the worker (`workerUrl`) would avoid
+the token at the cost of an unhashed asset in `web/public` plus a copy step.
+
+### Error tracking beyond the browser
+
+**The Worker reports too.** `src/index.ts` wraps its handler in `withSentry` from `@sentry/cloudflare`, so an
+unhandled throw anywhere on the server becomes an issue instead of a bare 500 nobody sees. It stays inert when
+`SENTRY_DSN` is unset (that is the SDK's documented way of switching off), so local development is unchanged.
+Because the browser already sends `sentry-trace` on every `/v1` call, one trace now spans the click, the API
+request and the D1 work behind it. `sendDefaultPii: false`: request bodies here are payroll and personal data,
+and nothing needs them to report an error.
+
+**The nightly cron has a check-in.** `withMonitor` opens a Sentry check-in around the `0 2 * * *` run - leave
+accrual, reminders, digests - and closes it ok or error. That alerts on a run that FAILS and, more usefully, on
+one that never arrives: a scheduled job that silently stops has no error to catch, and the symptom otherwise is
+a wrong leave balance noticed weeks later. The 5-minute drain is deliberately not monitored - it is
+self-correcting, and a missed one is made up by the next.
+
+**Source maps are uploaded and then deleted.** `web/vite.config.ts` runs `sentryVitePlugin` when
+`SENTRY_AUTH_TOKEN` is present, and map generation is tied to the same condition. That pairing is load-bearing:
+generating maps unconditionally left them sitting in `web/dist`, which is exactly what gets uploaded to
+Cloudflare, so a build without a token would have served the entire unminified source to anyone who asked.
+Maps are emitted `hidden` (no `sourceMappingURL` comment), uploaded, then removed by
+`filesToDeleteAfterUpload`.
+
+`SENTRY_RELEASE` (Worker) and `VITE_APP_VERSION` (SPA) must be the SAME string, or the maps are uploaded
+against a release no event claims and traces stay minified with nothing to explain why. `npm run preflight`
+warns when either is missing.
+
+**A last-resort scrub.** `beforeSend`/`beforeBreadcrumb` in `web/src/instrument.ts` redact PAN, IFSC, Aadhaar
+and bare account-number shapes from message text, exception values and breadcrumb URLs. Masking governs the
+screen; this governs the text of an event, which masking never touches - a validation error quoting the value
+it rejected, a URL with an account number in it. The patterns are narrow on purpose: a greedy "looks like
+digits" rule would redact dates and counts and make every issue unreadable, which is its own way of losing the
+data. It is a net under the deny-list, not a replacement for it.
+
+### What session replay can and cannot see
+
+> Recording staff working inside an HR system needs a **written notice to employees**, a stated retention
+> period on the tracker, and a named list of who may watch a replay - none of which are engineering
+> controls. `docs/session-recording-notice.md` carries the notice text to publish and the three decisions to
+> take before launch. This section is the mechanism behind it.
+
+Replay records the DOM. The masking policy lives in one object, `REPLAY_PRIVACY` in
+`web/src/instrument.ts`, and it is **unmask-by-default**: text, inputs and media are recorded, and only what is
+listed there is hidden.
+
+That is the opposite of the SDK's default, and it is a deliberate trade. A replay where every label reads
+`*****` shows the shape of a page and nothing about what went wrong on it. **The failure mode inverts with
+it:** under mask-by-default, forgetting to tag a field leaked nothing; here, forgetting leaks it. The list is
+therefore built out of things that do not depend on anyone remembering:
+
+- **Three routes, not fifteen.** `<main>` carries `data-page="<route key>"` (App.tsx) and `SENSITIVE_PAGES`
+  masks the container subtree for `payslips`, `payroll-runs` and `documents` - the pages where practically
+  everything on screen is a value.
+
+  It used to be fifteen, including expenses, vendors, compliance, reimbursements, background checks, settings
+  and the employee profile, and that was the mistake. Masking those masked their headings, hints, statuses,
+  dates and category names: ordinary business data that tells you what a person was looking at. The replays
+  came out unreadable everywhere without being meaningfully safer, because route masking is the wrong
+  instrument for a page that is mostly chrome around a few numbers. Add a route only when masking the whole
+  page loses nothing worth reading.
+
+  Within those three, `unmask` puts the structure back - rrweb resolves each text node by DISTANCE, the nearer
+  of a matching `mask` and `unmask` ancestor winning - for headings, `th`, `label`, `button`, `nav` (the
+  workspace tab strip), `#page-description`, `[role="tab"]`, `[role="alert"]` and `[data-sentry-unmask]`
+  (which `EmptyState` carries: "No payslips yet" is standing copy, and the emptiness is often the bug).
+
+- **The sensitive panels and dialogs, named individually.** What replaced the other twelve routes lives closer
+  to the data: the seven profile sections carry `sentry-mask` on both the panel and its editing dialog -
+  `EmployeeBankDetails`, `EmployeeCompensation`, `EmployeeTaxDetails`, `EmployeeSettlement`,
+  `EmployeeBonuses`, `EmployeeIdentityDetails`, `EmployeePersonalDetails`. A dialog needs its own tag because
+  it renders through a PORTAL, as a child of `<body>`, where no ancestor says which page it was opened over.
+
+  Per-panel means somebody has to remember, and forgetting fails SILENTLY - the panel works, the replay
+  records, the account number is simply in it - so `test/replayMaskCoverage.test.ts` asserts the tag on all
+  seven and that `instrument.ts` still masks on that class, while `e2e/replayMasking.spec.ts` proves the class
+  masks at all and that its neighbours are untouched.
+
+- **Attribute conventions, not class names.** `data-sentry-mask` (text hidden, layout kept) and
+  `data-sentry-block` (element replaced) survive a restyle in a way a CSS class does not. Use them on anything
+  showing money, an identity number, a bank account, a medical detail or a document that can appear OUTSIDE
+  those routes - a dialog opened from the dashboard, a drawer on a board.
+- **Field shape.** `input[type=password]`, `autocomplete="cc-*"`, and name matches for account/IFSC/PAN/
+  Aadhaar/UAN - matched on what the browser already knows about a field rather than on app markup, because
+  those attributes exist for the password manager and are stable. Fixed-format identifiers, worth something to
+  whoever reads them, and impossible to change once leaked.
+
+  `amount`, `salary` and `ctc` were on that list and are not any more: they matched an input on nearly every
+  form in the app - expenses, reimbursements, loans, bonuses, budgets - so an ordinary expense claim recorded
+  as a row of labels around one box of asterisks. Money where it IS the point is covered by the three masked
+  routes and by the compensation panel; a figure someone typed into an expense claim is not the same class of
+  secret as their PAN.
+- **Authored copy is never masked, wherever it sits.** Masking hid the things WE wrote as readily as the
+  things a person entered, which is what made a masked panel unreadable rather than merely discreet - a form
+  of `***` labels around `***` boxes. Three fixes, all in shared primitives so they hold everywhere:
+  `maskAttributes: []` (the SDK defaults to masking `title`, `placeholder` and `aria-label`, none of which
+  carries a value of anybody's); `data-sentry-unmask` on `Field`'s hint and on `CardTitle`/`CardDescription`,
+  which are `<div>`s and so are reached by no heading rule; and `dt` on the unmask list, because a
+  definition-list TERM is the label and the `<dd>` beside it is the value.
+
+- **`iframe` and `canvas` are blocked outright.** Neither is text, so masking would not touch them, and every
+  iframe this app creates is a rendered PDF - a payslip, a letter, a Form 16.
+- **Keystrokes** in search and file inputs are never recorded (`ignore`): what someone types into a search box
+  is often the thing they would never put in a ticket.
+
+The residual exposure is real and worth stating: on any route NOT in `SENSITIVE_PAGES`, a replay shows what
+was on screen, verbatim - names, email addresses, ticket text, board cards, announcements, chat-like
+comments. That is the point of the change, and it is also its cost.
+- Network bodies and headers stay off (`networkDetailAllowUrls` unset, `networkCaptureBodies: false`). URL,
+  method, status and byte counts are recorded; the `/v1` JSON is not.
+- `replaysSessionSampleRate: 0` with `replaysOnErrorSampleRate: 1` - nothing is uploaded while the app is
+  working. The SDK holds recent activity in memory and discards it at session end; an error flushes it.
+  Continuously recording a share of all sessions was rejected deliberately: it is surveillance of people doing
+  their HR admin, and it is not needed to reproduce a crash.
+
+A replay therefore leaves the browser in exactly two cases. The first is an unhandled error. The second is a
+person deciding it should, through **Report a problem** (the top bar's support menu, the command palette, or
+the phone create menu). That dialog - `web/src/components/common/ReportProblemDialog.tsx` - is the only place
+that calls `captureSessionReplay()` to flush the buffer. Every report made through it carries a recording -
+there is no per-report toggle, because a toggle mostly produced reports with the useful half missing - and the
+dialog says so on its face, in a line naming what is and is not in the recording. Stated, not asked: the
+people recorded are employees looking at their own salary and identity documents, and a recording they were
+not told about is monitoring rather than debugging. Raising an ordinary support ticket never captures one.
+
+**The flush happens when the dialog OPENS, not when it is sent**, and that timing is the feature. The buffer
+is not a rolling 60-second window. rrweb takes a full snapshot every 60 seconds and the SDK clears the buffer
+on each one, so what is held is everything since the last snapshot: a sawtooth between 0 and 60 seconds,
+averaging 30. A flush landing just after a checkout keeps only a few seconds no matter how long the person had
+been working - so every second spent reading the dialog and typing into it is a second of the fault lost, and
+capturing at submit reliably produced a recording of someone filling in a form. Opening the dialog keeps the minute that led to "something is wrong".
+**"Record the problem" is the manual mode.** It sits under the fields, at the foot of the dialog: the form
+hides, a `Recording · 0:47` countdown appears in the top bar with a Stop button, and the person goes and
+reproduces the fault. At zero, or on Stop, the form comes back with everything they had typed still in it.
+Below the fields rather than above them because the form is what most people came to fill in, and an action
+that empties the screen sitting above the first input reads as the thing to do first.
+
+**The disclosure lives on the success toast, not in the dialog.** Sending says "Problem reported - Screen
+recording attached", or "The recording was too short to include" when there was nothing to send. It moved
+there because the dialog is a form and standing text above a button is text people stop seeing; the toast
+lands at the moment the thing actually happens, and it says which of the two happened rather than describing
+the feature in general. The requester also sees the recording on their own ticket, where the drawer renders
+it as a "Session recording" link.
+
+What is NOT acceptable is neither: a screen recording sent with no indication to the person recorded is
+monitoring rather than debugging, whatever the intent. `e2e/reportProblem.spec.ts` asserts the toast text for
+that reason, so it cannot quietly disappear in a later edit. Nothing extra is
+switched on for it - the flush below already put the recorder in continuous mode under one replay id, so this
+is a UI state, and what the ticket links to is one recording holding the run-up, the form and the
+demonstration. Bounded at two minutes and shown as a live countdown on purpose. Two rather than one because reproducing a
+fault usually means navigating somewhere, filling something in and waiting for a response, and a timer that
+expires mid-demonstration wastes the attempt and the recording together; bounded and visible because an
+indefinite "you are being recorded" pill is the kind of thing people stop noticing, and this is not an app to
+stop noticing it in. Doing
+nothing is still the default - a report made without touching it behaves exactly as before.
+
+**Recording stops when the flush happens.** `captureSessionReplay()` flushes with `continueRecording: false`
+and immediately restarts the buffer, which leaves the app where it began: the last minute in memory, nothing
+uploaded, waiting for the next error or report. At its default the flush would convert the recorder to session
+mode and never stop - the whole rest of that browser session recorded continuously, for someone whose only act
+was to report a bug. It was configured that way for a while, on the reasoning that support's first question is
+"can you reproduce it?"; what it actually produced was open-ended recording of people who had reported one
+thing, which is not a trade worth making silently.
+
+**Continuous recording happens in exactly one place**: the two minutes of a demonstration the person started
+themselves, between `startManualRecording()` and `finishManualRecording()`.
+
+The window survives a reload. The SDK's replay session is sticky (`sessionStorage`), so a refresh
+mid-demonstration leaves the recorder running, and the countdown chip used to be React state a reload threw
+away - a recording continuing with nothing on screen saying so and no way to stop it, which is the one state
+this feature must never reach. The deadline is stored beside the SDK's own session, so the chip comes back with
+the time actually remaining; past the deadline the recorder is stopped on mount.
+
+That window is a REPLAY OF ITS OWN. `start()` always creates a new session, so the recording begins when Record
+is pressed and holds nothing else; `stop()` flushes the final segment and ends it, and buffering resumes.
+Converting the existing session with `flush()` was tried first and is wrong twice over: the demonstration was
+glued onto the run-up and the dialog being read, with no boundary marking where the person started
+demonstrating, and the recorder had been running continuously since the page loaded. Buffer mode cannot serve
+the window either - it clears on a full snapshot every 60 seconds, so a two-minute reproduction would arrive
+missing its first half.
+
+The demonstration is what the ticket links to: it holds the fault happening on purpose, which is worth more
+than the minute before somebody decided to report it. **Unless it was too short to exist** - the SDK discards a
+replay under `minReplayDuration` (5s), so a window stopped straight away would leave the ticket pointing at a
+recording Sentry threw away. Below that floor the run-up captured when the dialog opened is kept instead: a
+real recording of something beats a dead link to a better one.
+
+**Breadcrumbs carry the long history instead of video.** `maxBreadcrumbs: 300` (up from the default 100):
+every click, navigation, fetch and console line for the whole session, timestamped and attached to the issue.
+The replay covers at most the minute before a report; this is what answers "what were they doing before that",
+and it costs nothing in quota and collects nothing that was not already being collected.
+
+The 60s window is not a tuning choice. `BUFFER_CHECKOUT_TIME` is a hardcoded constant in `@sentry/replay`, so
+buffer mode holds one minute and no more. A longer window is only reachable by switching replay to session
+mode, which records continuously from page load and uploads as it goes - every session of every user, whether
+or not anything is ever reported. That is a different product decision (and a different legal one) than
+keeping a minute in memory against the chance it is asked for.
+
+The resulting id is stored on the ticket (`tickets.session_replay_id`, validated server-side as 32 hex so a
+URL cannot be smuggled in) and rendered in the ticket drawer as a link to the Sentry console - which needs a
+Sentry login, so being able to read the ticket is not the same as being able to watch the recording.
+
+The residual exposure is what the layout itself tells you - which page someone was on, which fields a form
+has, roughly how long a value was - plus request URLs, which carry record ids. Treat replays as
+restricted-access data in Sentry accordingly.
 
 `script-src` carries one extra token, `'wasm-unsafe-eval'`. It is the narrow permission to *compile*
 WebAssembly and grants nothing else — in particular it is **not** `'unsafe-eval'`, so `eval` and

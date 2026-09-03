@@ -20,7 +20,7 @@ binding = "ASSETS"
 # The Worker's notFound handler does the fallback instead - 404 for a missing FILE, the shell for a real app
 # route. See src/index.ts.
 not_found_handling = "none"
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*"]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag"]
 
 # Explicit CPU ceiling: PDF / Form-16 / letter rendering is CPU-heavy. Bounded so a runaway render can't run
 # away, with headroom above a normal request.
@@ -45,6 +45,16 @@ ALLOWED_EMAIL_DOMAINS = "msphere.io"
 # the VPN. Unset or empty = no fence (punch from anywhere). An APPROVED remote-work request eases it for
 # exactly its dates. A malformed entry is refused at startup.
 # ATTENDANCE_ALLOWED_IPS = "203.0.113.7, 198.51.100.0/24, 2001:db8::/32"
+# The one destination the /diag relay forwards the SPA's error/trace/replay envelopes to (routes/diag.ts).
+# A plain var, not a secret: a DSN only permits WRITING events, and the same string is already baked into the
+# bundle as VITE_SENTRY_DSN. It must BE that same DSN - the relay refuses an envelope addressed anywhere else,
+# which is what keeps it from being an open relay. Unset = the relay 404s and the SPA reports nothing.
+SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.de.sentry.io/4511982864498768"
+# Which build the Worker's own errors belong to. Set it in CI to the SAME value the SPA is built with
+# (VITE_APP_VERSION) so both halves of a distributed trace land on one release, and so the uploaded source maps
+# match. Left unset, every server issue is tagged "unknown release".
+# SENTRY_RELEASE = "abc1234"
+SENTRY_ENVIRONMENT = "production"
 
 [[d1_databases]]
 binding = "DB"
@@ -77,7 +87,7 @@ enabled = true
 directory = "./web/dist"
 binding = "ASSETS"
 not_found_handling = "none" # the Worker owns the SPA fallback - see the note on the top-level [assets]
-run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*"]
+run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "/diag"]
 
 [env.staging.vars]
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
@@ -89,6 +99,12 @@ ALLOWED_EMAIL_DOMAINS = "msphere.io"
 # the VPN. Unset or empty = no fence (punch from anywhere). An APPROVED remote-work request eases it for
 # exactly its dates. A malformed entry is refused at startup.
 # ATTENDANCE_ALLOWED_IPS = "203.0.113.7, 198.51.100.0/24, 2001:db8::/32"
+# Staging reports into the same project as production; `environment` on the event (from the SPA's build MODE)
+# is what separates them in the tracker. See the note in [vars].
+SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.de.sentry.io/4511982864498768"
+# What separates staging's issues from production's in the tracker - both report into the same project.
+SENTRY_ENVIRONMENT = "staging"
+# SENTRY_RELEASE = "abc1234"
 
 [[env.staging.d1_databases]]
 binding = "DB"

@@ -156,10 +156,10 @@ components:
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
-        automation: { type: string, readOnly: true, description: Path of the automation that fired. }
+        automation: { type: string, readOnly: true, description: Path of the automation that fired. Absent on a dropped run - no single rule caused it. }
         event: { type: string, readOnly: true, description: Path of the event-log entry that triggered this run. }
         event_type: { type: string, readOnly: true }
-        status: { type: string, readOnly: true, description: done | partial | error | skipped. }
+        status: { type: string, readOnly: true, description: 'done | partial | error | skipped | dropped. dropped means the per-request dispatch budget was exhausted and further events went unprocessed.' }
         subject: { type: string, readOnly: true, description: The event's subject resource path. }
         employee: { type: string, readOnly: true, description: Path of the employee the event concerned. }
         correlation_id: { type: string, readOnly: true, description: Trace id shared by every run/event of one root emit. }
@@ -560,9 +560,9 @@ components:
         plural: bank-formats
         patterns: ['bank-formats/{bank_format}']
         type: hrms.example.com/bank-format
-    letterhead-logo:
+    letterhead:
       type: object
-      description: One logo in the org's letterhead catalogue - the logos letters are ISSUED on, one per legal entity or brand, distinct from the app's own branding logo. The artwork is uploaded separately (uploadImage) and stored in object storage.
+      description: One letterhead in the org's catalogue - the stationery documents are ISSUED on, one per legal entity or brand, distinct from the app's own branding logo. Carries the page design (margins, typeface, palette, header band, footer band, watermark); the artwork is uploaded separately (uploadImage) and stored in object storage, used either as the header mark or as full-page stationery.
       required: [path, create_time, update_time, etag]
       properties:
         path: { type: string, readOnly: true }
@@ -571,18 +571,48 @@ components:
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
         label: { type: string, description: The entity or brand this letterhead belongs to. }
-        content_type: { type: string, readOnly: true, description: image/png or image/jpeg - the formats a PDF can embed. }
-        size_bytes: { type: integer, readOnly: true }
-        has_image: { type: boolean, readOnly: true, description: False until the artwork is uploaded; letters fall back to the organization logo. }
+        assets:
+          type: object
+          readOnly: true
+          additionalProperties:
+            type: object
+            properties:
+              content_type: { type: string, description: image/png or image/jpeg - the formats a PDF can embed. }
+              size_bytes: { type: integer }
+          description: >-
+            The images this letterhead holds, keyed by VERSION then by slot - `{ screen: { mark: {...} },
+            print: { stationery: {...} } }`. The two versions hold entirely separate images; slots are mark,
+            stationery and watermark. Empty until one is uploaded. The bytes are fetched one at a time from
+            :image?variant=&slot=, never inline.
+        design:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: >-
+            The page design - page (size, margin, font, ink/muted/hairline/accent), header (name, address,
+            lines, mark, rule, repeat, height), background (image, pages, opacity), footer (left, center,
+            right, rule, pages, height) and watermark (text or image). The three image-drawing bands - the
+            header mark, the background stationery and the watermark - are independent: each names its own
+            image slot and setting one never unsets another. Every property is optional; omissions fall back to
+            the stock page, and null or absent = the stock page. Validated on write - an unknown property or an
+            out-of-range value is rejected.
+        print_design:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: >-
+            The same page as it should come out of a printer, in the same shape as `design` - typically without
+            the flooded background, or with the header band off because the paper is already pre-printed. Null
+            or absent means documents print exactly as they render on screen.
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
       x-aep-resource:
-        singular: letterhead-logo
-        plural: letterhead-logos
+        singular: letterhead
+        plural: letterheads
         patterns:
-          - 'letterhead-logos/{letterhead_logo_id}'
-        type: hrms.example.com/letterhead-logo
+          - 'letterheads/{letterhead_id}'
+        type: hrms.example.com/letterhead
     payroll-debit-account:
       type: object
       description: The employer's bulk-payment debit account + currency for one bank (super_admin only). Stored encrypted; the account number is returned masked.
@@ -1107,7 +1137,7 @@ components:
         label: { type: string }
         category: { type: string, nullable: true, description: Grouping for the editor + generate pickers. }
         filename: { type: string, nullable: true, description: Download filename template (placeholders ok). }
-        letterhead: { type: string, nullable: true, description: "Letterhead this type is issued on, e.g. letterhead-logos/abc123. Unset (or a logo since removed) falls back to the organization logo." }
+        letterhead: { type: string, nullable: true, description: "Letterhead this type is issued on, e.g. letterheads/abc123. Unset (or one since removed) falls back to the org-wide default for letters." }
         inputs: { type: array, nullable: true, items: { type: object, additionalProperties: true }, description: Fields HR fills in at generation time. }
         blocks: { type: array, items: { type: object, additionalProperties: true }, description: "Ordered content blocks (closed vocabulary, rendered server-side)." }
         access:
@@ -1121,12 +1151,13 @@ components:
         type: hrms.example.com/letter-template
     compensation:
       type: object
-      description: An employee's effective-dated base pay. POST creates a revision (increment) - the current row is closed and a new current row opens from effective_from.
+      description: "An employee's effective-dated base pay, one row per revision. POST adds a revision at any effective date (normally the next increment, but a date inside the existing history inserts between two revisions); PATCH corrects one entered wrong; DELETE removes one from the timeline, the preceding revision absorbing its window."
       required: [path, create_time, update_time, etag, base_pay, current]
       properties:
         path: { type: string, readOnly: true }
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true, description: "Set when the revision was removed from the timeline. It no longer prices any period; visible only via show_deleted / deleted_only." }
         etag: { type: string, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
         annual_ctc: { type: number, description: "The authoritative figure: annual cost to company. This is the field you set. The server derives the monthly basic (ctc.basic_pct% of the monthly CTC) and a balancing Special Allowance so the full CTC lands on it." }
@@ -2875,6 +2906,18 @@ components:
         todo_done: { type: integer, readOnly: true, description: "Completed checklist items. Present on list and get." }
         todo_total: { type: integer, readOnly: true, description: "Total checklist items. Present on list and get." }
         initial_todos: { type: array, items: { type: string }, writeOnly: true, description: "Create-only: checklist item texts to seed on the new ticket (custom items and/or a copied checklist)." }
+        session_replay_id: { type: string, writeOnly: true, description: "Create-only: id of a Sentry session replay the requester chose to attach, showing the minute before they raised the ticket. 32 hex characters. Later recordings are added with :attachRecording; read them back from `session_replays`." }
+        session_replays:
+          type: array
+          readOnly: true
+          description: "Session recordings on this ticket, oldest first. The first arrives with the report; later ones are added via :attachRecording when support asks to see it again."
+          items:
+            type: object
+            required: [id, create_time]
+            properties:
+              id: { type: string, description: "Sentry replay id, 32 hex characters. The console URL is built client-side from the configured org slug." }
+              create_time: { type: string, format: date-time }
+              by: { type: string, description: "Resource path: employees/{employee_id} - who added it." }
         comments:
           type: array
           readOnly: true
@@ -3014,6 +3057,7 @@ components:
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
         source_document: { type: string, readOnly: true, description: "Source policy this was generated from (org-documents/{id}); set on a signed acknowledgement copy." }
         requires_signature: { type: boolean, readOnly: true, description: "True when this generated letter/contract has an e-signature placeholder the owner must sign via :sign." }
+        print_variant: { type: boolean, readOnly: true, description: "True when the letterhead this document was rendered on has a print version of its own, so :print returns a genuinely different page. Absent when there is one version and therefore one download." }
         signed_time: { type: string, format: date-time, readOnly: true, description: "When the owner e-signed the document (absent until signed)." }
         signature_name: { type: string, readOnly: true, description: "The signer's typed full name (the e-signature attestation)." }
         esign_provider: { type: string, readOnly: true, description: "E-sign driver handling this document (e.g. internal, signyu); absent when not e-signed." }
@@ -5004,6 +5048,10 @@ paths:
         - { in: query, name: entity, schema: { type: string }, description: "Org-wide feed only: narrow to one collection." }
         - { in: query, name: actor, schema: { type: string }, description: "Org-wide feed only: filter by actor email (substring)." }
         - { in: query, name: api_key, schema: { type: string }, description: "Org-wide feed only: everything ONE credential did, e.g. api-keys/{api_key_id}. A key acts as its owner, so its rows are attributed to that human and are otherwise indistinguishable from what they did at a keyboard." }
+        - { in: query, name: session, schema: { type: string }, description: "Org-wide feed only: every act of ONE sitting - a single login, from sign-in to sign-out. The value comes from a row's session_id. Absent on lanes that carry no session (API key, Cloudflare Access, cron)." }
+        - { in: query, name: case, schema: { type: string }, description: "Org-wide feed only: one long-running STORY, as a root resource path - applications/{id}, candidates/{id}, offers/{id}, transitions/{id}, employees/{id}, payroll-runs/{id}, org-documents/{id} or personal-documents/{id}. The member records are derived by walking the links the schema already carries - an application reaches its candidate, interviews, feedback, offer and the employee it hired; a payroll run reaches every payable it settled and the expense behind a bridged reimbursement; a policy reaches every acknowledgement and signed copy of it - so a case can never drift from the records that constitute it. Bounded: see case_truncated." }
+        - { in: query, name: subject, schema: { type: string }, description: "Org-wide feed only: everything that happened TO one person, across every collection, e.g. employees/{employee_id}. Distinct from ?actor, which is who performed the action - the two differ wherever somebody acts on another person's record. Gated by the `audit` capability, because a person's cross-collection timeline reveals more than any single record in it." }
+        - { in: query, name: correlation, schema: { type: string }, description: "Org-wide feed only: every entry written by ONE act - a single request, or a single cron tick. The value comes from a row's correlation_id; it is an equality key, never something to display." }
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: q, schema: { type: string }, description: "Free-text filter over the action, the actor (name/email), the touched object (its name, collection and id) and the change values." }
@@ -5027,11 +5075,18 @@ paths:
                         entity_ref: { type: string, description: "Org-wide feed: the touched record as a resource path, when it has an id." }
                         actor: { type: string, description: "Resource path: employees/{employee_id} (actor); may be absent for system actions." }
                         actor_email: { type: string }
+                        actor_name: { type: string, description: "The actor's display name AS OF the event." }
+                        actor_role: { type: string, description: "The role the act was performed under, AS OF the event - roles are data and they change, so the authority is snapshotted like the name." }
+                        entity_name: { type: string, description: "Display name of the touched record AS OF the event." }
+                        session_id: { type: string, readOnly: true, description: "The sitting this entry belongs to - every act of one login shares it. Pass it back as ?session. Opaque: an equality key, not a label. Absent for API-key, Access and cron lanes." }
+                        subject: { type: string, readOnly: true, description: "Resource path of the employee this entry is ABOUT (employees/{employee_id}), when it is about one. Absent for entries about a record rather than a person." }
+                        correlation_id: { type: string, description: "The act this entry was part of. One request (or cron tick) writes many entries - accepting an offer creates the employee, their compensation and the hire - and this is what identifies them as one thing. Pass it back as ?correlation to fetch the rest. Opaque: an equality key, not a label." }
                         create_time: { type: string, format: date-time }
                         ip: { type: string }
                         user_agent: { type: string }
-                        meta: { type: object, description: "Change details; `diff` = {field:{from,to}} on updates." }
+                        meta: { type: object, description: "Change details. `diff` = {field:{from,to}} on creates, updates and deletes; `via_automation` / `via_cron` name what acted when the actor is the system principal; `via_api_key` and `viewing_as` name the credential or the simulation the request rode; `authorized_by` is the grant PATTERN that allowed the request (the mirror of the pattern a denial names in its reason) - a pattern rather than an access-rule id, because a grant is compiled before it decides, so several rules may share one pattern." }
                   next_page_token: { type: string }
+                  case_truncated: { type: boolean, description: "Present and true when ?case matched more records than one case may carry, so the entries shown are part of the story rather than all of it. Reported rather than swallowed: a partial money trail that presents itself as complete is worse than none." }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
   /v1/review-cycles:
@@ -5245,7 +5300,9 @@ paths:
     post:
       description: "Custom method pdf: the finished review as a letter-style PDF for the employee's records. Only a SHARED or ACKNOWLEDGED review renders (nothing unshared may leave the app)."
       operationId: ":ReviewPdf"
-      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      parameters:
+        - { in: path, name: review_id, required: true, schema: { type: string } }
+        - { in: query, name: variant, schema: { type: string, enum: [screen, print] }, description: "Render on the letterhead's print page instead of the screen one. Default screen." }
       responses:
         '200': { description: "The review PDF, for inline display or saving.", content: { application/pdf: { schema: { type: string, format: binary } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -6489,6 +6546,8 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: employee, schema: { type: string }, description: "Filter to one employee (resource path)." }
+        - { in: query, name: show_deleted, schema: { type: boolean }, description: "Include revisions that were removed from the timeline." }
+        - { in: query, name: deleted_only, schema: { type: boolean }, description: "Only the removed revisions." }
       responses:
         '200':
           description: Successful response
@@ -6502,7 +6561,7 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
-      description: Create a salary revision (increment/appraisal) - closes the current row and opens a new one.
+      description: "Add a salary revision at effective_from. Normally the next increment (closes the current row and opens a new one), but the date may also fall inside the existing history, in which case the revision is inserted between two others: the one before it is closed at the new date and the one after it continues to govern from its own date."
       operationId: CreateCompensation
       parameters: [ { in: query, name: id, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/compensation' } } } }
@@ -6510,6 +6569,7 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/compensation' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/compensation/{compensation_id}:
     parameters: [ { in: path, name: compensation_id, required: true, schema: { type: string } } ]
@@ -6520,6 +6580,24 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/compensation' } } } }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: "Correct a revision that was entered wrong: annual_ctc, currency_code, pay_grade, salary_structure, effective_from. The split and the retro arrears are re-solved from the corrected figures, unless the arrears were already paid out - those stay at the amount that was actually disbursed. effective_from may move only within this revision's slot (after the revision before it, before the one after it); to move it further, delete the revision and add it at the new date."
+      operationId: UpdateCompensation
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/compensation' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/compensation' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: "Remove a revision from the timeline. Soft: the row is retained (and still resolves for audit links and past payslips) but no longer prices any period - the revision before it absorbs its window, and becomes the current salary again if the removed one was current. Refused once its retro arrears have been paid out; reverse the payroll run or settlement that paid them first."
+      operationId: DeleteCompensation
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
   /v1/positions:
     get:
       description: List role records (designation/department/location history), optionally for one employee. Access-scoped (HR + super).
@@ -8867,7 +8945,9 @@ paths:
     post:
       description: "Custom method letter: render this offer as a PDF offer letter (inline; nothing is persisted). Uses the org's letter defaults for the signatory, working pattern and probation."
       operationId: ":OfferLetter"
-      parameters: [ { in: path, name: offer_id, required: true, schema: { type: string } } ]
+      parameters:
+        - { in: path, name: offer_id, required: true, schema: { type: string } }
+        - { in: query, name: variant, schema: { type: string, enum: [screen, print] }, description: "Render on the letterhead's print page instead of the screen one. Default screen." }
       responses:
         '200': { description: The rendered offer letter., content: { application/pdf: { schema: { type: string, format: binary } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -9129,6 +9209,24 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/tickets/{ticket_id}:attachRecording:
+    post:
+      description: "Custom method attachRecording: adds a session recording to the ticket. Idempotent - re-adding an id already on the ticket changes nothing."
+      operationId: ":AttachTicketRecording"
+      parameters: [ { in: path, name: ticket_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_replay_id]
+              properties:
+                session_replay_id: { type: string, description: "Sentry replay id, 32 hex characters." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/tickets/{ticket_id}:attachment:
     post:
       description: "Custom method attachment: the bytes of one attachment on this ticket."
@@ -9341,7 +9439,7 @@ paths:
                 employee: { type: string, description: "The employee the letter is for, e.g. employees/abc123." }
                 letter_type: { type: string, description: "Template id of the letter to generate (from the letter-templates setting, e.g. offer, increment, appraisal, relieving, experience)." }
                 input: { type: object, additionalProperties: { type: string }, description: "HR-provided values for the template's input fields (e.g. subject, body)." }
-                letterhead: { type: string, description: "Letterhead for this one generation, e.g. letterhead-logos/abc123, overriding the template's own. Empty string = the plain organization logo." }
+                letterhead: { type: string, description: "Letterhead for this one generation, e.g. letterheads/abc123, overriding the template's own. Empty string = the stock page with the organization logo." }
                 esign: { type: boolean, description: "Force e-signature on/off for this one generation, overriding the esign setting's per-template default." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/personal-document' } } } }
@@ -9401,7 +9499,7 @@ paths:
                 employee: { type: string, description: "The employee to render the draft against, e.g. employees/abc123." }
                 template: { type: object, description: "The draft template (id, label, filename, letterhead, inputs, blocks)." }
                 input: { type: object, additionalProperties: { type: string }, description: "Sample values for the template's input fields." }
-                letterhead: { type: string, description: "Letterhead for this preview, e.g. letterhead-logos/abc123, overriding the draft's own. Empty string = the plain organization logo." }
+                letterhead: { type: string, description: "Letterhead for this preview, e.g. letterheads/abc123, overriding the draft's own. Empty string = the stock page with the organization logo." }
       responses:
         '200': { description: The rendered PDF, content: { application/pdf: { schema: { type: string, format: binary } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -9476,6 +9574,16 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/personal-document' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/personal-documents/{personal_document_id}:print:
+    post:
+      description: "Custom method print: the same generated letter re-rendered on its letterhead's PRINT page and returned as a PDF, persisting nothing. Only for letters generated from a template - an uploaded or vendor-signed PDF has no content to re-render and answers 400."
+      operationId: ":PrintPersonalDocument"
+      parameters: [ { in: path, name: personal_document_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/pdf: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/personal-documents/{personal_document_id}:refreshEsign:
     post:
       description: "Custom method refreshEsign: poll the e-sign vendor for a pending document's status and apply it (a fallback to the vendor webhook; applies the signed PDF + locks the document if it has been signed)."
@@ -10257,6 +10365,26 @@ paths:
                   results: { type: array, items: { $ref: '#/components/schemas/celebration' } }
         '403': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/export:record:
+    post:
+      description: "Custom method record: log a bulk export to the audit trail. Exports are generated in the browser from rows already on screen, so without this the highest-risk action in the system - three hundred salaries onto a laptop - leaves no entry at all. Records SHAPE only (collection, format, row count, column names), never values: the rows are the caller's own to read, and copying them into a table read by more people is the leak this endpoint exists to record. It logs what the client CLAIMS; a modified client could misreport the count, which is acceptable because it is accountability rather than a control - anyone who can export can already read those rows through the API."
+      operationId: ":RecordExport"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [collection, format, rows]
+              properties:
+                collection: { type: string, description: "The collection exported, or the view name when the export is not one collection (an attendance register, a leave calendar). A real collection the caller may read anchors the entry in that collection's trail; anything else is recorded against `export` with the name as a label." }
+                format: { type: string, enum: [csv, xlsx] }
+                rows: { type: integer, description: "How many rows left the app." }
+                columns: { type: array, items: { type: string }, description: "Column headers included in the file - which FIELDS left, never their values." }
+      responses:
+        '204': { description: Recorded }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
   /v1/compensation:reapplySplit:
     post:
       description: "Custom method reapplySplit: re-derive the monthly basic + Special Allowance for every current compensation row under the live CTC provisions (settings/ctc), holding each row's annual CTC fixed. Payroll/super only. Shifts take-home org-wide, so it is an explicit action, never automatic."
@@ -10669,10 +10797,10 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { type: object } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
-  /v1/letterhead-logos:
+  /v1/letterheads:
     get:
-      description: List method for letterhead-logo.
-      operationId: ListLetterheadLogos
+      description: List method for letterhead.
+      operationId: ListLetterheads
       parameters:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
@@ -10685,72 +10813,123 @@ paths:
               schema:
                 type: object
                 properties:
-                  results: { type: array, items: { $ref: '#/components/schemas/letterhead-logo' } }
+                  results: { type: array, items: { $ref: '#/components/schemas/letterhead' } }
                   next_page_token: { type: string }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
-      description: Create method for letterhead-logo. Creates the catalogue entry; upload its artwork with :uploadImage.
-      operationId: CreateLetterheadLogo
+      description: Create method for letterhead. Creates the catalogue entry; upload its artwork with :uploadImage and design its page with the `design` property.
+      operationId: CreateLetterhead
       parameters: [ { in: query, name: id, schema: { type: string } } ]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
       responses:
-        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
-  /v1/letterhead-logos/{letterhead_logo_id}:
-    parameters: [ { in: path, name: letterhead_logo_id, required: true, schema: { type: string } } ]
+  /v1/letterheads/{letterhead_id}:
+    parameters: [ { in: path, name: letterhead_id, required: true, schema: { type: string } } ]
     get:
-      description: Get method for letterhead-logo.
-      operationId: GetLetterheadLogo
+      description: Get method for letterhead.
+      operationId: GetLetterhead
       responses:
-        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     patch:
-      description: Update method for letterhead-logo - rename it. The id never changes, so templates keep pointing at it.
-      operationId: UpdateLetterheadLogo
-      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+      description: Update method for letterhead - rename it or replace its page design. The id never changes, so templates keep pointing at it.
+      operationId: UpdateLetterhead
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
       responses:
-        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     delete:
-      description: Delete method for letterhead-logo. Templates keep their letterhead; a deleted one falls back to the organization logo.
-      operationId: DeleteLetterheadLogo
+      description: Delete method for letterhead. Templates keep their letterhead; a deleted one falls back to the stock page with the organization logo.
+      operationId: DeleteLetterhead
       parameters:
         - { in: query, name: force, schema: { type: boolean } }
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/Problem' }
-  /v1/letterhead-logos/{letterhead_logo_id}:restore:
+  /v1/letterheads/{letterhead_id}:restore:
     post:
       description: "Custom method restore: undo a soft-delete."
-      operationId: ":RestoreLetterheadLogo"
-      parameters: [ { in: path, name: letterhead_logo_id, required: true, schema: { type: string } } ]
+      operationId: ":RestoreLetterhead"
+      parameters: [ { in: path, name: letterhead_id, required: true, schema: { type: string } } ]
       responses:
-        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
-  /v1/letterhead-logos/{letterhead_logo_id}:uploadImage:
+  /v1/letterheads/{letterhead_id}:duplicate:
     post:
-      description: "Custom method uploadImage: store this letterhead's artwork (PNG or JPEG, max 256 KB) in object storage."
-      operationId: ":UploadImageLetterheadLogo"
+      description: "Custom method duplicate: copy this letterhead, artwork included, as the basis for a variant. `label` and `design` override what the source holds, so an unsaved draft can be split off into a new letterhead."
+      operationId: ":DuplicateLetterhead"
+      parameters: [ { in: path, name: letterhead_id, required: true, schema: { type: string } } ]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string, description: Name for the copy. Defaults to the source's name with " copy" appended. }
+                design: { type: object, nullable: true, additionalProperties: true, description: Design for the copy. Defaults to the source's own. }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/letterheads/{letterhead_id}:preview:
+    post:
+      description: "Custom method preview: render a sample document on this letterhead and return the PDF, persisting nothing. Pass a `design` to preview an unsaved draft; omit it to preview what is stored."
+      operationId: ":PreviewLetterhead"
+      parameters: [ { in: path, name: letterhead_id, required: true, schema: { type: string } } ]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                design: { type: object, nullable: true, additionalProperties: true, description: The unsaved design to render instead of the stored one. }
+                variant: { type: string, enum: [screen, print], description: "Which of the letterhead's two pages to render; default screen. Ignored when `design` is given, since that IS the page being previewed." }
+      responses:
+        '200': { description: Successful response, content: { application/pdf: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/letterheads/{letterhead_id}:uploadImage:
+    post:
+      description: "Custom method uploadImage: store one of this letterhead's images (PNG or JPEG, max 1 MB) in object storage. `slot` says which - the header mark, the screen stationery, the print stationery or the watermark."
+      operationId: ":UploadImageLetterhead"
       parameters:
-        - { in: path, name: letterhead_logo_id, required: true, schema: { type: string } }
+        - { in: path, name: letterhead_id, required: true, schema: { type: string } }
+        - { in: query, name: variant, schema: { type: string, enum: [screen, print] }, description: "Which version of the letterhead this image belongs to. Default screen. The two versions never share images." }
+        - { in: query, name: slot, schema: { type: string, enum: [mark, stationery, watermark] }, description: "Which job it does in that version. Default mark." }
         - { in: query, name: content_type, schema: { type: string } }
         - { in: query, name: file_name, schema: { type: string } }
       requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
       responses:
-        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead-logo' } } } }
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
-  /v1/letterhead-logos/{letterhead_logo_id}:image:
+  /v1/letterheads/{letterhead_id}:image:
     post:
-      description: "Custom method image: the letterhead's artwork bytes, for the branding editor's preview."
-      operationId: ":ImageLetterheadLogo"
+      description: "Custom method image: one of the letterhead's images, for the branding editor's thumbnails."
+      operationId: ":ImageLetterhead"
       parameters:
-        - { in: path, name: letterhead_logo_id, required: true, schema: { type: string } }
+        - { in: path, name: letterhead_id, required: true, schema: { type: string } }
+        - { in: query, name: variant, schema: { type: string, enum: [screen, print] }, description: "Which version to read it from. Default screen." }
+        - { in: query, name: slot, schema: { type: string, enum: [mark, stationery, watermark] }, description: "Which image to read. Default mark." }
       responses:
         '200': { description: Successful response, content: { image/png: { schema: { type: string, format: binary } }, image/jpeg: { schema: { type: string, format: binary } } } }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/letterheads/{letterhead_id}:deleteImage:
+    post:
+      description: "Custom method deleteImage: remove one of the letterhead's images. The other images and the design are untouched; a band that drew this one then draws none."
+      operationId: ":DeleteImageLetterhead"
+      parameters:
+        - { in: path, name: letterhead_id, required: true, schema: { type: string } }
+        - { in: query, name: variant, schema: { type: string, enum: [screen, print] }, description: "Which version to remove it from. Default screen." }
+        - { in: query, name: slot, schema: { type: string, enum: [mark, stationery, watermark] }, description: "Which image to remove. Default mark." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/letterhead' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
   /v1/payroll-debit-accounts:

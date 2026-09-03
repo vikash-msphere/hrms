@@ -54,12 +54,44 @@ const LABELERS: Record<string, Labeler> = {
   "check-ins": (r) => u(shortDate(get(r, "meeting_date"))),
   "settlements": (r) => u(shortDate(get(r, "settlement_date"))),
   "benefit-enrollments": (r) => u(shortDate(get(r, "effective_date"))),
+  // A revision's own fact is the date it takes effect - which is also what tells two revisions of the same
+  // salary apart in the feed, since the row carries no name of any kind.
+  "compensation": (r) => u(shortDate(get(r, "effective_from"))),
   "notice-periods": (r) => u(shortDate(get(r, "last_working_day"))),
   "reimbursements": (r) => u(clip(txt(get(r, "description")))),
   "expenses": (r) => u(clip(txt(get(r, "description")) || txt(get(r, "invoice_number")))),
   "loans": (r) => u(txt(get(r, "kind"))),
   "bonuses": (r) => u(txt(get(r, "kind"))),
   "expense-budgets": (r) => u(txt(get(r, "period_key"))),
+
+  // Rows with no name column of any kind. Without an entry here the feed can only say "Review" or "Offer" -
+  // true, and useless the moment there are two of them. Each labeler names the one on-row fact that tells this
+  // record apart from its siblings: a date for the dated, a state for the stateful, the person or thing it is
+  // ABOUT for the rest. Never a joined value - the label is computed at write time from the row in hand, and a
+  // read to decorate an audit entry is a read this app does not have to spare.
+  "applications": (r) => u([txt(get(r, "stage")), txt(get(r, "status"))].filter(Boolean).join(" · ")),
+  "approval-delegations": (r) => u(dateRange(get(r, "from_date"), get(r, "to_date"))),
+  "attendance": (r) => u(shortDate(get(r, "date"))),
+  "cron-runs": (r) => u([txt(get(r, "cron")), txt(get(r, "status"))].filter(Boolean).join(" · ")),
+  "holiday-selections": (r) => u(shortDate(get(r, "created_at"))),
+  "interview-feedback": (r) => u(txt(get(r, "recommendation"))),
+  "leave-encashments": (r) => u(txt(get(r, "state"))),
+  // The offer's own dates; its candidate lives on the application it points at, which is a join away.
+  "offers": (r) => u(shortDate(get(r, "offer_date")) || txt(get(r, "status"))),
+  "operations": (r) => u(txt(get(r, "kind"))),
+  "payslips": (r) => u(shortDate(get(r, "created_at"))),
+  // Effective-dated history, same as compensation: the date it takes effect is what distinguishes revisions.
+  "positions": (r) => u(shortDate(get(r, "effective_from"))),
+  "referrals": (r) => u(txt(get(r, "candidate_name"))),
+  "review-feedback": (r) => u(txt(get(r, "state"))),
+  "reviews": (r) => u(txt(get(r, "state"))),
+  "users": (r) => u(txt(get(r, "email"))),
+  // A request/balance/run is about a thing the row only holds an id for. The STATE is the honest on-row fact,
+  // and it is also the one that changes - which is what a trail is read for.
+  "asset-requests": (r) => u(txt(get(r, "state"))),
+  "document-acknowledgements": (r) => u(shortDate(get(r, "acknowledged_time"))),
+  "leave-balances": (r) => u(txt(String(get(r, "balance_days") ?? "")) && `${get(r, "balance_days")} days`),
+  "payroll-runs": (r) => u(txt(get(r, "state"))),
 };
 
 // The label for a record. A per-collection labeler wins for transactional rows (so a stray name-ish column can't

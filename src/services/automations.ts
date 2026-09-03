@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, removedMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, forbidden } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
 import { paginate } from "../http/pagination";
@@ -94,7 +94,7 @@ export async function createAutomation(deps: Deps, actor: AppUser, input: Automa
       createdBy: actor.uuid === "system" ? null : actor.uuid,
     })
     .returning())[0]!;
-  await audit(deps, actor, "automation.create", "automations", row.uuid, undefined, row);
+  await audit(deps, actor, "automation.create", "automations", row.uuid, createdMeta(row, "automations"), row);
   invalidateAutomationCache();
   return row;
 }
@@ -132,7 +132,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
     set.lastScheduledOn = null;
   }
   const updated = (await deps.db.update(schema.automations).set(set).where(eq(schema.automations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "automation.update", "automations", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "automation.update", "automations", id, diffMeta(row, updated, set, "automations"), updated);
   invalidateAutomationCache();
   return updated;
 }
@@ -143,7 +143,8 @@ export async function deleteAutomation(deps: Deps, actor: AppUser, id: string, i
   assertNotLocked(row);
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   await deps.db.delete(schema.automations).where(eq(schema.automations.uuid, id));
-  await audit(deps, actor, "automation.delete", "automations", id);
+  // A hard delete: the rule and its trigger/action wiring survive only as this entry.
+  await audit(deps, actor, "automation.delete", "automations", id, removedMeta(row, "automations"), row);
   invalidateAutomationCache();
 }
 
@@ -155,7 +156,8 @@ export async function setAutomationEnabled(deps: Deps, actor: AppUser, id: strin
   const row = (await deps.db.select().from(schema.automations).where(eq(schema.automations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("automation not found");
   const updated = (await deps.db.update(schema.automations).set({ disabled: !enabled, updatedAt: new Date() }).where(eq(schema.automations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, `automation.${enabled ? "enable" : "disable"}`, "automations", id);
+  // A rule silently switched off is the hardest automation bug to find, so record the flip explicitly.
+  await audit(deps, actor, `automation.${enabled ? "enable" : "disable"}`, "automations", id, { diff: { disabled: { from: row.disabled, to: !enabled } } }, updated);
   invalidateAutomationCache();
   return updated;
 }

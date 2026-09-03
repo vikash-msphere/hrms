@@ -101,7 +101,7 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
   ];
 
   return (
-    <Card>
+    <Card className="sentry-mask">
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">
           <AccessAction collection="employees" objectPath={`employees/${employeeId}`} field="bank-account" label="Bank details">
@@ -129,7 +129,7 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
       </CardContent>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (canSave) save(); }}>
+        <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (canSave) save(); }}>
           <AccessScope collection="employees" objectPath={`employees/${employeeId}`}>
           <DialogHeader>
             <DialogTitle>{data?.on_file ? "Edit bank details" : "Add bank details"}</DialogTitle>

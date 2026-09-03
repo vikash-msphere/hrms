@@ -98,9 +98,12 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
   },
   "tax-declarations": { verify: { label: "Verify", description: "Accept the declared investment with its proof." } },
   "bank-formats": { uploadTemplate: { label: "Upload template", description: "Replace the bank file template." } },
-  "letterhead-logos": {
-    uploadImage: { label: "Upload artwork", description: "Replace the letterhead's logo image." },
-    image: { label: "View artwork", description: "See the logo image itself, not just its name." },
+  letterheads: {
+    uploadImage: { label: "Upload artwork", description: "Add or replace one of the letterhead's images." },
+    image: { label: "View artwork", description: "See the images themselves, not just their names." },
+    deleteImage: { label: "Remove artwork", description: "Delete one of the letterhead's images." },
+    preview: { label: "Preview page", description: "Render a sample document on this letterhead." },
+    duplicate: { label: "Duplicate", description: "Copy this letterhead, artwork and all, as a new one." },
   },
   operations: { run: { label: "Run", description: "Execute the maintenance job." } },
   "cron-runs": { run: { label: "Run now", description: "Fire a scheduled tick on demand." } },
@@ -109,7 +112,12 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
     test: { label: "Test rule", description: "Dry-run against a sample event; nothing executes." },
   },
   "org-documents": { acknowledge: { label: "Acknowledge", description: "Sign off on the policy version." }, download: { label: "Download" } },
-  "personal-documents": { sign: { label: "E-sign", description: "Sign the letter in place (owner only)." }, refreshEsign: { label: "Refresh e-sign status" }, download: { label: "Download" } },
+  "personal-documents": {
+    sign: { label: "E-sign", description: "Sign the letter in place (owner only)." },
+    refreshEsign: { label: "Refresh e-sign status" },
+    download: { label: "Download" },
+    print: { label: "Print copy", description: "Re-render the letter on its letterhead's print page." },
+  },
   offers: {
     extend: { label: "Extend", description: "Send the approved offer to the candidate." },
     accept: { label: "Accept", description: "Record acceptance and enable employee conversion." },

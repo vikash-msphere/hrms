@@ -316,9 +316,11 @@ export async function upload<T>(path: string, file: File, opts: { verb?: string;
 }
 
 /** Invoke an AEP custom method, e.g. invoke("payroll-runs/abc", "approve", etag). Pass `body` for verbs
- *  that take arguments (e.g. tickets :assign / :comment / :prioritize). */
-export function invoke<T>(path: string, verb: string, etag?: string, body?: Record<string, unknown>): Promise<T> {
-  return withInvalidation(path, verb, api<T>(`/${path}:${verb}`, {
+ *  that take arguments (e.g. tickets :assign / :comment / :prioritize), `params` for the few that are
+ *  addressed by query instead (e.g. letterheads :deleteImage, which names an image slot). */
+export function invoke<T>(path: string, verb: string, etag?: string, body?: Record<string, unknown>, params?: Record<string, string>): Promise<T> {
+  const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
+  return withInvalidation(path, verb, api<T>(`/${path}:${verb}${qs}`, {
     method: "POST",
     headers: etag ? { "If-Match": etag } : {},
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -358,6 +360,24 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
  *  (pdf.js) rather than handing it to the browser's own viewer, so no object URL is minted or leaked. */
 export function blobOf(path: string, opts: BinaryOpts = {}): Promise<Blob> {
   return postBinary(path, opts);
+}
+
+/**
+ * Fetch a binary custom method as a DATA URL - a plain string that stays valid for as long as it is held.
+ *
+ * For an `<img>` that lives as long as its component, this is the right tool and an object URL is the wrong
+ * one: object URLs have to be revoked by hand, and a component that re-fetches (a new upload, a switched tab)
+ * races its own cleanup, revoking the URL the DOM is still displaying and blanking the image. Nothing to
+ * revoke here, so nothing to get wrong. Use `blobUrl` for big things a viewer streams, like a PDF.
+ */
+export async function dataUrl(path: string, opts: BinaryOpts = {}): Promise<string> {
+  const blob = await postBinary(path, opts);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("could not read the image"));
+    reader.onload = () => resolve(reader.result as string);
+    reader.readAsDataURL(blob);
+  });
 }
 
 /** Fetch a binary custom method for INLINE viewing and return an object URL (feed it to an iframe).

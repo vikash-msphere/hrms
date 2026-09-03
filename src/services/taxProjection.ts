@@ -11,7 +11,7 @@ import { getSettingValue } from "./settings";
 import { applyStructure, type StructureLine } from "../domain/payroll";
 import { round2 } from "../domain/money";
 import { allStructureLines } from "./salaryStructures";
-import { DEFAULT_TAX_CONFIG, computeAnnualTax, monthlyTds, allowedDeductions, assertSupportedRegime, type TaxConfig, type RegimeConfig, type TaxBreakdown, type DeductionRow } from "../domain/incomeTax";
+import { DEFAULT_TAX_CONFIG, fyLabels, computeAnnualTax, monthlyTds, allowedDeductions, assertSupportedRegime, type TaxConfig, type RegimeConfig, type TaxBreakdown, type DeductionRow } from "../domain/incomeTax";
 import { refPayComponents, refPayPeriods } from "../lib/refData";
 
 // The stored (encrypted) tax-details blob. Prior-employer income/TDS are employee-DECLARED; HR/payroll then
@@ -70,8 +70,7 @@ export function fyWindow(asOf: Date) {
   const sy = asOf.getUTCMonth() >= 3 ? y : y - 1; // Apr = month 3
   const start = new Date(Date.UTC(sy, 3, 1));
   const end = new Date(Date.UTC(sy + 1, 2, 31, 23, 59, 59, 999));
-  const yy = (n: number) => String(n % 100).padStart(2, "0");
-  return { start, end, financialYear: `${sy}-${yy(sy + 1)}`, assessmentYear: `${sy + 1}-${yy(sy + 2)}` };
+  return { start, end, ...fyLabels(sy) };
 }
 
 // Monthly recurring GROSS = basic + recurring earning components + the Special Allowance plug of a top-down
@@ -287,7 +286,7 @@ export async function settlementTotals(
 }
 
 export async function currentComp(deps: Deps, employeeId: string) {
-  return (await deps.db.select().from(schema.compensation).where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.effectiveTo))).limit(1))[0];
+  return (await deps.db.select().from(schema.compensation).where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.effectiveTo), isNull(schema.compensation.deleteTime))).limit(1))[0];
 }
 
 export type TaxProjection = {
@@ -318,6 +317,11 @@ export type TaxProjection = {
 // but it can no longer collect TDS.
 export function assembleProjection(args: {
   cfg: TaxConfig;
+  // The financial year actually being withheld for, from `fyWindow` on the period/settlement date. Required
+  // and separate from `cfg` on purpose: `cfg.financialYear` stamps which Budget's SLABS are loaded, which is
+  // a different fact and is routinely a year behind. Labelling the projection from the config is how a
+  // FY 2026-27 payslip ends up captioned "FY 2025-26" on the Tax page while the arithmetic is correct.
+  fy: { financialYear: string; assessmentYear: string };
   regime: string;
   tdsConfigured: boolean;
   employedMonths: number;
@@ -354,8 +358,8 @@ export function assembleProjection(args: {
   return {
     regime: args.regime,
     regimeLabel: regimeCfg.label,
-    assessmentYear: args.cfg.assessmentYear,
-    financialYear: args.cfg.financialYear,
+    assessmentYear: args.fy.assessmentYear,
+    financialYear: args.fy.financialYear,
     tdsConfigured: args.tdsConfigured,
     annualGross: Math.round(annualGross),
     priorEmployerIncome: prior,
@@ -397,7 +401,7 @@ export async function getEmployeeTaxProjection(deps: Deps, employee: typeof sche
   const fy = fyWindow(asOf);
   // The whole salary history, not just the open row: an unpaid month before a raise (or before a future-dated
   // raise) must be projected at the salary that applies in THAT month.
-  const timeline = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, employee.uuid));
+  const timeline = await deps.db.select().from(schema.compensation).where(and(eq(schema.compensation.employeeId, employee.uuid), isNull(schema.compensation.deleteTime)));
   const pricer = compGrossPricer(components, await allStructureLines(deps));
   const employedMonths = employedMonthsInFy(employee.startDate ?? null, fy, employee.endDate ?? null);
   const t = (await finalizedTotals(deps, fy, undefined, employee.uuid)).get(employee.uuid) ?? EMPTY_FINALIZED_TOTALS();
@@ -409,7 +413,7 @@ export async function getEmployeeTaxProjection(deps: Deps, employee: typeof sche
   // earnings and the tax it withheld into the year, else the page understates both.
   const settled = await settlementTotals(deps, fy, employee.uuid);
   return assembleProjection({
-    cfg, regime, tdsConfigured: !!tds, employedMonths,
+    cfg, fy, regime, tdsConfigured: !!tds, employedMonths,
     paidGross: t.taxableGross + settled.taxableGross, paidTax: t.tax + settled.tax,
     collectMonths, projectedGross: projected, decl,
     declaredDeductions: await verifiedDeductions(deps, employee.uuid, fy.financialYear),

@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { emitEvent } from "./eventBus";
@@ -159,7 +159,7 @@ export async function createGoal(deps: Deps, actor: AppUser, input: GoalInput, i
         : {}),
     })
     .returning())[0]!;
-  await audit(deps, actor, "goal.create", "goals", row.uuid, undefined, row);
+  await audit(deps, actor, "goal.create", "goals", row.uuid, createdMeta(row, "goals"), row);
   // A goal assigned TO someone else (a manager setting a report's goal) notifies the owner.
   if (employeeId !== actor.employeeId)
     await notify(deps, { recipient: employeeId, type: "goal.assigned", title: "New goal assigned", body: row.title, link: "goals", subject: `goals/${row.uuid}`, actorId: actor.employeeId });
@@ -203,7 +203,7 @@ export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: 
   // a completed goal: closing one is a decision, and a corrected number should not undo it.
   if (set.progress === 100 && row.status !== "completed" && !has("status")) set.status = "completed";
   const updated = (await deps.db.update(schema.goals).set(set).where(eq(schema.goals.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "goal.update", "goals", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "goal.update", "goals", id, diffMeta(row, updated, set, "goals"), updated);
   if (has("progress") || has("status") || set.progress != null) await emitGoalProgress(deps, actor, updated);
   return updated;
 }
@@ -224,7 +224,7 @@ export async function commentGoal(deps: Deps, actor: AppUser, id: string, body?:
   const text = (body ?? "").trim();
   if (!text) throw invalidArgument("a comment body is required");
   await deps.db.insert(schema.goalComments).values({ goalId: id, authorId: actor.employeeId ?? null, authorEmail: actor.email, body: text });
-  await audit(deps, actor, "goal.comment", "goals", id);
+  await audit(deps, actor, "goal.comment", "goals", id, { employee: `employees/${row.employeeId}`, note: text.length > 140 ? `${text.slice(0, 140)}…` : text }, row);
   // The other party is told, because a comment nobody sees is a comment nobody answers: the owner hears from a
   // manager, and the manager hears from their report.
   const other = actor.employeeId === row.employeeId ? await managerIdOf(deps, row.employeeId) : row.employeeId;

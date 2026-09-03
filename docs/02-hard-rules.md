@@ -28,6 +28,9 @@ breaking the rule fails `npm run verify` rather than waiting for review.
   cache; async work is the `jobs` table drained by cron; the session is an HttpOnly cookie.
 - **Bypass `round2` / `sum2` for money**, or write a money value that did not come from them. Money is
   stored as `real`; the rounding discipline is what keeps it exact (`src/db/schema.ts:6`).
+  `test/moneyDrift.test.ts` enforces it: it fails on an arithmetic write to a money column that was not
+  routed through `round2`/`sum2`, and it fails on a new `real` column that the test does not classify as
+  money or not - so adding one means deciding, there, which it is.
 - **Keep more than one migration.** The project is greenfield: after a schema change, squash back to `0000`
   (remove the sql + meta snapshot, empty the journal, `npm run db:generate`).
 - **Put a comma inside an inline `{ }` description in `openapi.yaml`.** It crashes the linter; see

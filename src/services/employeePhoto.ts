@@ -39,7 +39,9 @@ export async function uploadPhoto(deps: Deps, actor: AppUser, employeeId: string
   const key = `photos/${emp.uuid}`;
   await deps.docs.put(key, bytes, "image/jpeg");
   const [updated] = await deps.db.update(schema.employees).set({ photoKey: key, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
-  await audit(deps, actor, "employee.photo.update", "employees", emp.uuid);
+  // Whether there IS one and how big, never the image. Replacing a photo and setting a first one are
+  // different acts and the trail should be able to tell them apart.
+  await audit(deps, actor, "employee.photo.update", "employees", emp.uuid, { diff: { photo: { from: emp.photoKey ? "an image" : null, to: `${bytes.byteLength} bytes` } } }, updated);
   return updated!;
 }
 
@@ -47,7 +49,7 @@ export async function clearPhoto(deps: Deps, actor: AppUser, employeeId: string)
   const emp = await loadEmployee(deps, employeeId);
   if (emp.photoKey) await deps.docs.delete(emp.photoKey);
   const [updated] = await deps.db.update(schema.employees).set({ photoKey: null, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
-  await audit(deps, actor, "employee.photo.clear", "employees", emp.uuid);
+  await audit(deps, actor, "employee.photo.clear", "employees", emp.uuid, { diff: { photo: { from: emp.photoKey ? "an image" : null, to: null } } }, updated);
   return updated!;
 }
 
@@ -104,7 +106,7 @@ export async function uploadSignature(deps: Deps, actor: AppUser, employeeId: st
   const key = `signatures/${emp.uuid}`;
   await deps.docs.put(key, bytes, contentType || "image/png");
   const [updated] = await deps.db.update(schema.employees).set({ signatureKey: key, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
-  await audit(deps, actor, "employee.signature.update", "employees", emp.uuid);
+  await audit(deps, actor, "employee.signature.update", "employees", emp.uuid, { diff: { signature: { from: emp.signatureKey ? "an image" : null, to: `${bytes.byteLength} bytes` } } }, updated);
   return updated!;
 }
 
@@ -113,7 +115,7 @@ export async function clearSignature(deps: Deps, actor: AppUser, employeeId: str
   const emp = await loadEmployee(deps, employeeId);
   if (emp.signatureKey) await deps.docs.delete(emp.signatureKey);
   const [updated] = await deps.db.update(schema.employees).set({ signatureKey: null, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
-  await audit(deps, actor, "employee.signature.clear", "employees", emp.uuid);
+  await audit(deps, actor, "employee.signature.clear", "employees", emp.uuid, { diff: { signature: { from: emp.signatureKey ? "an image" : null, to: null } } }, updated);
   return updated!;
 }
 

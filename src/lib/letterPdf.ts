@@ -1,5 +1,7 @@
-import { PDFDocument, PDFFont, PDFPage, StandardFonts, type Color } from "pdf-lib";
-import { DARK, SLATE, MUTED, HAIR, FAINT, PAGE_W, PAGE_H, enc, embedLogo } from "./pdfPrimitives";
+import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb, type Color } from "pdf-lib";
+import { DARK as INK_STOCK, SLATE as BODY_STOCK, MUTED as MUTED_STOCK, HAIR as HAIR_STOCK, FAINT as FAINT_STOCK, PAGE_W, PAGE_H, enc, embedLogo } from "./pdfPrimitives";
+import { hexToRgb01 } from "../domain/brand";
+import { STOCK_LETTERHEAD, fillTokens, type LetterheadDesign, type LetterheadSlot, type LetterheadToken } from "../domain/letterhead";
 
 // Generic A4 letterhead renderer for HR letters (offer, increment, appraisal, relieving, experience), mirroring
 // offer-letter.html: a company name/address + logo header with a heavy rule, serif justified-ish body with
@@ -33,12 +35,21 @@ export type LetterBlock =
   | { kind: "gap"; height: number }
   | { kind: "pageBreak" };
 
+// The page the letter is printed on: the chosen letterhead's design plus its artwork as a data URL. Absent =
+// the stock page with the organization logo, which is what every document rendered before letterheads carried
+// a design. Frozen into a letter's content sidecar alongside the blocks, so a re-render (an in-app e-sign)
+// reproduces the very page the recipient saw even if the letterhead is edited afterwards.
+export type LetterheadSpec = { design: LetterheadDesign; artwork?: Partial<Record<LetterheadSlot, string>> };
+
 export type LetterContent = {
-  org: { name: string; address?: string; logo?: string };
+  org: { name: string; address?: string; logo?: string; legalName?: string };
   date: string; // pre-formatted, e.g. "13 June 2026"
   ref?: string; // optional reference line
   to: { name: string; lines?: string[] };
   blocks: LetterBlock[];
+  letterhead?: LetterheadSpec;
+  /** `letterheads/<id>` this was rendered on, so a re-render can fetch its artwork and its print page. */
+  letterheadRef?: string;
 };
 
 // Where an `esignature` placeholder actually landed on the rendered page - captured so a vendor that must be
@@ -48,22 +59,74 @@ export type LetterContent = {
 export type SignAnchor = { page: number; x1: number; y1: number; x2: number; y2: number };
 export type RenderedLetter = { bytes: Uint8Array; signAnchors: SignAnchor[] };
 
-const ML = 54; // left margin
-const MR = 541; // right edge of content
-const MT = PAGE_H - 54; // top start (below page edge)
-const MB = 56; // bottom margin (stop drawing below this)
-const WIDTH = MR - ML;
+// US Letter, for a design that asks for it; A4 (pdfPrimitives PAGE_W/PAGE_H) is the default.
+const LETTER_W = 612;
+const LETTER_H = 792;
 
 export async function renderLetterPdf(content: LetterContent): Promise<RenderedLetter> {
   const doc = await PDFDocument.create();
-  // Serif body for a formal feel; monospaced figures so table money columns align like a ledger.
-  const font = await doc.embedFont(StandardFonts.TimesRoman);
-  const bold = await doc.embedFont(StandardFonts.TimesRomanBold);
+
+  // ── The page design. Every band falls back to STOCK, so a letter with no letterhead - and a letterhead with
+  //    an empty design - renders exactly as this engine always did. ─────────────────────────────────────────
+  const design: LetterheadDesign = content.letterhead?.design ?? {};
+  const pageOpts = { ...STOCK_LETTERHEAD.page, ...design.page };
+  const margin = { ...STOCK_LETTERHEAD.page.margin, ...design.page?.margin } as { top: number; right: number; bottom: number; left: number };
+  const bg = { ...STOCK_LETTERHEAD.background, ...design.background };
+  const head = { ...STOCK_LETTERHEAD.header, ...design.header };
+  const foot = { ...STOCK_LETTERHEAD.footer, ...design.footer };
+
+  const PW = pageOpts.size === "letter" ? LETTER_W : PAGE_W;
+  const PH = pageOpts.size === "letter" ? LETTER_H : PAGE_H;
+  const paint = (hex: string | undefined, stock: Color): Color => (hex ? rgb(...hexToRgb01(hex)) : stock);
+  // Shadowing the stock palette keeps every block below writing DARK/SLATE/... while the design decides what
+  // those actually are. FAINT follows the hairline when one is set, so row rules stay in the same family.
+  const DARK = paint(pageOpts.ink, INK_STOCK);
+  const SLATE = paint(pageOpts.ink, BODY_STOCK);
+  const MUTED = paint(pageOpts.muted, MUTED_STOCK);
+  const HAIR = paint(pageOpts.hairline, HAIR_STOCK);
+  const FAINT = paint(pageOpts.hairline, FAINT_STOCK);
+  const ACCENT = paint(pageOpts.accent ?? pageOpts.ink, INK_STOCK);
+
+  const ML = margin.left;
+  const MR = PW - margin.right;
+  const MT = PH - margin.top;
+  const WIDTH = MR - ML;
+  const footerOn = (pageNo: number) => (foot.pages === "first" ? pageNo === 1 : foot.pages === "continuation" ? pageNo > 1 : true);
+  // Content stops above the footer band, not at the bottom margin, so a long letter can never run into it.
+  const MB = margin.bottom + (foot.show ? (foot.height ?? 26) : 0);
+
+  // Serif body for a formal feel (Helvetica when the design asks for sans); monospaced figures so table money
+  // columns align like a ledger whichever body face is in use.
+  const serif = pageOpts.font !== "sans";
+  const font = await doc.embedFont(serif ? StandardFonts.TimesRoman : StandardFonts.Helvetica);
+  const bold = await doc.embedFont(serif ? StandardFonts.TimesRomanBold : StandardFonts.HelveticaBold);
   const mono = await doc.embedFont(StandardFonts.Courier);
   const monoBold = await doc.embedFont(StandardFonts.CourierBold);
-  const logo = await embedLogo(doc, content.org.logo);
+  // The artwork is the row's own image when there is one; a letter with no letterhead still gets the
+  // organization logo as its mark, which is the behaviour every document had before designs existed.
+  // A letterhead holds several images by slot; each band draws the one its design names. Only the slots the
+  // design uses were fetched, so anything else is simply absent here.
+  // Three INDEPENDENT bands, each naming its own image: the header mark, the stationery under the sheet, and
+  // the watermark. Any combination is legal - turning one off leaves the other two exactly as they were.
+  // This version's own images, one per job. An image IS its job: the mark is the header logo, the stationery
+  // is the sheet, the watermark is the wash. A slot with no image draws nothing, and `show: false` keeps the
+  // image but stops drawing it.
+  const images = content.letterhead?.artwork ?? {};
+  const mark = { ...STOCK_LETTERHEAD.header.mark, ...design.header?.mark };
+  const logo = mark.show === false ? null : ((await embedLogo(doc, images.mark)) ?? (await embedLogo(doc, content.org.logo)));
+  const pageArt = bg.show === false ? null : await embedLogo(doc, images.stationery);
+  const wmImage = design.watermark?.show === false ? null : await embedLogo(doc, images.watermark);
 
-  let page: PDFPage = doc.addPage([PAGE_W, PAGE_H]);
+  // Tokens a header line, footer cell or watermark may interpolate. `page`/`pages` are filled per page in the
+  // footer pass, where the total is finally known.
+  const tokens: Partial<Record<LetterheadToken, string>> = {
+    org_name: content.org.name || "",
+    legal_name: content.org.legalName || content.org.name || "",
+    address: (content.org.address || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(", "),
+    date: content.date,
+  };
+
+  let page: PDFPage = doc.addPage([PW, PH]);
   let y = MT;
   let firstPage = true;
   let pageIndex = 1; // 1-based page the cursor is on; captured with each e-signature anchor
@@ -77,36 +140,118 @@ export async function renderLetterPdf(content: LetterContent): Promise<RenderedL
   const rule = (x1: number, yy: number, x2: number, thickness = 0.5, color = HAIR) =>
     page.drawLine({ start: { x: x1, y: yy }, end: { x: x2, y: yy }, thickness, color });
 
-  // Letterhead: company name + address (left), logo (right), heavy rule. Drawn full on page 1; a slim
-  // repeat (name + rule) tops continuation pages so a multi-page letter still reads as one document.
+  // Draw a line of header text at its own alignment, and return the height it consumed.
+  function headerLine(s: string, size: number, f: PDFFont, color: Color, align: "left" | "center" | "right", yy: number) {
+    const filled = fillTokens(s, tokens);
+    const x = align === "left" ? ML : align === "right" ? MR - w(filled, f, size) : ML + (WIDTH - w(filled, f, size)) / 2;
+    text(filled, x, yy, f, size, color);
+  }
+
+  // The header band: company name + address + any extra lines, with the mark on the chosen side and a rule
+  // under the lot. Drawn full on page 1; `repeat` decides what continuation pages get, so a multi-page letter
+  // still reads as one document. A design that turns the band off (its artwork already draws one) reserves
+  // `header.height` of blank instead, which is what keeps the body clear of pre-printed stationery.
   function drawHeader(full: boolean) {
-    if (full) {
-      text((content.org.name || "").toUpperCase(), ML, y, bold, 10, DARK);
-      let ay = y - 13;
-      for (const ln of (content.org.address || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
-        text(ln, ML, ay, font, 7.5, MUTED); ay -= 10;
-      }
-      if (logo) {
-        const h = 46, scale = h / logo.height, lw = logo.width * scale;
-        page.drawImage(logo, { x: MR - lw, y: y - h + 8, width: lw, height: h });
-        ay = Math.min(ay, y - h + 8);
-      }
-      y = ay - 8;
-      rule(ML, y, MR, 2, DARK);
-      y -= 24;
-    } else {
-      text((content.org.name || "").toUpperCase(), ML, y, bold, 7.5, MUTED);
-      y -= 8;
-      rule(ML, y, MR, 0.75, HAIR);
-      y -= 18;
+    const variant = full ? "full" : (head.repeat ?? "slim");
+    if (head.show === false || variant === "none") {
+      y -= head.height ?? 0;
+      return;
     }
+    if (variant === "slim") {
+      const name = head.name?.text || content.org.name || "";
+      text(head.name?.case === "asis" ? name : name.toUpperCase(), ML, y, bold, 7.5, MUTED);
+      y -= 8;
+      if (head.rule?.show !== false) rule(ML, y, MR, 0.75, HAIR);
+      y -= 18;
+      return;
+    }
+
+    const top = y;
+    const nameCfg = head.name ?? {};
+    let ay = y;
+    if (nameCfg.show !== false) {
+      const raw = nameCfg.text || content.org.name || "";
+      const size = nameCfg.size ?? 10;
+      headerLine(nameCfg.case === "asis" ? raw : raw.toUpperCase(), size, nameCfg.weight === "regular" ? font : bold, paint(nameCfg.color, DARK), "left", ay);
+      ay -= size + 3;
+    }
+    const addrCfg = head.address ?? {};
+    if (addrCfg.show !== false) {
+      const size = addrCfg.size ?? 7.5;
+      const lines = (addrCfg.text ?? content.org.address ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      for (const ln of lines) {
+        headerLine(ln, size, font, paint(addrCfg.color, MUTED), "left", ay);
+        ay -= size + 2.5;
+      }
+    }
+    for (const ln of head.lines ?? []) {
+      const size = ln.size ?? 7.5;
+      headerLine(ln.text, size, ln.weight === "bold" ? bold : font, paint(ln.color, MUTED), ln.align ?? "left", ay);
+      ay -= size + 2.5;
+    }
+    if (logo) {
+      const h = mark.height ?? 46;
+      const scale = h / logo.height;
+      const lw = logo.width * scale;
+      const x = mark.align === "left" ? ML : mark.align === "center" ? ML + (WIDTH - lw) / 2 : MR - lw;
+      page.drawImage(logo, { x, y: top - h + 8, width: lw, height: h });
+      ay = Math.min(ay, top - h + 8);
+    }
+    // A fixed height pins where the body starts regardless of how many lines the band drew - the setting that
+    // makes a design line up with artwork that was measured in a design tool.
+    y = head.height != null ? top - head.height : ay - 8;
+    if (head.rule?.show !== false) {
+      y -= head.rule?.gap ?? 0;
+      rule(ML, y, MR, head.rule?.weight ?? 2, paint(head.rule?.color, ACCENT));
+    }
+    y -= 24;
+  }
+
+  // Full-bleed stationery and the watermark go down before anything else on the sheet, so the body prints on
+  // top of them rather than under them.
+  function drawPageFurniture(pageNo: number) {
+    if (pageArt && (bg.pages === "all" || pageNo === 1)) {
+      const scale = Math.max(PW / pageArt.width, PH / pageArt.height); // cover: no bare margin on any edge
+      const iw = pageArt.width * scale;
+      const ih = pageArt.height * scale;
+      page.drawImage(pageArt, { x: (PW - iw) / 2, y: (PH - ih) / 2, width: iw, height: ih, opacity: bg.opacity ?? 1 });
+    }
+    // An image watermark wins over text; with neither there is nothing to wash across the sheet.
+    const wm = design.watermark ?? {};
+    if (wm.show === false || (!wm.text && !wmImage)) return;
+    const opacity = wm.opacity ?? 0.08;
+    const angle = wm.angle ?? 45;
+    if (wmImage) {
+      const h = wm.size ?? 260;
+      const scale = h / wmImage.height;
+      const iw = wmImage.width * scale;
+      page.drawImage(wmImage, { x: (PW - iw) / 2, y: (PH - h) / 2, width: iw, height: h, opacity, rotate: degrees(angle) });
+      return;
+    }
+    if (!wm.text) return;
+    const size = wm.size ?? 72;
+    const s = enc(fillTokens(wm.text, tokens));
+    const tw = bold.widthOfTextAtSize(s, size);
+    const rad = (angle * Math.PI) / 180;
+    // Rotation pivots on the anchor, so step back along the rotated baseline to land the string's MIDDLE at
+    // the middle of the sheet.
+    page.drawText(s, {
+      x: PW / 2 - (tw / 2) * Math.cos(rad),
+      y: PH / 2 - (tw / 2) * Math.sin(rad) - size * 0.35,
+      size,
+      font: bold,
+      color: paint(wm.color, MUTED),
+      opacity,
+      rotate: degrees(angle),
+    });
   }
 
   function newPage() {
-    page = doc.addPage([PAGE_W, PAGE_H]);
+    page = doc.addPage([PW, PH]);
     y = MT;
     firstPage = false;
     pageIndex++;
+    drawPageFurniture(pageIndex);
     drawHeader(false);
   }
 
@@ -115,6 +260,7 @@ export async function renderLetterPdf(content: LetterContent): Promise<RenderedL
     if (y - h < MB) newPage();
   }
 
+  drawPageFurniture(1);
   drawHeader(true);
 
   // ── Word-wrap a paragraph of runs at WIDTH, switching fonts per run; returns nothing (advances y). ──
@@ -336,6 +482,36 @@ export async function renderLetterPdf(content: LetterContent): Promise<RenderedL
     }
   }
 
-  void firstPage; // (tracked for header variant; no trailing footer needed)
+  void firstPage; // (tracked for the header variant)
+
+  // ── Footer band, drawn once the page count is known so {{page}} of {{pages}} can be honest. Content already
+  //    stopped above this band (MB), so nothing here can land on top of a paragraph. ───────────────────────
+  const sheets = doc.getPages();
+  if (foot.show === true) {
+    const size = foot.size ?? 7.5;
+    const height = foot.height ?? 26;
+    const color = paint(foot.color, MUTED);
+    sheets.forEach((p, i) => {
+      const pageNo = i + 1;
+      if (!footerOn(pageNo)) return;
+      const vals = { ...tokens, page: String(pageNo), pages: String(sheets.length) };
+      const ruleY = margin.bottom + height - 6;
+      if (foot.rule?.show !== false) {
+        p.drawLine({ start: { x: ML, y: ruleY }, end: { x: MR, y: ruleY }, thickness: foot.rule?.weight ?? 0.5, color: paint(foot.rule?.color, HAIR) });
+      }
+      const baseline = ruleY - size - 5;
+      const cell = (raw: string | undefined, align: "left" | "center" | "right") => {
+        if (!raw) return;
+        const s = enc(fillTokens(raw, vals));
+        const tw = font.widthOfTextAtSize(s, size);
+        const x = align === "left" ? ML : align === "right" ? MR - tw : ML + (WIDTH - tw) / 2;
+        p.drawText(s, { x, y: baseline, size, font, color });
+      };
+      cell(foot.left, "left");
+      cell(foot.center, "center");
+      cell(foot.right, "right");
+    });
+  }
+
   return { bytes: await doc.save(), signAnchors };
 }

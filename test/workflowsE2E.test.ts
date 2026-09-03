@@ -384,3 +384,37 @@ describe("workflows e2e: offboarding reclaim ticket counts the kit from the inve
     expect((await ticketsFor(emp)).length).toBe(0);
   });
 });
+
+// The runaway guard is correct, but a guard nobody can see is a guard that silently eats work. Before this,
+// an exhausted budget only produced a console.warn: the Workflows UI showed the runs that DID fire and no
+// hint that anything was refused. It now also writes one automation_runs row, which is the surface someone
+// actually opens.
+describe("workflows e2e: an exhausted dispatch budget is visible, not just logged", () => {
+  it("writes exactly one 'dropped' run naming no rule, however many events are refused", async () => {
+    const emp = await seedEmployee({ code: "04-980" });
+    await seedRule("Provision IT & workspace for new hires");
+
+    const prev = deps.automationBudget;
+    deps.automationBudget = { n: 50, dropped: 0 }; // already at MAX_TOTAL_DISPATCHES
+    try {
+      for (let i = 0; i < 3; i++) {
+        await emitEvent(deps, actor, "employee.created", { subject: `employees/${emp}`, employeeId: emp, payload: { departmentId: null, startDate: null } });
+      }
+      expect(deps.automationBudget.dropped).toBe(3); // every one was refused...
+    } finally {
+      deps.automationBudget = prev;
+    }
+
+    // ...but only the first is recorded. A row per dropped event would be the same runaway this guard exists
+    // to stop, and one row already carries the fact.
+    const runs = await deps.db.select().from(schema.automationRuns);
+    expect(runs.length).toBe(1);
+    expect(runs[0]!.status).toBe("dropped");
+    expect(runs[0]!.automationId).toBeNull(); // no rule was loaded, so none is to blame
+    expect(runs[0]!.eventType).toBe("employee.created");
+    expect(runs[0]!.resultJson).toContain("Dispatch budget");
+
+    // The rule never ran, so nothing it would have done exists.
+    expect((await ticketsFor(emp)).length).toBe(0);
+  });
+});

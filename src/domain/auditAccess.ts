@@ -56,6 +56,8 @@ export function accessAudit(method: string, pathname: string, decision: Decision
   const sensitiveVerb = verb !== null && policy.sensitive_verbs.includes(`${collection}:${verb}`);
   if (sensitiveSub || sensitiveCol || sensitiveVerb) {
     const field = sensitiveVerb ? `:${verb}` : sub.length ? sub.join(".") : collection;
+    // `authorized_by` is NOT set here: the middleware parks the allowing pattern on the request user, so
+    // lib/audit stamps it on this row and on every row the handler writes, from one place.
     return { action: `${collection}.read.sensitive`, entity: collection, entityId: id, meta: { method: m, field } };
   }
   return null;

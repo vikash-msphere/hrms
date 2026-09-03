@@ -116,6 +116,43 @@ describe("payslip template validation", () => {
   });
 });
 
+// A payslip prints on one of two pages, and HR picks which in the payslip designer: its OWN sheet (the
+// default, laid out entirely by these blocks) or the LETTERHEAD chosen for payslips. The figures are the same
+// either way - only the sheet around them changes.
+describe("payslip on a letterhead", () => {
+  const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  it("takes the letterhead's page geometry, not the payslip design's", async () => {
+    const own = await renderPayslipPdf(DATA, { options: { pageSize: "letter" }, blocks: DEFAULT_PAYSLIP_TEMPLATE.blocks });
+    const onHead = await renderPayslipPdf(DATA, { options: { pageSize: "letter" }, blocks: DEFAULT_PAYSLIP_TEMPLATE.blocks }, { design: { page: { size: "a4" } } });
+    const ownDoc = await PDFDocument.load(own);
+    const headDoc = await PDFDocument.load(onHead);
+    expect(Math.round(ownDoc.getPage(0).getSize().width)).toBe(612); // the design asked for US Letter
+    expect(Math.round(headDoc.getPage(0).getSize().width)).toBe(595); // the LETTERHEAD asked for A4, and wins
+  });
+
+  it("draws the letterhead's stationery behind the figures", async () => {
+    const bare = await renderPayslipPdf(DATA, DEFAULT_PAYSLIP_TEMPLATE, { design: {} });
+    const withSheet = await renderPayslipPdf(DATA, DEFAULT_PAYSLIP_TEMPLATE, { design: {}, artwork: { stationery: PNG } });
+    expect(withSheet.length).toBeGreaterThan(bare.length);
+  });
+
+  it("starts the figures BELOW the letterhead's header band, not at the payslip page's own top", async () => {
+    // The payslip's own page puts its first baseline at the top margin (the geometry tripwire below pins
+    // 791.89). On a letterhead the body starts under the band instead - so that baseline must be gone, which
+    // is also the proof that the orgHeader block is not drawing a second masthead over the letterhead's.
+    const own = await drawingOps(await renderPayslipPdf(DATA));
+    expect(own).toContain("1 0 0 1 48 791.89 Tm");
+    const onHead = await drawingOps(await renderPayslipPdf(DATA, DEFAULT_PAYSLIP_TEMPLATE, { design: {} }));
+    expect(onHead).not.toContain("1 0 0 1 48 791.89 Tm");
+  });
+
+  it("leaves the payslip's own page untouched when no letterhead is passed", async () => {
+    // The default path must be byte-identical to what it always was - this is the whole install's payslips.
+    expect((await renderPayslipPdf(DATA)).length).toBe((await renderPayslipPdf(DATA, DEFAULT_PAYSLIP_TEMPLATE)).length);
+  });
+});
+
 describe("payslip renderer walks the template", () => {
   it("renders the stock design", async () => {
     expect(isPdf(await renderPayslipPdf(DATA))).toBe(true);

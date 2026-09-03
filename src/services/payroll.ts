@@ -5,7 +5,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, removedMeta, stateMeta } from "../lib/audit";
 import { notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { notFound, failedPrecondition, aborted } from "../lib/errors";
@@ -23,6 +23,8 @@ import { unpaidBonusesAll, markBonusesPaidByRun, resetBonusesPaidByRun } from ".
 import { dueLoanInstallmentsAll, outstandingLoansAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
 import { runBatch, runBatchChecked, chunk, insertBatches, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
+import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
+import type { LetterheadSpec } from "../lib/letterPdf";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
@@ -200,7 +202,7 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
 export async function createRun(deps: Deps, actor: AppUser, payPeriodPath: string) {
   const payPeriodId = payPeriodPath.split("/").pop()!;
   const row = (await deps.db.insert(schema.payrollRuns).values({ code: await allocFlatCode(deps, schema.payrollRuns), payPeriodId, createdBy: actor.uuid }).returning())[0]!;
-  await audit(deps, actor, "payroll.create", "payroll-runs", row.uuid, undefined, row);
+  await audit(deps, actor, "payroll.create", "payroll-runs", row.uuid, createdMeta(row, "payroll-runs"), row);
   return row;
 }
 
@@ -262,6 +264,13 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // rows marked paid by a run that no longer pays them - the employee is never paid).
   const payViaPayroll = (await reimbursementPayoutMode(deps)) === "payroll";
   const otCfg = await getSettingValue<OvertimeConfig>(deps, "overtime", DEFAULT_OVERTIME_CONFIG);
+  // What the PREVIOUS build of this run came to, read before its items are dropped below. It is the "from"
+  // half of the audit diff at the end: a rebuild that moves the company's net pay by a lakh and one that
+  // changes nothing are the same entry without it.
+  const prior = await deps.db.select({ gross: schema.payrollRunItems.gross, net: schema.payrollRunItems.net, tax: schema.payrollRunItems.tax }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
+  const priorTotals = prior.length
+    ? { employees: prior.length, gross: round2(prior.reduce((s, r) => s + r.gross, 0)), net: round2(prior.reduce((s, r) => s + r.net, 0)), tax: round2(prior.reduce((s, r) => s + (r.tax ?? 0), 0)) }
+    : null;
   await runBatch(deps.db, [
     deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
     ...(await releasePaidByRun(deps, runId)),
@@ -276,7 +285,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // Every payout queue + compensation, prefetched in ONE read each and grouped by employee - the per-employee
   // loop below touches the DB not at all, so the build's subrequest count is flat in headcount (the free-plan
   // Workers budget is 50 an invocation).
-  const compByEmp = groupBy(await deps.db.select().from(schema.compensation), (r) => r.employeeId);
+  // Live revisions only: a revision removed as an entry error is out of the timeline, so it must not be the row
+  // compForPeriod finds effective for a period.
+  const compByEmp = groupBy(await deps.db.select().from(schema.compensation).where(isNull(schema.compensation.deleteTime)), (r) => r.employeeId);
   const encashByEmp = groupBy(await approvedUnpaidEncashmentsAll(deps), (r) => r.employeeId);
   const bonusByEmp = groupBy(await unpaidBonusesAll(deps), (r) => r.employeeId);
   const otByEmp = otCfg.enabled ? groupBy(await approvedUnpaidOvertimeAll(deps, periodEndMs), (r) => r.employeeId) : new Map<string, never[]>();
@@ -592,7 +603,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       const decl = await readDeclarations(deps, e.taxDetailsEnc);
       const paid = paidTotals.get(e.uuid) ?? EMPTY_FINALIZED_TOTALS();
       const proj = assembleProjection({
-        cfg, regime: tds.regime ?? "new", tdsConfigured: true,
+        cfg, fy, regime: tds.regime ?? "new", tdsConfigured: true,
         employedMonths: employedMonthsInFy(e.startDate ?? null, fy, e.endDate ?? null),
         paidGross: paid.taxableGross, paidTax: paid.tax,
         // Spread the balance over the calendar months left from this run's PAY month (inclusive - this run
@@ -709,7 +720,20 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       console.error(`[payroll] ${ev.type} emit failed (non-fatal)`, err);
     }
   }
-  await audit(deps, actor, "payroll.build", "payroll-runs", runId, { employees: employees.length });
+  // What the build PRODUCED, not just how many people it touched. A rebuild is the commonest payroll action
+  // and the question asked of its trail is always the same - "did the numbers move, and by how much" - which
+  // a headcount cannot answer and a diff against the previous build's totals can. Rounded like every other
+  // money figure in this file (see the monetary invariant in db/schema.ts).
+  const built = { gross: round2(itemRows.reduce((s, r) => s + r.gross, 0)), net: round2(itemRows.reduce((s, r) => s + r.net, 0)), tax: round2(itemRows.reduce((s, r) => s + (r.tax ?? 0), 0)) };
+  await audit(deps, actor, "payroll.build", "payroll-runs", runId, {
+    employees: employees.length,
+    diff: {
+      employees: { from: priorTotals?.employees ?? null, to: employees.length },
+      gross: { from: priorTotals?.gross ?? null, to: built.gross },
+      totalTax: { from: priorTotals?.tax ?? null, to: built.tax },
+      net: { from: priorTotals?.net ?? null, to: built.net },
+    },
+  });
   return getRun(deps, runId);
 }
 
@@ -827,7 +851,7 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
   }
   // Zero rows means the state moved between the read above and this write, so somebody else's decision won.
   if (!updated) throw failedPrecondition(`this run is no longer ${run.state} - reload it and try again`);
-  await audit(deps, actor, `payroll.${to.toLowerCase()}`, "payroll-runs", runId);
+  await audit(deps, actor, `payroll.${to.toLowerCase()}`, "payroll-runs", runId, stateMeta(run.state, to), updated);
   return (await withNames(deps, [updated]))[0]!;
 }
 
@@ -867,7 +891,8 @@ export async function deleteRun(deps: Deps, actor: AppUser, runId: string, ifMat
     deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
     deps.db.delete(schema.payrollRuns).where(eq(schema.payrollRuns.uuid, runId)),
   ]);
-  await audit(deps, actor, "payroll.delete", "payroll-runs", runId);
+  // The run and its items are hard-deleted above, so this entry is the only surviving record of it.
+  await audit(deps, actor, "payroll.delete", "payroll-runs", runId, removedMeta(run, "payroll-runs"), run);
 }
 
 // :publish - transition to PUBLISHED and start the payslip-generation Operation. Returns the job row.
@@ -895,7 +920,7 @@ export async function publishRun(deps: Deps, actor: AppUser, runId: string, ifMa
   const code = actor.employeeId
     ? await allocOwnedCode(deps, schema.jobs, schema.jobs.employeeId, actor.employeeId)
     : await allocFlatCode(deps, schema.jobs);
-  const job = (await deps.db.insert(schema.jobs).values({ code, employeeId: actor.employeeId, kind: "payslip.generateRun", payload: JSON.stringify({ runId }), createdBy: actor.uuid }).returning())[0]!;
+  const job = (await deps.db.insert(schema.jobs).values({ code, employeeId: actor.employeeId, kind: "payslip.generateRun", payload: JSON.stringify({ runId, correlationId: deps.trace }), createdBy: actor.uuid }).returning())[0]!;
   await audit(deps, actor, "payroll.published", "payroll-runs", runId, { operation: `operations/${job.uuid}` });
   await emitEvent(deps, actor, "payroll.published", { subject: `payroll-runs/${runId}`, payload: { payPeriodId: run.payPeriodId, employeeCount: runEmps.length } });
   return job;
@@ -922,11 +947,15 @@ type PayslipRunContext = {
   dp: number;
   periodLabel: string;
   template: PayslipTemplate; // the configured payslip design (settings/payslip), or the stock one
+  /** Set only when the design says payslips print ON the letterhead; the page then comes from here. */
+  letterhead?: LetterheadSpec;
 };
 
 async function payslipRunContext(deps: Deps, run: typeof schema.payrollRuns.$inferSelect): Promise<PayslipRunContext> {
   const period = (await deps.db.select().from(schema.payPeriods).where(eq(schema.payPeriods.uuid, run.payPeriodId)).limit(1))[0];
-  const org = await getSettingValue<{ name?: string; logo?: string; address?: string; default_currency?: string; currency_decimals?: CurrencyDecimals }>(deps, "organization", {});
+  const org = await getSettingValue<{ name?: string; logo?: string; address?: string; default_currency?: string; currency_decimals?: CurrencyDecimals } & OrgWithDocumentLogos>(deps, "organization", {});
+  // The letterhead payslips are set to, resolved once per run rather than per slip (it is an R2 read).
+  const chosen = await documentLetterhead(deps, org, "payslip");
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const depts = new Map((await refDepartments(deps)).map((d) => [d.uuid, d.name] as const));
   const lop = period ? await assembleLop(deps, period, att) : null;
@@ -934,8 +963,14 @@ async function payslipRunContext(deps: Deps, run: typeof schema.payrollRuns.$inf
   // The design is org config. A blob that fails validation falls back to the stock layout rather than failing
   // the run - payslips must still go out if someone saved a broken template.
   const template = payslipTemplateOrDefault(await getSettingValue<unknown>(deps, "payslip", null));
+  // Two ways to print a payslip, and HR picks which in the payslip designer. "own" (the default) keeps the
+  // payslip's own sheet and borrows only the letterhead's MARK for its header block. "letterhead" prints the
+  // same figures on the letterhead itself - its margins, stationery, header band, footer, watermark - which
+  // is what an org whose payslips should look like the rest of its stationery wants.
+  const onLetterhead = template.options?.page === "letterhead" && !!chosen;
   return {
-    org: { name: org.name, logo: org.logo, address: org.address },
+    org: { name: org.name, logo: (onLetterhead ? undefined : letterheadMark(chosen)) ?? org.logo, address: org.address },
+    letterhead: onLetterhead ? chosen : undefined,
     att,
     depts,
     lop,
@@ -1020,7 +1055,7 @@ export async function previewRunItemPayslip(deps: Deps, runId: string, employeeI
   const ctx = await payslipRunContext(deps, run);
   const data = await payslipDataForItem(deps, ctx, item);
   if (!data) throw notFound("employee not found");
-  return { bytes: await renderPayslipPdf(data, ctx.template), fileName: `payslip-preview-${item.uuid}.pdf` };
+  return { bytes: await renderPayslipPdf(data, ctx.template, ctx.letterhead), fileName: `payslip-preview-${item.uuid}.pdf` };
 }
 
 // Called by the cron drainer. Resumable + idempotent: bounded batch, skips already-generated payslips.
@@ -1036,7 +1071,7 @@ export async function processPayslipRunJob(deps: Deps, jobId: string, payload: {
   for (const it of todo) {
     const data = await payslipDataForItem(deps, ctx, it);
     if (!data) continue; // employee row gone - nothing to render
-    const pdf = await renderPayslipPdf(data, ctx.template);
+    const pdf = await renderPayslipPdf(data, ctx.template, ctx.letterhead);
     const key = `payslips/${it.employeeId}/${it.uuid}.pdf`;
     await deps.docs.put(key, pdf, "application/pdf");
     const [slip] = await deps.db.insert(schema.payslips).values({ code: await allocOwnedCode(deps, schema.payslips, schema.payslips.employeeId, it.employeeId), runId: payload.runId, runItemId: it.uuid, employeeId: it.employeeId, r2Key: key, gross: it.gross, taxableGross: it.taxableGross, totalDeductions: it.totalDeductions, tax: it.tax, net: it.net }).returning({ uuid: schema.payslips.uuid });

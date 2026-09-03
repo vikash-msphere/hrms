@@ -8,7 +8,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
@@ -263,7 +263,7 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string) 
     await deps.db.update(schema.leaveEncashments).set({ state: "PENDING", decidedBy: null, updatedAt: new Date() }).where(eq(schema.leaveEncashments.uuid, id));
     throw failedPrecondition(`insufficient leave balance (${await balanceOf(deps, row.employeeId, row.leaveTypeId)} day(s) available)`);
   }
-  await audit(deps, actor, "leave_encashment.approve", "leave-encashments", id);
+  await audit(deps, actor, "leave_encashment.approve", "leave-encashments", id, stateMeta("PENDING", "APPROVED", { employee: `employees/` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "encashment.approved", title: "Leave encashment approved", body: `Your encashment of ${row.days} day(s) was approved.`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "leaveEncashment.approved", { subject: `leave-encashments/${id}`, employeeId: row.employeeId, payload: { days: row.days, amount: row.amount } });
   return updated;
@@ -274,7 +274,7 @@ export async function rejectEncashment(deps: Deps, actor: AppUser, id: string) {
   if (row.state !== "PENDING") throw failedPrecondition("encashment is not pending");
   const [updated] = await deps.db.update(schema.leaveEncashments)
     .set({ state: "REJECTED", decidedBy: actor.uuid, updatedAt: new Date() }).where(eq(schema.leaveEncashments.uuid, id)).returning();
-  await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id);
+  await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id, stateMeta(row.state, "REJECTED", { employee: `employees/` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "encashment.rejected", title: "Leave encashment rejected", body: `Your encashment of ${row.days} day(s) was rejected.`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
   return updated;
 }
@@ -290,7 +290,7 @@ export async function cancelEncashment(deps: Deps, actor: AppUser, id: string) {
     .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, from))).returning();
   if (!updated) throw failedPrecondition("encashment is no longer cancellable");
   if (from === "APPROVED") await adjustBalance(deps, row.employeeId, row.leaveTypeId, row.days); // credit the days back
-  await audit(deps, actor, "leave_encashment.cancel", "leave-encashments", id);
+  await audit(deps, actor, "leave_encashment.cancel", "leave-encashments", id, stateMeta(from, "CANCELLED", { employee: `employees/` }), updated);
   return updated;
 }
 

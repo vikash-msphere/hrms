@@ -128,6 +128,8 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
     name: `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim() || null,
     grant,
     policy: real.policy, // the body-AC manifest is global - reuse the one auth already loaded
-    simulatedBy: { uuid: real.uuid, email: real.email, employeeId: real.employeeId, name: real.name },
+    // The real admin's SITTING travels with them: a simulation is still something that human did while signed
+    // in, and it is the sitting an incident review most wants grouped.
+    simulatedBy: { uuid: real.uuid, email: real.email, employeeId: real.employeeId, name: real.name, sessionId: real.sessionId },
   };
 }

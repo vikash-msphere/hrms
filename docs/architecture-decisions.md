@@ -144,7 +144,7 @@ HR data is relational, which is exactly what D1/SQLite is good at. Core entities
 - **`announcements`** — company-wide posts.
 - **`audit_log`** — append-only record of who viewed/changed what, when.
 - **`jobs`** — queue table processed by cron (since Queues are paid).
-- **`compensation`** — effective-dated salary records per employee (base pay, currency, pay grade); history is preserved, never overwritten.
+- **`compensation`** — effective-dated salary records per employee (annual CTC, its derived basic/allowance split, currency, pay grade). One contiguous timeline of half-open intervals per employee, with at most one open (current) row. A revision may be added at any effective date — including inside the existing history — corrected in place, or removed (soft; the preceding revision absorbs its window and reopens if it was the current one). Removal is refused once the revision's retro arrears have been paid out. Every one of those writes carries a before/after in `audit_log`, which is what preserves the history — not a refusal to write.
 - **`pay_components`** — definitions of earnings and deductions (fixed amount or a simple formula like % of base or rate × quantity; recurring or one-time).
 - **`pay_periods`** — the pay calendar (e.g. monthly cycles with cut-off and pay dates).
 - **`payroll_runs`** — one per pay period; carries the run's state (draft → review → approved → locked → published) and becomes immutable once locked.

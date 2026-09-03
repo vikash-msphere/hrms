@@ -170,7 +170,7 @@ describe("every collection is built by the factory", () => {
     // the same `applyScope(code)` call the generic list uses.
     const GENERIC_LIST = [
       "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "holidays", "leave-types",
-      "letter-templates", "letterhead-logos", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
+      "letter-templates", "letterheads", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
       "access-rules", "salary-structures", "shifts", "vendors",
     ];
     const genericListFiles = entries.filter((e) => usesFactory(e.src) && !/^\s*list:/m.test(e.src)).map((e) => e.name);

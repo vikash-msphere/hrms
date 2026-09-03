@@ -55,7 +55,9 @@ export const offers = collectionRoutes<OfferInput, typeof schema.offers>({
     // read before it is approved and a signed copy is filed on the hire's shelf afterwards like any document.
     letter: {
       raw: async (c, id) => {
-        const { bytes, fileName } = await renderOfferLetter(c.get("deps"), id);
+        // `?variant=print` renders the offer on the letterhead's print page instead. Nothing is stored either
+        // way, so the choice is made per request rather than frozen at generation like a filed letter's.
+        const { bytes, fileName } = await renderOfferLetter(c.get("deps"), id, c.req.query("variant") === "print" ? "print" : "screen");
         const pdf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
         return c.body(pdf, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("inline", fileName) });
       },

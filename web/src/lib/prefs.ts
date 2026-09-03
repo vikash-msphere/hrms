@@ -57,9 +57,19 @@ function apply(key: string, value: unknown) {
 // window - flushed when the tab is hidden, which is the last moment that still reaches another device.
 const pending = new Map<string, { value: unknown; timer: ReturnType<typeof setTimeout> }>();
 
-export function writePrefDeferred(key: string, value: unknown, delayMs: number): void {
+/**
+ * Update the shared snapshot and sibling tabs WITHOUT scheduling a request. For a preference whose value moves
+ * far more often than another device needs to hear about it: stage every change so readers here and in a
+ * sibling tab are correct, and call writePrefDeferred only for the changes that are worth a request. Whatever
+ * was staged in between rides along, since the flush sends the value as it stands then.
+ */
+export function stagePref(key: string, value: unknown): void {
   apply(key, value);
   publish(TOPIC_SET, { key, value } satisfies SetMsg);
+}
+
+export function writePrefDeferred(key: string, value: unknown, delayMs: number): void {
+  stagePref(key, value);
   const existing = pending.get(key);
   if (existing) clearTimeout(existing.timer);
   pending.set(key, { value, timer: setTimeout(() => flushPref(key), delayMs) });

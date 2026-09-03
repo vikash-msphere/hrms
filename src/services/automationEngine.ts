@@ -355,7 +355,8 @@ async function suspend(deps: Deps, ctx: EvalContext, event: DomainEvent, arms: W
       await deps.db.insert(schema.jobs).values({
         code: await allocFlatCode(deps, schema.jobs),
         kind: "workflow.timer",
-        payload: JSON.stringify({ instanceId: inst!.uuid, armIndex: i }),
+        // The timer belongs to the act that armed it, like every other enqueued job (see cron processOneJob).
+        payload: JSON.stringify({ instanceId: inst!.uuid, armIndex: i, correlationId: deps.trace }),
         runAfter: new Date(+deps.clock.now() + delayMs),
       });
     }
@@ -412,6 +413,35 @@ async function resumeWaiting(deps: Deps, event: DomainEvent, depth: number): Pro
   return resumed;
 }
 
+/**
+ * The one automation_runs row that names no automation: the dispatch budget was exhausted, so events after
+ * this one went unprocessed and no rule was even loaded to blame. Written once per originating action (see
+ * the call site) and, like recordRun, never allowed to throw - an observability write must not turn a
+ * degraded fan-out into a failed request.
+ */
+async function recordDroppedRun(deps: Deps, eventId: string | null, event: DomainEvent): Promise<void> {
+  const now = deps.clock.now();
+  try {
+    await deps.db.insert(schema.automationRuns).values({
+      code: await allocFlatCode(deps, schema.automationRuns),
+      automationId: null,
+      eventId,
+      eventType: event.type,
+      subject: event.subject ?? null,
+      employeeId: event.employeeId ?? null,
+      correlationId: deps.trace ?? null,
+      status: "dropped",
+      resultJson: JSON.stringify([
+        { kind: "dispatch", status: "dropped", detail: `Dispatch budget of ${MAX_TOTAL_DISPATCHES} exhausted; ${event.type} and any later events in this action were not processed.` },
+      ]),
+      startedAt: now,
+      finishedAt: now,
+    });
+  } catch (e) {
+    console.error("[automationEngine] dropped-run insert failed (non-fatal)", e);
+  }
+}
+
 async function recordRun(deps: Deps, automationId: string, eventId: string | null, event: DomainEvent, start: number, outcomes: ActionOutcome[]): Promise<void> {
   const anyErr = outcomes.some((o) => o.status === "error");
   const anyDone = outcomes.some((o) => o.status === "done" || o.status === "suspended");
@@ -463,6 +493,11 @@ export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventI
     // budget lands on the cron_runs row instead of only in Workers Logs.
     budget.dropped++;
     console.warn(`[automationEngine] dispatch budget exhausted (${MAX_TOTAL_DISPATCHES}); dropping ${event.type}`);
+    // ...and once per originating action, a `dropped` run row, so it also reaches the Workflows UI, which is
+    // where someone actually looks. Only on the FIRST drop: a row per dropped event would be a second runaway
+    // of exactly the kind this guard exists to stop, and the row already says the cap was hit. Whoever wired
+    // the rules can see that events went unprocessed without reading Workers Logs.
+    if (budget.dropped === 1) await recordDroppedRun(deps, eventId, event);
     return;
   }
   budget.n++;
@@ -478,7 +513,17 @@ export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventI
     const ctx = contextOf(event); // fresh results bag per rule
     if (!evalCondition(automation.condition, ctx)) continue;
     const start = +deps.clock.now();
-    const outcomes = await runActions(deps, ctx, event, automation.actions, depth);
+    // Name the rule for the duration of its actions, so every audit entry they write says which automation
+    // did it rather than "System". Parked on Deps like `trace`, so it survives the apiCall re-dispatch (which
+    // reuses this Deps) and is restored afterwards - a rule must not be blamed for the next rule's writes.
+    const prevActing = deps.actingAs;
+    deps.actingAs = { kind: "automation", name: automation.name || row.uuid, ref: `automations/${row.uuid}` };
+    let outcomes: ActionOutcome[];
+    try {
+      outcomes = await runActions(deps, ctx, event, automation.actions, depth);
+    } finally {
+      deps.actingAs = prevActing;
+    }
     await recordRun(deps, row.uuid, eventId, event, start, outcomes);
   }
   try {

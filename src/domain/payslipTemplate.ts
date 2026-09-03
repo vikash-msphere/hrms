@@ -87,6 +87,12 @@ export const PAYSLIP_ATTENDANCE_CELLS = ["actual", "working", "lop", "payable"] 
 export type PayslipAttendanceCell = (typeof PAYSLIP_ATTENDANCE_CELLS)[number];
 
 export type PayslipTemplateOptions = {
+  // WHICH PAGE a payslip is printed on. "own" (default) is this design's own sheet, laid out entirely by the
+  // blocks below - what every payslip has always used. "letterhead" puts the same blocks on the letterhead
+  // chosen for payslips (Settings -> Company -> Letterheads): its size, margins, stationery, header band,
+  // footer band and watermark, exactly as a letter gets. The blocks that would then draw the page a second
+  // time - `orgHeader` and `footer` - are skipped, because the letterhead is already drawing them.
+  page?: "own" | "letterhead";
   font?: "serif" | "sans"; // Times (statement-like, default) or Helvetica
   accent?: string; // #rrggbb for the header rule, totals and net-pay box; default is the near-black ink
   pageSize?: "a4" | "letter";
@@ -201,6 +207,7 @@ export function parsePayslipTemplate(input: unknown): PayslipTemplate {
   if (raw.options != null) {
     if (typeof raw.options !== "object" || Array.isArray(raw.options)) throw new TemplateError("options must be an object");
     const o = raw.options as Record<string, unknown>;
+    if (o.page != null) options.page = oneOf(o.page, ["own", "letterhead"] as const, "options.page");
     if (o.font != null) options.font = oneOf(o.font, ["serif", "sans"] as const, "options.font");
     if (o.accent != null) options.accent = hex(o.accent, "options.accent");
     if (o.pageSize != null) options.pageSize = oneOf(o.pageSize, ["a4", "letter"] as const, "options.pageSize");

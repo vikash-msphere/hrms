@@ -4,6 +4,7 @@ import { jsonBody } from "../http/jsonRequest";
 import { renderPayslipPdf, type PayslipData } from "../lib/pdf";
 import { parsePayslipTemplate, payslipTemplateOrDefault } from "../domain/payslipTemplate";
 import { getSettingValue } from "../services/settings";
+import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "../services/letterheads";
 import { decimalsFor, type CurrencyDecimals } from "../domain/currency";
 import { invalidArgument } from "../lib/errors";
 
@@ -68,11 +69,16 @@ export const payslipTemplatePreview = new Hono<AppEnv>().post("/", async (c) => 
   }
 
   // Branding and currency precision come from the real org settings, so the preview matches what will print.
-  const org = await getSettingValue<{ name?: string; logo?: string; address?: string; default_currency?: string; currency_decimals?: CurrencyDecimals }>(deps, "organization", {});
+  const org = await getSettingValue<{ name?: string; logo?: string; address?: string; default_currency?: string; currency_decimals?: CurrencyDecimals } & OrgWithDocumentLogos>(deps, "organization", {});
   const currencyCode = org.default_currency || "INR";
-  const data = sampleData(org.name || "", org.address, org.logo, currencyCode, decimalsFor(currencyCode, org.currency_decimals));
+  // The design decides which page it is previewed on, so the editor shows what will actually print: the
+  // payslip's own sheet (borrowing the letterhead's mark) or the letterhead itself.
+  const chosen = await documentLetterhead(deps, org, "payslip");
+  const onLetterhead = template.options?.page === "letterhead" && !!chosen;
+  const mark = onLetterhead ? undefined : letterheadMark(chosen);
+  const data = sampleData(org.name || "", org.address, mark ?? org.logo, currencyCode, decimalsFor(currencyCode, org.currency_decimals));
 
-  const pdf = await renderPayslipPdf(data, template);
+  const pdf = await renderPayslipPdf(data, template, onLetterhead ? chosen : undefined);
   const body_ = pdf.buffer.slice(pdf.byteOffset, pdf.byteOffset + pdf.byteLength) as ArrayBuffer;
   return c.body(body_, 200, { "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="payslip-design-preview.pdf"' });
 });

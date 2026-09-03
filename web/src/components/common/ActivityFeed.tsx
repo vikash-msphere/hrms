@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, History } from "lucide-react";
-import { get } from "@/api";
+import { Search, History, ChevronLeft, ChevronRight } from "lucide-react";
+import { batchGet, get } from "@/api";
 import { navigate } from "@/router";
 import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
@@ -15,17 +15,243 @@ import { CardsSkeleton } from "@/components/common/Skeletons";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
-// On-demand audit trail for one resource. Mount only when opened (never eager). Rows read as a sentence with a
-// color-coded action pill + the change INLINE. Filtering: a single-page log filters CLIENT-SIDE (instant, no
-// reads); a paginated log filters SERVER-SIDE (so search spans all history, not just loaded pages). IP/UA in
-// the timestamp tooltip. Names resolve from cached employees.
+// On-demand audit trail for one resource. Mount only when opened (never eager). A table - who / action /
+// record / details / when - because every row answers the same questions and a column is what lets the eye run
+// down one of them; it folds into labelled blocks on a phone (`table-stack`). Filtering: a single-page log
+// filters CLIENT-SIDE (instant, no reads); a paginated log filters SERVER-SIDE (so search spans all history,
+// not just loaded pages). IP/UA in the timestamp tooltip. Names resolve from cached employees.
 // Human field label: drop storage suffixes (columnsJson → columns, employeeId → employee), de-camel, de-snake.
 // A sensitive-read row names the custom method as `:bankFile` — drop the leading colon so it reads "bank file".
 const fieldLabel = (k: string) => k.replace(/^:/, "").replace(/(Id|Json)$/, "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_(id|json)$/i, "").replace(/_/g, " ").trim().toLowerCase();
 // Collection -> the user-facing word for the org-wide feed's type chip/filter, shared with global search so
 // both name a collection the same way.
+// A date or timestamp column diffs as an ISO string (lib/audit fieldDiff normalizes every Date through
+// toISOString), which is both unreadable at a glance and long enough to crowd every other change out of the
+// row. Returns undefined for anything that is not an ISO date, so the caller falls through to plain text.
+//
+// Midnight UTC is how this app stores a DATE (an effective_from, a leave day, a holiday) - so it is formatted
+// in UTC, or a browser east of Greenwich would render 2026-01-01 as "31 Dec 2025". Anything carrying a real
+// time of day is an INSTANT and is shown in the reader's own zone, where that is the only reading that means
+// anything. A zone-less `T00:00:00` is neither reliably, so it is left alone.
+const ISO_RE = /^(\d{4}-\d{2}-\d{2})(?:T([\d:.]+)Z)?$/;
+function fmtIso(v: string): string | undefined {
+  const m = ISO_RE.exec(v);
+  if (!m) return undefined;
+  const d = new Date(m[2] ? v : `${m[1]}T00:00:00Z`);
+  if (isNaN(+d)) return undefined;
+  return !m[2] || /^00:00(:00(\.0+)?)?$/.test(m[2])
+    ? d.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" })
+    : d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// One "field: old → new" as a self-contained chip.
+//
+// The VALUES carry the mask, not the chip: this feed spans every collection, so a change chip is as likely to
+// hold a salary or an account number as a ticket status, and /activity is not one of the masked routes (it is
+// mostly labels - masking the page would be the over-masking instrument.ts argues against). The field NAME
+// stays readable, so a session replay still shows which field moved without showing what it moved to.
+function ChangeChip({ label, from, to, fmt }: { label: string; from: unknown; to: unknown; fmt: (v: unknown) => string }) {
+  return (
+    <span className="inline-flex max-w-full items-baseline gap-1 rounded border bg-muted/40 px-1.5 py-0.5 text-[11px] leading-5">
+      {/* A legacy `{from, to}` meta carries no field name; the chip is then just the two values. */}
+      {label && <span className="shrink-0 capitalize text-muted-foreground">{label}</span>}
+      <span data-sentry-mask className="text-muted-foreground line-through decoration-muted-foreground/60">{fmt(from)}</span>
+      <span className="shrink-0 text-muted-foreground/70">→</span>
+      <span data-sentry-mask className="font-medium">{fmt(to)}</span>
+    </span>
+  );
+}
+
+// A `<collection>/<token>` value in an audit entry - the server writes every foreign key that way so an
+// internal id never reaches the wire and the reader's client has something it can resolve.
+const REF_RE = /^([a-z][a-z-]+)\/([A-Za-z0-9_-]{6,})$/;
+const refOf = (v: unknown) => (typeof v === "string" ? REF_RE.exec(v) : null);
+
+// What acted, when the actor is the system principal: `via_automation` names the rule, `via_cron` the schedule.
+// Stamped by lib/audit from `deps.actingAs`.
+function actedBy(a: Activity): { kind: "automation" | "cron"; name: string; ref?: string } | null {
+  const m = (a.meta ?? {}) as Record<string, { name?: string; ref?: string } | undefined>;
+  for (const kind of ["automation", "cron"] as const) {
+    const v = m[`via_${kind}`];
+    if (v?.name) return { kind, name: v.name, ref: v.ref };
+  }
+  return null;
+}
+
+// SCREAMING_SNAKE and lower_snake are how a state machine writes to a column, not how a person reads one.
+// Only touched when the whole string IS one token of that shape: a sentence with a space in it is prose
+// somebody typed, and mangling its capitalisation would be worse than leaving it alone.
+const ENUMISH = /^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*|[a-z][a-z0-9]*(?:_[a-z0-9]+)+)$/;
+const humanizeEnum = (v: string) => {
+  const words = v.toLowerCase().split("_");
+  return words[0]!.charAt(0).toUpperCase() + words[0]!.slice(1) + (words.length > 1 ? ` ${words.slice(1).join(" ")}` : "");
+};
+
+// A user agent is a machine's self-description; a reader wants the two facts in it. Best-effort by design -
+// an unrecognised string is shown as it came rather than guessed at, because "unknown browser" is worse than
+// the raw truth when the question is which client did something.
+function deviceOf(ua: string): string {
+  const browser = /Edg\/(\d+)/.exec(ua) ? `Edge ${/Edg\/(\d+)/.exec(ua)![1]}`
+    : /OPR\/(\d+)/.exec(ua) ? `Opera ${/OPR\/(\d+)/.exec(ua)![1]}`
+    : /Chrome\/(\d+)/.exec(ua) ? `Chrome ${/Chrome\/(\d+)/.exec(ua)![1]}`
+    : /Firefox\/(\d+)/.exec(ua) ? `Firefox ${/Firefox\/(\d+)/.exec(ua)![1]}`
+    : /Version\/(\d+).*Safari/.exec(ua) ? `Safari ${/Version\/(\d+).*Safari/.exec(ua)![1]}`
+    : null;
+  const os = /iPhone|iPad/.test(ua) ? "iOS" : /Android/.test(ua) ? "Android" : /Mac OS X/.test(ua) ? "macOS"
+    : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : null;
+  return browser && os ? `${browser} on ${os}` : browser ?? os ?? ua;
+}
+
+// The fields an entry touched. Some services predate `meta.diff` and stamp a bare top-level `{from, to}` with
+// no field name; normalized to the same shape here so the row preview and the detail view share ONE reading of
+// what changed and can never disagree about it.
+function changesOf(a: Activity): [string, { from: unknown; to: unknown }][] {
+  const m = (a.meta ?? {}) as Record<string, unknown>;
+  if (a.meta?.diff && Object.keys(a.meta.diff).length) return Object.entries(a.meta.diff);
+  if ("from" in m || "to" in m) return [["", { from: m.from, to: m.to }]];
+  return [];
+}
+
+// The row's Details cell: one chip per change. A chip per change reads as a list - run together as prose,
+// "a → b c → d e → f" gave the reader no boundary between one change and the next.
+//
+// Past three it says how many it is not showing, and stops. This is a PREVIEW, not a disclosure: the cell is
+// itself a button onto the full before/after view, so an expander inside it would be a second affordance for
+// the same question, and the smaller one at that.
+const CHANGE_PREVIEW = 3;
+function ChangePreview({ items, fmt }: { items: [string, { from: unknown; to: unknown }][]; fmt: (v: unknown) => string }) {
+  const hidden = Math.max(0, items.length - CHANGE_PREVIEW);
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {items.slice(0, CHANGE_PREVIEW).map(([k, v]) => (
+        <ChangeChip key={k} label={fieldLabel(k)} from={v.from} to={v.to} fmt={fmt} />
+      ))}
+      {hidden > 0 && <span className="px-0.5 text-[11px] font-medium text-muted-foreground">+{hidden} more</span>}
+    </div>
+  );
+}
+
+// The whole of one audit entry, opened from its Details cell.
+//
+// It exists because the row is a preview: chips there are capped and their values clipped to keep a hundred
+// rows scannable, so there has to be one place that shows the entry entire. Every changed field, in full, as
+// before/after columns - then the identity facts (IP, device) that were only ever in a tooltip, and finally the
+// raw meta behind a disclosure, so a key the feed has no renderer for is visible rather than silently dropped.
+// A trail that quietly omits part of itself is worse than none, because it is trusted.
+function ActivityDetail({ row, who, record, extras, fmt, onShowAct, onShowSession, onShowCase }: {
+  row: Activity;
+  who: string;
+  record: string | null;
+  extras: React.ReactNode[];
+  fmt: (v: unknown) => string;
+  /** Open the whole ACT this entry belongs to - every entry the same request or cron tick wrote. */
+  onShowAct?: (correlationId: string) => void;
+  /** Open the whole SITTING - every act of the login this entry was written under. */
+  onShowSession?: (sessionId: string) => void;
+  /** Open the whole STORY this entry's record belongs to, by that record's ref. */
+  onShowCase?: (rootRef: string) => void;
+}) {
+  const changes = changesOf(row);
+  const via = actedBy(row);
+  // A case can only be rooted at a record that HAS a story - see CASE_ROOTS server-side. Offering the link on
+  // anything else would be offering a 400.
+  const caseRootable = ["applications", "candidates", "offers", "transitions", "employees", "payroll-runs", "org-documents", "personal-documents"];
+  const zoom = [
+    ...(row.correlation_id && onShowAct ? [{ label: "Show everything this action changed", onClick: () => onShowAct(row.correlation_id!) }] : []),
+    ...(row.session_id && onShowSession ? [{ label: "Show the rest of this sitting", onClick: () => onShowSession(row.session_id!) }] : []),
+    ...(row.entity && row.entity_ref && caseRootable.includes(row.entity) && onShowCase
+      ? [{ label: "Show the whole story", onClick: () => onShowCase(row.entity_ref!) }]
+      : []),
+  ];
+  const fact = (label: string, value: React.ReactNode) => (
+    <>
+      <dt className="whitespace-nowrap text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words">{value}</dd>
+    </>
+  );
+  return (
+    <div className="space-y-4">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        {fact("Who", <>{who} <span className="text-muted-foreground">· {row.actor_email}</span></>)}
+        {/* The authority the act was performed under, not whatever the actor holds today - "who approved this"
+            reads differently as payroll_admin than as super_admin, and roles move. */}
+        {row.actor_role && fact("Acting as", humanizeEnum(row.actor_role))}
+        {via && fact(via.kind === "cron" ? "Scheduled job" : "Automation", via.name)}
+        {/* WHICH grant allowed it. A denial has always explained itself; this is the same answer on the other
+            side. The pattern, not a rule - it narrows "which rule was this?" to a handful. */}
+        {typeof row.meta?.authorized_by === "string" && fact("Authorized by", <code className="rounded bg-muted px-1 py-0.5 text-xs">{row.meta.authorized_by}</code>)}
+        {fact("Action", actionLabel(row.action))}
+        {record && fact("Record", record)}
+        {fact("When", new Date(row.create_time).toLocaleString())}
+        {/* Where from, on what: only ever in a tooltip before this view existed, which is no place for the two
+            facts an incident review needs. Masked from replay - an IP locates a person. */}
+        {row.ip && fact("IP address", <span data-sentry-mask className="font-mono text-xs">{row.ip}</span>)}
+        {row.user_agent && fact("Device", <span data-sentry-mask className="text-xs" title={row.user_agent}>{deviceOf(row.user_agent)}</span>)}
+      </dl>
+
+      {changes.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Changes</p>
+          {/* On the dialog's ground, not the page's - see the `--scroll-ground` note in index.css. */}
+          <div className="scroll-shadow-x overflow-x-auto [--scroll-ground:hsl(var(--card))]">
+            <table className="table-stack w-full text-sm">
+              <thead>
+                <tr className="border-b text-left text-muted-foreground">
+                  <th className="py-1.5 pr-3 font-medium">Field</th>
+                  <th className="py-1.5 pr-3 font-medium">Before</th>
+                  <th className="py-1.5 font-medium">After</th>
+                </tr>
+              </thead>
+              <tbody>
+                {changes.map(([k, v]) => (
+                  <tr key={k} className="border-b align-top last:border-0">
+                    {/* Values masked, field names not - see ChangeChip. */}
+                    <td className="py-1.5 pr-3 capitalize">{fieldLabel(k) || "value"}</td>
+                    <td data-label="Before" data-sentry-mask className="py-1.5 pr-3 text-muted-foreground line-through decoration-muted-foreground/50">{fmt(v.from)}</td>
+                    <td data-label="After" data-sentry-mask className="py-1.5 font-medium">{fmt(v.to)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {extras.length > 0 && <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-sm">{extras}</div>}
+
+      {row.meta && Object.keys(row.meta).length > 0 && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground">Raw entry</summary>
+          {/* Blanket mask: this is the unrendered remainder of the entry, so by definition nothing here has
+              been vetted for what it might contain. */}
+          <pre data-sentry-mask className="mt-1 max-h-64 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">{JSON.stringify(row.meta, null, 2)}</pre>
+        </details>
+      )}
+
+      {/* Three ways to widen out from one entry, in order of how far they reach: the ACT it was part of (one
+          request - accepting an offer creates the employee, their compensation and the hire), the SITTING it
+          was written in (one login), and the STORY its record belongs to (one hire, over weeks). Reading a
+          single entry without any of them is reading a fraction of what happened. */}
+      {(zoom.length > 0) && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-3">
+          {zoom.map((z) => (
+            <button
+              key={z.label}
+              type="button"
+              onClick={z.onClick}
+              className="text-xs font-medium text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+            >
+              {z.label} →
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TONE_CLS: Record<ActionTone, string> = {
   create: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
   update: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
@@ -43,7 +269,21 @@ const TONE_CLS: Record<ActionTone, string> = {
 // gated by the `audit` capability) — it adds an entity-type filter and shows each row's touched record.
 // `initialEntity` pre-selects the object-type filter (the Activity page's "Permission changes" view opens the
 // feed already narrowed to access-rules); the filter itself stays fully editable afterwards.
-export function ActivityFeed({ resource, global = false, initialEntity, apiKey }: { resource?: string; global?: boolean; initialEntity?: string; /** Narrow the org-wide feed to everything ONE credential did (`api-keys/<id>`). */ apiKey?: string }) {
+export function ActivityFeed({ resource, global = false, initialEntity, apiKey, correlation, subject, session, caseRoot }: {
+  resource?: string;
+  global?: boolean;
+  initialEntity?: string;
+  /** Narrow the org-wide feed to everything ONE credential did (`api-keys/<id>`). */
+  apiKey?: string;
+  /** Narrow to ONE act: every entry a single request or cron tick wrote. */
+  correlation?: string;
+  /** Narrow to everything that happened TO one person, across every collection (`employees/<id>`). */
+  subject?: string;
+  /** Narrow to one SITTING: every act of a single login. */
+  session?: string;
+  /** Narrow to one long-running STORY, by its root record (`applications/<id>`, `transitions/<id>`, ...). */
+  caseRoot?: string;
+}) {
   const { rows: employees } = useCollection<Employee>("employees");
   const [rows, setRows] = useState<Activity[] | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -53,16 +293,21 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey }
   const [entity, setEntity] = useState<string>(initialEntity ?? "all"); // global feed: narrow to one collection
   const [actor, setActor] = useState<string>("all"); // global feed: narrow to one actor (employee path)
   const [drill, setDrill] = useState<{ resource: string; label: string | null } | null>(null); // global feed: open one record's own trail
+  const [detail, setDetail] = useState<Activity | null>(null); // one entry, entire (opened from its Details cell)
+  const [act, setAct] = useState<string | null>(null); // the whole act one entry belongs to (its correlation id)
+  const [sitting, setSitting] = useState<string | null>(null); // the whole login one entry belongs to
+  const [story, setStory] = useState<string | null>(null); // the whole case one entry belongs to (root ref)
+  const [refNames, setRefNames] = useState<Record<string, string>>({}); // `<collection>/<token>` -> record name
   const [nextToken, setNextToken] = useState<string | undefined>();
   const [paginated, setPaginated] = useState(false); // true once the unfiltered log is known to have >1 page
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageSize, setPageSize] = useState(25);
   const fetchKey = useRef(""); // dedupes the server-filter effect against the initial load
   const sizeInited = useRef(false);
-  const scope = resource ?? apiKey ?? "*"; // stable key for the initial-load effect (undefined for the global feed)
+  const scope = resource ?? apiKey ?? (correlation ? `act:${correlation}` : subject ? `subject:${subject}` : session ? `session:${session}` : caseRoot ? `case:${caseRoot}` : "*"); // stable key for the initial-load effect
 
   const params = (extra: Record<string, string | undefined>) => {
-    const u = new URLSearchParams(resource ? { resource } : apiKey ? { api_key: apiKey } : {});
+    const u = new URLSearchParams(resource ? { resource } : apiKey ? { api_key: apiKey } : correlation ? { correlation } : subject ? { subject } : session ? { session } : caseRoot ? { case: caseRoot } : {});
     for (const [k, v] of Object.entries(extra)) if (v) u.set(k, v);
     return `activity?${u.toString()}`;
   };
@@ -123,16 +368,32 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey }
   const empOf = (a: Activity) => (a.actor ? employees.find((e) => idOf(e.path) === idOf(a.actor!)) : undefined);
   // Prefer the server-resolved actor name (works even for actors not in the loaded employees page); then the
   // cached employee; finally the email (system/unlinked actors have no name).
-  const nameOf = (a: Activity) => { if (a.actor_name) return a.actor_name; const e = empOf(a); return e ? `${e.first_name} ${e.last_name}` : a.actor_email; };
+  const nameOf = (a: Activity) => {
+    // An automation or a cron tick runs as the system principal, so the actor columns can only say "System".
+    // The meta names the rule (or the schedule) that actually did it, and that is what the reader came for.
+    const via = actedBy(a);
+    if (via) return via.name;
+    if (a.actor_name) return a.actor_name;
+    const e = empOf(a);
+    return e ? `${e.first_name} ${e.last_name}` : a.actor_email;
+  };
 
   const clip = (s: string) => (s.length > 48 ? s.slice(0, 48) + "…" : s);
   const fmt = (v: unknown): string => {
     if (v === null || v === undefined || v === "") return "—";
     if (typeof v === "boolean") return v ? "yes" : "no";
+    // Thousands separators from 10,000 up, where a bare run of digits stops being readable at a glance. The
+    // floor is what keeps a year out of it: no year is ever five digits, so "2026" can never come out "2,026"
+    // and this needs no guess about what the column means.
+    if (typeof v === "number") return Math.abs(v) >= 10000 ? v.toLocaleString() : String(v);
     if (typeof v === "string") {
       if (/^employees\//.test(v)) return empName(v) ?? "someone";
-      if (/^[a-z-]+\//.test(v)) return v.split("/").pop() ?? v;
-      return clip(v);
+      // A ref the caller may read resolves to the record's NAME (see `useRefNames`); until it does - or when
+      // they may not read it - the TYPE is the honest answer, and a raw token was never any answer at all.
+      const ref = refOf(v);
+      if (ref) return refNames[v] ?? entityLabel(ref[1]!);
+      if (ENUMISH.test(v)) return humanizeEnum(v);
+      return fmtIso(v) ?? clip(v);
     }
     // Objects/arrays (nested settings blobs, e.g. quick_actions): summarize compactly rather than
     // rendering "[object Object]". Arrays of scalars join; anything deeper collapses to short JSON.
@@ -143,19 +404,11 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey }
     if (typeof v === "object") return clip(JSON.stringify(v));
     return String(v);
   };
-  const fromTo = (from: unknown, to: unknown, key: number, label?: string) => (
-    <span key={key} className="inline-flex flex-wrap items-baseline gap-1">
-      {label && <span className="capitalize text-muted-foreground">{label}</span>}
-      <span className="text-muted-foreground line-through">{fmt(from)}</span>
-      <span className="text-muted-foreground">→</span>
-      <span className="font-medium">{fmt(to)}</span>
-    </span>
-  );
+  // Everything about the row that is NOT a field change: the reason, the subject, the attempted path. Shown
+  // under the change chips in the same cell, since both answer "what actually happened here".
   const inline = (a: Activity): React.ReactNode[] => {
     const m = a.meta ?? {};
     const bits: React.ReactNode[] = [];
-    if (m.diff && Object.keys(m.diff).length) Object.entries(m.diff).forEach(([k, v], i) => bits.push(fromTo(v.from, v.to, i, `${fieldLabel(k)}:`)));
-    else if ("from" in m || "to" in m) bits.push(fromTo((m as Record<string, unknown>).from, (m as Record<string, unknown>).to, 0));
     if (typeof m.reason === "string" && m.reason) bits.push(<span key="r" className="text-muted-foreground">— {m.reason}</span>);
     // Progress-update notes (goal.updateProgress meta): same dash treatment as reasons.
     if (typeof m.note === "string" && m.note) bits.push(<span key="n" className="text-muted-foreground">— {m.note}</span>);
@@ -223,6 +476,57 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey }
   };
   const visible = paginated ? (rows ?? []) : (rows ?? []).filter(clientMatch);
 
+  // Name the records an OPEN entry points at. A foreign key is stored as `<collection>/<token>`, which is
+  // resolvable but not readable - "Leave type · Annual leave" is the answer, "leave-types/AbCdEf" is not.
+  //
+  // Resolved for the open entry ALONE, not the page: it costs one batched request against a handful of paths
+  // instead of one per row of a hundred-row feed, and it is only in the detail view that the reader is asking
+  // about this record rather than scanning past it. Employees are skipped - the cached directory already
+  // answers those for free. A ref the caller may not read comes back 403 and keeps its type name, so this
+  // resolves nothing the reader could not have opened themselves.
+  useEffect(() => {
+    if (!detail) return;
+    const paths = [...new Set(
+      Object.values(detail.meta?.diff ?? {})
+        .flatMap((v) => [v.from, v.to])
+        .concat(Object.values(detail.meta ?? {}))
+        .map((v) => refOf(v))
+        .filter((m): m is RegExpExecArray => !!m && m[1] !== "employees")
+        .map((m) => m[0]),
+    )].filter((p) => !(p in refNames)).slice(0, 12);
+    if (!paths.length) return;
+    let live = true;
+    batchGet(paths)
+      .then((rs) => {
+        if (!live) return;
+        const found: Record<string, string> = {};
+        rs.forEach((r, i) => {
+          const b = r.status === 200 ? (r.body as Record<string, unknown> | null) : null;
+          const name = b && [b.display_name, b.name, b.title, b.subject, b.label].find((x) => typeof x === "string" && x.trim());
+          if (name) found[paths[i]!] = String(name);
+        });
+        if (Object.keys(found).length) setRefNames((prev) => ({ ...prev, ...found }));
+      })
+      .catch(() => { /* an unresolvable ref keeps its type name; nothing to report */ });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.path]);
+
+  // Stepping through the log from inside the detail dialog. An audit read is nearly always "what happened
+  // AROUND this" - the entry before it is half the answer - and closing the dialog to click the next row loses
+  // the place every time.
+  //
+  // Resolved by PATH, not by a stored index: `visible` moves under the dialog (a "Load older", a filter change
+  // while it is open), and an index would then point at a different entry than the one on screen.
+  const detailIdx = detail ? visible.findIndex((r) => r.path === detail.path) : -1;
+  // Left/right follow the LIST, not the clock: the list is newest-first, so the row above (left) is the newer
+  // one. Naming the buttons "Newer"/"Older" rather than "Previous"/"Next" is the point - "previous entry" in a
+  // reverse-chronological log is genuinely ambiguous about which way it means.
+  const stepDetail = (delta: number) => {
+    const to = detailIdx < 0 ? undefined : visible[detailIdx + delta];
+    if (to) setDetail(to);
+  };
+
   if (state === "loading" && !rows) return <CardsSkeleton count={4} />;
   if (state === "error") return <p className="py-6 text-center text-sm text-destructive">Couldn't load activity.</p>;
   if (rows && rows.length === 0 && !q && tone === "all" && entity === "all" && actor === "all") return <p className="py-6 text-center text-sm text-muted-foreground">No activity yet.</p>;
@@ -277,62 +581,118 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey }
       {visible.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted-foreground">{state === "loading" ? "Searching…" : "No matching activity."}</p>
       ) : (
-        <ul className={`${global ? "max-h-[68dvh]" : "max-h-[50dvh]"} divide-y overflow-y-auto`}>
-          {visible.map((a) => {
-            const e = empOf(a);
-            const name = nameOf(a);
-            const t = actionTone(a.action);
-            const ActionIcon = actionIcon(a.action);
-            const title = [new Date(a.create_time).toLocaleString(), a.ip, a.user_agent].filter(Boolean).join(" · ");
-            // The touched record's destination page (deep record page where supported, else the list page).
-            const route = global && a.entity ? resourceRoute(a.entity, a.entity_ref) : null;
-            // Type glyph for the touched record — the same icon its nav entry / Settings panel uses (via iconOf),
-            // so the feed never drifts from the sidebar. Rendered inside all three chip variants.
-            const TargetIcon = a.entity ? iconOf(a.entity) : null;
-            const targetChip = (
-              <>
-                {TargetIcon && <TargetIcon className="h-3 w-3 shrink-0 opacity-70" />}
-                {targetLabel(a)}
-              </>
-            );
-            return (
-              <li key={a.path} className="flex items-start gap-2 py-2">
-                {e ? <PhotoAvatar employeeId={idOf(e.path)} name={name} className="mt-0.5 h-6 w-6 text-[10px]" /> : <PersonAvatar name={name} className="mt-0.5 h-6 w-6 text-[10px]" />}
-                <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-sm">
-                  <span className="font-medium">{name}</span>
-                  <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${TONE_CLS[t]}`}>
-                    <ActionIcon className="h-3 w-3 shrink-0" />
-                    {actionLabel(a.action)}
-                  </span>
-                  {/* Org-wide feed: which record was touched. Clicking the name opens its page (the exact record
-                      where the page deep-links, else the list); a trailing icon drills into its own trail. */}
-                  {global && a.entity && (
-                    <span className="inline-flex items-center gap-0.5">
-                      {route ? (
-                        <button type="button" onClick={() => navigate(route)} title={opensExactRecord(a.entity) ? "Open record" : "Open page"} className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-                          {targetChip}
-                        </button>
-                      ) : a.entity_ref ? (
-                        <button type="button" onClick={() => setDrill({ resource: a.entity_ref!, label: targetLabel(a) })} className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-                          {targetChip}
+        /* A log is a table: every row answers the same five questions, and columns are what let the eye run
+           DOWN one of them ("everything Priya did", "every deletion") instead of re-reading each sentence to
+           find where the answer sits. `table-stack` (index.css) folds it back into labelled blocks on a
+           phone, where columns have nowhere to go. The header sticks so a 100-row page keeps its labels. */
+        <div className={`${global ? "max-h-[68dvh]" : "max-h-[50dvh]"} scroll-shadow-x overflow-auto [--scroll-ground:hsl(var(--card))]`}>
+          {/* No min-width: this feed renders everywhere from a full page to a record dialog, and any floor
+              picked for the page turns into a scrollbar in the dialogs. Auto table layout sizes the four short
+              columns to their content and lets Details take the slack, so it degrades by wrapping rather than
+              by scrolling. `overflow-auto` is the backstop for the cases where even that is not enough. */}
+          <table className="table-stack w-full text-sm">
+            <thead className="sticky top-0 z-10 bg-card">
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="py-2 pr-3 font-medium">Who</th>
+                <th className="py-2 pr-3 font-medium">Action</th>
+                {global && <th className="py-2 pr-3 font-medium">Record</th>}
+                {/* Not "Change": the column also carries a denial's attempted path and a sensitive read's
+                    field, and those rows changed nothing. */}
+                <th className="py-2 pr-3 font-medium">Details</th>
+                <th className="py-2 text-right font-medium">When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((a) => {
+                const e = empOf(a);
+                const name = nameOf(a);
+                const t = actionTone(a.action);
+                const ActionIcon = actionIcon(a.action);
+                const title = [new Date(a.create_time).toLocaleString(), a.ip, a.user_agent].filter(Boolean).join(" · ");
+                // The touched record's destination page (deep record page where supported, else the list page).
+                const route = global && a.entity ? resourceRoute(a.entity, a.entity_ref) : null;
+                // Type glyph for the touched record — the same icon its nav entry / Settings panel uses (via iconOf),
+                // so the feed never drifts from the sidebar. Rendered inside all three chip variants.
+                const TargetIcon = a.entity ? iconOf(a.entity) : null;
+                const targetChip = (
+                  <>
+                    {TargetIcon && <TargetIcon className="h-3 w-3 shrink-0 opacity-70" />}
+                    {targetLabel(a)}
+                  </>
+                );
+                const changes = changesOf(a);
+                const extras = inline(a);
+                return (
+                  <tr key={a.path} className="border-b align-top last:border-0 sm:hover:bg-muted/30">
+                    {/* First cell = the row's title on a phone, so it carries no data-label. */}
+                    <td className="py-2 pr-3">
+                      <span className="flex items-center gap-2">
+                        {e ? <PhotoAvatar employeeId={idOf(e.path)} name={name} className="h-6 w-6 shrink-0 text-[10px]" /> : <PersonAvatar name={name} className="h-6 w-6 shrink-0 text-[10px]" />}
+                        <span className="font-medium">{name}</span>
+                      </span>
+                    </td>
+                    <td data-label="Action" className="whitespace-nowrap py-2 pr-3">
+                      <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${TONE_CLS[t]}`}>
+                        <ActionIcon className="h-3 w-3 shrink-0" />
+                        {actionLabel(a.action)}
+                      </span>
+                    </td>
+                    {/* Org-wide feed: which record was touched. Clicking the name opens its page (the exact record
+                        where the page deep-links, else the list); a trailing icon drills into its own trail. A
+                        per-record feed drops the column outright - it would repeat one value down every row. */}
+                    {global && (
+                      <td data-label="Record" className="py-2 pr-3">
+                        {a.entity && (
+                          <span className="inline-flex items-center gap-0.5">
+                            {route ? (
+                              <button type="button" onClick={() => navigate(route)} title={opensExactRecord(a.entity) ? "Open record" : "Open page"} className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                                {targetChip}
+                              </button>
+                            ) : a.entity_ref ? (
+                              <button type="button" onClick={() => setDrill({ resource: a.entity_ref!, label: targetLabel(a) })} className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                                {targetChip}
+                              </button>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">{targetChip}</span>
+                            )}
+                            {a.entity_ref && (
+                              <button type="button" onClick={() => setDrill({ resource: a.entity_ref!, label: targetLabel(a) })} title="Record activity" aria-label="Record activity" className="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground">
+                                <History className="h-3 w-3" />
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </td>
+                    )}
+                    {/* No data-label: the chips are a wrapped LIST, and the stacked label/value pair would squash
+                        them into a right-aligned column. index.css renders an unlabelled cell as a plain block.
+                        The whole cell is the button onto the full entry - the chips are a clipped preview, so
+                        the thing the reader wants to click is exactly the thing that is not showing everything.
+                        A row with nothing to detail stays inert rather than offering a door onto an empty room. */}
+                    <td className="py-0 pr-3">
+                      {changes.length || extras.length ? (
+                        <button
+                          type="button"
+                          onClick={() => setDetail(a)}
+                          title="Show the full entry"
+                          className="-mx-1 w-full space-y-1 rounded px-1 py-2 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          {changes.length > 0 && <ChangePreview items={changes} fmt={fmt} />}
+                          {extras.length > 0 && <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">{extras}</div>}
                         </button>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">{targetChip}</span>
+                        // Desktop only: it keeps an empty column reading as a column. Stacked on a phone there
+                        // is no column to hold together, and a lone dash in its own block is just litter.
+                        <span className="hidden py-2 text-muted-foreground/60 sm:inline">—</span>
                       )}
-                      {a.entity_ref && (
-                        <button type="button" onClick={() => setDrill({ resource: a.entity_ref!, label: targetLabel(a) })} title="Record activity" aria-label="Record activity" className="rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground">
-                          <History className="h-3 w-3" />
-                        </button>
-                      )}
-                    </span>
-                  )}
-                  {inline(a)}
-                </div>
-                <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground" title={title}>{timeAgo(a.create_time)}</span>
-              </li>
-            );
-          })}
-        </ul>
+                    </td>
+                    <td data-label="When" className="whitespace-nowrap py-2 text-xs text-muted-foreground sm:text-right" title={title}>{timeAgo(a.create_time)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
       {nextToken && <Button variant="ghost" size="sm" className="w-full text-muted-foreground" onClick={loadMore} loading={loadingMore}>Load older</Button>}
       {/* Drill into one record's own trail (global feed). The nested feed reads lazily, only while open. The
@@ -341,6 +701,76 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey }
         <DialogContent className="sm:max-w-3xl">
           <DialogHeader><DialogTitle>{drill?.label || "Activity"}</DialogTitle></DialogHeader>
           {drill && <ActivityFeed resource={drill.resource} />}
+        </DialogContent>
+      </Dialog>
+      {/* Every entry one act wrote, as a feed of its own. The nested feed fetches by ?correlation, so it shows
+          the act WHOLE - including the entries on records this dialog was not opened from. */}
+      <Dialog open={!!act} onOpenChange={(o) => !o && setAct(null)}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Everything this action changed</DialogTitle>
+            <DialogDescription>Every record written by the same request or scheduled run.</DialogDescription>
+          </DialogHeader>
+          {act && <ActivityFeed global correlation={act} />}
+        </DialogContent>
+      </Dialog>
+      {/* Every act of one login. The question an incident review opens with, which a per-request trace cannot
+          answer: what else did this person do while signed in? */}
+      <Dialog open={!!sitting} onOpenChange={(o) => !o && setSitting(null)}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>The rest of this sitting</DialogTitle>
+            <DialogDescription>Everything this person did while signed in on this session.</DialogDescription>
+          </DialogHeader>
+          {sitting && <ActivityFeed global session={sitting} />}
+        </DialogContent>
+      </Dialog>
+      {/* One long-running story, assembled from the records that make it up (services/activityCase.ts). */}
+      <Dialog open={!!story} onOpenChange={(o) => !o && setStory(null)}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>The whole story</DialogTitle>
+            <DialogDescription>Every record that makes up this case, from first to last.</DialogDescription>
+          </DialogHeader>
+          {story && <ActivityFeed global caseRoot={story} />}
+        </DialogContent>
+      </Dialog>
+      {/* One entry, entire. The title says what happened; the body is the before/after table. */}
+      <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
+        <DialogContent
+          className="sm:max-w-2xl"
+          scrollBody
+          // Arrow keys walk the log. Radix traps focus inside the panel, so a keydown anywhere in it bubbles
+          // here - no window listener to register and tear down, and no stale closure over `visible`.
+          // preventDefault stops the browser scrolling the raw-entry block sideways instead.
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+            const el = e.target as HTMLElement | null;
+            // A text field owns its own arrow keys (there is none here today; the guard is so adding one
+            // later does not silently break typing in it).
+            if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+            e.preventDefault();
+            stepDetail(e.key === "ArrowLeft" ? -1 : 1);
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{detail ? `${nameOf(detail)} ${actionLabel(detail.action)}` : "Activity"}</DialogTitle>
+            {detail && <DialogDescription>{targetLabel(detail) ?? "This record"} · {timeAgo(detail.create_time)}</DialogDescription>}
+          </DialogHeader>
+          <DialogBody>
+            {detail && <ActivityDetail row={detail} who={nameOf(detail)} record={targetLabel(detail)} extras={inline(detail)} fmt={fmt} onShowAct={(id) => { setDetail(null); setAct(id); }} onShowSession={(id) => { setDetail(null); setSitting(id); }} onShowCase={(rootRef) => { setDetail(null); setStory(rootRef); }} />}
+          </DialogBody>
+          <DialogFooter className="sm:items-center sm:justify-between">
+            <span className="text-xs text-muted-foreground">{detailIdx >= 0 ? `${detailIdx + 1} of ${visible.length}` : "No longer in this view"}</span>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" disabled={detailIdx <= 0} onClick={() => stepDetail(-1)} title="Newer entry (←)">
+                <ChevronLeft className="h-4 w-4" /> Newer
+              </Button>
+              <Button variant="outline" size="sm" disabled={detailIdx < 0 || detailIdx >= visible.length - 1} onClick={() => stepDetail(1)} title="Older entry (→)">
+                Older <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

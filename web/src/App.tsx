@@ -620,6 +620,11 @@ export default function App() {
             ref={mainRef}
             tabIndex={-1}
             aria-label="Main content"
+            // The route key, for session replay's per-page masking (SENSITIVE_PAGES in instrument.ts). Replay
+            // records text by default, and a selector on this attribute is what hides a whole sensitive route -
+            // payslips, the profile, documents - subtree and all. Kept here rather than on each page because
+            // the point is that a panel added to one of those routes is covered without anyone opting it in.
+            data-page={route.page}
             className="mx-auto w-full max-w-screen-2xl flex-1 px-4 pb-[calc(5rem+env(safe-area-inset-bottom))] pt-5 outline-none sm:px-6 sm:pt-8 md:pb-8 lg:px-8"
           >
             {/* Ambient access scope for the whole page: collection = the route key (the collection for most

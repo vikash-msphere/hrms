@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Eye, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
 import { blobUrl, get, patch } from "@/api";
 import { cn } from "@/lib/utils";
+import { useOrg } from "@/lib/org";
 import {
   ALIGNABLE_KINDS, ATTENDANCE_CELL_LABELS, DEFAULT_PAYSLIP_TEMPLATE, MAX_PAYSLIP_BLOCKS, PAYSLIP_ATTENDANCE_CELLS,
   PAYSLIP_BLOCK_META, PAYSLIP_TOKENS, STOCK_DEFAULTS, newPayslipBlock,
@@ -32,6 +33,7 @@ const BLOCK_ORDER: PayslipBlockKind[] = [
 // published payslip's PDF is already stored, so it never changes under an employee.
 export default function PayslipDesignTab({ toast }: { toast: Toast }) {
   const confirm = useConfirm();
+  const { org } = useOrg(); // to say plainly when "print on the letterhead" has no letterhead to print on
   const [template, setTemplate] = useState<PayslipTemplate | null>(null);
   const [etag, setEtag] = useState<string | undefined>();
   const [saved, setSaved] = useState<string>(""); // serialized baseline, for the dirty check
@@ -150,6 +152,12 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
 
   if (!template) return <PanelSkeleton />;
 
+  // Which page these payslips print on, and whether the letterhead it needs actually exists. The page-level
+  // controls below belong to whichever one is in charge, so the other's are disabled rather than silently
+  // ignored.
+  const onLetterhead = template.options?.page === "letterhead";
+  const payslipLetterhead = !!org.document_logos?.payslip;
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -227,9 +235,34 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
           <Card>
             <CardHeader className="pb-2"><CardTitle className="text-sm">Document</CardTitle></CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
-              <Field label="Typeface" hint="Serif reads like a formal statement; sans is plainer. Money always uses a monospaced face.">
+              {/* The one choice that decides what everything else below means: whose PAGE this is. */}
+              <Field
+                label="Print on"
+                className="sm:col-span-2"
+                hint={
+                  onLetterhead
+                    ? "The letterhead chosen for payslips supplies the page - its size, margins, stationery, header band, footer and watermark. The blocks below still lay out the figures; the company header and footer blocks are skipped, because the letterhead already draws them."
+                    : "This design's own page. It borrows the payslip letterhead's mark for the company header block, and nothing else."
+                }
+              >
+                <Select value={template.options?.page ?? "own"} onValueChange={(v) => setOptions({ page: v as "own" | "letterhead" })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="own">This payslip design</SelectItem>
+                    <SelectItem value="letterhead">The payslip letterhead</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              {onLetterhead && !payslipLetterhead && (
+                <p className="text-xs text-warning sm:col-span-2">
+                  No letterhead is set for payslips yet, so they still print on this design's own page. Pick one under Settings &rarr; Company &rarr;
+                  Letterheads.
+                </p>
+              )}
+              <Field label="Typeface" hint={onLetterhead ? "Set by the letterhead while payslips print on it." : "Serif reads like a formal statement; sans is plainer. Money always uses a monospaced face."}>
                 <Select
                   value={template.options?.font ?? "serif"}
+                  disabled={onLetterhead}
                   onValueChange={(v) => setOptions({ font: v as "serif" | "sans" })}
                 >
                   <SelectTrigger><SelectValue /></SelectTrigger>
@@ -239,8 +272,8 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Page size">
-                <Select value={template.options?.pageSize ?? "a4"} onValueChange={(v) => setOptions({ pageSize: v as "a4" | "letter" })}>
+              <Field label="Page size" hint={onLetterhead ? "Set by the letterhead." : undefined}>
+                <Select value={template.options?.pageSize ?? "a4"} disabled={onLetterhead} onValueChange={(v) => setOptions({ pageSize: v as "a4" | "letter" })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="a4">A4</SelectItem>
@@ -248,8 +281,8 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
                   </SelectContent>
                 </Select>
               </Field>
-              <Field label="Margin (points)" hint="24 to 96. The content box is the page minus this on each side.">
-                <Input type="number" min="24" max="96" value={template.options?.margin ?? STOCK_DEFAULTS.margin} onChange={(e) => setOptions({ margin: Number(e.target.value) })} />
+              <Field label="Margin (points)" hint={onLetterhead ? "Set by the letterhead." : "24 to 96. The content box is the page minus this on each side."}>
+                <Input type="number" min="24" max="96" disabled={onLetterhead} value={template.options?.margin ?? STOCK_DEFAULTS.margin} onChange={(e) => setOptions({ margin: Number(e.target.value) })} />
               </Field>
               <Field label="Text scale" hint="0.8 to 1.25, multiplies every default size. A size set on a block wins over this.">
                 <Input type="number" step="0.05" min="0.8" max="1.25" value={template.options?.scale ?? STOCK_DEFAULTS.scale} onChange={(e) => setOptions({ scale: Number(e.target.value) })} />

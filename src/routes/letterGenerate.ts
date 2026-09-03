@@ -8,15 +8,16 @@ import { jsonBody } from "../http/jsonRequest";
 import { toPersonalDocumentResource } from "../http/serialize";
 import { assembleLetterContext } from "../services/letterData";
 import { findLetterTemplate } from "../services/letterTemplates";
-import { letterheadDataUrl } from "../services/letterheadLogos";
+import { documentLetterhead, documentLetterheadRef, type OrgWithDocumentLogos } from "../services/letterheads";
 import { resolveLetter } from "../domain/letters";
 import { renderLetterPdf } from "../lib/letterPdf";
+import { freezeLetterContent } from "../services/letterPrint";
 import { idFromPath } from "../services/documentsCommon";
 import { canReadObjectId } from "../lib/objectAccess";
 import { invalidArgument, forbidden, failedPrecondition } from "../lib/errors";
 import { getSettingValue } from "../services/settings";
 import { readIdentityValues } from "../services/identityDetails";
-import { getProvider } from "../services/esign";
+import { getProvider, assertProviderConfigured } from "../services/esign";
 import { notify } from "../services/notifications";
 import { DEFAULT_ESIGN, DEFAULT_ESIGN_METHOD, esignFor, type EsignConfig } from "../domain/esign";
 
@@ -28,8 +29,8 @@ import { DEFAULT_ESIGN, DEFAULT_ESIGN_METHOD, esignFor, type EsignConfig } from 
 // super_admin (`**`) match - payroll/employees hold only `personal-documents.me.*`, so they can't generate.
 const svc = makeDocumentService({ table: schema.personalDocuments, collection: "personal-documents", singular: "personal document", owned: true });
 
-// `letterhead` overrides the template's own letterhead for THIS generation (a `letterhead-logos/<id>` ref,
-// decoded at the edge); "" means the plain organization logo. Omitted = whatever the template says.
+// `letterhead` overrides the template's own letterhead for THIS generation (a `letterheads/<id>` ref, decoded
+// at the edge); "" means the stock page with the organization logo. Omitted = whatever the template resolves to.
 const bodySchema = z.object({ employee: z.string(), letter_type: z.string(), input: z.record(z.string(), z.string().max(20_000)).refine((o) => Object.keys(o).length <= 200, "too many input fields").optional(), letterhead: z.string().max(80).optional(), esign: z.boolean().optional() }).strict();
 
 export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
@@ -47,11 +48,18 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
   if (!(await canReadObjectId(deps, user, "letter-templates", template.id))) throw forbidden("that letter type isn't available to you");
 
   const ctx = await assembleLetterContext(deps, employeeId);
-  // Letterhead: the request's choice wins over the template's, and either falls back to the organization logo
-  // when the id is blank, unknown or its image has gone. The resolved data URL is baked into `content`, so the
-  // frozen sidecar an internal e-sign re-renders from keeps the very logo the recipient saw.
-  const letterhead = await letterheadDataUrl(deps, letterheadRef !== undefined ? letterheadRef : template.letterhead);
-  if (letterhead) ctx.org.logo = letterhead;
+  // Letterhead: the request's choice wins over the template's, which wins over the org-wide letter default, and
+  // each falls back to the organization logo when the id is blank, unknown or its image has gone.
+  const orgLogos = await getSettingValue<OrgWithDocumentLogos>(deps, "organization", {});
+  const chain = [letterheadRef, template.letterhead];
+  const chosenLetterhead = documentLetterheadRef(orgLogos, "letter", chain);
+  const letterhead = await documentLetterhead(deps, orgLogos, "letter", chain);
+  if (letterhead) {
+    ctx.letterhead = letterhead;
+    // WHICH letterhead, not just what it looked like: a re-render (an in-app e-sign, a print copy) needs the
+    // row to fetch artwork from and to ask for the print page.
+    if (chosenLetterhead) ctx.letterheadRef = chosenLetterhead;
+  }
   const { content, title, fileName } = resolveLetter(template, ctx, input ?? {});
   const { bytes: pdf, signAnchors } = await renderLetterPdf(content);
 
@@ -75,6 +83,7 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
   if (external) {
     provider = getProvider(providerId);
     if (!provider) throw invalidArgument(`unknown e-sign provider "${providerId}"`);
+    assertProviderConfigured(provider, deps.esignSecrets?.[providerId]);
     const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
     if (!emp) throw invalidArgument("employee not found");
     const aadhaar = (await readIdentityValues(deps, emp)).aadhaar;
@@ -85,10 +94,11 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
   // Create the owned personal-document row (allocates the r2 key), then store the rendered bytes + stamp size.
   const row = await svc.create(deps, user, { employee, display_name: title, document_type: "LETTER", content_type: "application/pdf" });
   await deps.docs.put(row.r2Key, pdf, "application/pdf");
-  // The `internal` driver signs in place later (:sign), re-rendering the frozen content with the image
-  // embedded - so freeze the resolved content as a sidecar. External vendors return their own signed PDF, so
-  // no sidecar is needed there.
-  if (wantEsign && !external) await deps.docs.put(`${row.r2Key}.content`, new TextEncoder().encode(JSON.stringify(content)), "application/json");
+  // Freeze the resolved letter beside its PDF so it can be re-rendered: with the signature image embedded by
+  // the `internal` e-sign driver (:sign), and on the letterhead's PRINT page by :print. Written for every
+  // letter, not just signable ones - a print copy is something any letter may be asked for later. External
+  // e-sign vendors return their own signed PDF, but the sidecar still earns its keep for printing.
+  await freezeLetterContent(deps, row.r2Key, content);
 
   const esignFields: Record<string, unknown> = {};
   if (external && provider && signer) {
@@ -121,7 +131,12 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
 
   const updated = (await deps.db
     .update(schema.personalDocuments)
-    .set({ sizeBytes: pdf.byteLength, contentType: "application/pdf", fileName, requiresSignature: wantEsign, ...esignFields, updatedAt: new Date() })
+    .set({
+      sizeBytes: pdf.byteLength, contentType: "application/pdf", fileName, requiresSignature: wantEsign,
+      // Which letterhead it went out on, so a list can tell whether a print version of it also exists.
+      letterheadId: idFromPath(chosenLetterhead ?? "") ?? null,
+      ...esignFields, updatedAt: new Date(),
+    })
     .where(eq(schema.personalDocuments.uuid, row.uuid))
     .returning())[0]!;
   // Let the employee know a document was issued to them. When it needs their in-app signature it's an ACTION

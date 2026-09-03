@@ -1,4 +1,5 @@
 import * as React from "react";
+import { captureReactException } from "@sentry/react";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { retryLazyChunks, isChunkLoadError } from "@/lib/lazyPage";
@@ -33,6 +34,12 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error("Unhandled render error:", error, info.componentStack);
+    // React swallows a caught render error - without this the SPA's most serious class of failure (a page that
+    // white-screens for a user) never reaches Sentry. `captureReactException` is used rather than a plain
+    // captureException because it attaches the component stack, which is what tells you WHICH page died.
+    // Sentry's own <Sentry.ErrorBoundary> would do the same, but this boundary owns the recovery UX
+    // (retryLazyChunks + clearCache, the stale-chunk branch) that a swap would throw away.
+    captureReactException(error, info, { mechanism: { handled: true } });
   }
 
   private retry = () => {

@@ -322,6 +322,10 @@ CREATE TABLE `audit_log` (
 	`entity_name` text,
 	`meta` text,
 	`api_key_id` text,
+	`actor_role` text,
+	`correlation_id` text,
+	`subject_id` text,
+	`session_id` text,
 	`ip` text,
 	`user_agent` text,
 	`at` integer NOT NULL
@@ -330,11 +334,14 @@ CREATE TABLE `audit_log` (
 CREATE UNIQUE INDEX `audit_log_code_unique` ON `audit_log` (`code`);--> statement-breakpoint
 CREATE INDEX `audit_entity_idx` ON `audit_log` (`entity`,`entity_id`);--> statement-breakpoint
 CREATE INDEX `audit_at_idx` ON `audit_log` (`at`);--> statement-breakpoint
+CREATE INDEX `audit_corr_idx` ON `audit_log` (`correlation_id`,`at`) WHERE "audit_log"."correlation_id" is not null;--> statement-breakpoint
+CREATE INDEX `audit_subject_idx` ON `audit_log` (`subject_id`,`at`) WHERE "audit_log"."subject_id" is not null;--> statement-breakpoint
+CREATE INDEX `audit_session_idx` ON `audit_log` (`session_id`,`at`) WHERE "audit_log"."session_id" is not null;--> statement-breakpoint
 CREATE INDEX `audit_api_key_idx` ON `audit_log` (`api_key_id`,`at`) WHERE "audit_log"."api_key_id" is not null;--> statement-breakpoint
 CREATE TABLE `automation_runs` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
-	`automation_id` text NOT NULL,
+	`automation_id` text,
 	`event_id` text,
 	`event_type` text NOT NULL,
 	`status` text NOT NULL,
@@ -640,6 +647,7 @@ CREATE TABLE `compensation` (
 	`arrears_paid_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
+	`delete_time` integer,
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`pay_grade_id`) REFERENCES `pay_grades`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`structure_id`) REFERENCES `salary_structures`(`uuid`) ON UPDATE no action ON DELETE no action,
@@ -648,7 +656,7 @@ CREATE TABLE `compensation` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `compensation_code_unique` ON `compensation` (`code`);--> statement-breakpoint
 CREATE INDEX `comp_emp_idx` ON `compensation` (`employee_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `comp_open_idx` ON `compensation` (`employee_id`) WHERE "compensation"."effective_to" is null;--> statement-breakpoint
+CREATE UNIQUE INDEX `comp_open_idx` ON `compensation` (`employee_id`) WHERE "compensation"."effective_to" is null and "compensation"."delete_time" is null;--> statement-breakpoint
 CREATE TABLE `compliance_events` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1188,19 +1196,19 @@ CREATE TABLE `letter_templates` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `letter_templates_code_unique` ON `letter_templates` (`code`);--> statement-breakpoint
-CREATE TABLE `letterhead_logos` (
+CREATE TABLE `letterheads` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
 	`label` text NOT NULL,
-	`r2_key` text,
-	`content_type` text,
-	`size_bytes` integer,
+	`assets_json` text,
+	`design_json` text,
+	`print_design_json` text,
 	`delete_time` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `letterhead_logos_code_unique` ON `letterhead_logos` (`code`);--> statement-breakpoint
+CREATE UNIQUE INDEX `letterheads_code_unique` ON `letterheads` (`code`);--> statement-breakpoint
 CREATE TABLE `loan_repayments` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`loan_id` text NOT NULL,
@@ -1491,6 +1499,7 @@ CREATE TABLE `personal_documents` (
 	`source_doc_id` text,
 	`ack_id` text,
 	`requires_signature` integer DEFAULT false NOT NULL,
+	`letterhead_id` text,
 	`signed_time` integer,
 	`signature_name` text,
 	`financial_year` text,
@@ -1954,6 +1963,7 @@ CREATE TABLE `tickets` (
 	`priority` text DEFAULT 'medium' NOT NULL,
 	`state` text DEFAULT 'OPEN' NOT NULL,
 	`attachments_json` text DEFAULT '[]' NOT NULL,
+	`session_replays_json` text DEFAULT '[]' NOT NULL,
 	`delete_time` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
@@ -3891,16 +3901,16 @@ CREATE TRIGGER "chg_d_letter_templates" AFTER DELETE ON "letter_templates" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('letter-templates', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
-CREATE TRIGGER "chg_i_letterhead_logos" AFTER INSERT ON "letterhead_logos" BEGIN
-  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterhead-logos', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+CREATE TRIGGER "chg_i_letterheads" AFTER INSERT ON "letterheads" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterheads', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
-CREATE TRIGGER "chg_u_letterhead_logos" AFTER UPDATE ON "letterhead_logos" BEGIN
-  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterhead-logos', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+CREATE TRIGGER "chg_u_letterheads" AFTER UPDATE ON "letterheads" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterheads', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
-CREATE TRIGGER "chg_d_letterhead_logos" AFTER DELETE ON "letterhead_logos" BEGIN
-  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterhead-logos', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+CREATE TRIGGER "chg_d_letterheads" AFTER DELETE ON "letterheads" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('letterheads', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_i_loans" AFTER INSERT ON "loans" BEGIN

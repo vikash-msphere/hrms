@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { getAttachmentsFor } from "./attachments";
@@ -119,6 +119,7 @@ export async function setIdentityDetails(deps: Deps, actor: AppUser, employeeId:
 
   const enc = await deps.encryptor.encrypt(JSON.stringify(next));
   await deps.db.update(schema.employees).set({ identityDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
-  await audit(deps, actor, "employee.identity_details.update", "employees", emp.uuid);
+  // Field names only - an Aadhaar or passport number must not be copied into the audit table (see bankDetails).
+  await audit(deps, actor, "employee.identity_details.update", "employees", emp.uuid, fieldsMeta(next), emp);
   return toView(defs, next, await attachedSlots(deps, emp.uuid));
 }

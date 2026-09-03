@@ -1,0 +1,74 @@
+name: r2-backup
+# Weekly copy of the R2 document bucket into a SEPARATE bucket.
+#
+# WHY THIS EXISTS. D1 is recoverable two ways (Time Travel for 30 days, plus the nightly d1-backup.yml export).
+# The documents were recoverable zero ways: one bucket, no second copy. That asymmetry is the wrong way round
+# for what the two hold. A payslip can be rebuilt from the payroll run; a letter carrying an employee's
+# e-signature cannot be rebuilt by anything, and neither can an uploaded identity document or a signed policy
+# acknowledgement. Bucket versioning on `hrms` protects against overwrite and delete; it does not protect
+# against losing the bucket. This does.
+#
+# WHY aws-cli AND NOT wrangler. `wrangler r2 object` can only get/put a single named key - it cannot list a
+# bucket, so it cannot sync one. R2 speaks the S3 API, and `aws s3 sync` is a one-line incremental copy that
+# transfers only what changed. That needs an R2 **S3 API token** (an access key id + secret), which is a
+# DIFFERENT credential from the CLOUDFLARE_API_TOKEN the other workflows use.
+#
+# SETUP (once), all under the `production` GitHub environment:
+#   1. Create the destination bucket:  npx wrangler r2 bucket create hrms-backup
+#   2. Enable versioning on the live bucket, in the dashboard (R2 -> hrms -> Settings), so an overwrite or a
+#      delete is itself recoverable between runs of this job.
+#   3. Cloudflare dashboard -> R2 -> Manage R2 API Tokens -> Create token, Object Read & Write, scoped to the
+#      `hrms` and `hrms-backup` buckets. Add its two values as repo secrets:
+#        R2_ACCESS_KEY_ID
+#        R2_SECRET_ACCESS_KEY
+#      Neither the deploy nor the d1-backup workflow uses these, and this workflow uses nothing else.
+#   4. Optionally add a lifecycle rule on `hrms-backup` to expire objects after your retention period.
+#
+# NOTE ON ENCRYPTION. Document bodies in R2 are encrypted under FIELD_ENCRYPTION_KEY, so this copy is only as
+# recoverable as that key. Escrow the key somewhere outside Cloudflare, or the backup restores nothing.
+# See docs/deploy.md "Backups & disaster recovery".
+on:
+  schedule:
+    - cron: "0 4 * * 0" # Sundays 04:00 UTC, after the nightly D1 export has finished
+  workflow_dispatch: {}
+
+concurrency:
+  group: r2-backup-production
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      # `aws s3 sync` is incremental (size + mtime), so a week of unchanged documents transfers nothing and
+      # only new or modified objects move. `--delete` is deliberately NOT passed: a document deleted in the
+      # app must stay in the backup, which is the entire point of having one.
+      - name: Sync hrms -> hrms-backup
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto # R2 has no regions; the SDK still demands a value
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY are not set - see the setup notes at the top of this workflow." >&2
+            exit 1
+          fi
+          aws s3 sync \
+            "s3://hrms" "s3://hrms-backup" \
+            --endpoint-url "https://${ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --checksum-algorithm CRC32 \
+            --no-progress
+      # Report what the backup now holds, so a run that silently copied nothing is visible in the log.
+      - name: Report backup contents
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          aws s3 ls "s3://hrms-backup" --recursive --summarize \
+            --endpoint-url "https://${ACCOUNT_ID}.r2.cloudflarestorage.com" | tail -5

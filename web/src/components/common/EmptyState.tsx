@@ -22,7 +22,13 @@ export function EmptyState({
     // Tighter on a phone: 16px of side padding rather than 24 (the description is the widest thing here and
     // it is already capped at max-w-sm), and 48px of air above and below instead of 64 - a zero state that
     // fills the screen reads as a failure rather than as "nothing here yet".
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 px-4 py-12 text-center sm:px-6 sm:py-16">
+    // data-sentry-unmask: an empty state is standing copy - "No payslips yet", and what would put one here -
+    // so on a masked route (payslips, the profile) it was the emptiness itself that got hidden, which is
+    // exactly the state a bug report is usually about. Nothing here renders a record's values.
+    <div
+      data-sentry-unmask
+      className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 px-4 py-12 text-center sm:px-6 sm:py-16"
+    >
       {illustration ? (
         <img
           src={illustrationSrc(illustration)}

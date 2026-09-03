@@ -269,6 +269,12 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || null,
     grant,
     policy,
+    // The sitting, for grouping a whole login in the audit trail. The cookie's issue instant scoped to the
+    // user identifies one session without a session TABLE - this lane is deliberately stateless (zero reads),
+    // and adding a store just to name a session would give that up. Two sessions of the same user in the same
+    // millisecond would collide; they would also both be that user signing in twice at once, which is one
+    // sitting for every purpose this grouping serves.
+    ...(sessionIat !== null ? { sessionId: `${user.uuid}:${sessionIat}` } : {}),
   };
 
   // "View as": an access admin can ask the app to answer as another user (read-only, audited). This swaps the

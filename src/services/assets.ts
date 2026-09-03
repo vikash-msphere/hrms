@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, auditMany, diffMeta } from "../lib/audit";
+import { audit, auditMany, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { chunk, insertBatches, runBatch } from "../lib/dbBatch";
 import { invalidArgument, notFound, aborted, forbidden, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -269,7 +269,7 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
       notes: input.notes?.trim() || null,
     })
     .returning())[0]!;
-  await audit(deps, actor, "asset.create", "assets", row.uuid, undefined, row);
+  await audit(deps, actor, "asset.create", "assets", row.uuid, createdMeta(row, "assets"), row);
   await emitEvent(deps, actor, "asset.created", { subject: `assets/${row.uuid}`, employeeId: assignedTo, payload: { categoryId: row.categoryId, assetTag: row.assetTag } });
   if (assignedTo && assignedTo !== actor.employeeId) await notifyAssignee(deps, actor, row);
   return row;
@@ -386,7 +386,7 @@ export async function createAssetsBatch(deps: Deps, actor: AppUser, items: Asset
   const byId = new Map(created.map((r) => [r.uuid, r]));
   const ordered = rows.map((r) => byId.get(r.uuid)!).filter(Boolean);
   // Each asset keeps its own creation entry (its activity feed is per record), stamped with the run it came in.
-  await auditMany(deps, actor, ordered.map((row) => ({ action: "asset.create", entity: "assets", entityId: row.uuid, meta: { batch: ordered.length }, snapshot: row })));
+  await auditMany(deps, actor, ordered.map((row) => ({ action: "asset.create", entity: "assets", entityId: row.uuid, meta: { batch: ordered.length, ...createdMeta(row, "assets") }, snapshot: row })));
   await emitEvents(deps, actor, "asset.created", ordered.map((row) => ({ subject: `assets/${row.uuid}`, payload: { categoryId: row.categoryId, assetTag: row.assetTag, batch: ordered.length } })));
   return ordered;
 }
@@ -459,7 +459,7 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
   }
   if (set.status !== undefined && set.status !== row.status) set.custodySince = isPending(set.status as string) ? new Date() : null;
   const [updated] = await deps.db.update(schema.assets).set(set).where(eq(schema.assets.uuid, id)).returning();
-  await audit(deps, actor, "asset.update", "assets", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "asset.update", "assets", id, diffMeta(row, updated, set, "assets"), updated);
   // Newly assigned to someone (a reassignment) notifies the new owner - with the "scan it" ask when the
   // org requires acknowledgement.
   if (derivedAssigned && derivedAssigned !== row.assignedTo && derivedAssigned !== actor.employeeId) await notifyAssignee(deps, actor, updated!);
@@ -556,7 +556,7 @@ export async function markTagPrinted(deps: Deps, actor: AppUser, id: string) {
     .set({ tagPrintedAt: now, tagSecret: row.tagSecret ?? mintTagSecret(), updatedAt: now })
     .where(eq(schema.assets.uuid, id))
     .returning();
-  await audit(deps, actor, "asset.printTag", "assets", id, undefined, updated);
+  await audit(deps, actor, "asset.printTag", "assets", id, { diff: { tagPrintedAt: { from: row.tagPrintedAt, to: updated!.tagPrintedAt } } }, updated);
   return updated!;
 }
 
@@ -574,7 +574,9 @@ export async function reissueTag(deps: Deps, actor: AppUser, id: string) {
     .set({ tagSecret: mintTagSecret(), tagPrintedAt: null, updatedAt: now })
     .where(eq(schema.assets.uuid, id))
     .returning();
-  await audit(deps, actor, "asset.reissueTag", "assets", id, undefined, updated);
+  // The old sticker stops working here, so the trail records the invalidation - never the secret itself,
+  // which lib/audit strips from any meta regardless.
+  await audit(deps, actor, "asset.reissueTag", "assets", id, { note: "the printed tag was invalidated and the asset returned to the print queue" }, updated);
   return updated!;
 }
 
@@ -593,5 +595,6 @@ export async function deleteAsset(deps: Deps, actor: AppUser, id: string, ifMatc
     .limit(1);
   if (issued) throw failedPrecondition("this asset was handed over against an asset request, so its history cannot be deleted - retire it instead");
   await deps.db.delete(schema.assets).where(eq(schema.assets.uuid, id));
-  await audit(deps, actor, "asset.delete", "assets", id);
+  // Assets have no delete_time - this is permanent, so the row survives only as this entry.
+  await audit(deps, actor, "asset.delete", "assets", id, removedMeta(row, "assets"), row);
 }

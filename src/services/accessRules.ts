@@ -8,7 +8,7 @@ import { and, eq, inArray, isNotNull, lte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, auditMany } from "../lib/audit";
 import { clearCache, clearCachePrefix } from "../lib/cache";
 import { notFound, failedPrecondition, alreadyExists, invalidArgument } from "../lib/errors";
 import { validateAccessRule, type AccessRuleInput } from "../domain/policyValidate";
@@ -291,13 +291,28 @@ export function ruleIdFromRef(ref: unknown): string {
 // (policyLoad filters on the same instant), so this only keeps the table - and the UI's rule lists - clean.
 export async function purgeExpiredAccessRules(deps: Deps): Promise<number> {
   const now = deps.clock.now();
+  // The WHOLE row, not just the id: these are hard-deleted below, so whatever the trail does not record about
+  // them is gone. "Who lost which access, when, and under what rule" is the question this table exists for.
   const expired = await deps.db
-    .select({ id: schema.accessRules.uuid, subject: schema.accessRules.subject, subjectKind: schema.accessRules.subjectKind })
+    .select()
     .from(schema.accessRules)
     .where(and(isNotNull(schema.accessRules.expiresAt), lte(schema.accessRules.expiresAt, now)));
   if (!expired.length) return 0;
-  await deps.db.delete(schema.accessRules).where(inArray(schema.accessRules.uuid, expired.map((r) => r.id)));
+  await deps.db.delete(schema.accessRules).where(inArray(schema.accessRules.uuid, expired.map((r) => r.uuid)));
   for (const r of expired) bustGrantCache(r.subjectKind, r.subject);
-  await audit(deps, "system", "access-rule.expire", "access-rules", undefined, { expired: expired.length });
+  // One entry per LAPSED RULE, batched. A nightly `{ expired: 4 }` said that four people somewhere lost
+  // something - which is exactly the shape of audit entry nobody can act on. Each entry now names the subject,
+  // the collection and the pattern, the same `ruleMeta` a grant or a revocation records, so an expiry reads
+  // like the revocation it is and the access-change feed can show all three side by side.
+  await auditMany(deps, "system", expired.map((row) => ({
+    action: "access-rule.expire",
+    entity: "access-rules",
+    entityId: row.uuid,
+    // `ruleMeta` alone: it already carries subject, collection, pattern, scope and level. The plain-language
+    // sentence the create path adds is built from the WIRE shape (`collection`/`scope`), not the row's
+    // (`namespace`/`scopeKind`), so it does not belong on this side of the boundary.
+    meta: ruleMeta(row),
+    snapshot: row,
+  })));
   return expired.length;
 }

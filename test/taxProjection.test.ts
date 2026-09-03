@@ -67,7 +67,7 @@ describe("mid-year revision - each month priced at the salary in force then", ()
 
   it("the projected split flows into the year's tax", () => {
     const p = assembleProjection({
-      cfg: DEFAULT_TAX_CONFIG, regime: "new", tdsConfigured: true, decl: {},
+      cfg: DEFAULT_TAX_CONFIG, fy, regime: "new", tdsConfigured: true, decl: {},
       employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9,
       projectedGross: projectedGrossForMonths(unpaidEarningMonths(fy, null, null, none), timeline, grossFor),
     });
@@ -78,10 +78,22 @@ describe("mid-year revision - each month priced at the salary in force then", ()
 describe("assembleProjection - income months vs collection months", () => {
   const base = {
     cfg: DEFAULT_TAX_CONFIG,
+    fy,
     regime: "new",
     tdsConfigured: true,
     decl: {},
   };
+
+  // The year a projection is LABELLED with comes from the payroll window, never from the slab table's
+  // vintage stamp. They differ whenever the loaded Budget is a year behind the year being run - which is the
+  // normal state for most of a financial year - and reading the label off `cfg` captions a FY 2026-27
+  // projection "FY 2025-26" while every number on it is right.
+  it("labels the projection from the FY window, not the config's slab vintage", () => {
+    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 });
+    expect(p.financialYear).toBe("2026-27");
+    expect(p.assessmentYear).toBe("2027-28");
+    expect(DEFAULT_TAX_CONFIG.financialYear).toBe("2025-26"); // the stamp it must NOT have used
+  });
   it("projects income over unpaid EMPLOYED months but spreads tax over calendar collectMonths", () => {
     // Employed all year (12), zero runs finalized, asOf July -> 9 collectible months.
     const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 });

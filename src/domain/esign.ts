@@ -14,6 +14,12 @@ export type EsignSigner = { name: string; aadhaar?: string; email?: string; phon
 export type EsignProviderCfg = Record<string, unknown>;
 export type EsignSecrets = { apiKey?: string; apiSecret?: string; webhookSecret?: string; publicKey?: string };
 
+// Which of the above a driver cannot work without. Declared by the driver so the gate lives with the vendor
+// that knows its own requirements, and checked BEFORE any row is created (see esign/index.ts
+// `assertProviderConfigured`) - otherwise the first sign of a missing secret is the vendor call throwing deep
+// inside createRequest, which surfaces as an opaque 500 after a document has already been written.
+export type EsignRequiredSecret = "apiKey" | "apiSecret" | "webhookSecret" | "publicKey";
+
 // Where the signature placeholder(s) actually landed on the rendered PDF, for a vendor that must be told
 // where to stamp the signature. Points, PDF bottom-left origin; (x1,y1) top-left, (x2,y2) bottom-right; page
 // 1-based. Produced by the letter renderer per document (never a static guess).
@@ -49,6 +55,8 @@ export interface EsignProvider {
   requiresAadhaar: boolean; // gate generation on an Aadhaar being on file
   supportsWebhook: boolean; // false -> the UI/cron must poll getStatus
   configFields: EsignConfigField[]; // operator-settable, non-secret config the UI renders
+  // Env secrets this driver cannot run without. Empty/absent = works with none (the `internal` driver).
+  requiredSecrets?: EsignRequiredSecret[];
   createRequest(i: CreateRequestInput): Promise<CreateRequestResult>;
   // Verify + normalize an inbound webhook. Returns null when the payload is unrecognized (still ack to the vendor).
   parseWebhook(i: WebhookInput): Promise<WebhookResult>;

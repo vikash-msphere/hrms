@@ -1,8 +1,10 @@
-import { Search, ChevronRight, Plus, Sparkles, LifeBuoy, Ticket, LogIn, CircleDot } from "lucide-react";
+import { Search, ChevronRight, Plus, Sparkles, LifeBuoy, Ticket, LogIn, CircleDot, Bug } from "lucide-react";
 import { navBreadcrumb } from "@/nav";
 import { navigate } from "@/router";
 import { cn, humanize } from "@/lib/utils";
-import { resolveQuickMenu, visibleQuickActions, runQuickAction, KUDOS_ACTION_ID } from "@/lib/quickActions";
+import { resolveQuickMenu, visibleQuickActions, runQuickAction, KUDOS_ACTION_ID, TICKET_ACTION_ID, REPORT_PROBLEM_ACTION_ID } from "@/lib/quickActions";
+import { ReportProblemDialog } from "@/components/common/ReportProblemDialog";
+import { RecordingChip } from "@/components/common/RecordingChip";
 import { useOrg } from "@/lib/org";
 import { useClock, useElapsedMinutes } from "@/lib/clock";
 import { usePermission } from "@/lib/perm";
@@ -44,7 +46,10 @@ export function TopBar({
   // "Support" gets its own icon-only top-bar affordance: a get-unstuck-anywhere entry point. The dropdown
   // raises a ticket (reusing the new-ticket quick action) or jumps to the full Support page. Gated on the
   // presence of the new-ticket action, which is itself employee-only.
-  const newTicket = visibleQuickActions(me).find((a) => a.id === "new-ticket");
+  const newTicket = visibleQuickActions(me).find((a) => a.id === TICKET_ACTION_ID);
+  // Absent when the build has no Sentry: there would be no recording to attach, which is the only thing that
+  // makes this different from raising a ticket.
+  const reportProblem = visibleQuickActions(me).find((a) => a.id === REPORT_PROBLEM_ACTION_ID);
   // Reading the queue is its own grant: somebody who may raise a ticket but not list them gets the raise
   // entry without a link to a page the router would wall off anyway.
   const canSeeTickets = usePermission("tickets.read");
@@ -85,6 +90,19 @@ export function TopBar({
       {/* Right-side chrome cluster: the clock, quick-create, theme switch, global search. */}
       <div className="ml-auto flex items-center gap-2">
         <ClockChip />
+
+        {/* Mounted here rather than on the Tickets page because the whole point is that it opens without
+            leaving the page you are on - and the top bar is the one thing rendered on all of them. That also
+            makes the "report-problem" intent reachable from the command palette and the phone create menu,
+            which fire it from wherever the user is.
+            Inside the chip cluster specifically because it renders the "Recording · 0:47" countdown, which
+            belongs beside the clock rather than after it: while a demonstration is running the dialog is
+            hidden on purpose, and that chip is the only thing on screen saying so. The dialog itself portals
+            to the body, so this placement does not constrain it. */}
+        {/* Not gated on the report action: a recording can also be started from a ticket, and the chip is
+            what stops it. Renders nothing unless a window is running. */}
+        <RecordingChip />
+        {reportProblem && <ReportProblemDialog />}
 
         {/* Create: the bottom bar's raised "+" owns this on a phone, so the top-bar copy starts at `md`. */}
         {hasActions && (
@@ -139,6 +157,15 @@ export function TopBar({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
+              {/* First, above "Raise a ticket": the two read as the same thing until you have needed one of
+                  them, and the broken-right-now case is the one that cannot wait while somebody decides which
+                  it is. It opens in place - no navigate() - so the screen being reported stays on screen. */}
+              {reportProblem && (
+                <DropdownMenuItem onClick={() => runQuickAction(reportProblem)}>
+                  <Bug className="h-4 w-4" />
+                  Report a problem
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={() => runQuickAction(newTicket)}>
                 <LifeBuoy className="h-4 w-4" />
                 Raise a ticket
@@ -174,6 +201,7 @@ export function TopBar({
 
         <UserMenu me={me} />
       </div>
+
     </header>
   );
 }

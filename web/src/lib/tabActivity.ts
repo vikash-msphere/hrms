@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { get } from "@/api";
-import { readPref, writePrefDeferred } from "@/lib/prefs";
+import { readPref, stagePref, writePrefDeferred } from "@/lib/prefs";
 import { subscribe, getSnapshot } from "@/lib/resourceStore";
 
 // Per-tab "new activity" badges. A tab lights up with a count of items created since the last time the caller
@@ -39,26 +39,35 @@ function notifySeen() {
   seenSubs.forEach((cb) => cb());
 }
 
-// "Viewed a tab" happens on every navigation, so this is the most-written preference in the app. The copy that
-// matters here is the local one - it is what the next page load measures "new" against - so it is written
-// immediately; the server copy (which exists only to carry cleared badges to another device) coalesces over a
-// long quiet window and is flushed when the tab is hidden. One request per browsing session, not one per click.
+// "Viewed a tab" happens on every navigation, so this map moves constantly - but the server copy exists for
+// exactly ONE purpose: carrying a badge you cleared here to your other device. A visit to a tab that wasn't
+// badged has nothing to carry, so it costs no request at all: the local copy (what the next page load measures
+// "new" against) is written immediately, the shared snapshot and any sibling tab are staged, and that is it.
+// Only a visit that actually clears a badge schedules a save, coalesced over a long quiet window and flushed
+// when the tab is hidden.
 const SERVER_SAVE_DEBOUNCE_MS = 30_000;
 
-function persist() {
+// What each tab's badge currently shows, published by every mounted useTabActivity below. This is how
+// markTabSeen knows whether a visit is clearing anything; a tab with no badge configured is simply absent.
+const shown = new Map<string, number>();
+
+function persist(toServer: boolean) {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(seen));
   } catch {
     /* ignore */
   }
-  writePrefDeferred(PREF_KEY, seen, SERVER_SAVE_DEBOUNCE_MS);
+  if (toServer) writePrefDeferred(PREF_KEY, seen, SERVER_SAVE_DEBOUNCE_MS);
+  else stagePref(PREF_KEY, seen);
 }
 
 // Mark a tab viewed as of now - clears its badge and advances the reference the next visit measures "new" from.
 export function markTabSeen(tabKey: string) {
   if (!tabKey || seen[tabKey] === undefined || Date.now() - seen[tabKey]! > 1000) {
+    // Read the badge BEFORE advancing the reference, which is what clears it.
+    const clearing = (shown.get(tabKey) ?? 0) > 0;
     seen = { ...seen, [tabKey]: Date.now() };
-    persist();
+    persist(clearing);
     notifySeen();
   }
 }
@@ -120,7 +129,9 @@ export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<st
         seeded = true;
       }
     }
-    if (seeded) persist();
+    // A baseline is not a cleared badge - there was nothing to clear - so it stays off the wire. The other
+    // device baselines its own first visit the same way.
+    if (seeded) persist(false);
 
     const local = withColl.filter((t) => t.filter); // counted from cached rows
     const remote = withColl.filter((t) => !t.filter); // counted by the server
@@ -130,10 +141,21 @@ export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<st
     // The moment each server count was measured FROM. Visiting a tab advances its seen time, and the count we
     // already hold was measured from the older one - so it is spent, and the badge clears without re-asking.
     let askedFrom: Record<string, number> = {};
+    // Counts that landed already spent: the tab was visited before its number came back (landing directly on a
+    // badged tab), so the badge cleared without ever being drawn. markTabSeen couldn't see it to know the visit
+    // was worth carrying to another device, so it is carried from here - once per count, not per recompute.
+    const carried = new Set<string>();
 
     const recompute = () => {
       const next: Record<string, number> = {};
-      for (const [k, n] of Object.entries(fromServer)) next[k] = (seen[k] ?? 0) > (askedFrom[k] ?? 0) ? 0 : n;
+      for (const [k, n] of Object.entries(fromServer)) {
+        const spent = (seen[k] ?? 0) > (askedFrom[k] ?? 0);
+        next[k] = spent ? 0 : n;
+        if (spent && n > 0 && !carried.has(k)) {
+          carried.add(k);
+          writePrefDeferred(PREF_KEY, seen, SERVER_SAVE_DEBOUNCE_MS);
+        }
+      }
       for (const t of local) {
         const snap = getSnapshot(t.collection!, OPTS);
         if (snap.state !== "ready") continue;
@@ -144,6 +166,8 @@ export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<st
         }
         next[t.key] = n;
       }
+      // Publish for markTabSeen, which uses it to tell a badge-clearing visit from a plain one.
+      for (const [k, n] of Object.entries(next)) shown.set(k, n);
       setCounts(next);
     };
 
@@ -174,6 +198,7 @@ export function useTabActivity(tabs: TabSpec[], deps: unknown[] = []): Record<st
     return () => {
       live = false;
       unsubs.forEach((u) => u());
+      for (const t of withColl) shown.delete(t.key);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, ...deps]);

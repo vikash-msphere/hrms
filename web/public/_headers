@@ -3,8 +3,20 @@
 # and its bundled assets. script-src is 'self' only (the theme bootstrap is an external file, and the
 # module-preload polyfill is disabled in vite.config.ts), so no inline scripts are permitted. style-src keeps
 # 'unsafe-inline' because React and the card-template renderer set element style attributes.
-# No remote host appears anywhere in this policy: the app's typefaces (the UI font, the org wordmark and the
-# faces a post can be set in) are self-hosted via @fontsource and ship as same-origin bundled assets.
+# NO remote origin appears anywhere in this policy. The app's typefaces (the UI font, the org wordmark and the
+# faces a post can be set in) are self-hosted via @fontsource and ship as same-origin bundled assets, and the
+# error tracker is reached through the Worker's own /diag relay (src/routes/diag.ts) rather than by the browser
+# posting to a vendor host - so connect-src stays 'self'. That relay exists because ad and tracking blockers
+# carry every ingest host on their default lists; it is not a CSP workaround, but keeping this line at 'self'
+# is a real second benefit of it.
+# worker-src allows blob: for the SAME reason, and it is load-bearing rather than cosmetic: Sentry's session
+# replay compresses its recording in a Web Worker built from a blob URL, and under `default-src 'self'` that
+# Worker constructor throws where nothing catches it - replay records nothing, reports no error, and the
+# feature looks configured while being dead. child-src repeats it for Safari <=15.4, which never learned
+# worker-src. Widening this costs little: constructing a blob Worker already requires script execution in the
+# page, which script-src governs. The alternative is self-hosting the worker (`workerUrl`), which trades this
+# token for an unhashed asset in web/public and a copy step - not worth it for one library.
+# The service worker (push-sw.js) is unaffected either way: it is a same-origin file, covered by 'self'.
 # 'wasm-unsafe-eval' is the narrow permission to COMPILE WebAssembly - it grants nothing else, and in
 # particular is not 'unsafe-eval' (no eval/new Function). pdf.js decodes JBIG2 and JPEG2000 images (what
 # office scanners emit) and runs its colour engine in wasm; Chromium refuses to compile a module without this
@@ -14,7 +26,7 @@
 # frame falls back to default-src 'self', which excludes blob: - the viewer renders as an empty box. No remote
 # origin is framed, and object-src stays 'none' (no <object>/<embed> plugin surface).
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer

@@ -7,6 +7,7 @@ import { toSettingResource } from "../http/serialize";
 import { clampPageSize } from "../http/pagination";
 import { notFound, invalidArgument } from "../lib/errors";
 import { parsePayslipTemplate } from "../domain/payslipTemplate";
+import { DOCUMENT_KINDS } from "../services/letterheads";
 
 const writeSchema = z.object({ value: z.unknown().optional(), key: z.string().optional() }).strict();
 
@@ -91,8 +92,19 @@ function validateTagCustody(value: unknown) {
 
 // Per-currency display/payout precision: a { [ISO code]: decimals } map. Each entry must be an integer in
 // [0, 4] - money is stored full-precision, so this only sets how many places a currency is shown and paid in.
+// `document_logos` maps a generated-document kind to the letterhead it prints on; an unknown kind would be a
+// silently ignored choice, so the vocabulary is closed here.
 function validateOrganization(value: unknown) {
-  if (!isObj(value) || value.currency_decimals == null) return;
+  if (!isObj(value)) return;
+  if (value.document_logos != null) {
+    const dl = value.document_logos;
+    if (!isObj(dl)) throw invalidArgument("organization.document_logos must be an object mapping a document kind to a letterhead");
+    for (const [kind, ref] of Object.entries(dl)) {
+      if (!(DOCUMENT_KINDS as readonly string[]).includes(kind)) throw invalidArgument(`organization.document_logos.${kind} is not a document kind (${DOCUMENT_KINDS.join(", ")})`);
+      if (typeof ref !== "string" || ref.length > 80) throw invalidArgument(`organization.document_logos.${kind} must be a letterhead ref of at most 80 characters`);
+    }
+  }
+  if (value.currency_decimals == null) return;
   const cd = value.currency_decimals;
   if (!isObj(cd)) throw invalidArgument("organization.currency_decimals must be an object mapping currency code to decimal places");
   for (const [code, dp] of Object.entries(cd)) {

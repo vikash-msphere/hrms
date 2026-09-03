@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
 import { listActivity, listAllActivity } from "../services/activity";
+import { caseMembers } from "../services/activityCase";
 import { toActivityResource } from "../http/serialize";
 
 // GET /v1/activity — the audit trail, newest-first, keyset-paged (`page_token` = the `at` epoch-ms of the
@@ -32,14 +33,38 @@ export const activity = new Hono<AppEnv>().get("/", async (c) => {
   // `?api_key=api-keys/<id>` (the inbound edge already decoded the token) narrows the feed to everything that
   // ONE credential did. It rides the org-wide branch on purpose: a key's trail spans every collection, so it
   // must not be readable by someone who cannot read the org-wide feed.
+  const subjectRaw = c.req.query("subject") || undefined;
+  // `?case=<collection>/<id>` - one long-running STORY (a hire, an onboarding), assembled by walking the links
+  // the schema already carries rather than from a stored case id. Org-wide branch like the others: a case
+  // spans collections, so reading it whole needs the org-wide grant, not read on one record in it.
+  const caseRaw = c.req.query("case") || undefined;
+  const caseResult = caseRaw ? await caseMembers(c.get("deps"), caseRaw.split("/")[0]!, caseRaw.split("/").pop()!) : undefined;
+  const caseIds = caseResult?.members;
+  // A root that resolves to nothing must answer with nothing, not with the whole org-wide feed.
+  if (caseRaw && !caseIds?.length) return c.json({ results: [] });
   const keyRaw = c.req.query("api_key") || undefined;
   const apiKeyId = keyRaw?.startsWith("api-keys/") ? keyRaw.slice("api-keys/".length) : keyRaw;
+  // `?correlation=<id>` narrows to ONE act: every entry a single request (or cron tick) wrote. Rides the
+  // org-wide branch for the same reason the api-key filter does - an act spans collections, so reading it whole
+  // must require the org-wide grant rather than read on whichever record happens to anchor one of its entries.
   const { items, nextBefore } = await listAllActivity(c.get("deps"), {
     limit, before, q, tone,
     entity: c.req.query("entity") || undefined,
     actor: actorId ? undefined : actorRaw,
     actorId,
     apiKeyId,
+    correlationId: c.req.query("correlation") || undefined,
+    // `?subject=employees/<id>` (the inbound edge already decoded the token). Org-wide branch DELIBERATELY: a
+    // person's cross-collection timeline is strictly more revealing than any single record in it, so it must
+    // require the `audit` capability rather than read on whichever record happens to anchor one of its entries.
+    subjectId: subjectRaw?.startsWith("employees/") ? subjectRaw.slice("employees/".length) : undefined,
+    sessionId: c.req.query("session") || undefined,
+    entityIds: caseIds,
   });
-  return c.json({ results: items.map(toActivityResource), next_page_token: nextBefore ? String(nextBefore) : undefined });
+  return c.json({
+    results: items.map(toActivityResource),
+    next_page_token: nextBefore ? String(nextBefore) : undefined,
+    // Say so when the case was cut short, rather than letting a partial money trail pass for a complete one.
+    ...(caseResult?.truncated ? { case_truncated: true } : {}),
+  });
 });

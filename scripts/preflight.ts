@@ -12,6 +12,9 @@
 // it is rejected by Cloudflare, which is a confusing failure to hit for the first time mid-deploy.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+// Pure domain constants (no I/O, no bindings) - imported rather than regex-scraped so a rename breaks the
+// build instead of silently disabling the check below.
+import { DEFAULT_TAX_FY_START_YEAR, fyLabels } from "../src/domain/incomeTax";
 
 const root = resolve(import.meta.dirname, "..");
 const read = (p: string) => {
@@ -90,6 +93,28 @@ if (vapidPublic) {
 if (!viteVar("VITE_VAPID_PUBLIC_KEY")) {
   warns.push("web/.env has no VITE_VAPID_PUBLIC_KEY - browser push notifications will be inert in this build (pushSupported() returns false). Set it, together with the VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY secrets on the Worker, to enable push.");
 }
+if (!viteVar("VITE_SENTRY_DSN")) {
+  warns.push("web/.env has no VITE_SENTRY_DSN - this build reports no errors to Sentry (instrument.ts skips Sentry.init). Set it to see what breaks for real users.");
+} else {
+  // Independent checks, not a chain: each names a different thing that will be missing in production, and
+  // reporting only the first would send someone round the loop once per deploy.
+  if (!process.env.SENTRY_AUTH_TOKEN) {
+    // Said here rather than at build time because this is the gate `npm run deploy` runs, and a build without
+    // the token produces no source maps at all (web/vite.config.ts ties the two together deliberately, so that
+    // maps are never left sitting in web/dist to be uploaded as public assets). The failure is invisible until
+    // the first production issue arrives as `index-a1b2c3.js:1:48213`.
+    warns.push("SENTRY_AUTH_TOKEN is not set - this build uploads no source maps, so production stack traces will be minified and unreadable. Set it (with SENTRY_ORG/SENTRY_PROJECT) in the deploy environment.");
+  }
+  if (!viteVar("VITE_SENTRY_ORG")) {
+    warns.push("web/.env has VITE_SENTRY_DSN but no VITE_SENTRY_ORG - a session recording attached to a support ticket will show as a bare id instead of a link support can click.");
+  }
+  if (!viteVar("VITE_APP_VERSION")) {
+    // With no release every issue lands as "unknown release", so regression detection and "resolved in next
+    // release" have nothing to key on - and the source maps upload against a release no event ever claims,
+    // which is the same as not uploading them. It cannot be backfilled.
+    warns.push("web/.env has VITE_SENTRY_DSN but no VITE_APP_VERSION - Sentry issues will be tagged 'unknown release' and the uploaded source maps will not match them. Set it in CI, e.g. VITE_APP_VERSION=$(git rev-parse --short HEAD).");
+  }
+}
 if (viteVar("VITE_ESIGN_ALLOW_SANDBOX")) {
   errors.push("web/.env sets VITE_ESIGN_ALLOW_SANDBOX - a production build must never trust the eSign SANDBOX certificate roots.");
 }
@@ -106,6 +131,24 @@ const prodBlock = (ccaRoots.match(/const PROD_ROOT_PEMS[^=]*=\s*\[([\s\S]*?)\n\]
   .join("\n");
 if (!prodBlock.includes("BEGIN CERTIFICATE")) {
   warns.push("web/src/lib/ccaRoots.ts: PROD_ROOT_PEMS is empty - every production-signed eSign document will verify as amber \"validity unknown\" (tamper detection still works; signer identity cannot be attested). Run `node --import ./scripts/tsResolve.mjs scripts/esignChain.ts <signed.pdf>` on a real signed document to learn which CCA root to add.");
+}
+
+// --- 5. Income-tax slab vintage -----------------------------------------------------------------------
+// The seeded/fallback slab table carries a stamp saying which Budget it encodes. Withholding itself is safe
+// when that stamp is behind - the FY window comes from the payroll period's own dates, never from the stamp
+// - but the RATES applied are then last year's, which is a wrong number on a real payslip that no test can
+// catch, because only the Finance Act knows the right one. Warn rather than fail: an org deploying in
+// (say) April, before that year's Budget is even passed, legitimately runs on the previous table.
+{
+  const now = new Date();
+  const currentFyStart = now.getUTCMonth() >= 3 ? now.getUTCFullYear() : now.getUTCFullYear() - 1; // Apr = month 3
+  if (DEFAULT_TAX_FY_START_YEAR < currentFyStart) {
+    const loaded = fyLabels(DEFAULT_TAX_FY_START_YEAR).financialYear;
+    const current = fyLabels(currentFyStart).financialYear;
+    warns.push(
+      `src/domain/incomeTax.ts: the slab table is stamped FY ${loaded} but today falls in FY ${current}. TDS deducted now uses the FY ${loaded} rates, rebate and surcharge bands. Confirm the Budget figures for FY ${current}, then update the slabs together with DEFAULT_TAX_FY_START_YEAR (and re-seed the tax-config settings row, which overrides this fallback at runtime).`,
+    );
+  }
 }
 
 // --- report -------------------------------------------------------------------------------------------

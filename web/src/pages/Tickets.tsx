@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Check, X, ChevronDown, ChevronLeft, ChevronRight, Send, LifeBuoy, MessageSquare, ListChecks, Trash2, AlertCircle, Users, Link2, SquareKanban, Paperclip } from "lucide-react";
+import { Plus, Check, X, ChevronDown, ChevronLeft, ChevronRight, Send, LifeBuoy, MessageSquare, ListChecks, Trash2, AlertCircle, Users, Link2, SquareKanban, Paperclip, Video, ExternalLink } from "lucide-react";
+import { replayUrl, sentryEnabled } from "@/instrument";
+import { startRecording } from "@/lib/screenRecording";
+import { DEFAULT_TICKET_CATEGORIES } from "../../../src/domain/tickets";
 import { create, download, get, invoke, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useDebounced } from "@/hooks/useDebounced";
@@ -162,9 +165,12 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
 
   const [categories, setCategories] = useState<TicketCategory[]>([]);
   useEffect(() => {
+    // Falls back to the server's own defaults, not to []: an absent settings row means "not configured yet",
+    // and reading it as "no categories" left this dialog with an empty picker and a permanently disabled
+    // Raise button, on a Worker that would have accepted any of the default keys.
     getSetting<{ categories?: TicketCategory[] }>("ticket-categories")
-      .then((s) => setCategories(s.value?.categories ?? []))
-      .catch(() => setCategories([]));
+      .then((s) => setCategories(s.value?.categories ?? DEFAULT_TICKET_CATEGORIES.categories))
+      .catch(() => setCategories(DEFAULT_TICKET_CATEGORIES.categories));
   }, []);
   // Predefined checklists the caller can see (the collection list is scoped by the access middleware, so the
   // pickers only ever show checklists this user has been granted read on).
@@ -172,6 +178,17 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
+
+  // Drop a category the org no longer has. The draft this dialog restores (`draftKey="ticket:new"`) outlives
+  // the configuration it was written against - a renamed or deleted category, or a reseeded database, leaves
+  // a draft naming a key that is gone. The Select renders an unknown value as its PLACEHOLDER, so the field
+  // looks unset while `form.category` is truthy: Raise stays enabled and the server refuses the write with
+  // "that ticket category is unavailable", pointing at a picker that appears empty already.
+  useEffect(() => {
+    if (!categories.length) return; // nothing loaded = nothing to validate against
+    setForm((f) => (f.category && !categories.some((c) => c.key === f.category) ? { ...f, category: "" } : f));
+  }, [categories]);
+
   // Staged attachments for a ticket that does not exist yet. Files can't live in the form (a draft is JSON),
   // so they sit beside it and are uploaded the moment the ticket has a path.
   const [files, setFiles] = useState<File[]>([]);
@@ -950,6 +967,65 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
         </dl>
 
         {t.description && <p className="whitespace-pre-wrap rounded-lg border bg-muted/30 p-3 text-sm">{t.description}</p>}
+
+        {/* The replay the requester chose to attach. An outbound link to the Sentry console, not an embed:
+            watching it needs a Sentry login, which is the point - the recording is support tooling, and the
+            people who can open it are the people with an account there, not everyone who can read the ticket.
+            Without a configured org slug there is no URL to build, so it says the id and stops. */}
+        {((t.session_replays ?? []).length > 0 || sentryEnabled) && (
+          <div className="space-y-2">
+            <h4 className="flex items-center gap-1.5 text-sm font-medium">
+              <Video className="h-4 w-4" /> Session recordings
+              {(t.session_replays ?? []).length > 0 && (
+                <span className="text-xs font-normal text-muted-foreground">{(t.session_replays ?? []).length}</span>
+              )}
+            </h4>
+            {(t.session_replays ?? []).map((r) => {
+              const url = replayUrl(r.id!);
+              return url ? (
+                <a
+                  key={r.id}
+                  className="flex items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5 text-sm hover:bg-accent"
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  <Video className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {r.by ? `Recorded by ${empName(r.by)}` : "Recording"}
+                  </span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{formatDate(r.create_time)}</span>
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                </a>
+              ) : (
+                // No org slug configured, so there is no console URL to build - say the id rather than a dead link.
+                <p key={r.id} className="rounded-md border bg-muted/20 px-2.5 py-1.5 font-mono text-xs text-muted-foreground">{r.id}</p>
+              );
+            })}
+            {/* "Can you show me that again?" answered in place. The window runs for two minutes with the
+                countdown in the top bar, survives navigating away to reproduce the fault, and attaches itself
+                when it ends - so the drawer does not have to still be open. */}
+            {sentryEnabled && (
+              <AccessAction collection="tickets" objectPath={t.path} verb="attachRecording" can={can} label="Add a recording">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full gap-1.5 border-dashed"
+                  onClick={() => {
+                    // Close the drawer as the window opens. It is a modal covering the whole app, and the
+                    // point of the next two minutes is to go and make the fault happen - which cannot be done
+                    // with the ticket sitting on top of it. The recording attaches itself when it ends, so
+                    // nothing here needs the drawer to still be open.
+                    onClose();
+                    startRecording({ kind: "ticket", path: t.path, subject: t.subject });
+                  }}
+                >
+                  <Video className="h-3.5 w-3.5" /> Record the problem again
+                </Button>
+              </AccessAction>
+            )}
+          </div>
+        )}
 
         {/* Attachments: what the requester was looking at. Downloads go through the verb (never a public URL),
             so the bytes are gated by the same read as the ticket. */}

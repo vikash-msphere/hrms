@@ -66,7 +66,7 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
     if (next !== row.parentId) { await moveDepartment(deps, id, row.code!, next); await audit(deps, actor, "department.reparent", "departments", id, { from: row.parentId, to: next }); }
   }
   const [updated] = await deps.db.update(schema.departments).set(set).where(eq(schema.departments.uuid, id)).returning();
-  await audit(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set, "departments"), updated);
   return updated;
 }
 

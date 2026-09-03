@@ -362,7 +362,8 @@ function RequisitionDialog({ req, cloneOf, reqs, hiredCount, employees, departme
     };
     if (editing) {
       try {
-        await patch(`job-requisitions/${idOf(req!.path)}`, body, etag ?? req!.etag);
+        const saved = await patch<JobRequisition>(`job-requisitions/${idOf(req!.path)}`, body, etag ?? req!.etag);
+        setEtag(saved.etag);
       } catch (e) {
         // Lost race: a recruiter moved the status while the hiring manager had the form open. Take their
         // version's etag so the next press goes through deliberately.

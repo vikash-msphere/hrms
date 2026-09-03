@@ -7,7 +7,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { round2 } from "../domain/money";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
@@ -211,7 +211,7 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   } else {
     await adjustLeaveBalance(deps, employeeId, leaveTypeId, -days);
   }
-  await audit(deps, actor, "leave_request.create", "leave-requests", row.uuid, undefined, row);
+  await audit(deps, actor, "leave_request.create", "leave-requests", row.uuid, createdMeta(row, "leave-requests"), row);
   await notifyManager(deps, employeeId, { type: "leave.requested", noun: "leave request" });
   await emitEvent(deps, actor, "leave.requested", {
     subject: `leave-requests/${row.uuid}`,
@@ -267,7 +267,7 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   if (!updated) throw failedPrecondition("request was already decided");
   // Balance is reserved at request time, so approval changes nothing; rejecting or cancelling releases it back.
   if (to === "REJECTED" || to === "CANCELLED") await adjustLeaveBalance(deps, row.employeeId, row.leaveTypeId, row.days);
-  await audit(deps, actor, `leave_request.${to.toLowerCase()}`, "leave-requests", id);
+  await audit(deps, actor, `leave_request.${to.toLowerCase()}`, "leave-requests", id, stateMeta(from, to, { employee: `employees/${row.employeeId}` }), updated);
   if (to === "APPROVED" || to === "REJECTED") {
     await notify(deps, { recipient: row.employeeId, type: `leave.${to.toLowerCase()}`, title: `Leave ${to.toLowerCase()}`, body: `Your leave request was ${to.toLowerCase()}.`, link: "leave-requests/history", subject: `leave-requests/${id}`, actorId: actor.employeeId });
   }

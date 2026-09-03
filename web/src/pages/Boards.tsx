@@ -1172,8 +1172,15 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     // "" = untouched new card -> omit so the server applies the org default. Otherwise send the choice.
     if (department !== "") body.department = department === NO_DEPT ? null : `departments/${department}`;
     try {
-      if (editing) await patch<CardT>(`cards/${idOf(card!.path)}`, body, etag);
-      else await create<CardT>("cards", { board: board.path, column_key: column, ...body, ...(initialTodos.length ? { initial_todos: initialTodos } : {}) });
+      if (editing) {
+        const saved = await patch<CardT>(`cards/${idOf(card!.path)}`, body, etag);
+        // Same reason as act(): a second Save from a dialog left open would otherwise send the etag from
+        // before the first one.
+        setEtag(saved.etag);
+        setConflict(null); // the save went through; whatever the banner was showing is now the past
+      } else {
+        await create<CardT>("cards", { board: board.path, column_key: column, ...body, ...(initialTodos.length ? { initial_todos: initialTodos } : {}) });
+      }
     } catch (e) {
       // Lost race: somebody saved this task while it was open here. Take their version's etag so the next
       // press goes through, and say what happened - the raw "etag mismatch" told nobody anything, and the
@@ -1191,7 +1198,12 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   async function act(verb: string, body?: Record<string, unknown>) {
     setBusy(true);
     try {
-      await invoke(`cards/${idOf(card!.path)}`, verb, etag, body);
+      // Take the etag the write just produced. Every verb here bumps the card's updated_at, which IS the etag,
+      // so dropping the response left this dialog holding a stale one - and the next Save reported a conflict
+      // with "somebody else" who was in fact the same person, one click earlier. todoAct and addComment
+      // already did this; act and submit did not.
+      const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, verb, etag, body);
+      setEtag(res.etag);
       toast({ title: "Done", variant: "success" });
       onSaved();
     } catch (e) {

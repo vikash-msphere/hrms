@@ -147,7 +147,9 @@ export function Field({
       {shown ? (
         <p role="alert" className="text-xs font-medium text-destructive">{shown}</p>
       ) : hint ? (
-        <p className="text-xs text-muted-foreground">{hint}</p>
+        // data-sentry-unmask: a hint is copy we wrote, never the reader's data, and masking it left the
+        // control it explains standing on its own inside a masked panel.
+        <p data-sentry-unmask className="text-xs text-muted-foreground">{hint}</p>
       ) : null}
     </div>
   );

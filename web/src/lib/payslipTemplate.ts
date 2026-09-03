@@ -78,6 +78,8 @@ export type PayslipBlock = {
 };
 
 export type PayslipTemplateOptions = {
+  /** Whose PAGE a payslip prints on: this design's own sheet, or the letterhead chosen for payslips. */
+  page?: "own" | "letterhead";
   font?: "serif" | "sans";
   accent?: string;
   pageSize?: "a4" | "letter";

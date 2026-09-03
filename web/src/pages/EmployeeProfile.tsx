@@ -74,6 +74,8 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   // Core profile + employment fields are HR/super_admin only (not self-service).
   const canManage = usePermission("employees.write");
   const canActivity = useCanSeeActivity("employees"); // gates the Activity tab (server ANDs with employee read)
+  // The org-wide audit grant, which is what `?subject` needs - see the note on that panel below.
+  const canOrgActivity = useCanSeeActivity();
   // Personal/bank details are visible to the employee themselves, HR and super_admin.
   const canBank = me.employee_id === id || canManage;
   // Tax: owner, HR, payroll, super (anyone holding the employees.tax capability); the server still enforces.
@@ -493,8 +495,26 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                 <EmployeeDocuments key={docsKey} employeeId={id} />
               </TabsContent>
               {canActivity && (
-                <TabsContent value="activity">
-                  <ActivityFeed resource={empPath} />
+                <TabsContent value="activity" className="space-y-6">
+                  {/* Two different questions, and the tab used to answer only the first. `resource` is writes to
+                      the EMPLOYEE RECORD - a bank detail, a manager change. `subject` is everything that
+                      happened to this person anywhere: the leave they filed, the pay that was revised, the
+                      asset they were issued. The second is what somebody opening an employee's activity
+                      actually means, and it spans a dozen collections that the record's own trail never sees. */}
+                  {/* Gated on the ORG-WIDE grant, not on employees-activity: `?subject` rides the org-wide
+                      branch server-side (a person's cross-collection timeline reveals more than any single
+                      record in it), so offering it to a caller who only holds `activity.employees.read` would
+                      render a panel that can only 403. */}
+                  {canOrgActivity && (
+                    <div>
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Everything about this person</p>
+                      <ActivityFeed global subject={empPath} />
+                    </div>
+                  )}
+                  <div>
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Changes to the employee record</p>
+                    <ActivityFeed resource={empPath} />
+                  </div>
                 </TabsContent>
               )}
             </Tabs>

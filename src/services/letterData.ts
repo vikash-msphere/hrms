@@ -1,7 +1,7 @@
 // Assembles the LetterContext for an HR letter from DB + settings, with NO per-generation input - everything
 // is pulled from the employee record, current/previous compensation, recurring pay components, and the org
 // settings (incl. the "letter_defaults" block). The pure letter wording lives in src/domain/letters.ts.
-import { and, eq, desc } from "drizzle-orm";
+import { and, eq, desc, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { notFound } from "../lib/errors";
@@ -10,7 +10,7 @@ import { applyStructure, ctcLines, DEFAULT_CTC_CONFIG, type CtcConfig } from "..
 import { structureLinesById } from "./salaryStructures";
 import type { LetterContext, LetterDefaults } from "../domain/letters";
 
-type OrgSettings = { name?: string; logo?: string; address?: string; letter_defaults?: LetterDefaults };
+type OrgSettings = { name?: string; legal_name?: string; logo?: string; address?: string; letter_defaults?: LetterDefaults };
 
 import { round2 } from "../domain/money";
 import { refDepartments, refPayComponents } from "../lib/refData";
@@ -37,7 +37,7 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
   const comps = await deps.db
     .select()
     .from(schema.compensation)
-    .where(eq(schema.compensation.employeeId, employeeId))
+    .where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.deleteTime)))
     .orderBy(desc(schema.compensation.effectiveFrom));
   const current = comps.find((c) => c.effectiveTo === null) ?? comps[0];
   const components = await refPayComponents(deps);
@@ -108,7 +108,7 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
   const settlement = settleRow ? { lines: JSON.parse(settleRow.linesJson) as { name: string; kind: "earning" | "deduction"; amount: number }[], net: settleRow.net, date: settleRow.settlementDate } : undefined;
 
   return {
-    org: { name: org.name || "", address: org.address, logo: org.logo },
+    org: { name: org.name || "", address: org.address, logo: org.logo, legalName: org.legal_name || undefined },
     defaults: org.letter_defaults ?? {},
     today: deps.clock.now(),
     employee: {

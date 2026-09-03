@@ -31,16 +31,18 @@ const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDiv
 );
 CardHeader.displayName = "CardHeader";
 
+// data-sentry-unmask on the title and description: both are <div>s, so no heading rule reaches them, and both
+// hold the section's NAME rather than its contents - masking them left panels titled `***` describing `***`.
 const CardTitle = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("text-base font-semibold leading-none tracking-tight", className)} {...props} />
+    <div data-sentry-unmask ref={ref} className={cn("text-base font-semibold leading-none tracking-tight", className)} {...props} />
   )
 );
 CardTitle.displayName = "CardTitle";
 
 const CardDescription = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
+    <div data-sentry-unmask ref={ref} className={cn("text-sm text-muted-foreground", className)} {...props} />
   )
 );
 CardDescription.displayName = "CardDescription";

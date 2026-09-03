@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
@@ -63,7 +63,7 @@ export async function createLoan(deps: Deps, actor: AppUser, input: LoanInput, i
     reason: input.reason?.trim() || null,
     startDate: input.start_date ? new Date(dayMs(input.start_date)) : null,
   }).returning())[0]!;
-  await audit(deps, actor, "loan.create", "loans", row.uuid, undefined, row);
+  await audit(deps, actor, "loan.create", "loans", row.uuid, createdMeta(row, "loans"), row);
   await notifyManager(deps, employeeId, { type: "loan.requested", noun: `${row.kind === "advance" ? "advance" : "loan"} request` });
   await emitEvent(deps, actor, "loan.requested", { subject: `loans/${row.uuid}`, employeeId, payload: { amount: row.principal } });
   return row;
@@ -83,7 +83,7 @@ export async function updateLoan(deps: Deps, actor: AppUser, id: string, patch: 
   if (has("reason")) set.reason = patch.reason?.trim() || null;
   if (has("start_date")) { if (patch.start_date && Number.isNaN(dayMs(patch.start_date))) throw invalidArgument("start_date is invalid"); set.startDate = patch.start_date ? new Date(dayMs(patch.start_date)) : null; }
   const updated = (await deps.db.update(schema.loans).set(set).where(eq(schema.loans.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "loan.update", "loans", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "loan.update", "loans", id, diffMeta(row, updated, set, "loans"), updated);
   return updated;
 }
 
@@ -107,7 +107,7 @@ export async function approveLoan(deps: Deps, actor: AppUser, id: string) {
   const monthly = round2(row.principal / Math.max(1, row.installments));
   const updated = await setStatus(deps, id, { status: "APPROVED", monthlyAmount: monthly, decidedBy: actor.uuid, ...(row.startDate ? {} : { startDate: new Date() }) }, "PENDING");
   if (!updated) throw failedPrecondition("only a pending loan can be approved");
-  await audit(deps, actor, "loan.approve", "loans", id);
+  await audit(deps, actor, "loan.approve", "loans", id, stateMeta(row.status, "APPROVED", { employee: `employees/`, diff: { status: { from: row.status, to: "APPROVED" }, monthlyAmount: { from: row.monthlyAmount, to: monthly } } }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.approved", title: `${row.kind === "advance" ? "Advance" : "Loan"} approved`, body: `Your ${row.kind} was approved (monthly ${monthly}).`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.approved", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal, emiAmount: monthly, installments: row.installments } });
   return updated;
@@ -117,7 +117,7 @@ export async function rejectLoan(deps: Deps, actor: AppUser, id: string) {
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be rejected");
   const updated = await setStatus(deps, id, { status: "REJECTED", decidedBy: actor.uuid }, "PENDING");
   if (!updated) throw failedPrecondition("only a pending loan can be rejected");
-  await audit(deps, actor, "loan.reject", "loans", id);
+  await audit(deps, actor, "loan.reject", "loans", id, stateMeta(row.status, "REJECTED", { employee: `employees/` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.rejected", title: `${row.kind === "advance" ? "Advance" : "Loan"} rejected`, body: `Your ${row.kind} request was rejected.`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.rejected", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal } });
   return updated;
@@ -127,7 +127,7 @@ export async function disburseLoan(deps: Deps, actor: AppUser, id: string) {
   if (row.status !== "APPROVED") throw failedPrecondition("only an approved loan can be disbursed");
   const updated = await setStatus(deps, id, { status: "DISBURSED" }, "APPROVED");
   if (!updated) throw failedPrecondition("only an approved loan can be disbursed");
-  await audit(deps, actor, "loan.disburse", "loans", id);
+  await audit(deps, actor, "loan.disburse", "loans", id, stateMeta(row.status, "DISBURSED", { employee: `employees/` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.disbursed", title: `${row.kind === "advance" ? "Advance" : "Loan"} disbursed`, body: `Your ${row.kind} was disbursed.`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.disbursed", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal } });
   return updated;
@@ -154,7 +154,7 @@ export async function recordLoanRepayment(deps: Deps, actor: AppUser, id: string
   // above: a payroll build committing an installment in between would otherwise be erased, leaving the
   // employee owing an installment they already paid.
   await repaidCreditStmt(deps, id, applied, new Date());
-  await audit(deps, actor, "loan.recordRepayment", "loans", id);
+  await audit(deps, actor, "loan.recordRepayment", "loans", id, { employee: `employees/`, diff: { repaid: { from: round2(row.repaid), to: round2(row.repaid + applied) } } }, row);
   return await load(deps, id);
 }
 

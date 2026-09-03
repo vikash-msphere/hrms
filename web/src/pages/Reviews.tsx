@@ -4,6 +4,7 @@ import { get, invoke } from "@/api";
 import { useRoute, setQueryParams } from "@/router";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { useHasPrintVersion } from "@/lib/letterheads";
 import { DEFAULT_PERFORMANCE, ratingLabel, type PerformanceFramework } from "@/lib/performance";
 import type { Department, Employee, Goal, Review, ReviewCycle, ReviewState, ReviewFeedback, Me, Card as KanbanCard } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -584,6 +585,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   const [mgrComment, setMgrComment] = useState(review.manager_comment || loadDraft("manager"));
   const [ackComment, setAckComment] = useState("");
   const [pdfSource, setPdfSource] = useState<PdfSource | null>(null);
+  const reviewHasPrint = useHasPrintVersion("review");
 
   // One in-flight verb at a time; the clicked button spins, the rest stay idle.
   type BusyKey = "" | "self" | "manager" | "ack" | "skip" | "nudge";
@@ -867,6 +869,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                     title: `Performance review · ${cycle?.name ?? "review"}`,
                     description: employeeName,
                     fileName: `review-${(employeeName || "employee").replace(/\s+/g, "-").toLowerCase()}.pdf`,
+                    hasPrintVariant: reviewHasPrint, // only when the review letterhead actually has a print version
                   })}
                 >
                   <FileDown className="h-3.5 w-3.5" /> Review PDF

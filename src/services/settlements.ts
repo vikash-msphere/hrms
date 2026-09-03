@@ -1,5 +1,5 @@
 import { allocOwnedCode } from "./codeAlloc";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -162,7 +162,7 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
 // what s.10(10AA) means by "average salary"; the last-drawn figure over-exempts after a final-year raise.
 // Months before the employee had any compensation on record are skipped rather than counted as zero.
 async function averageMonthlyBasic(deps: Deps, employeeId: string, asOf: Date): Promise<number> {
-  const rows = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, employeeId));
+  const rows = await deps.db.select().from(schema.compensation).where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.deleteTime)));
   if (!rows.length) return 0;
   const values: number[] = [];
   for (let back = 0; back < 10; back++) {
@@ -247,6 +247,7 @@ async function settlementTds(
   const paid = (await finalizedTotals(deps, fy, undefined, emp.uuid)).get(emp.uuid) ?? EMPTY_FINALIZED_TOTALS();
   const proj = assembleProjection({
     cfg: await loadTaxConfig(deps),
+    fy,
     regime: tdsComp.regime ?? "new",
     tdsConfigured: true,
     employedMonths: employedMonthsInFy(emp.startDate ?? null, fy, emp.endDate ?? settlementDate),
@@ -313,7 +314,7 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const encashments = await approvedUnpaidEncashments(deps, employeeId);
   const otCfg = await getSettingValue<OvertimeConfig>(deps, "overtime", DEFAULT_OVERTIME_CONFIG);
   const overtime = otCfg.enabled ? await approvedUnpaidOvertime(deps, employeeId) : [];
-  const arrearsRows = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, employeeId)))
+  const arrearsRows = (await deps.db.select().from(schema.compensation).where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.deleteTime))))
     .filter((c) => c.arrearsAmount > 0 && !c.arrearsPaidRunId && !c.arrearsPaidAt);
   const loans = await outstandingLoans(deps, employeeId);
   // Single-currency invariant, same as the payroll build: every line is summed as a bare number, so a payable

@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, fieldsMeta, stateMeta } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getEmployeeTaxProjection, readDeclarations, readRawTaxDetails, type TaxDeclarations, type TaxProjection } from "./taxProjection";
@@ -159,7 +159,8 @@ export async function setTaxDetails(deps: Deps, actor: AppUser, employeeId: stri
     .update(schema.employees)
     .set({ taxDetailsEnc: enc, taxVerificationStatus: declared ? next.status ?? "DECLARED" : null, updatedAt: new Date() })
     .where(eq(schema.employees.uuid, emp.uuid));
-  await audit(deps, actor, `employee.tax_details.${event}`, "employees", emp.uuid);
+  // The STATUS is the auditable fact (it decides withholding); the declared figures stay off the trail.
+  await audit(deps, actor, `employee.tax_details.${event}`, "employees", emp.uuid, stateMeta(emp.taxVerificationStatus, declared ? next.status ?? "DECLARED" : null, fieldsMeta(next)), emp);
   // Tell the subject employee when HR/payroll acts on their declaration (verify makes it apply to withholding;
   // reject asks them to re-declare). Not on a plain (re)declaration - that's the employee's own action.
   if (event === "verify") {

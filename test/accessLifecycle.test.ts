@@ -97,6 +97,17 @@ describe("expiring grants", () => {
     expect(await purgeExpiredAccessRules(deps)).toBe(1);
     const left = await deps.db.select().from(schema.accessRules);
     expect(left.map((r) => r.uuid)).toEqual([permanent.uuid]);
+
+    // The lapsed rule is hard-deleted, so the trail is the only surviving record of the access it granted -
+    // and it must name that rule, not just count it. A nightly `{ expired: 4 }` says four people somewhere
+    // lost something, which is the shape of entry nobody can act on.
+    const entries = (await deps.db.select().from(schema.auditLog)).filter((r) => r.action === "access-rule.expire");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.entityId).toBe(temp.uuid);
+    const meta = JSON.parse(entries[0]!.meta!) as { subject: string; collection: string; pattern: string };
+    expect(meta.collection).toBe(temp.namespace); // the access it granted, named ("leave-requests" here)
+    expect(meta.pattern).toBeTruthy();
+    expect(meta.subject).toBeTruthy();
   });
 });
 

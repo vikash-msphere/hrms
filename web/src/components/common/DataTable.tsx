@@ -1076,7 +1076,9 @@ export function DataTable<T>({
   function runExport(format: "csv" | "xlsx") {
     const headers = exportCols.map((c) => c.header);
     const data = filtered.map((r) => exportCols.map((c) => c.accessor!(r) ?? ""));
-    void exportTable(tableId || accessCollection || "export", headers, data, format);
+    // `accessCollection` is the real collection name where the table has one; the filename fallback is a view
+    // label. The server anchors the audit entry on the former and records the latter as a label.
+    void exportTable(tableId || accessCollection || "export", headers, data, format, accessCollection);
   }
   const exportControl = (canExport || am.enabled) && (
     <AccessAction collection="export" label="Data export">

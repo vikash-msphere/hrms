@@ -4,15 +4,16 @@
 import { allocOwnedCode, allocFlatCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, inArray, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { hasPrintVersion } from "./letterheads";
 import { assertNotLocked } from "./lifecycle";
 import { genId } from "../lib/idCodec";
 import { VALID_DOC_TYPES, idFromPath, isAllowedUpload, isPdfUpload, assertUploadSize, documentFileName, type DocumentInput, type DocType } from "./documentsCommon";
@@ -20,7 +21,7 @@ import { notifyAudience, type Audience } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { getSettingValue } from "./settings";
 import { readIdentityValues } from "./identityDetails";
-import { getProvider } from "./esign";
+import { getProvider, assertProviderConfigured } from "./esign";
 import { DEFAULT_ESIGN, type EsignConfig } from "../domain/esign";
 import { stampSignature, type SignAnchor } from "../lib/pdfStamp";
 
@@ -63,17 +64,32 @@ export function makeDocumentService(cfg: Cfg) {
     return rows.map((r) => ({ ...r, ackedVersion: byDoc.get(r.uuid) ?? 0 }));
   }
 
+  /**
+   * Flag the documents whose letterhead has a PRINT version, so the UI can offer the two downloads as a
+   * choice and otherwise offer one button. One query for the whole page, keyed off the letterhead id stamped
+   * on each row at generation - no R2 read, and nothing at all when the page holds no generated documents.
+   */
+  async function decoratePrint(deps: Deps, rows: any[]): Promise<any[]> {
+    const ids = [...new Set(rows.map((r) => r.letterheadId).filter((x): x is string => !!x))];
+    if (ids.length === 0) return rows;
+    const heads = await deps.db.select().from(schema.letterheads).where(inArray(schema.letterheads.uuid, ids));
+    const withPrint = new Set(heads.filter((h) => hasPrintVersion(h)).map((h) => h.uuid));
+    return rows.map((r) => ({ ...r, printVariant: !!r.letterheadId && withPrint.has(r.letterheadId) }));
+  }
+
+  const decorate = async (deps: Deps, actor: AppUser | undefined, rows: any[]) => decoratePrint(deps, await decorateAck(deps, actor, rows));
+
   async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser) {
     const where = applyScope(scope, table.code, ownerCol);
     const all = visibleByDelete(await deps.db.select().from(table).where(where), showDeleted);
     const page = paginate(all, maxPageSize, pageToken, (r: any) => +new Date(r.createdAt), (r: any) => r.uuid);
-    return { items: await decorateAck(deps, actor, page.items), nextPageToken: page.nextPageToken };
+    return { items: await decorate(deps, actor, page.items), nextPageToken: page.nextPageToken };
   }
 
   async function get(deps: Deps, actor: AppUser, id: string) {
     const row = await loadRow(deps, id); // access already enforced by the middleware on this path
     if (!row || row.deleteTime) throw notFound(`${singular} not found`);
-    return (await decorateAck(deps, actor, [row]))[0];
+    return (await decorate(deps, actor, [row]))[0];
   }
 
   async function create(deps: Deps, actor: AppUser, input: CreateInput, id?: string) {
@@ -110,7 +126,7 @@ export function makeDocumentService(cfg: Cfg) {
       base.code = await allocFlatCode(deps, table);
     }
     const row = (await deps.db.insert(table).values(base).returning() as any[])[0]!;
-    await audit(deps, actor, `${singular}.create`, collection, row.uuid, undefined, row);
+    await audit(deps, actor, `${singular}.create`, collection, row.uuid, createdMeta(row, collection), row);
     // Org documents can fan a notification to a chosen audience on publish. If acknowledgement is required it's
     // an ACTION item ("review & sign"), at the configured `document` priority (high by default).
     if (acknowledgeable && base.published !== false && input.notify_audience && input.notify_audience.kind !== "none") {
@@ -174,7 +190,7 @@ export function makeDocumentService(cfg: Cfg) {
       if (has("requires_ack") && patch.requires_ack && !row.requiresAck) set.ackVersionTime = new Date();
     }
     const updated = (await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning() as any[])[0]!;
-    await audit(deps, actor, `${singular}.update`, collection, id, undefined, updated);
+    await audit(deps, actor, `${singular}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
     return updated;
   }
 
@@ -269,6 +285,7 @@ export function makeDocumentService(cfg: Cfg) {
     const providerId = "cashfree";
     const provider = getProvider(providerId);
     if (!provider) throw failedPrecondition(`e-sign provider "${providerId}" is not available`);
+    assertProviderConfigured(provider, deps.esignSecrets?.[providerId]);
     const cfg = await getSettingValue<EsignConfig>(deps, "esign", DEFAULT_ESIGN);
     const aadhaar = (await readIdentityValues(deps, emp)).aadhaar;
     if (provider.requiresAadhaar && !aadhaar) throw failedPrecondition("this employee has no Aadhaar on file; cannot request Aadhaar e-sign");

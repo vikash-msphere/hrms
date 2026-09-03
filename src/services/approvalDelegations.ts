@@ -5,7 +5,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, removedMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -56,7 +56,8 @@ export async function deleteApprovalDelegation(deps: Deps, actor: AppUser, id: s
   if (!row) throw notFound("approval delegation not found");
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   await deps.db.delete(schema.approvalDelegations).where(eq(schema.approvalDelegations.uuid, id));
-  await audit(deps, actor, "approvalDelegation.delete", "approval-delegations", id);
+  // A hard delete (see above): who was covering for whom, and when, survives only here.
+  await audit(deps, actor, "approvalDelegation.delete", "approval-delegations", id, removedMeta(row, "approval-delegations"), row);
 }
 
 export const approvalDelegationSpec: CrudSpec<ApprovalDelegationInput, typeof schema.approvalDelegations> = {

@@ -6,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { notFound, invalidArgument, failedPrecondition, alreadyExists } from "../lib/errors";
 import { clearCache } from "../lib/cache";
 import { paginate } from "../http/pagination";
@@ -31,17 +31,17 @@ export async function createRole(deps: Deps, actor: AppUser, body: { name?: stri
   const [row] = await deps.db.insert(schema.roles).values({ name, label: String(body.label || name), protected: !!body.protected }).returning();
   // A new role starts with NO access_rules rows -> the engine reconstructs EMPTY_GRANT (deny-all). Authority is
   // added later as individual rules via the access-rules API. No grant blob, no recompile.
-  await audit(deps, actor, "role.create", "roles", name);
+  await audit(deps, actor, "role.create", "roles", name, createdMeta(row, "roles"), row);
   return row!;
 }
 
 export async function updateRole(deps: Deps, actor: AppUser, name: string, body: { label?: string; protected?: boolean }) {
-  await getRole(deps, name); // 404 if absent
+  const before = await getRole(deps, name); // 404 if absent, and the label/protected this write replaces
   const patch: Record<string, unknown> = { updatedAt: new Date() }; // name is immutable (it is the key + FK target)
   if (body.label !== undefined) patch.label = String(body.label);
   if (body.protected !== undefined) patch.protected = !!body.protected;
   const [row] = await deps.db.update(schema.roles).set(patch).where(eq(schema.roles.name, name)).returning();
-  await audit(deps, actor, "role.update", "roles", name);
+  await audit(deps, actor, "role.update", "roles", name, diffMeta(before, row, patch, "roles"), row);
   return row!;
 }
 
@@ -56,5 +56,6 @@ export async function deleteRole(deps: Deps, actor: AppUser, name: string) {
   await deps.db.delete(schema.accessRules).where(and(eq(schema.accessRules.subject, name), eq(schema.accessRules.subjectKind, "role")));
   clearCache(`grant:${name}`);
   await deps.db.delete(schema.roles).where(eq(schema.roles.name, name));
-  await audit(deps, actor, "role.delete", "roles", name);
+  // The role row and its access rules are hard-deleted above, so what it WAS survives only here.
+  await audit(deps, actor, "role.delete", "roles", name, removedMeta(role, "roles"), role);
 }

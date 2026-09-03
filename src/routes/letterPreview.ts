@@ -4,7 +4,8 @@ import type { AppEnv } from "../env";
 import { jsonBody } from "../http/jsonRequest";
 import { assembleLetterContext } from "../services/letterData";
 import { resolveLetter, type LetterTemplate } from "../domain/letters";
-import { letterheadDataUrl } from "../services/letterheadLogos";
+import { documentLetterhead, type OrgWithDocumentLogos } from "../services/letterheads";
+import { getSettingValue } from "../services/settings";
 import { renderLetterPdf } from "../lib/letterPdf";
 import { idFromPath } from "../services/documentsCommon";
 import { invalidArgument } from "../lib/errors";
@@ -40,8 +41,9 @@ export const letterPreview = new Hono<AppEnv>().post("/", async (c) => {
   if (!employeeId) throw invalidArgument("employee is required");
 
   const ctx = await assembleLetterContext(c.get("deps"), employeeId);
-  const letterhead = await letterheadDataUrl(c.get("deps"), letterheadRef !== undefined ? letterheadRef : template.letterhead);
-  if (letterhead) ctx.org.logo = letterhead;
+  const org = await getSettingValue<OrgWithDocumentLogos>(c.get("deps"), "organization", {});
+  const letterhead = await documentLetterhead(c.get("deps"), org, "letter", [letterheadRef, template.letterhead]);
+  if (letterhead) ctx.letterhead = letterhead;
   const tpl: LetterTemplate = { id: template.id ?? "preview", label: template.label ?? "Preview", filename: template.filename, letterhead: template.letterhead, inputs: template.inputs as LetterTemplate["inputs"], blocks: template.blocks as LetterTemplate["blocks"] };
   const { bytes: pdf } = await renderLetterPdf(resolveLetter(tpl, ctx, input ?? {}).content);
   // pdf-lib returns a Uint8Array; hand c.body a plain ArrayBuffer (matches the download path's bytes type).

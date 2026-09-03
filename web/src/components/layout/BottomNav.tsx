@@ -14,7 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { resolveQuickMenu, runQuickAction, visibleQuickActions, KUDOS_ACTION_ID, TICKET_ACTION_ID } from "@/lib/quickActions";
+import { resolveQuickMenu, runQuickAction, visibleQuickActions, KUDOS_ACTION_ID, TICKET_ACTION_ID, REPORT_PROBLEM_ACTION_ID } from "@/lib/quickActions";
 import { useOrg } from "@/lib/org";
 import type { Me } from "@/types";
 
@@ -55,7 +55,7 @@ export function BottomNav({
   // phone bar does not have room for, so they are excluded from the configurable menu and would otherwise be
   // unreachable here. Folded in as their own group - the create menu is exactly where they belong on a phone.
   const visible = visibleQuickActions(me);
-  const standalone = visible.filter((a) => a.id === KUDOS_ACTION_ID || a.id === TICKET_ACTION_ID);
+  const standalone = visible.filter((a) => a.id === KUDOS_ACTION_ID || a.id === TICKET_ACTION_ID || a.id === REPORT_PROBLEM_ACTION_ID);
   // What this page creates comes first. The page's own create button is in the header, which on a phone is
   // several screens up as soon as the list is scrolled - so from anywhere but the top, the fastest route to
   // "add one of these" was a scroll back up or a hunt through twenty unrelated actions. Promoted rather than

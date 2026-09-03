@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { createTransition, terminateForOffboarding } from "./transitions";
@@ -100,7 +100,7 @@ export async function createNoticePeriod(deps: Deps, actor: AppUser, input: Noti
       console.error("offboarding transition from notice failed", e);
     }
   }
-  await audit(deps, actor, "notice_period.create", "notice-periods", row.uuid, undefined, row);
+  await audit(deps, actor, "notice_period.create", "notice-periods", row.uuid, createdMeta(row, "notice-periods"), row);
   return row;
 }
 
@@ -134,7 +134,7 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   if (has("status") && updated.status === "completed") {
     await terminateForOffboarding(deps, actor, updated.employeeId, updated.lastWorkingDay);
   }
-  await audit(deps, actor, "notice_period.update", "notice-periods", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "notice_period.update", "notice-periods", id, diffMeta(row, updated, set, "notice-periods"), updated);
   return updated;
 }
 

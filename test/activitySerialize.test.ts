@@ -27,3 +27,28 @@ describe("toActivityResource entity_ref guard", () => {
     expect(r.entity_ref).toBeUndefined();
   });
 });
+
+// The lineage keys the client passes straight back as `?correlation` / `?session` / `?subject`. All three are
+// equality keys rather than labels, so what matters is that they survive the serializer intact and are absent
+// (not null, not "") when the row carries none - a `?session=` with an empty value would widen the feed to
+// everything instead of narrowing it.
+describe("toActivityResource carries the lineage keys", () => {
+  it("passes the act, the sitting, the authority and the subject through", () => {
+    const r = toActivityResource(row({
+      entity: "compensation", entityId: "cmp1",
+      correlationId: "act-1", sessionId: "u1:1700000000000", actorRole: "payroll_admin", subjectId: "emp1",
+    }));
+    expect(r.correlation_id).toBe("act-1");
+    expect(r.session_id).toBe("u1:1700000000000");
+    expect(r.actor_role).toBe("payroll_admin");
+    expect(r.subject).toBe("employees/emp1"); // a wire ref, so the outbound edge tokenizes it
+  });
+
+  it("omits each one rather than emitting an empty value the client would filter on", () => {
+    const r = toActivityResource(row({ entity: "boards", entityId: "b1" }));
+    expect(r.correlation_id).toBeUndefined();
+    expect(r.session_id).toBeUndefined();
+    expect(r.actor_role).toBeUndefined();
+    expect(r.subject).toBeUndefined();
+  });
+});

@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, fieldDiff } from "../lib/audit";
+import { audit, createdMeta, fieldDiff } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
@@ -118,7 +118,7 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
       nationalIdEnc,
     })
     .returning())[0]!;
-  await audit(deps, actor, "employee.create", "employees", row.uuid, undefined, row);
+  await audit(deps, actor, "employee.create", "employees", row.uuid, createdMeta(row, "employees"), row);
   // Auto-link an existing, unlinked user account that signed in with this email.
   await deps.db
     .update(schema.users)
@@ -194,6 +194,6 @@ export async function setBio(deps: Deps, actor: AppUser, id: string, bio: string
   const v = (bio ?? "").trim();
   if (v.length > 280) throw invalidArgument("bio is too long (max 280 characters)");
   await deps.db.update(schema.employees).set({ bio: v || null, updatedAt: new Date() }).where(eq(schema.employees.uuid, id));
-  await audit(deps, actor, "employee.bio.update", "employees", id);
+  await audit(deps, actor, "employee.bio.update", "employees", id, { diff: { bio: { from: row.bio, to: v || null } } }, row);
   return { bio: v || undefined };
 }

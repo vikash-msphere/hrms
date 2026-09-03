@@ -11,7 +11,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { idFromPath } from "./documentsCommon";
@@ -100,7 +100,7 @@ export async function createRequisition(deps: Deps, actor: AppUser, input: Requi
       closedDate: input.closed_date ? parseDate(input.closed_date, "closed_date") : null,
     })
     .returning())[0]!;
-  await audit(deps, actor, "requisition.create", "job-requisitions", row.uuid, undefined, row);
+  await audit(deps, actor, "requisition.create", "job-requisitions", row.uuid, createdMeta(row, "job-requisitions"), row);
   return row;
 }
 
@@ -128,7 +128,7 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
     if ((s === "closed" || s === "filled") && !row.closedDate && patch.closed_date === undefined) set.closedDate = new Date();
   }
   const updated = (await deps.db.update(schema.jobRequisitions).set(set).where(eq(schema.jobRequisitions.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "requisition.update", "job-requisitions", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "requisition.update", "job-requisitions", id, diffMeta(row, updated, set, "job-requisitions"), updated);
   return updated;
 }
 
@@ -175,7 +175,7 @@ export async function createCandidate(deps: Deps, actor: AppUser, input: Candida
       notes: input.notes?.trim() || null,
     })
     .returning())[0]!;
-  await audit(deps, actor, "candidate.create", "candidates", row.uuid, undefined, row);
+  await audit(deps, actor, "candidate.create", "candidates", row.uuid, createdMeta(row, "candidates"), row);
   return row;
 }
 
@@ -193,7 +193,7 @@ export async function updateCandidate(deps: Deps, actor: AppUser, id: string, pa
   if (patch.tags !== undefined) set.tags = patch.tags?.trim() || null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
   const updated = (await deps.db.update(schema.candidates).set(set).where(eq(schema.candidates.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "candidate.update", "candidates", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "candidate.update", "candidates", id, diffMeta(row, updated, set, "candidates"), updated);
   return updated;
 }
 
@@ -252,7 +252,7 @@ export async function createApplication(deps: Deps, actor: AppUser, input: Appli
       stageChangedDate: new Date(),
     })
     .returning())[0]!;
-  await audit(deps, actor, "application.create", "applications", row.uuid, undefined, row);
+  await audit(deps, actor, "application.create", "applications", row.uuid, createdMeta(row, "applications"), row);
   // A candidate entering the pipeline is the first transition, so it is an event like every other one: rules
   // acknowledge the applicant, alert the hiring manager, or route a referral.
   await emitApplicationEvent(deps, actor, "application.created", row);
@@ -342,7 +342,7 @@ async function setStage(deps: Deps, actor: AppUser, id: string, stage: string): 
     .set({ stage, status: statusForStage(cfg, stage), rejectionReason: null, stageChangedDate: new Date(), updatedAt: new Date() })
     .where(eq(schema.applications.uuid, id))
     .returning();
-  await audit(deps, actor, "application.stage", "applications", id, { stage });
+  await audit(deps, actor, "application.stage", "applications", id, { diff: { stage: { from: row.stage, to: stage }, status: { from: row.status, to: updated!.status } } }, updated);
   // `previousStage` is what makes "moved FORWARD into offer" expressible - without it a rule can't tell a
   // genuine advance from a card being dragged back and forth.
   await emitApplicationEvent(deps, actor, "application.stageChanged", updated!, { previousStage: row.stage });
@@ -360,7 +360,7 @@ export async function updateApplication(deps: Deps, actor: AppUser, id: string, 
   if (patch.applied_date !== undefined) set.appliedDate = patch.applied_date ? parseDate(patch.applied_date, "applied_date") : null;
   if (patch.status !== undefined && patch.status === "withdrawn") set.status = "withdrawn";
   const updated = (await deps.db.update(schema.applications).set(set).where(eq(schema.applications.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "application.update", "applications", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "application.update", "applications", id, diffMeta(row, updated, set, "applications"), updated);
   return updated;
 }
 
@@ -485,7 +485,7 @@ export async function createInterview(deps: Deps, actor: AppUser, input: Intervi
       location: input.location?.trim() || null,
     })
     .returning())[0]!;
-  await audit(deps, actor, "interview.create", "interviews", row.uuid, undefined, row);
+  await audit(deps, actor, "interview.create", "interviews", row.uuid, createdMeta(row, "interviews"), row);
   // Notify each interviewer they're scheduled (with the candidate + time).
   const candName = await candidateNameForApplication(deps, applicationId);
   const when = row.scheduledStart ? ` on ${new Date(row.scheduledStart).toLocaleString()}` : "";
@@ -507,7 +507,7 @@ export async function updateInterview(deps: Deps, actor: AppUser, id: string, pa
   if (patch.interviewers !== undefined) set.interviewerIds = interviewersJson(patch.interviewers);
   if (patch.location !== undefined) set.location = patch.location?.trim() || null;
   const updated = (await deps.db.update(schema.interviews).set(set).where(eq(schema.interviews.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "interview.update", "interviews", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "interview.update", "interviews", id, diffMeta(row, updated, set, "interviews"), updated);
   // A reschedule notifies every interviewer; a changed panel notifies only the newly-added interviewers.
   const timeChanged = set.scheduledStart !== undefined && +new Date(row.scheduledStart ?? 0) !== +new Date(updated.scheduledStart ?? 0);
   const current = parseIdList(updated.interviewerIds);
@@ -526,7 +526,7 @@ async function setInterviewStatus(deps: Deps, actor: AppUser, id: string, status
   const row = await getInterview(deps, id);
   if (row.deleteTime) throw notFound("interview not found");
   const [updated] = await deps.db.update(schema.interviews).set({ status, updatedAt: new Date() }).where(eq(schema.interviews.uuid, id)).returning();
-  await audit(deps, actor, `interview.${status === "done" ? "complete" : "cancel"}`, "interviews", id);
+  await audit(deps, actor, `interview.${status === "done" ? "complete" : "cancel"}`, "interviews", id, stateMeta(row.status, status), updated);
   await emitInterviewEvent(deps, actor, status === "done" ? "interview.completed" : "interview.cancelled", updated!);
   return updated!;
 }
@@ -653,7 +653,7 @@ export async function createInterviewFeedback(deps: Deps, actor: AppUser, input:
       comment: input.comment?.trim() || null,
     })
     .returning())[0]!;
-  await audit(deps, actor, "interview-feedback.create", "interview-feedback", row.uuid, undefined, row);
+  await audit(deps, actor, "interview-feedback.create", "interview-feedback", row.uuid, createdMeta(row, "interview-feedback"), row);
   return row;
 }
 
@@ -667,7 +667,7 @@ export async function updateInterviewFeedback(deps: Deps, actor: AppUser, id: st
   if (patch.recommendation !== undefined) set.recommendation = patch.recommendation ? oneOf(patch.recommendation, RECOMMENDATIONS, "invalid recommendation") : null;
   if (patch.comment !== undefined) set.comment = patch.comment?.trim() || null;
   const updated = (await deps.db.update(schema.interviewFeedback).set(set).where(eq(schema.interviewFeedback.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "interview-feedback.update", "interview-feedback", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "interview-feedback.update", "interview-feedback", id, diffMeta(row, updated, set, "interview-feedback"), updated);
   return updated;
 }
 
@@ -718,7 +718,7 @@ export async function createOffer(deps: Deps, actor: AppUser, input: OfferInput,
       notes: input.notes?.trim() || null,
     })
     .returning())[0]!;
-  await audit(deps, actor, "offer.create", "offers", row.uuid, undefined, row);
+  await audit(deps, actor, "offer.create", "offers", row.uuid, createdMeta(row, "offers"), row);
   // Emitted whether a person wrote the offer or the "draft the offer" rule did, so approval chasing is one rule
   // either way.
   await emitOfferEvent(deps, actor, "offer.created", row);
@@ -738,7 +738,7 @@ export async function updateOffer(deps: Deps, actor: AppUser, id: string, patch:
   if (patch.expiry_date !== undefined) set.expiryDate = patch.expiry_date ? parseDate(patch.expiry_date, "expiry_date") : null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
   const updated = (await deps.db.update(schema.offers).set(set).where(eq(schema.offers.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "offer.update", "offers", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "offer.update", "offers", id, diffMeta(row, updated, set, "offers"), updated);
   return updated;
 }
 
@@ -751,7 +751,7 @@ async function transitionOffer(deps: Deps, actor: AppUser, id: string, to: Offer
   // Guard the flip on the read status so the transition is EXACTLY-ONCE (0 rows = a concurrent call moved it).
   const [updated] = await deps.db.update(schema.offers).set({ status: to, updatedAt: new Date(), ...extra }).where(and(eq(schema.offers.uuid, id), eq(schema.offers.status, row.status))).returning();
   if (!updated) throw failedPrecondition(`cannot move an offer from ${row.status} to ${to}`);
-  await audit(deps, actor, `offer.${to}`, "offers", id);
+  await audit(deps, actor, `offer.${to}`, "offers", id, stateMeta(row.status, to), updated);
   // Every step of the offer workflow is an event, so chasing an unanswered offer and reacting to a "no" are
   // rules rather than more code. `accepted` is emitted by acceptOffer instead - it means far more than a status
   // change, and it carries the hire it produced.

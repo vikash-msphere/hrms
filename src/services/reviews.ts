@@ -4,11 +4,12 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, fieldDiff, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { notify, managerIdOf } from "./notifications";
 import { getSettingValue } from "./settings";
+import { documentLetterhead, type LetterheadMedia, type OrgWithDocumentLogos } from "./letterheads";
 import { DEFAULT_PERFORMANCE, type PerformanceFramework } from "../domain/performance";
 import { renderLetterPdf, type LetterBlock } from "../lib/letterPdf";
 import { formatLongDate } from "../lib/pdfPrimitives";
@@ -58,7 +59,7 @@ export async function submitSelf(deps: Deps, actor: AppUser, id: string, selfCom
     selfRatingsJson: ratings && Object.keys(ratings).length ? JSON.stringify(ratings) : null,
     state: "MANAGER",
   });
-  await audit(deps, actor, "review.submitSelf", "reviews", id);
+  await audit(deps, actor, "review.submitSelf", "reviews", id, stateMeta("SELF", "MANAGER", { employee: `employees/${row.employeeId}` }), row);
   // Hand the review to the employee's manager for the manager stage.
   const mgr = await managerIdOf(deps, row.employeeId);
   if (mgr) await notify(deps, { recipient: mgr, type: "review.self_submitted", title: "Self-review submitted", body: "A report finished their self-assessment. Your review is next.", link: `reviews/${id}`, subject: `reviews/${id}`, action: "respond", actorId: row.employeeId });
@@ -67,7 +68,7 @@ export async function submitSelf(deps: Deps, actor: AppUser, id: string, selfCom
 
 // MANAGER -> SHARED: the manager records ratings + comment and shares the result with the employee.
 export async function submitManager(deps: Deps, actor: AppUser, id: string, input: { ratings?: Record<string, number>; manager_comment?: string | null; overall_rating?: number | null }) {
-  await loadInState(deps, id, "MANAGER");
+  const before = await loadInState(deps, id, "MANAGER"); // also the scores this submission replaces, for the audit diff
   // Ratings are competency-key -> number; stored as JSON. Drop non-numeric values defensively.
   const ratings = input.ratings && typeof input.ratings === "object"
     ? Object.fromEntries(Object.entries(input.ratings).filter(([, v]) => typeof v === "number" && !Number.isNaN(v)))
@@ -81,7 +82,16 @@ export async function submitManager(deps: Deps, actor: AppUser, id: string, inpu
     overallRating: input.overall_rating ?? null,
     state: "SHARED",
   });
-  await audit(deps, actor, "review.submitManager", "reviews", id);
+  // The per-competency scores are the substance of a manager review, and `ratingsJson` was excluded from every
+  // diff as a blob. lib/audit expands it for this collection, so `fieldDiff` states each rating that was set.
+  await audit(deps, actor, "review.submitManager", "reviews", id, stateMeta("MANAGER", "SHARED", {
+    employee: `employees/${row.employeeId}`,
+    diff: {
+      state: { from: "MANAGER", to: "SHARED" },
+      overallRating: { from: null, to: input.overall_rating ?? null },
+      ...fieldDiff({ ratingsJson: before?.ratingsJson ?? null }, { ratingsJson: row.ratingsJson }, ["ratingsJson"], "reviews"),
+    },
+  }), row);
   // The result is now shared with the employee to review + acknowledge.
   await notify(deps, { recipient: row.employeeId, type: "review.shared", title: "Your review is ready", body: "Your manager shared your performance review.", link: `reviews/${id}`, subject: `reviews/${id}`, action: "acknowledge", actorId: actor.employeeId });
   return row;
@@ -92,7 +102,7 @@ export async function submitManager(deps: Deps, actor: AppUser, id: string, inpu
 export async function acknowledgeReview(deps: Deps, actor: AppUser, id: string, comment?: string | null) {
   await loadInState(deps, id, "SHARED");
   const row = await applyState(deps, id, "SHARED", { state: "ACKNOWLEDGED", ackComment: comment?.trim() || null });
-  await audit(deps, actor, "review.acknowledge", "reviews", id);
+  await audit(deps, actor, "review.acknowledge", "reviews", id, stateMeta("SHARED", "ACKNOWLEDGED", { employee: `employees/${row.employeeId}`, ...(comment?.trim() ? { note: comment.trim() } : {}) }), row);
   // A note on the acknowledgement is feedback aimed at the manager - surface it, don't bury it.
   if (comment?.trim()) {
     const mgr = await managerIdOf(deps, row.employeeId);
@@ -111,21 +121,24 @@ export async function nudgeReview(deps: Deps, actor: AppUser, id: string) {
   if (!recipient) throw failedPrecondition("this review's current stage has no owner to remind");
   const body = row.state === "SELF" ? "Reminder: your self-assessment is waiting." : row.state === "MANAGER" ? "Reminder: your manager review is waiting." : "Reminder: your shared review is waiting for your acknowledgement.";
   await notify(deps, { recipient, type: "review.nudge", title: "Review reminder", body, link: `reviews/${id}`, subject: `reviews/${id}`, action: "respond", actorId: actor.employeeId });
-  await audit(deps, actor, "review.nudge", "reviews", id);
+  // Which stage was nudged, and whose inbox it went to - a reminder with neither is unauditable as chasing.
+  await audit(deps, actor, "review.nudge", "reviews", id, { employee: `employees/${recipient}`, note: `at the ${row.state.toLowerCase()} stage` }, row);
   return row;
 }
 
 // The finished review as a letter-style PDF (the employee's record copy). Only a SHARED/ACKNOWLEDGED review
 // renders - before that the manager assessment is still private to its author, and a PDF is a copy that
 // leaves the app, so nothing unshared may be in it. Layout rides the letterhead renderer; content only here.
-export async function renderReviewPdf(deps: Deps, _actor: AppUser, id: string): Promise<{ bytes: Uint8Array; fileName: string }> {
+export async function renderReviewPdf(deps: Deps, _actor: AppUser, id: string, media: LetterheadMedia = "screen"): Promise<{ bytes: Uint8Array; fileName: string }> {
   const row = (await deps.db.select().from(schema.reviews).where(eq(schema.reviews.uuid, id)).limit(1))[0];
   if (!row) throw notFound("review not found");
   if (row.state !== "SHARED" && row.state !== "ACKNOWLEDGED") throw failedPrecondition("only a shared or acknowledged review can be exported");
 
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, row.employeeId)).limit(1))[0];
   const cycle = (await deps.db.select().from(schema.reviewCycles).where(eq(schema.reviewCycles.uuid, row.cycleId)).limit(1))[0];
-  const org = await getSettingValue<{ name?: string; address?: string; logo?: string }>(deps, "organization", {});
+  const org = await getSettingValue<{ name?: string; legal_name?: string; address?: string; logo?: string } & OrgWithDocumentLogos>(deps, "organization", {});
+  // A review export is rendered on demand and never filed, so the print page is chosen per request.
+  const letterhead = await documentLetterhead(deps, org, "review", [], media);
   const framework = await getSettingValue<PerformanceFramework>(deps, "performance", DEFAULT_PERFORMANCE);
   const scaleLabel = (v: number | null | undefined) => (v == null ? "-" : `${v} (${framework.scale.find((s) => s.value === v)?.label ?? ""})`);
 
@@ -165,7 +178,8 @@ export async function renderReviewPdf(deps: Deps, _actor: AppUser, id: string): 
   }
 
   const { bytes } = await renderLetterPdf({
-    org: { name: org.name || "", address: org.address, logo: org.logo },
+    org: { name: org.name || "", address: org.address, logo: org.logo, legalName: org.legal_name || undefined },
+    ...(letterhead ? { letterhead } : {}),
     date: formatLongDate(new Date()),
     to: { name: empName, lines: cycle?.name ? [cycle.name] : [] },
     blocks,
@@ -181,6 +195,6 @@ export async function skipReviewStage(deps: Deps, actor: AppUser, id: string) {
   const next = NEXT[row.state];
   if (!next) throw failedPrecondition("this review is already complete");
   const updated = await applyState(deps, id, row.state, { state: next });
-  await audit(deps, actor, "review.skipStage", "reviews", id);
+  await audit(deps, actor, "review.skipStage", "reviews", id, stateMeta(row.state, next, { employee: `employees/${row.employeeId}` }), updated);
   return updated;
 }

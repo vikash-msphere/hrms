@@ -5,7 +5,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit } from "../lib/audit";
+import { audit, stateMeta } from "../lib/audit";
 import { notFound, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { makeDocumentService } from "./documentService";
@@ -42,7 +42,7 @@ export async function completeTransitionTask(deps: Deps, actor: AppUser, id: str
   const set: SetOf<typeof schema.transitionTasks> = { status: "DONE", completedAt: new Date(), updatedAt: new Date() };
   if (note !== undefined) set.note = note?.trim() || null;
   const updated = (await deps.db.update(schema.transitionTasks).set(set).where(eq(schema.transitionTasks.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "transition-task.complete", "transition-tasks", id);
+  await audit(deps, actor, "transition-task.complete", "transition-tasks", id, stateMeta(row.status, "DONE", { employee: `employees/`, ...(note?.trim() ? { note: note.trim() } : {}) }), updated);
   return updated;
 }
 
@@ -51,7 +51,7 @@ export async function reopenTransitionTask(deps: Deps, actor: AppUser, id: strin
   if (!row) throw notFound("task not found");
   if (row.status !== "DONE") throw failedPrecondition("the task is not done");
   const updated = (await deps.db.update(schema.transitionTasks).set({ status: "TODO", completedAt: null, updatedAt: new Date() }).where(eq(schema.transitionTasks.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "transition-task.reopen", "transition-tasks", id);
+  await audit(deps, actor, "transition-task.reopen", "transition-tasks", id, stateMeta(row.status, "TODO", { employee: `employees/` }), updated);
   return updated;
 }
 

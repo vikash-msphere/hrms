@@ -12,7 +12,7 @@ export type LetterTemplateInput = {
   label?: string;
   category?: string | null;
   filename?: string | null;
-  letterhead?: string | null; // `letterhead-logos/<id>` ref (decoded at the edge) or null
+  letterhead?: string | null; // `letterheads/<id>` ref (decoded at the edge) or null
   inputs?: TemplateInput[] | null;
   blocks?: TemplateBlock[];
 };
@@ -26,7 +26,7 @@ export function rowToLetterTemplate(row: typeof schema.letterTemplates.$inferSel
     label: row.label,
     category: row.category ?? undefined,
     filename: row.filename ?? undefined,
-    letterhead: row.letterheadId ? `letterhead-logos/${row.letterheadId}` : undefined,
+    letterhead: row.letterheadId ? `letterheads/${row.letterheadId}` : undefined,
     inputs: (row.inputs as TemplateInput[] | null) ?? undefined,
     blocks: (row.blocks as TemplateBlock[] | null) ?? [],
   };

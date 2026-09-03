@@ -74,10 +74,10 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   // read those verb names out of `access.can`. Verb rules validate by name (policyValidate), not against this map.
   "bank-formats": ["update", "uploadTemplate"],
   // The artwork is a second object behind the row: `image` reads it, `uploadImage` replaces it.
-  "letterhead-logos": ["update", "delete", "uploadImage", "image"],
+  letterheads: ["update", "delete", "uploadImage", "image", "deleteImage", "preview", "duplicate"],
   payslips: ["preview", "download"],
   "org-documents": ["update", "delete", "download", "acknowledge", "remindAck"],
-  "personal-documents": ["update", "delete", "download", "sign", "refreshEsign"],
+  "personal-documents": ["update", "delete", "download", "sign", "refreshEsign", "print"],
   "document-acknowledgements": ["delete"],
   suggestions: ["update", "delete", "respond", "upvote", "downvote", "merge"],
   referrals: ["update", "delete", "upload", "download", "award"],
@@ -122,14 +122,16 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "bankFile", // download a payroll run as a bank's bulk-payment .xlsx
   "statutoryReport", // download a payroll run's PF/ESI/PT/TDS statutory report (.xlsx)
   "previewPayslip", // render one employee's payslip for an unpublished run, inline, nothing persisted (payroll-runs)
-  "preview", // view a stored document inline, without the right to keep a copy (payslips); effective-access view-as (access-rules)
+  "preview", // view a stored document inline, without the right to keep a copy (payslips); effective-access view-as (access-rules); render a sample page on a letterhead design (letterheads)
   "clockIn", "clockOut", // attendance punches (self-service)
   "sign", // in-place e-signature of a generated letter/contract (personal-documents, owner-only)
   "refreshEsign", // poll an e-sign vendor for a pending document's status and apply it (personal-documents)
   "remindAck", // nudge whoever still owes a signature on a policy's current version (org-documents)
   "run", // run a queued job (operations) or fire a cron tick on demand (cron-runs)
   "uploadTemplate", // upload a bank's blank bulk-payment .xlsx (bank-formats)
-  "uploadImage", "image", // upload / read a letterhead's artwork (letterhead-logos)
+  "uploadImage", "image", "deleteImage", // upload / read / remove one of a letterhead's images (letterheads)
+  "duplicate", // copy a letterhead, artwork and all, as the basis for a variant (letterheads)
+  "print", // re-render a generated letter on its letterhead's print page, storing nothing (personal-documents)
   "award", // award a flat bonus across a scope (bonuses)
   "respond", "upvote", "downvote", // suggestion box: HR triage (status + reply) + peer up/down vote (suggestions); `respond` is also an attendee's RSVP (events)
   "merge", // fold a duplicate suggestion into the one it repeats, taking its votes with it (suggestions)

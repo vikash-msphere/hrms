@@ -14,13 +14,20 @@ export type AppUser = {
   grant: import("./domain/permissions").Grant; // the caller's role grant, loaded on the auth read - the decision reads this, never the DB
   policy: import("./domain/manifests").Policy; // global body-AC manifest (protected fields + refs), carried on the auth read
   reqMeta?: { ip?: string; ua?: string }; // per-request client metadata, set in middleware, recorded by audit()
+  // Identifies the SITTING this request belongs to, for grouping a whole login in the audit trail. Set only on
+  // the session-cookie lane; an API key and an Access assertion carry no session to group by.
+  sessionId?: string;
+  // The grant PATTERN that authorized this request (`compensation.**`), set by the authz middleware once the
+  // decision is made and recorded on every audit row the request writes. Absent on a denial - the refusal
+  // names its own pattern in the problem detail instead.
+  authorizedBy?: string;
   // Set true by audit() (request-actor path) so the authz write backstop knows the handler already logged this
   // request and skips its generic activity row. Reset per request in authz (batch reuses one user object).
   audited?: boolean;
   // Present ONLY on a "view as" simulation (lib/viewAs.ts): this whole AppUser is the SIMULATED subject, and
   // this field carries the real access admin driving it. Audit rows are written against the real human (with
   // the simulated email as `viewing_as` meta), so the trail never credits a read to the person being watched.
-  simulatedBy?: { uuid: string; email: string; employeeId: string | null; name: string | null };
+  simulatedBy?: { uuid: string; email: string; employeeId: string | null; name: string | null; sessionId?: string };
   // Present ONLY when the caller authenticated with an API key (middleware/auth.ts). The principal is still
   // the key's OWNER - `grant` above has already been narrowed by the key's scope - so nothing downstream has
   // to special-case machine callers to be safe. This field exists for the three places that legitimately
@@ -69,6 +76,16 @@ export type Bindings = {
   ESIGN_CASHFREE_CLIENT_ID?: string;
   ESIGN_CASHFREE_CLIENT_SECRET?: string; // also the webhook HMAC key (Cashfree has no separate webhook secret)
   ESIGN_CASHFREE_PUBLIC_KEY?: string; // Cashfree's RSA public key (base64 SPKI or PEM) for the production X-Cf-Signature 2FA header; absent = header not sent
+  // Error tracker DSN, for the /diag relay only (routes/diag.ts). Not a secret - the same DSN is baked into
+  // the SPA as VITE_SENTRY_DSN, and a DSN only permits writing events. It is here so the Worker knows the one
+  // destination it may forward to; unset = the relay 404s and the SPA reports nothing.
+  SENTRY_DSN?: string;
+  // Which build and which deployment the Worker's own errors belong to. `SENTRY_RELEASE` should be the same
+  // string the SPA is built with (VITE_APP_VERSION) so both halves of a trace land on one release;
+  // `SENTRY_ENVIRONMENT` separates staging from production in the tracker. Both optional - absent means
+  // "unknown release" and environment "production".
+  SENTRY_RELEASE?: string;
+  SENTRY_ENVIRONMENT?: string;
   // Web Push (browser notifications): a VAPID keypair (base64url, P-256). Optional - absent = push off, the
   // app degrades to the in-app bell + email digest. Generate once per deployment (e.g. `npx web-push
   // generate-vapid-keys`); the public key is also baked into the SPA as VITE_VAPID_PUBLIC_KEY.

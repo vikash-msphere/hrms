@@ -1,10 +1,9 @@
 import { useMemo } from "react";
-import { FileText, Download, FileLock, CheckCircle2, AlertCircle } from "lucide-react";
-import { download } from "@/api";
+import { FileText, FileLock, CheckCircle2, AlertCircle } from "lucide-react";
 import { useCollection } from "@/hooks/useCollection";
 import { formatDate, humanize, idOf } from "@/lib/utils";
 import type { DocumentResource } from "@/types";
-import { documentFileName } from "@/lib/documents";
+import { DocumentDownload } from "@/components/common/DocumentDownload";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,14 +30,6 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
     () => new Set(docs.filter((d) => d.document_type === "FORM16" && d.official && d.financial_year).map((d) => d.financial_year)),
     [docs]
   );
-
-  async function onDownload(d: DocumentResource) {
-    try {
-      await download(d.path, documentFileName(d));
-    } catch (e) {
-      toast({ title: "Download failed", description: (e as Error).message, variant: "destructive" });
-    }
-  }
 
   return (
     <Card className="mt-6">
@@ -94,11 +85,11 @@ export function EmployeeDocuments({ employeeId, title = "Documents" }: { employe
                       <Badge variant="warning" className="gap-1"><AlertCircle className="h-3 w-3" /> Awaiting signature</Badge>
                     )
                   ) : null}
+                  {/* One control: a plain Download, or a two-item menu when this document's letterhead has a
+                      print version to offer as well. */}
                   {d.size_bytes ? (
                     <AccessAction collection={d.path.split("/")[0]} objectPath={d.path} can={d.access?.can} verb="download" label="Download">
-                      <Button variant="outline" size="sm" onClick={() => onDownload(d)}>
-                        <Download className="h-4 w-4" /> Download
-                      </Button>
+                      <DocumentDownload doc={d} />
                     </AccessAction>
                   ) : null}
                   {/* Object-level access for THIS document: who can read/write/admin it (the "control access per

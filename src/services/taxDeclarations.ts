@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, diffMeta } from "../lib/audit";
+import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
@@ -63,7 +63,7 @@ export async function createTaxDeclaration(deps: Deps, actor: AppUser, input: Ta
     declaredAmount: input.declared_amount ?? 0,
     note: input.note?.trim() || null,
   }).returning())[0]!;
-  await audit(deps, actor, "tax-declaration.create", "tax-declarations", row.uuid, undefined, row);
+  await audit(deps, actor, "tax-declaration.create", "tax-declarations", row.uuid, createdMeta(row, "tax-declarations"), row);
   return row;
 }
 
@@ -82,7 +82,7 @@ export async function updateTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   if (has("declared_amount")) { if ((patch.declared_amount ?? 0) < 0) throw invalidArgument("declared_amount must be >= 0"); set.declaredAmount = patch.declared_amount ?? 0; }
   if (has("note")) set.note = patch.note?.trim() || null;
   const updated = (await deps.db.update(schema.taxDeclarations).set(set).where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "tax-declaration.update", "tax-declarations", id, diffMeta(row, updated, set), updated);
+  await audit(deps, actor, "tax-declaration.update", "tax-declarations", id, diffMeta(row, updated, set, "tax-declarations"), updated);
   return updated;
 }
 
@@ -94,7 +94,7 @@ export async function verifyTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   const updated = (await deps.db.update(schema.taxDeclarations)
     .set({ status: "VERIFIED", verifiedAmount: verifiedAmount ?? row.declaredAmount, decidedBy: actor.uuid, updatedAt: new Date() })
     .where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "tax-declaration.verify", "tax-declarations", id);
+  await audit(deps, actor, "tax-declaration.verify", "tax-declarations", id, stateMeta(row.status, "VERIFIED", { employee: `employees/`, diff: { status: { from: row.status, to: "VERIFIED" }, verifiedAmount: { from: row.verifiedAmount, to: updated.verifiedAmount } } }), updated);
   // Notify only on an actual status change so a re-verify (amount correction) doesn't re-spam the employee.
   if (row.status !== "VERIFIED")
     await notify(deps, { recipient: row.employeeId, type: "tax.verified", title: "Tax declaration verified", body: "Your investment/tax declaration was verified.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
@@ -104,7 +104,7 @@ export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   const row = (await deps.db.select().from(schema.taxDeclarations).where(eq(schema.taxDeclarations.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("declaration not found");
   const updated = (await deps.db.update(schema.taxDeclarations).set({ status: "REJECTED", verifiedAmount: null, decidedBy: actor.uuid, updatedAt: new Date() }).where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id);
+  await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id, stateMeta(row.status, "REJECTED", { employee: `employees/` }), updated);
   if (row.status !== "REJECTED")
     await notify(deps, { recipient: row.employeeId, type: "tax.rejected", title: "Tax declaration rejected", body: "Your investment/tax declaration was rejected - please review and resubmit.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
   return updated;
