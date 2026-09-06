@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FileText } from "lucide-react";
-import { api, download } from "@/api";
+import { download, invoke } from "@/api";
 import { usePermission } from "@/lib/perm";
 import type { DocumentResource } from "@/types";
 import { documentFileName } from "@/lib/documents";
@@ -25,9 +25,11 @@ export function GenerateForm16Button({ employeeId, onGenerated }: { employeeId: 
   if (!canGenerate) return null;
 
   async function generate() {
-    const doc = await api<DocumentResource>("/personal-documents:generateForm16", {
-      method: "POST",
-      body: JSON.stringify({ employee: `employees/${employeeId}`, financial_year: fy }),
+    // Through `invoke`, not the raw `api` helper: filing a document adds a row every mounted list of this
+    // person's documents is showing, and only the write helpers refresh the shared cache for it.
+    const doc = await invoke<DocumentResource>("personal-documents", "generateForm16", undefined, {
+      employee: `employees/${employeeId}`,
+      financial_year: fy,
     });
     toast({ title: "Form 16 generated", description: doc.display_name, variant: "success" });
     onGenerated?.();

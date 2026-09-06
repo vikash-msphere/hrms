@@ -111,7 +111,8 @@ export default function Delegations({ me }: { me: Me }) {
         <div className="flex justify-end gap-1">
           <Button size="sm" variant="ghost" onClick={() => openEdit(r)}>Edit</Button>
           <AccessAction collection={COL} objectPath={r.path} can={r.access?.can} label="Remove">
-            <Button size="sm" variant="ghost" onClick={() => del(r)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+            {/* Named: an icon alone is nameless to a screen reader, and this is the destructive one of the two. */}
+            <Button size="sm" variant="ghost" aria-label="Remove delegation" title="Remove delegation" onClick={() => del(r)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
           </AccessAction>
         </div>
       ) : null,

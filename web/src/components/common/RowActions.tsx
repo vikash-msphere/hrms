@@ -36,6 +36,12 @@ export function RowActions({ actions, objectPath, can }: { actions: RowAction[];
         <Button
           variant="ghost"
           size="icon"
+          // The row underneath is usually clickable in its own right (DataTable's `onRowClick` opens the
+          // record), and this button sits inside it - so without this, reaching for the actions menu ALSO
+          // opened the row: the menu appeared over a detail sheet nobody asked for, and whichever action was
+          // then chosen ran against a page that had moved. Stopping the click leaves Radix's own pointerdown
+          // trigger alone, so the menu still opens.
+          onClick={(e) => e.stopPropagation()}
           className="h-8 w-8 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 coarse:h-9 coarse:w-9"
         >
           <MoreHorizontal className="h-4 w-4" />

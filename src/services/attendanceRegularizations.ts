@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { and, eq, isNull } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -63,10 +63,11 @@ export async function createRegularization(deps: Deps, actor: AppUser, input: Re
   // Default the employee to the caller's own record unless an admin files on someone's behalf.
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
-  const row = (await deps.db
+  // Allocated inside the retry (codeAlloc.ts): a forgotten punch is noticed by half a team at once.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.attendanceRegularizations)
     .values({ code: await allocOwnedCode(deps, schema.attendanceRegularizations, schema.attendanceRegularizations.employeeId, employeeId), employeeId, date: new Date(date), sessions, reason: input.reason?.trim() || null, state: "PENDING" })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "attendance-regularization.create", "attendance-regularizations", row.uuid, { employee: `employees/${employeeId}`, date: new Date(date).toISOString().slice(0, 10), sessions, ...(input.reason ? { reason: input.reason } : {}) }, row);
   await notifyManager(deps, employeeId, { type: "regularization.requested", noun: "attendance regularization" });
   await emitEvent(deps, actor, "attendanceRegularization.requested", { subject: `attendance-regularizations/${row.uuid}`, employeeId, payload: { date: new Date(date).toISOString() } });
@@ -101,14 +102,18 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
       await deps.db.update(schema.attendanceSessions).set({ supersededBy: id, updatedAt: new Date() }).where(eq(schema.attendanceSessions.uuid, s.uuid));
     }
     for (const p of row.sessions) {
-      await deps.db.insert(schema.attendanceSessions).values({
-        code: await allocOwnedCode(deps, schema.attendanceSessions, schema.attendanceSessions.employeeId, row.employeeId),
-        employeeId: row.employeeId,
-        clockIn: new Date(p.clock_in),
-        clockOut: new Date(p.clock_out),
-        source: "correction",
-        note: row.reason ?? null,
-      });
+      // Each corrected session allocates its own code, so each is retried on its own: an approval that
+      // writes three sessions must not fail on the third because somebody else clocked in mid-write.
+      await withFreshCode(async () =>
+        deps.db.insert(schema.attendanceSessions).values({
+          code: await allocOwnedCode(deps, schema.attendanceSessions, schema.attendanceSessions.employeeId, row.employeeId),
+          employeeId: row.employeeId,
+          clockIn: new Date(p.clock_in),
+          clockOut: new Date(p.clock_out),
+          source: "correction",
+          note: row.reason ?? null,
+        }),
+      );
     }
   }
   const verb = to === "APPROVED" ? "approve" : to === "REJECTED" ? "reject" : "cancel";

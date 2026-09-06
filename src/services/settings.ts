@@ -1,9 +1,10 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldDiff } from "../lib/audit";
-import { notFound } from "../lib/errors";
+import { aborted, isSettingKeyCollision, notFound } from "../lib/errors";
+import { etagOf } from "../http/serialize";
 import { paginate } from "../http/pagination";
 import { refSettings, bustRef } from "../lib/refData";
 
@@ -70,13 +71,26 @@ function settingDiff(before: string, after: string): Record<string, { from: unkn
   return Object.keys(diff).length ? diff : undefined;
 }
 
-export async function upsertSetting(deps: Deps, actor: AppUser, key: string, value: unknown) {
+export async function upsertSetting(deps: Deps, actor: AppUser, key: string, value: unknown, ifMatch?: string) {
   const json = JSON.stringify(value ?? {});
   // Read-for-diff goes straight to the row: this is the one path that must see the CURRENT value (a stale
   // snapshot would write a wrong audit diff).
   const existing = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];
   if (existing) {
-    const [updated] = await deps.db.update(schema.settings).set({ value: json, updatedAt: new Date() }).where(eq(schema.settings.key, key)).returning();
+    if (ifMatch && ifMatch !== etagOf(+new Date(existing.updatedAt))) throw aborted("etag mismatch");
+    // COMPARE-AND-SWAP when the caller said which version it edited, exactly as services/crud.ts does for
+    // every other row. It matters MORE here than there: a settings value is one blob holding many independent
+    // fields, so the whole of it is rewritten to change any part of it. Two people saving different sections
+    // of the same key a moment apart is not an exotic race - it is two admins in Settings - and without the
+    // version in the WHERE the second save silently reverts the first, with a 200 and no trace but the audit
+    // diff. A caller that sends no If-Match keeps last-write-wins, so nothing that never had an ETag to send
+    // changes behaviour.
+    const [updated] = await deps.db
+      .update(schema.settings)
+      .set({ value: json, updatedAt: new Date() })
+      .where(ifMatch ? and(eq(schema.settings.key, key), eq(schema.settings.updatedAt, existing.updatedAt)) : eq(schema.settings.key, key))
+      .returning();
+    if (!updated) throw aborted("etag mismatch");
     // After the write: the rest of THIS request (an automation the save triggers, the serialized response)
     // must see the new value, not the snapshot taken before it.
     bustRef(deps, "settings");
@@ -84,7 +98,20 @@ export async function upsertSetting(deps: Deps, actor: AppUser, key: string, val
     await audit(deps, actor, "setting.update", "settings", key, diff ? { diff } : undefined);
     return updated!;
   }
-  const [inserted] = await deps.db.insert(schema.settings).values({ key, value: json }).returning();
+  // An If-Match on a key that has no row at all is a caller editing a version that is gone (the key was
+  // never written, or something purged it). Creating it here would discard whatever it thought it was
+  // amending, so it is the same conflict as any other stale ETag.
+  if (ifMatch) throw aborted("etag mismatch");
+  // Two callers can both read no row and both get here; `settings.key` is the primary key, so the second
+  // insert fails. That is the create-race the caller can simply retry against the row that now exists - not
+  // a fault - so it answers 409 like every other lost allocation race rather than an unhandled 500.
+  let inserted: typeof schema.settings.$inferSelect | undefined;
+  try {
+    [inserted] = await deps.db.insert(schema.settings).values({ key, value: json }).returning();
+  } catch (e) {
+    if (isSettingKeyCollision(e)) throw aborted("the setting was created concurrently; read it again and retry");
+    throw e;
+  }
   bustRef(deps, "settings");
   // A first save has no previous value to diff against, so the whole of what it set IS the change.
   await audit(deps, actor, "setting.create", "settings", key, { diff: { value: { from: null, to: json.length > 140 ? `${json.slice(0, 140)}…` : json } } }, inserted);

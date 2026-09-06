@@ -3,16 +3,37 @@ import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const Select = SelectPrimitive.Root;
+// The id a surrounding <Field> minted for this select, handed down to the TRIGGER.
+//
+// Radix's root takes no id (it renders nothing), and the trigger is written by the call site - so a Field
+// had no way to point its `<label for>` at anything, and every select in the app was a control whose name a
+// screen reader could not read: it announced the current VALUE and nothing about what the value is for.
+// Field now clones this root with an `id`, which arrives here and lands on the trigger.
+const SelectIdCtx = React.createContext<string | undefined>(undefined);
+
+function Select({ id, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Root> & { id?: string }) {
+  return (
+    <SelectIdCtx.Provider value={id}>
+      <SelectPrimitive.Root {...props} />
+    </SelectIdCtx.Provider>
+  );
+}
+// Set explicitly: <Field> identifies the controls it may bind its label to by displayName, and a minified
+// production build mangles Function.name.
+Select.displayName = "Select";
+
 const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
 
 const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
->(({ className, children, ...props }, ref) => (
+>(({ className, children, ...props }, ref) => {
+  const fieldId = React.useContext(SelectIdCtx);
+  return (
   <SelectPrimitive.Trigger
     ref={ref}
+    id={props.id ?? fieldId}
     className={cn(
       // coarse:min-h-10 mirrors the phone floor index.css puts on native inputs, so a form's selects and its
       // text fields end up the same height on touch. `min-h` rather than `h` so a caller who deliberately
@@ -33,7 +54,8 @@ const SelectTrigger = React.forwardRef<
       <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
-));
+  );
+});
 SelectTrigger.displayName = SelectPrimitive.Trigger.displayName;
 
 const SelectContent = React.forwardRef<

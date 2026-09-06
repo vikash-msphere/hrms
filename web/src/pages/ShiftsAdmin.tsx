@@ -183,13 +183,16 @@ export default function ShiftsAdmin({ openId }: { openId?: string }) {
               </div>
             </div>
           )}
-          <Field label="Name" error={duplicateName ? "Another shift already has this name." : undefined}>
+          {/* Eager, all three: none of these is a half-typed value the reader is about to finish - a clash is
+              with ANOTHER shift, and the break and end-time rules are about a different field. They also
+              gate Save, so held back they leave a disabled button with nothing on the form saying why. */}
+          <Field label="Name" eager error={duplicateName ? "Another shift already has this name." : undefined}>
             <Input ref={nameRef} value={form.name} placeholder={`e.g. Day ${form.start}–${form.end}`} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus />
           </Field>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
             <Field label="Start"><Input type="time" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} /></Field>
-            <Field label="End" error={sameTime ? "Pick a different end time." : undefined}><Input type="time" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} /></Field>
-            <Field label="Unpaid break" hint="minutes" error={breakTooLong ? "Shorter than the shift." : undefined} className="col-span-2 sm:col-span-1">
+            <Field label="End" eager error={sameTime ? "Pick a different end time." : undefined}><Input type="time" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} /></Field>
+            <Field label="Unpaid break" hint="minutes" eager error={breakTooLong ? "Shorter than the shift." : undefined} className="col-span-2 sm:col-span-1">
               <Input type="number" min={0} step={5} value={form.break_minutes} onChange={(e) => setForm({ ...form, break_minutes: e.target.value })} />
             </Field>
           </div>

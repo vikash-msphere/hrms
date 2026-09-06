@@ -252,8 +252,11 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
               </Button>
               {empIdx >= 0 && liveEmployees.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  {/* Named for a screen reader, hinted by name for a pointer: the tooltip says WHO is next,
+                      which the label cannot (it would read the person's name as the button's purpose). */}
                   <Button
                     variant="ghost" size="sm" className="h-7 px-1.5" disabled={!prevEmp}
+                    aria-label="Previous employee"
                     title={prevEmp ? `${prevEmp.first_name} ${prevEmp.last_name}` : undefined}
                     onClick={() => prevEmp && navigate(`employees/${idOf(prevEmp.path)}`)}
                   >
@@ -262,6 +265,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
                   <span className="tabular-nums">{empIdx + 1} of {liveEmployees.length}</span>
                   <Button
                     variant="ghost" size="sm" className="h-7 px-1.5" disabled={!nextEmp}
+                    aria-label="Next employee"
                     title={nextEmp ? `${nextEmp.first_name} ${nextEmp.last_name}` : undefined}
                     onClick={() => nextEmp && navigate(`employees/${idOf(nextEmp.path)}`)}
                   >
@@ -271,6 +275,9 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
               )}
             </div>
             <ProfileView
+              // The person's name IS this page's title - there is no PageHeader above it - so it carries the
+              // page's only `h1`.
+              heading="h1"
               name={`${emp.first_name} ${emp.last_name}`}
               email={emp.work_email}
               jobTitle={emp.job_title}
@@ -279,7 +286,7 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
               // Bio is personal: the "Add a short bio" prompt is owner-only. HR still gets the edit
               // pencil once a bio EXISTS (moderation), just not the empty-state nudge.
               onEditBio={me.employee_id === id || (canManage && !!emp.bio) ? () => setBioOpen(true) : undefined}
-              avatar={<PhotoAvatar employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+              avatar={<PhotoAvatar className="h-16 w-16 sm:h-[72px] sm:w-[72px]" employeeId={id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable={canBank} onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
               meta={
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                   {emp.employee_number && (

@@ -172,8 +172,12 @@ for (let k = 0; k < 4; k++) {
   rpRows.push(` (${q(nid())},${q(ku.uuid)},${q(author.uuid)},${q(author.email)},${q(REPLIES[k % REPLIES.length])},${NOW - k * HOUR})`);
 }
 
-// --- Demo employee logins (employee role) so you can "act as" a few people -----------------------------------
-const userRows = [employees[0]!, employees[4]!, employees[8]!].map(
+// --- Demo employee logins (employee role) ---------------------------------------------------------------------
+// One account per demo employee, matching what the app does when HR creates a person (services/employees.ts
+// provisionAccount). An access rule names a `users/{id}` subject, so a person with no account row can neither be
+// granted access nor appear in the access modal's people picker - seeding three accounts for thirteen employees
+// left that picker showing three names.
+const userRows = employees.map(
   (e) => ` (${q(nid())},${q(e.email)},'employee','active',${q(e.uuid)},${T0},${T0})`,
 );
 

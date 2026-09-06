@@ -429,8 +429,34 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
       const label = pairs.length ? pairs.map((p) => `${hm(p.clock_in)}–${hm(p.clock_out)}`).join(", ") : "no punches";
       bits.push(<span key="ses" className="text-muted-foreground tabular-nums">{label}</span>);
     }
-    // Access-audit rows: a sensitive read names the field/sub-resource; a denial names the attempted path.
-    if (typeof m.field === "string" && m.field) bits.push(<span key="f" className="text-muted-foreground">{fieldLabel(m.field)}</span>);
+    // Permission changes (`access-rule.*`): the rule itself, in words, plus who it is for.
+    //
+    // A rule write has no field diff - the whole of what happened is WHICH access moved for WHOM - so this cell
+    // was empty for every one of them, and the row said only that somebody had touched an access rule. The
+    // server stamps the plain-language sentence and the subject on every rule event (it also hard-deletes the
+    // row on the delete / reject / expiry paths, so the meta is the only place left to read it from).
+    // `access-rule.clone` has no rule of its own (it is the copy, not one of the rules it wrote), so the
+    // branch keys on the action as well as on the rule id.
+    const isRuleEvent = typeof m.rule_id === "string" || a.action.startsWith("access-rule.");
+    if (isRuleEvent) {
+      // The subject as a person where the meta carries their employee ref, else the label the server wrote
+      // (their email, or "the hr role"). A user rule's stored subject is a users uuid and names nobody.
+      const who = typeof m.subject_employee === "string" ? empName(m.subject_employee) : undefined;
+      const subject = who ?? (typeof m.subject_label === "string" ? m.subject_label : null);
+      // A four-eyes decision approves either a grant or a REMOVAL - opposite outcomes under one action code.
+      const removal = m.decided === "removal" ? "removal of " : "";
+      const sentence = typeof m.sentence === "string" && m.sentence ? `${removal}${m.sentence}` : null;
+      if (subject || sentence) bits.push(<span key="rule" className="text-muted-foreground">{[subject, sentence].filter(Boolean).join(" · ")}</span>);
+      // A pending row is a request, not a live grant; an expiry is the one fact that says a grant is temporary.
+      if (m.status === "pending" || m.status === "pending_delete") bits.push(<span key="rst" className="text-muted-foreground">awaiting approval</span>);
+      if (typeof m.expire_time === "string") bits.push(<span key="rex" className="text-muted-foreground">expires {fmtIso(m.expire_time) ?? m.expire_time}</span>);
+      if (typeof m.requested_by === "string") bits.push(<span key="rrq" className="text-muted-foreground">requested by {fmt(m.requested_by)}</span>);
+      // A copy that refused part of itself says so here; the per-rule entries under the same act say which.
+      if (typeof m.failed === "number" && m.failed > 0) bits.push(<span key="rfl" className="text-muted-foreground">{m.failed} rejected</span>);
+    }
+    // Access-audit rows: a sensitive read names the field/sub-resource; a denial names the attempted path. Not
+    // for a rule row: there the field is part of the rule, and the sentence above already reads it out.
+    if (typeof m.field === "string" && m.field && !isRuleEvent) bits.push(<span key="f" className="text-muted-foreground">{fieldLabel(m.field)}</span>);
     // Raw request path: only for a denial / an unresolved (no-target) row — there the attempted path IS the
     // signal. For a normal mutation the action pill + resolved target already say it, so the path is pure noise.
     const showPath = a.action === "access.denied" || (!a.entity_name && !a.entity_ref);

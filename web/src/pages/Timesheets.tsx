@@ -484,11 +484,14 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
             </div>
           </DialogDescription>
         </DialogHeader>
-        <Field label="Hours" error={hours.trim() !== "" && !valid ? "Enter between 0 and 24 hours." : undefined}>
+        {/* `htmlFor` by hand: the field holds a stepper, the input and the quick-hour chips, and Field can
+            only bind its label when there is a single control to bind it to - so without this the label named
+            nothing. */}
+        <Field label="Hours" htmlFor="timesheet-hours" error={hours.trim() !== "" && !valid ? "Enter between 0 and 24 hours." : undefined}>
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={() => bump(-0.25)} aria-label="Quarter hour less"><Minus className="h-4 w-4" /></Button>
-              <Input type="number" min={0} max={24} step={0.25} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus
+              <Input id="timesheet-hours" type="number" min={0} max={24} step={0.25} value={hours} onChange={(e) => setHours(e.target.value)} autoFocus
                 className="h-10 w-24 text-center text-base tabular-nums" />
               <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={() => bump(0.25)} aria-label="Quarter hour more"><Plus className="h-4 w-4" /></Button>
               <span className="ml-auto text-xs text-muted-foreground">
@@ -508,9 +511,9 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
             </div>
           </div>
         </Field>
-        <Field label="Description (optional)" hint="Approvers read this when the week is submitted.">
+        <Field label="Description (optional)" htmlFor="timesheet-description" hint="Approvers read this when the week is submitted.">
           {/* A datalist, not a combobox: typing stays primary and past descriptions are one keystroke away. */}
-          <Input list={suggestions.length ? `desc-${project.path}` : undefined} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What did you work on?" />
+          <Input id="timesheet-description" list={suggestions.length ? `desc-${project.path}` : undefined} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What did you work on?" />
           {suggestions.length > 0 && (
             <datalist id={`desc-${project.path}`}>{suggestions.map((s) => <option key={s} value={s} />)}</datalist>
           )}

@@ -6,12 +6,54 @@ import { cn } from "@/lib/utils";
 
 const ToastProvider = ToastPrimitives.Provider;
 
+/**
+ * Keep the toast stack in the accessibility tree while a dialog is open.
+ *
+ * A Radix modal hides the rest of the page from assistive tech by walking `document.body`'s children and
+ * stamping `aria-hidden="true"` (plus its own `data-aria-hidden` bookkeeping marker) on every one that is not
+ * the dialog. The toast viewport is one of those children - so from the moment any dialog opened, every
+ * confirmation and every ERROR the app raised was announced to nobody, which is exactly when the app has the
+ * most to say: almost every write in this app is made from inside a dialog.
+ *
+ * Radix offers no way to exempt a node, so this un-hides ours as the sweep happens. Only `aria-hidden` is
+ * removed; `data-aria-hidden` is left alone, because that is the attribute the library queries to find what it
+ * hid - stripping it would strand the node when the dialog closes. It is a live region reporting the result of
+ * what the reader just did, and it is never behind the modal's scrim, so nothing about it is "the rest of the
+ * page" that the modal is entitled to silence.
+ */
+/** Give the node to the caller's ref AND to our own, so the forwarded ref keeps working. */
+function mergeRefs<T>(...refs: (React.Ref<T> | undefined)[]): React.RefCallback<T> {
+  return (node) => {
+    for (const ref of refs) {
+      if (typeof ref === "function") ref(node);
+      else if (ref) (ref as React.MutableRefObject<T | null>).current = node;
+    }
+  };
+}
+
+function useAlwaysAnnounced(ref: React.RefObject<HTMLElement>) {
+  React.useEffect(() => {
+    // The forwarded ref lands on the `<ol>`; the node Radix hides is the `role="region"` wrapper it puts
+    // around it, which is the actual child of `document.body` the modal's sweep walks over.
+    const region = ref.current?.closest('[role="region"]');
+    if (!region) return;
+    const unhide = () => region.hasAttribute("aria-hidden") && region.removeAttribute("aria-hidden");
+    unhide(); // a dialog open before this mounted has already stamped it
+    const observer = new MutationObserver(unhide);
+    observer.observe(region, { attributes: true, attributeFilter: ["aria-hidden"] });
+    return () => observer.disconnect();
+  }, [ref]);
+}
+
 const ToastViewport = React.forwardRef<
   React.ElementRef<typeof ToastPrimitives.Viewport>,
   React.ComponentPropsWithoutRef<typeof ToastPrimitives.Viewport>
->(({ className, ...props }, ref) => (
+>(({ className, ...props }, ref) => {
+  const own = React.useRef<HTMLOListElement>(null);
+  useAlwaysAnnounced(own);
+  return (
   <ToastPrimitives.Viewport
-    ref={ref}
+    ref={mergeRefs(ref, own)}
     className={cn(
       // On a phone the toast stack has to clear the fixed bottom nav (and the home indicator below it),
       // otherwise every confirmation lands on top of the navigation - the one strip that must stay tappable.
@@ -22,7 +64,8 @@ const ToastViewport = React.forwardRef<
     )}
     {...props}
   />
-));
+  );
+});
 ToastViewport.displayName = ToastPrimitives.Viewport.displayName;
 
 const toastVariants = cva(

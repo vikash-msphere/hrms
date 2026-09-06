@@ -1,4 +1,4 @@
-import { fileLeave, gotoRoute, test, expect } from "./fixtures";
+import { SPA_HEADERS, fileLeave, gotoRoute, test, expect } from "./fixtures";
 
 // Something one person did, arriving in another person's browser.
 //
@@ -6,30 +6,43 @@ import { fileLeave, gotoRoute, test, expect } from "./fixtures";
 // end: that the bell carries an unread count for the person it was addressed to, that opening it lists the
 // thing that happened, and that reading it clears the count. That chain crosses two users and the
 // notifications provider, and it is the mechanism half the app leans on to tell anybody anything.
-test("a request filed by one person shows up in their manager's bell", async ({ as }) => {
+//
+// Read on the EMPLOYEE's bell, on a decision rather than on the filing. The other direction - a request
+// landing in the manager's bell - is the same mechanism, but the manager's unread pile is what
+// `notificationsPage.spec.ts` empties in one press ("Mark all read"), and two specs cannot both be the
+// authority on one person's unread count. Nothing clears the employee's pile wholesale, and the other specs
+// that decide this employee's requests can only push the count UP, which is all this asserts.
+test("a decision by one person shows up in the other's bell", async ({ as }) => {
+  test.setTimeout(120_000);
   const employee = await as("employee");
   const manager = await as("manager");
 
-  // The manager's starting position, whatever the seed left them.
-  await gotoRoute(manager, "dashboard");
-  const bell = manager.getByRole("banner").getByRole("button", { name: /^Notifications/ });
+  // The employee's starting position, whatever the seed and the rest of the lane have left them.
+  await gotoRoute(employee, "dashboard");
+  const bell = employee.getByRole("banner").getByRole("button", { name: /^Notifications/ });
   await expect(bell).toBeVisible();
-  const unreadBefore = await settledUnread(manager, bell);
+  const unreadBefore = await settledUnread(employee, bell);
 
-  // The employee files leave (through the API - the UI path is leaveTwoRoles.spec.ts, and repeating it here
-  // would be testing the form twice to test the bell once).
-  await fileLeave(employee, `E2E bell ${Date.now()}`);
+  // A request of their own, decided by their manager - both over the API, because the forms behind them are
+  // `leaveTwoRoles.spec.ts`'s subject and repeating them here would test them twice to test the bell once.
+  const leave = await fileLeave(employee, `E2E bell ${Date.now()}`);
+  const decided = await manager.request.post(`/v1/${leave}:approve`, { headers: SPA_HEADERS });
+  expect(decided.ok(), await decided.text()).toBe(true);
 
-  // The manager's browser learns about it on its next load - a write in somebody else's session cannot reach
-  // into this one's cache.
-  await manager.reload();
-  await expect(manager.getByRole("main")).toBeVisible();
-  expect(await settledUnread(manager, bell)).toBe(unreadBefore + 1);
+  // The employee's browser learns about it on its next load - a write in somebody else's session cannot
+  // reach into this one's cache. Polled across reloads: the emit is a server-side follow-on to the decision,
+  // and on a busy lane it lands a moment after the response does.
+  await expect
+    .poll(async () => {
+      await employee.reload();
+      await expect(employee.getByRole("main")).toBeVisible();
+      return settledUnread(employee, bell);
+    }, { timeout: 60_000 })
+    .toBeGreaterThan(unreadBefore);
 
   // And it says what happened, not just that something did.
   await bell.click();
-  const item = manager.getByText("New leave request to review").first();
-  await expect(item).toBeVisible();
+  await expect(employee.getByText(/Leave approved/i).first()).toBeVisible({ timeout: 30_000 });
 });
 
 /** The number on the bell, from its own accessible name ("Notifications (3 unread)").

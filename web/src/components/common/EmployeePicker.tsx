@@ -71,13 +71,18 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
               const ref = empRef(e);
               const on = picked.has(ref);
               return (
+                // A toggle says so with `aria-pressed`, and keeps the person's name as its whole accessible
+                // name: with the ✓/+ glyph in the name instead, the chip answers to a different label
+                // depending on whether it is on, which is no name at all to a screen reader and no handle to
+                // anything driving the page.
                 <button
                   key={e.path}
                   type="button"
+                  aria-pressed={on}
                   onClick={() => toggle(ref)}
                   className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${on ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"}`}
                 >
-                  {on ? "✓ " : "+ "}{e.first_name} {e.last_name}
+                  <span aria-hidden="true">{on ? "✓ " : "+ "}</span>{e.first_name} {e.last_name}
                 </button>
               );
             })}

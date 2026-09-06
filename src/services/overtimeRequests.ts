@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { and, eq, isNull, lte, inArray } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
@@ -53,10 +53,11 @@ export async function createOvertimeRequest(deps: Deps, actor: AppUser, input: O
   // middleware's owner_refs check, so a non-admin can only create under their own employee).
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
-  const row = (await deps.db
+  // Allocated inside the retry (codeAlloc.ts): a late shift ends with several of these at once.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.overtimeRequests)
     .values({ code: await allocOwnedCode(deps, schema.overtimeRequests, schema.overtimeRequests.employeeId, employeeId), employeeId, date: new Date(dateMs), startTime: new Date(start), endTime: new Date(end), reason: input.reason?.trim() || null, state: "PENDING" })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "overtime_request.create", "overtime-requests", row.uuid, createdMeta(row, "overtime-requests"), row);
   await notifyManager(deps, employeeId, { type: "overtime.requested", noun: "overtime request" });
   await emitEvent(deps, actor, "overtime.requested", { subject: `overtime-requests/${row.uuid}`, employeeId, payload: { hours: (end - start) / 3_600_000 } });

@@ -3,9 +3,18 @@ import { KeyRound, X, Eye, SlidersHorizontal } from "lucide-react";
 import { CapabilitiesContext, hasCapability } from "@/lib/perm";
 import { navigate } from "@/router";
 import { startViewAs, stopViewAs, useViewAs } from "@/lib/viewAsStore";
-import { AclModal } from "./AclModal";
+import { lazyPage } from "@/lib/lazyPage";
 import { fetchAllAccessRules, type AccessRule } from "./permMatrix";
-import { fetchSubjectOptions } from "./PreviewPanel";
+import { fetchSubjectOptions } from "./subjectOptions";
+
+// The access modal, LAZY. This provider wraps the whole tree, so a static import put all 26 kB of it (the
+// largest single app module in the shell chunk, plus PreviewPanel behind it) on the critical path for every
+// visitor on every route - to render, until an admin clicks a manage-access key, a closed dialog. Measured at
+// 26.0 kB raw off first paint.
+//
+// lazyPage rather than React.lazy so a chunk request that loses a race with a deploy stays retryable through
+// the crash boundary (see lib/lazyPage.tsx).
+const AclModal = lazyPage(() => import("./AclModal").then((m) => ({ default: m.AclModal })));
 import { Combobox } from "@/components/ui/combobox";
 
 // A target the access-management UI can act on. `objectPath` ("collection/uuid") is present when the target is
@@ -101,7 +110,18 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     });
   }, [userEmail]);
 
-  const open = React.useCallback((t: AccessTargetRef) => setTarget(t), []);
+  // Whether the modal has ever been opened, which is what gates its mount below.
+  //
+  // Gating on `target` instead would have been simpler and would have changed behaviour: the modal resets
+  // `focusVerb`/`addUsers`/`addExpires` itself whenever `target` changes, but `scopeSel` and `addAccess`
+  // deliberately persist across opens, and unmounting on close would reset those too. Mounting once on the
+  // first open and leaving it mounted keeps every open after the first identical to a static import; all that
+  // is skipped is the closed dialog it used to render before anyone asked for it.
+  const [aclUsed, setAclUsed] = React.useState(false);
+  const open = React.useCallback((t: AccessTargetRef) => {
+    setAclUsed(true);
+    setTarget(t);
+  }, []);
 
   // Rules cache for the deny tint: loaded when the mode turns on, refreshed when the modal closes (the
   // only place rules change while browsing). Failure -> empty (no tint, mode still works).
@@ -270,7 +290,14 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
             </div>
           </div>
         )}
-        <AclModal target={target} onClose={() => setTarget(null)} canManageUsers={canManageUsers} canManageRoles={canManageRoles} />
+        {/* fallback null: the modal is its own overlay and the key that opened it stays on screen, so a
+            frame or two with nothing new is the right "loading" for it - a spinner would flash over the page
+            the admin is still looking at. */}
+        {aclUsed && (
+          <React.Suspense fallback={null}>
+            <AclModal target={target} onClose={() => setTarget(null)} canManageUsers={canManageUsers} canManageRoles={canManageRoles} />
+          </React.Suspense>
+        )}
       </CapabilitiesContext.Provider>
     </Ctx.Provider>
   );

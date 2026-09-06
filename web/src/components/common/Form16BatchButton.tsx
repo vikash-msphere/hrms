@@ -1,6 +1,6 @@
 import * as React from "react";
 import { FileStack, Users } from "lucide-react";
-import { api } from "@/api";
+import { invoke } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { currentFy, fyOptions, fySpan } from "@/lib/fy";
 import { runSequential, batchSummary, type BatchProgress } from "@/lib/batchRun";
@@ -22,9 +22,12 @@ import type { Department, DocumentResource, Employee } from "@/types";
  * renders a PDF from that person's finalized payroll), so this walks the roster sequentially and reports who
  * it could not do - a year-end job that silently skipped four people would be worse than one that failed.
  */
-export function Form16BatchButton({ employees, departments, onGenerated }: {
+export function Form16BatchButton({ employees, departments, loading = false, onGenerated }: {
   employees: Employee[];
   departments: Department[];
+  /** Whether the roster is still being read. A count is the whole point of this dialog, and an unread roster
+   *  is not a count of nought - "0 active employees" beside a disabled button reads as an empty company. */
+  loading?: boolean;
   onGenerated?: () => void;
 }) {
   const canGenerate = usePermission("personal-documents.write");
@@ -39,6 +42,8 @@ export function Form16BatchButton({ employees, departments, onGenerated }: {
   if (!canGenerate) return null;
 
   const active = employees.filter((e) => !e.disabled && !e.delete_time);
+  // Rows already in hand answer even while the store revalidates; only an empty, unread roster is "counting".
+  const counting = loading && employees.length === 0;
   const targets = scope === "everyone" ? active : active.filter((e) => picked.some((p) => idOf(p) === idOf(e.path)));
   const empName = (e: Employee) => `${e.first_name} ${e.last_name}`;
 
@@ -46,9 +51,11 @@ export function Form16BatchButton({ employees, departments, onGenerated }: {
     const result = await runSequential(
       targets,
       empName,
-      (e) => api<DocumentResource>("/personal-documents:generateForm16", {
-        method: "POST",
-        body: JSON.stringify({ employee: `employees/${idOf(e.path)}`, financial_year: fy }),
+      // Through `invoke`, not the raw `api` helper: each call files a document, and only the write helpers
+      // refresh the shared cache the lists of somebody's documents read from.
+      (e) => invoke<DocumentResource>("personal-documents", "generateForm16", undefined, {
+        employee: `employees/${idOf(e.path)}`,
+        financial_year: fy,
       }),
       setProgress,
     );
@@ -77,9 +84,9 @@ export function Form16BatchButton({ employees, departments, onGenerated }: {
         collection="personal-documents"
         guardLabel="Form 16 run"
         form={{ fy, scope, picked }}
-        submitLabel={`Generate ${targets.length}`}
-        canSubmit={targets.length > 0}
-        whyNot="Nobody is selected."
+        submitLabel={counting ? "Generate" : `Generate ${targets.length}`}
+        canSubmit={targets.length > 0 && !counting}
+        whyNot={counting ? "Still counting the roster." : "Nobody is selected."}
         onSubmit={run}
       >
         <Field label="Financial year" hint={`${fySpan(fy)}.${fy === currentFy() ? " This year is still running - figures cover the runs finalized so far." : ""}`}>
@@ -88,7 +95,14 @@ export function Form16BatchButton({ employees, departments, onGenerated }: {
             <SelectContent>{fyOptions().map((y) => <SelectItem key={y} value={y}>FY {y}</SelectItem>)}</SelectContent>
           </Select>
         </Field>
-        <Field label="Who" hint={scope === "everyone" ? `${active.length} active ${active.length === 1 ? "employee" : "employees"}.` : `${picked.length} selected.`}>
+        <Field
+          label="Who"
+          hint={
+            scope === "everyone"
+              ? counting ? "Counting the roster…" : `${active.length} active ${active.length === 1 ? "employee" : "employees"}.`
+              : `${picked.length} selected.`
+          }
+        >
           <div className="flex items-center gap-2">
             <Select value={scope} onValueChange={(v) => setScope(v as typeof scope)}>
               <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>

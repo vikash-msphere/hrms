@@ -193,16 +193,23 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
             </CardHeader>
             <CardContent className="space-y-2">
               {blocks.length === 0 && <p className="py-4 text-sm text-muted-foreground">No blocks - the payslip would be blank. Add one below, or restore the stock design.</p>}
+              {/* An ordered list of blocks, and said so: the payslip IS this sequence, and without the roles it
+                  is announced as a run of unrelated boxes with no count and no boundaries - on the one screen
+                  whose whole purpose is the order things come in. */}
+              <div role="list" className="space-y-2">
               {blocks.map((b, i) => {
                 const meta = PAYSLIP_BLOCK_META[b.kind];
                 const isOpen = open === i;
                 return (
-                  <div key={i} className={cn("rounded-md border", isOpen && "border-primary/60 bg-accent/20")}>
+                  <div key={i} role="listitem" aria-label={meta.title} className={cn("rounded-md border", isOpen && "border-primary/60 bg-accent/20")}>
                     <div className="flex items-center gap-2 px-2 py-1.5">
-                      <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(isOpen ? null : i)}>
-                        <Badge variant="outline" className="shrink-0 text-[10px]">{i + 1}</Badge>
+                      {/* The row is named by its block, nothing else: the position badge and the one-line
+                          description are decoration, and folding them into the name gives every row a label
+                          that reads as a sentence and changes as blocks move. */}
+                      <button type="button" aria-expanded={isOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(isOpen ? null : i)}>
+                        <Badge variant="outline" aria-hidden="true" className="shrink-0 text-[10px]">{i + 1}</Badge>
                         <span className="truncate text-sm font-medium">{meta.title}</span>
-                        <span className="hidden truncate text-xs text-muted-foreground sm:inline">{meta.desc}</span>
+                        <span aria-hidden="true" className="hidden truncate text-xs text-muted-foreground sm:inline">{meta.desc}</span>
                       </button>
                       <Button variant="ghost" size="icon" title="Move up" disabled={i === 0} onClick={() => move(i, -1)}><ChevronUp className="h-4 w-4" /></Button>
                       <Button variant="ghost" size="icon" title="Move down" disabled={i === blocks.length - 1} onClick={() => move(i, 1)}><ChevronDown className="h-4 w-4" /></Button>
@@ -217,9 +224,12 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
                   </div>
                 );
               })}
+              </div>
               <div className="flex flex-wrap gap-1.5 pt-1">
                 {BLOCK_ORDER.map((kind) => (
-                  <Button key={kind} variant="outline" size="sm" onClick={() => addBlock(kind)} title={PAYSLIP_BLOCK_META[kind].desc}>
+                  // "Add Spacer", not "Spacer": the button and the Spacer block already in the list are two
+                  // different things to press, and the leading "+" that says which is which is an icon.
+                  <Button key={kind} variant="outline" size="sm" onClick={() => addBlock(kind)} aria-label={`Add ${PAYSLIP_BLOCK_META[kind].title}`} title={PAYSLIP_BLOCK_META[kind].desc}>
                     <Plus className="h-3.5 w-3.5" /> {PAYSLIP_BLOCK_META[kind].title}
                   </Button>
                 ))}

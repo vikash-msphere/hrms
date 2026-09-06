@@ -1,8 +1,8 @@
 import {
   Activity, ArrowRightLeft, ArrowUpDown, Award, BadgeCheck, Ban, Banknote, Check, CheckCheck,
-  CircleCheckBig, CircleSlash, CircleX, ClipboardCheck, Eye, LockOpen, MessageSquare,
+  CircleCheckBig, CircleSlash, CircleX, ClipboardCheck, Copy, Eye, LockOpen, MessageSquare,
   MessageSquarePlus, MoveRight, Pencil, Play, Plus, RotateCcw, Rocket, Send, Settings2,
-  ShieldAlert, Signature, Trash2, TrendingUp, Undo2, UserPlus, UserRoundCheck, type LucideIcon,
+  ShieldAlert, Signature, TimerOff, Trash2, TrendingUp, Undo2, UserPlus, UserRoundCheck, type LucideIcon,
 } from "lucide-react";
 
 // Human-readable label for an audit action code (e.g. "card.move" -> "moved"). Web mirror of the action
@@ -41,6 +41,13 @@ const VERB: Record<string, string> = {
   record: "recorded",
   sensitive: "viewed", // `<col>.read.sensitive` — an allowed read of a sensitive record
   denied: "was denied", // `access.denied` — a blocked attempt
+  // Permission-change verbs (`access-rule.*`). Four-eyes puts a change through request → approve/reject, a
+  // rule with an expiry lapses on its own, and a copy writes one summary entry over the rules it created - so
+  // the trail has four verbs no other collection uses.
+  request: "requested",
+  removalRequest: "requested removal of",
+  expire: "lapsed",
+  clone: "copied permissions onto",
 };
 
 export function actionLabel(action: string): string {
@@ -59,6 +66,8 @@ const TONE: Record<string, ActionTone> = {
   restore: "positive", unblock: "positive", approve: "positive", complete: "positive", activate: "positive", resolve: "positive", acknowledge: "positive", launch: "positive", enroll: "positive", submit: "positive",
   comment: "comment", nominate: "comment", start: "positive", close: "remove", reopen: "positive", skipStage: "update",
   sensitive: "read", denied: "denied", // access-audit rows: sensitive read / blocked attempt
+  // A pending request is not yet a change (update); a removal request and an expiry both TAKE access away.
+  request: "update", removalRequest: "remove", expire: "remove", clone: "create",
 };
 export function actionTone(action: string): ActionTone {
   const verb = action.includes(".") ? action.slice(action.lastIndexOf(".") + 1) : action;
@@ -113,6 +122,10 @@ const ACTION_ICON: Record<string, LucideIcon> = {
   route: MoveRight,
   sensitive: Eye,
   denied: ShieldAlert,
+  request: Send,
+  removalRequest: Trash2,
+  expire: TimerOff,
+  clone: Copy,
 };
 export function actionIcon(action: string): LucideIcon {
   const verb = action.includes(".") ? action.slice(action.lastIndexOf(".") + 1) : action;

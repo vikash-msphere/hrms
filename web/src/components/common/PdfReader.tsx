@@ -60,11 +60,30 @@ export function PdfReader({
 
   // A one-page policy that fits the viewport was still "read to the end" - otherwise the tick-box would be
   // impossible to satisfy on exactly the documents that are shortest.
+  //
+  // Measured only once the reader HAS a size, and again after the browser has laid the canvas out. A box
+  // that is still being laid out - a dialog mid-animation, a canvas whose height has not been applied yet -
+  // reports scrollHeight === clientHeight, and that is not "the whole document is on screen": it is "there
+  // is nothing on screen yet". Treating the two the same let an unread policy unlock its own consent gate,
+  // which is the one thing this reader exists to prevent.
   const checkFits = React.useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (el.scrollHeight - el.clientHeight <= 8) markRead();
+    const measure = () => {
+      const el = scrollRef.current;
+      if (!el || el.clientHeight <= 0 || el.scrollHeight <= 0) return;
+      if (el.scrollHeight - el.clientHeight <= 8) markRead();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(measure));
   }, [markRead]);
+
+  // And re-measured whenever the reader's box changes: a document that only fits AFTER the dialog settles
+  // (or after the window is resized) is still one nobody has to scroll, and its tick-box has to be reachable.
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !doc) return;
+    const ro = new ResizeObserver(() => checkFits());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [doc, checkFits]);
 
   function onScroll() {
     const el = scrollRef.current;

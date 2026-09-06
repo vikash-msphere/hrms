@@ -1,5 +1,6 @@
 import { list } from "@/api";
-import { subscribeInvalidations, storedCopiesTrusted } from "@/lib/resourceStore";
+import { subscribeInvalidations, storedCopiesTrusted, subscribePurge, reconciled } from "@/lib/resourceStore";
+import { registerHydrator, put, del } from "@/lib/clientStore";
 
 // One read of the org's settings, shared by every consumer of them.
 //
@@ -17,56 +18,66 @@ import { subscribeInvalidations, storedCopiesTrusted } from "@/lib/resourceStore
 type Row = { key: string; value?: unknown };
 
 let loaded: Promise<Map<string, unknown>> | null = null;
+// Bumped on every invalidation, so a read that is WAITING for the reconciliation can tell whether the copy it
+// was about to serve was dropped while it waited.
+let generation = 0;
 
 // ---- Disk copy ----------------------------------------------------------------------------------------------
-// The snapshot is also kept in localStorage, and that is about REQUEST SHAPE as much as request count: config
-// gates other reads. The dashboard cannot ask for its KPI counts until it knows which cards this viewer sees,
-// so waiting on the network for `settings` pushed the summary read - and the row reads behind it - into later
-// `batch:run` calls. Answering from disk resolves the config in a microtask, so those reads join the page's
-// FIRST batch instead of trailing it.
+// The snapshot is also kept on disk, and that is about REQUEST SHAPE as much as request count: config gates
+// other reads. The dashboard cannot ask for its KPI counts until it knows which cards this viewer sees, so
+// waiting on the network for `settings` pushed the summary read - and the row reads behind it - into later
+// `batch:run` calls. Answering from the stored copy resolves the config in a microtask, so those reads join the
+// page's FIRST batch instead of trailing it.
 //
-// Safe because it is only ever a head start: the network read still happens (it is the same one request, in the
-// page's first batch either way) and replaces the copy when it lands. Any settings write drops it. Stale-safe
-// too: these blobs are org configuration the server re-reads and enforces on every write.
-const DISK_PREFIX = "st1:";
-const MAX_AGE_MS = 24 * 60 * 60_000;
+// It used to be safe only in the sense that it was a head start, with a 24-hour age as the backstop. That was
+// wrong: with the change feed vouching for the stored copy (below), the refresh was skipped entirely, and the
+// `settings` table carried no change stamp - so an org whose config another admin had edited went on reading
+// yesterday's config, for up to a day, with nothing able to correct it. The stamp exists now
+// (src/db/changeDdl.ts), which makes the vouching honest, and the age is back to being a backstop rather than
+// the mechanism.
+const DISK_KEY = "settings";
 let diskUser: string | null = null;
+let stored: Map<string, unknown> | null = null;
+
+registerHydrator("snapshot", {
+  onRecords: (records) => {
+    const rec = records.find((r) => r.key === DISK_KEY);
+    if (!rec) return;
+    try {
+      const entries = JSON.parse(rec.value) as [string, unknown][];
+      if (Array.isArray(entries)) stored = new Map(entries);
+    } catch {
+      /* unparseable: no stored copy, which is a state this already handles */
+    }
+  },
+  onEvict: () => {
+    stored = null;
+  },
+  // A different caller sees a different subset of the config (managed keys are excluded server-side).
+  onReset: () => {
+    stored = null;
+    loaded = null;
+  },
+});
 
 /** Namespace the stored copy to the caller (org config is the same for everyone, but their view of it is not). */
 export function setSettingsUser(key: string | undefined) {
   diskUser = key || null;
 }
 
-const diskKey = () => `${DISK_PREFIX}${diskUser}`;
-
 function readDisk(): Map<string, unknown> | null {
-  if (!diskUser) return null;
-  try {
-    const raw = localStorage.getItem(diskKey());
-    if (!raw) return null;
-    const rec = JSON.parse(raw) as { at: number; entries: [string, unknown][] };
-    if (!Array.isArray(rec?.entries) || typeof rec.at !== "number" || Date.now() - rec.at > MAX_AGE_MS) return null;
-    return new Map(rec.entries);
-  } catch {
-    return null;
-  }
+  return diskUser && stored?.size ? stored : null;
 }
 
 function writeDisk(all: Map<string, unknown>) {
   if (!diskUser) return;
-  try {
-    localStorage.setItem(diskKey(), JSON.stringify({ at: Date.now(), entries: [...all] }));
-  } catch {
-    /* private mode / quota: memory-only, everything still works */
-  }
+  stored = new Map(all);
+  put("snapshot", DISK_KEY, JSON.stringify([...all]));
 }
 
 function dropDisk() {
-  try {
-    if (diskUser) localStorage.removeItem(diskKey());
-  } catch {
-    /* nothing to do */
-  }
+  stored = null;
+  del("snapshot", DISK_KEY);
 }
 
 function fetchAll(): Promise<Map<string, unknown>> {
@@ -75,18 +86,45 @@ function fetchAll(): Promise<Map<string, unknown>> {
     .catch(() => new Map<string, unknown>()); // unreadable / offline: every key reads as unset
 }
 
+// How long a config read waits for the change feed's verdict before serving the stored copy anyway. Generous
+// against the normal case (the feed is already in the page's first batch) so the bound is only ever reached by
+// a connection that has stopped answering.
+const RECONCILE_WAIT_MS = 3_000;
+const afterMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 function load(): Promise<Map<string, unknown>> {
   if (loaded) return loaded;
   const disk = readDisk();
   if (disk) {
+    // A stored copy may be served without reading the config again - but only once the change feed has
+    // VOUCHED for it. `GET /v1/changes` (one request for the whole app, already in the page's first batch)
+    // reports whether `settings` has been written to; if it has, the invalidation below drops this snapshot
+    // and the read below happens instead.
+    //
+    // Waiting for that verdict is the difference between a cache and a wrong answer. A config read is awaited
+    // once and its value decides behaviour for the rest of the page life, so there is no later render to
+    // correct: an admin who saves a setting and reloads has to see what they saved, and a page that answered
+    // ahead of the feed showed them the value they had just replaced.
+    if (storedCopiesTrusted()) {
+      const gen = generation;
+      // BOUNDED. The verdict rides the page's first `batch:run` and normally lands in tens of milliseconds,
+      // but nothing in api.ts sets a timeout, so a connection that stalls without erroring never settles it -
+      // and every consumer of this is awaiting a value it needs before it can render. Unbounded, one stalled
+      // request left the dashboard's cards, payroll's rounding and the attendance rules waiting forever.
+      // Timing out serves the stored copy, which is exactly what this did before the wait existed: a config
+      // that may be a page-load stale, rather than a page that never finishes.
+      loaded = Promise.race([reconciled(), afterMs(RECONCILE_WAIT_MS)]).then(() => {
+        // A bumped generation means the feed named `settings` while we waited (invalidateSettings ran), so
+        // this copy is exactly the one not to serve.
+        if (generation === gen) return disk;
+        return (loaded = fetchAll().then((all) => (writeDisk(all), all)));
+      });
+      return loaded;
+    }
     loaded = Promise.resolve(disk);
-    // Nothing to refresh when the change feed vouches for the stored copy: `GET /v1/changes` (one request for
-    // the whole app) reports whether `settings` has been written to at all, and the invalidation below drops
-    // this snapshot if it has. So an org whose config nobody touched pays NO settings read on a page load,
-    // rather than one to confirm the config it already had.
-    if (storedCopiesTrusted()) return loaded;
-    // Otherwise: serve the stored copy now, and refresh it in the background. Values are updated IN PLACE so a
-    // consumer that already read a key keeps working against the same map.
+    // No reconciliation to wait for (a first visit, or storage that has been cleared): serve the stored copy
+    // now and refresh it in the background. Values are updated IN PLACE so a consumer that already read a key
+    // keeps working against the same map.
     void fetchAll().then((fresh) => {
       if (!fresh.size) return; // a failed refresh says nothing about the config; keep what we have
       disk.clear();
@@ -120,6 +158,7 @@ export async function getSetting<T>(key: string): Promise<{ value?: T }> {
 
 /** Drop the snapshot (memory and disk); the next read fetches it again. */
 export function invalidateSettings() {
+  generation++;
   loaded = null;
   dropDisk();
 }
@@ -129,3 +168,7 @@ export function invalidateSettings() {
 subscribeInvalidations((collections) => {
   if (collections.includes("settings")) invalidateSettings();
 });
+
+// And when the store gives up everything (the caller's own access changed, or a crash boundary is retrying):
+// this snapshot is derived from a read they may no longer be entitled to the same answer for.
+subscribePurge(invalidateSettings);

@@ -26,8 +26,11 @@ import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 // Dev-only, and off unless a URL asks for it (`?overflow=1`): names whichever box is painting past the
 // viewport, which `html { overflow-x: clip }` otherwise hides by clipping it.
 import { startOverflowProbe } from "@/lib/overflowProbe";
+// Gives every clipped ("...") string its full text as a hover tooltip, measured from the live layout.
+import { startClippedTitles } from "@/lib/clippedTitle";
 
 startOverflowProbe();
+startClippedTitles();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

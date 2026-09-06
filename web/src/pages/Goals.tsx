@@ -447,7 +447,10 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   // the server re-derives the goal's progress from its linked cards on every link/unlink/delivery.
   async function linkCard(g: Goal, card: KanbanCard, unlink = false) {
     try {
-      await patch(`cards/${idOf(card.path)}`, { goal: unlink ? null : g.path }, card.etag);
+      // A CLEARED reference goes out as "", never null: the contract types the field as a string (see api.ts,
+      // "No nulls on the wire"), so unlinking with a null is refused by the proxy with a 422 the worker never
+      // sees - the same trap the task editor's department picker fell into.
+      await patch(`cards/${idOf(card.path)}`, { goal: unlink ? "" : g.path }, card.etag);
       toast({ title: unlink ? "Task unlinked" : "Task linked", description: card.title, variant: "success" });
       reloadCards();
       reload(); // the goal's derived progress may have shifted

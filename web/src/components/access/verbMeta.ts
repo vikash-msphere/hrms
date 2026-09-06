@@ -142,6 +142,14 @@ const PER_COLLECTION: Record<string, Record<string, VerbInfo>> = {
     requestAccess: { label: "Request access", description: "Let people ask access admins for a missing grant (grant to Everyone to enable the flow)." },
     approve: { label: "Approve permission changes", description: "Apply a pending grant or removal queued by four-eyes approval. Nobody can approve their own request." },
     reject: { label: "Reject permission changes", description: "Turn down a pending grant or removal queued by four-eyes approval." },
+    clone: {
+      label: "Copy permissions",
+      description: "Copy every rule one role or person holds onto another, in one traceable operation. Additive - nothing is removed.",
+      // Each copied rule is still authored through the normal create path, so nothing here escapes validation
+      // or the four-eyes queue. The width is in the REACH: one click can hand a role forty grants, including
+      // whatever the source holds over payroll or personal data.
+      caution: "One click can hand a subject every grant another one holds. Give it to the people you trust with the whole access model, not to everyone who may edit a single rule.",
+    },
   },
 };
 

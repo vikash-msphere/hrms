@@ -8,8 +8,11 @@ import {
 } from "../services/automations";
 import { toAutomationResource } from "../http/serialize";
 
-// condition/actions are validated in depth by the pure domain validator (services/automations); the schema
-// only enforces the transport shape (JSON objects), keeping the rule grammar in ONE place.
+// condition/actions/schedule are validated in depth by the pure domain validator (services/automations); the
+// schema only enforces the transport shape (JSON objects), keeping the rule grammar in ONE place. `schedule`
+// belongs here for the same reason the others do: the builder sends it on every write (null for an
+// event-triggered rule), and a `.strict()` object that does not name it rejects the whole body - which is a
+// scheduled rule that cannot be authored at all, and an event rule the builder cannot save either.
 const writeSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
@@ -17,6 +20,7 @@ const writeSchema = z.object({
   condition: z.any().nullable().optional(),
   actions: z.array(z.any()).optional(),
   enabled: z.boolean().optional(),
+  schedule: z.any().nullable().optional(),
 }).strict();
 
 // Data-driven automation rules. Every write is the service's own: a rule is validated as a whole (a partial

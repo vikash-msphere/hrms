@@ -79,8 +79,17 @@ export function makeDocumentService(cfg: Cfg) {
 
   const decorate = async (deps: Deps, actor: AppUser | undefined, rows: any[]) => decoratePrint(deps, await decorateAck(deps, actor, rows));
 
-  async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser) {
-    const where = applyScope(scope, table.code, ownerCol);
+  /**
+   * `employee` narrows an OWNED collection to one person's documents. Without it a caller who can see everyone
+   * has to read a page of the whole org to find one person's file, and the row they want is as likely as not
+   * past the page cursor - which is how "has this letter already been written for them?" answered no for the
+   * hundred-and-first document in the org. It only ever narrows: the scope is applied first and still decides
+   * what the caller may see at all.
+   */
+  async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser, employee?: string) {
+    const scoped = applyScope(scope, table.code, ownerCol);
+    const employeeId = owned ? idFromPath(employee) : undefined;
+    const where = employeeId ? and(scoped, eq(table.employeeId, employeeId)) : scoped;
     const all = visibleByDelete(await deps.db.select().from(table).where(where), showDeleted);
     const page = paginate(all, maxPageSize, pageToken, (r: any) => +new Date(r.createdAt), (r: any) => r.uuid);
     return { items: await decorate(deps, actor, page.items), nextPageToken: page.nextPageToken };

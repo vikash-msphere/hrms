@@ -65,7 +65,10 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches ? "list" : "month";
   });
   const [cursor, setCursor] = useState(() => {
-    const m = readHashQuery("m");
+    // `m=YYYY-MM` is this page's own month param. `d=YYYY-MM-DD` is what links from elsewhere carry (the
+    // holiday calendar's "open this day" is one), and a day names its month - without this those links
+    // landed on the CURRENT month, which is never the month the reader clicked.
+    const m = readHashQuery("m") ?? readHashQuery("d")?.slice(0, 7);
     return m && /^\d{4}-\d{2}$/.test(m) ? new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1, 1)) : monthStart(new Date());
   });
   const [dept, setDept] = useState(() => readHashQuery("dept") ?? "all");

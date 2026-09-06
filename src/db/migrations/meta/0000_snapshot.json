@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2679ba44-5bd6-47c7-84b0-77d8d5cbfe42",
+  "id": "caea8d94-126c-414f-a108-646475110082",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -4190,6 +4190,14 @@
             "goal_id"
           ],
           "isUnique": false
+        },
+        "card_board_seq_idx": {
+          "name": "card_board_seq_idx",
+          "columns": [
+            "board_id",
+            "seq"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {
@@ -4435,6 +4443,30 @@
           "onUpdate": "no action"
         }
       },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "code_sequences": {
+      "name": "code_sequences",
+      "columns": {
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "next": {
+          "name": "next",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -5745,6 +5777,13 @@
         "photo_key": {
           "name": "photo_key",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "photo_at": {
+          "name": "photo_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

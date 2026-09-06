@@ -36,9 +36,10 @@ hold. `docs/deploy.md` is the runbook; this is the ordered list, and the order i
    is a build run from the wrong directory that `.gitignore` does not cover — delete it, do not ignore it.
 2. Open a PR to `dev` so `verify.yml` proves a clean `npm ci` and a clean `api:types` regeneration on
    neutral ground. The `e2e` workflow runs on the same push.
-3. Create `main`. `deploy.yml` triggers on push to `main`, and the branch does not exist yet. A release
-   branch (rather than retargeting the workflow at `dev`) is what lets production be frozen through a
-   monthly payroll cutover while work keeps merging.
+3. Create `prod`, the release branch. `deploy.yml` triggers on push to it, and the branch does not exist
+   yet: `git checkout -b prod && git push -u origin prod`. A release branch separate from the `dev` trunk
+   (rather than retargeting the workflow at `dev`) is what lets production be frozen through a monthly
+   payroll cutover while work keeps merging.
 4. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repo secrets under a `production` environment
    (scopes: Workers Scripts Edit, D1 Edit, Workers R2 Storage Edit). Both `deploy.yml` and `d1-backup.yml`
    need them. Application secrets stay on the Worker and must not be added to CI.
@@ -150,5 +151,8 @@ Each of these leaves production working but weaker.
   telemetry, the e-sign trust store.
 - `docs/session-recording-notice.md` — the employee notice for screen recording, and what to decide first.
 - `docs/security-review.md` — the archived 2026-07-04 review and its remediation ledger.
+- `client-storage.md` — what the SPA keeps in the browser, what makes a stored copy trustworthy, and what is
+  purged when. Relevant to a launch on two counts: it is the app's data-at-rest surface outside the org's
+  control, and conditional revalidation is what keeps a session inside the free plan's read budget.
 - `scripts/preflight.ts` — the pre-deploy gate itself, and why each check exists.
 - `bootstrap/bootstrap.sql` — exactly what a fresh production database starts with.

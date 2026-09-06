@@ -129,7 +129,7 @@ const EMPTY = { name: "", type: "OTHER", expire: "", employee: ORG, requireAck: 
 
 export default function Documents({ me }: { me: Me }) {
   const { rows, state, error, reload, reloadOrg, reloadPersonal } = useDocuments({ showDeleted: true });
-  const { rows: employees } = useCollection<Employee>("employees");
+  const { rows: employees, state: employeesState } = useCollection<Employee>("employees");
   const { rows: departments } = useCollection<Department>("departments");
   const [pickAudience, setPickAudience] = useState(false);
   // The acknowledging user's own record (for their signature image + name on the acknowledge dialog).
@@ -662,7 +662,14 @@ export default function Documents({ me }: { me: Me }) {
         </AccessAction>
       )}
       {/* Year-end: the same document for the whole company, which the per-employee button can't do. */}
-      {canGenerate && <Form16BatchButton employees={employees} departments={departments} onGenerated={reload} />}
+      {canGenerate && (
+        <Form16BatchButton
+          employees={employees}
+          departments={departments}
+          loading={employeesState === "loading"}
+          onGenerated={reload}
+        />
+      )}
       {writable && (
         <AccessAction collection="org-documents" create><Button onClick={openCreate}><Plus className="h-4 w-4" /> Upload document</Button></AccessAction>
       )}
@@ -764,7 +771,6 @@ export default function Documents({ me }: { me: Me }) {
         onClose={() => setGenOpen(false)}
         employees={employees}
         departments={departments}
-        recent={rows} // already loaded: lets the dialog notice a letter of this kind was just made
         onGenerated={reload}
       />
 

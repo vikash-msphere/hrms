@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { Wire } from "../http/wire";
+import { photoMarker } from "../http/serialize";
 
 // Company-wide "who's celebrating soon" feed for the dashboard. Birthdays come from the ENCRYPTED personal
 // details blob (date_of_birth) and are returned as day+month ONLY - never the year, so no age is exposed.
@@ -53,7 +54,10 @@ export async function upcomingCelebrations(deps: Deps, withinDays = 30): Promise
     if (e.deleteTime) continue;
     const name = `${e.firstName} ${e.lastName}`.trim();
     const ref = `employees/${e.uuid}`;
-    const photo = e.photoKey ? `employees/${e.uuid}:getPhoto` : undefined;
+    // The same marker every other surface serves, version and all (http/serialize.ts). Built by hand here it
+    // had no `?v=`, so these avatars keyed the face cache on the bare employee id - a key nothing outside the
+    // uploading tab invalidates, which left the card showing last year's picture.
+    const photo = photoMarker(e);
 
     // Birthday (day + month only).
     const md = monthDay(await readDob(deps, e.personalDetailsEnc));

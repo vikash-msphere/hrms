@@ -187,6 +187,21 @@ export const announcements = collectionRoutes<AnnouncementInput, typeof schema.a
   publishTime: true,
   serialize: serializeAnnouncement,
   decorate: decorateAnnouncements,
+  // A hard purge takes the whole post with it. Every one of these tables is a sub-resource reached only
+  // through this announcement's own routes (schema.ts says so on each), so none of them outlives it - and
+  // each is a foreign key that made `DELETE ?force=true` fail as a 500 for any post somebody had read,
+  // reacted to, replied to or voted on, which is every post that ever mattered.
+  //
+  // Reactions before replies: a reaction may point at a reply rather than the post itself.
+  purgeCascade: {
+    remove: [
+      { table: schema.announcementReactions, column: schema.announcementReactions.announcementId },
+      { table: schema.announcementReplies, column: schema.announcementReplies.announcementId },
+      { table: schema.announcementReads, column: schema.announcementReads.announcementId },
+      { table: schema.announcementPollVotes, column: schema.announcementPollVotes.announcementId },
+      { table: schema.announcementPollOptions, column: schema.announcementPollOptions.announcementId },
+    ],
+  },
   overrides: {
     create: (deps, actor, input, id) => createAnnouncement(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateAnnouncement(deps, actor, id, patch, ifMatch),

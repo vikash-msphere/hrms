@@ -1,5 +1,5 @@
 import { eq, and, isNull, asc, inArray } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
@@ -9,7 +9,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, fieldDiff } from "../lib/audit";
 import { getDefaultDepartmentId } from "./settings";
-import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from "../lib/errors";
+import { invalidArgument, notFound, aborted, failedPrecondition, oneOf, isCodeCollision, isCardSeqCollision } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { emitEvent } from "./eventBus";
@@ -152,6 +152,7 @@ export async function removeCardTodo(deps: Deps, actor: AppUser, id: string, tod
 
 export async function createCard(deps: Deps, actor: AppUser, input: CardInput, id?: string) {
   if (!input.title?.trim()) throw invalidArgument("title is required");
+  const title = input.title.trim();
   const boardId = idFromPath(input.board);
   if (!boardId) throw invalidArgument("board is required");
   const board = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, boardId)).limit(1))[0];
@@ -170,13 +171,16 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
   // Append to the end of the target column unless a rank was supplied.
   const existing = await columnCards(deps, boardId, columnKey);
   const rank = input.rank ?? (existing.reduce((m, r) => Math.max(m, r.rank), 0) + 1024);
-  // Per-board incrementing number for the human key (MS-1, MS-2…). Read-then-write max+1 (racey under heavy
-  // concurrency, acceptable for an internal app - same tradeoff as codeAlloc). Prefix copied from the board so
-  // the key is immutable if the board's prefix later changes.
-  const seqRows = await deps.db.select({ seq: schema.cards.seq }).from(schema.cards).where(eq(schema.cards.boardId, boardId));
-  const seq = seqRows.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) + 1;
-  const code = await allocOwnedCode(deps, schema.cards, schema.cards.employeeId, employeeId);
-  const row = (await deps.db
+  // Both of the card's allocated numbers are read-then-write max+1: its `code` and the per-board `seq` behind
+  // the human key (MS-1, MS-2…). Two people filing a task on the same board at the same moment therefore
+  // compose the same pair, and the unique indexes fail the loser rather than let two tasks answer to MS-4.
+  // Allocating INSIDE the retry is what makes that recoverable: the second look sees the winner's row and
+  // takes the next numbers. Prefix is copied from the board so the key survives a later prefix change.
+  const row = (await withFreshCode(async () => {
+    const seqRows = await deps.db.select({ seq: schema.cards.seq }).from(schema.cards).where(eq(schema.cards.boardId, boardId));
+    const seq = seqRows.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) + 1;
+    const code = await allocOwnedCode(deps, schema.cards, schema.cards.employeeId, employeeId);
+    return deps.db
     .insert(schema.cards)
     .values({
       code,
@@ -190,7 +194,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       departmentId,
       swimlaneKey: idFromPath(input.swimlane_key) ?? (input.swimlane_key?.trim() || null),
       rank,
-      title: input.title.trim(),
+      title,
       description: input.description?.trim() || null,
       assigneeId: idFromPath(input.assignee) ?? null,
       priority: input.priority ?? "medium",
@@ -200,7 +204,8 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       dueDate: input.due_date ? new Date(due) : null,
       goalId: idFromPath(input.goal) ?? null,
     })
-    .returning())[0]!;
+    .returning();
+  }, (e) => isCodeCollision(e) || isCardSeqCollision(e)))[0]!;
   await deps.db.insert(schema.cardMovements).values({ cardId: row.uuid, boardId, fromColumn: null, toColumn: columnKey, actorId: actor.employeeId ?? null });
   // Optional checklist seeded at creation (custom items and/or a template the dialog expanded to texts).
   const initialTodos = (input.initial_todos ?? []).map((s) => (s ?? "").trim()).filter(Boolean);

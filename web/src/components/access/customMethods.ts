@@ -62,7 +62,7 @@ export const CUSTOM_METHODS: Record<string, string[]> = {
   offers: ["approve", "extend", "accept", "decline", "rescind", "letter"],
   expenses: ["submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["enable", "disable", "test"],
-  "access-rules": ["preview", "requestAccess", "approve", "reject"],
+  "access-rules": ["preview", "requestAccess", "approve", "reject", "clone"],
 };
 
 // The standard methods that live on the level ladder (read/write/admin), NOT grantable as custom methods.

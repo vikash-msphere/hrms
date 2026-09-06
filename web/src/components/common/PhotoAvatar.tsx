@@ -51,9 +51,12 @@ export function PhotoAvatar({
   const [picked, setPicked] = useState(false);
   // The photo bytes come from the shared session cache, which batches every avatar mounted in the same tick
   // into one `employees:batchGetPhotos` request (no per-avatar fetch). `src` is a data URI or null.
+  // The `photo` marker is passed through rather than reduced to a boolean: it carries the photo's own version,
+  // which is what keys the cache, so replacing a photo is a cache MISS in every browser rather than something
+  // only the uploading tab finds out about.
   const src = useSyncExternalStore(
-    (cb) => subscribePhoto(employeeId, cb),
-    () => requestPhoto(employeeId, !!photo),
+    (cb) => subscribePhoto(employeeId, photo, cb),
+    () => requestPhoto(employeeId, photo),
   );
 
   // crop state

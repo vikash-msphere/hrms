@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 // WORKFLOW resource (custom methods :start/:resolve/:close/:reopen/:cancel + :assign/:comment). Categories
 // and their default assignee are org config (the `ticket-categories` settings blob), not a collection.
 import { eq, and, asc, inArray, isNull } from "drizzle-orm";
@@ -162,7 +162,8 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
   // Servicing department: explicit override, else the category's configured default, else the org default.
   const departmentId = idFromPath(input.department) ?? (await categoryDepartment(deps, categoryKey)) ?? (await getDefaultDepartmentId(deps));
 
-  const row = (await deps.db
+  // Allocated inside the retry: two tickets raised in the same moment both get filed (codeAlloc.ts).
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.tickets)
     .values({
       code: await allocOwnedCode(deps, schema.tickets, schema.tickets.employeeId, employeeId),
@@ -176,7 +177,7 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
       state: "OPEN",
       sessionReplaysJson: JSON.stringify(firstReplay ? [{ id: firstReplay, created_at: Date.now(), by: employeeId }] : []),
     })
-    .returning())[0]!;
+    .returning()))[0]!;
   // Optional checklist seeded at creation (custom items and/or a checklist the dialog expanded to texts).
   const items = (input.initial_todos ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
   if (items.length) await deps.db.insert(schema.ticketTodos).values(items.map((text) => ({ ticketId: row.uuid, text })));

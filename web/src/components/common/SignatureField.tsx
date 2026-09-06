@@ -42,7 +42,13 @@ const MAX_BYTES = 3 * 1024 * 1024;
 export function SignatureField({ employeeId, signature, canEdit, onChanged }: { employeeId: string; signature?: string; canEdit?: boolean; onChanged?: () => void }) {
   const { toast } = useToast();
   const [version, setVersion] = useState(0);
-  const src = useSignatureUrl(employeeId, signature, version);
+  // Removal is known here before the parent's reload lands, and the marker it carries is stale from that
+  // moment on. Refetching against it asks storage for a file that has just been deleted - a 404 the browser
+  // logs as a failed request - so the panel stops asking rather than asking and ignoring the answer. Reset
+  // whenever the parent hands down a new marker (the reload that follows, or an upload after this).
+  const [removed, setRemoved] = useState(false);
+  useEffect(() => setRemoved(false), [signature]);
+  const src = useSignatureUrl(employeeId, removed ? undefined : signature, version);
   const [busy, setBusy] = useState<"upload" | "remove" | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -73,7 +79,7 @@ export function SignatureField({ employeeId, signature, canEdit, onChanged }: { 
     try {
       await api(`/employees/${employeeId}:clearSignature`, { method: "POST" });
       toast({ title: "Signature removed", variant: "success" });
-      setVersion((v) => v + 1);
+      setRemoved(true);
       onChanged?.();
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't remove", description: (e as Error).message });

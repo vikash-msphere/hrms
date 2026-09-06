@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
+import { draftKey } from "@/components/common/dialogGuard";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 // Weekday of a ymd date, parsed as UTC so the label never shifts with the viewer's offset.
@@ -26,7 +27,10 @@ const weekdayOf = (ymd: string) => new Date(ymd + "T00:00:00Z").toLocaleDateStri
 const fmtDays = (n: number) => String(Math.round(n * 2) / 2);
 // Local calendar dates for the quick picks (toISOString would flip to UTC's date late in the evening).
 const ymdIn = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toLocaleDateString("en-CA"); };
-const DRAFT_KEY = "hrms:leave-request-draft";
+// Namespaced to the caller (draftKey), so a half-written request on a shared machine - dates, and a reason
+// that is often personal - is never handed to whoever opens this dialog next. Session-scoped, which is the
+// useful lifetime of a draft.
+const DRAFT_KEY = () => draftKey("leave-request");
 const dowOf = (ymd: string) => new Date(ymd + "T00:00:00Z").getUTCDay();
 // "Fri 26 Dec" - the month matters, because the calendar below shows two of them and a bridge can sit in
 // either. `weekdayDay` drops it for the near end of a same-month range, so it isn't printed twice.
@@ -106,7 +110,7 @@ export function RequestLeaveDialog({
   useEffect(() => {
     if (!open || initial) return;
     try {
-      const raw = sessionStorage.getItem(DRAFT_KEY);
+      const raw = sessionStorage.getItem(DRAFT_KEY());
       if (!raw) return;
       const saved = JSON.parse(raw) as Partial<typeof form>;
       if (!saved.leave_type && !saved.start_date && !saved.reason) return;
@@ -121,14 +125,14 @@ export function RequestLeaveDialog({
     if (!open) return;
     const blank = !form.leave_type && !form.start_date && !form.end_date && !form.reason.trim();
     try {
-      if (blank) sessionStorage.removeItem(DRAFT_KEY);
-      else sessionStorage.setItem(DRAFT_KEY, JSON.stringify(form));
+      if (blank) sessionStorage.removeItem(DRAFT_KEY());
+      else sessionStorage.setItem(DRAFT_KEY(), JSON.stringify(form));
     } catch {
       // Private-mode storage refusals are not worth surfacing; the form still works.
     }
   }, [open, form]);
   function startOver() {
-    try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* nothing to clean up */ }
+    try { sessionStorage.removeItem(DRAFT_KEY()); } catch { /* nothing to clean up */ }
     setForm({ leave_type: "", start_date: "", end_date: "", reason: "", startSession: 1, endSession: 2 });
     setDoc(null);
     setRestored(false);
@@ -341,7 +345,7 @@ export function RequestLeaveDialog({
           await upload(created.path, doc);
         } catch (e) {
           toast({ title: "Leave requested, but the document didn't attach", description: (e as Error).message, variant: "destructive" });
-          try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* nothing to clean up */ }
+          try { sessionStorage.removeItem(DRAFT_KEY()); } catch { /* nothing to clean up */ }
           setForm({ leave_type: "", start_date: "", end_date: "", reason: "", startSession: 1, endSession: 2 });
           setDoc(null);
           onOpenChange(false);
@@ -350,7 +354,7 @@ export function RequestLeaveDialog({
         }
       }
       toast({ title: "Leave requested", variant: "success" });
-      try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* nothing to clean up */ }
+      try { sessionStorage.removeItem(DRAFT_KEY()); } catch { /* nothing to clean up */ }
       setRestored(false);
       setForm({ leave_type: "", start_date: "", end_date: "", reason: "", startSession: 1, endSession: 2 });
       setDoc(null);

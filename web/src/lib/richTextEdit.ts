@@ -162,20 +162,54 @@ function selectedLines(lines: string[], sel: Sel): [number, number] {
 }
 
 /**
- * Grow a line index out to its whole block (bounded by blank lines), skipping any attribute line on top. "The
- * block the caret is in" is the run of lines around it bounded by blank lines, which is exactly how the renderer
- * groups them - the two agree by construction.
+ * Which block a line belongs to, by the SAME markers the renderer splits on (lib/richText.tsx's parse loop).
+ *
+ * A block boundary is not only a blank line. The renderer closes the paragraph it is building whenever a line
+ * opens a heading, a rule, a quote or a list, so `## Title` followed straight away by a sentence is two blocks
+ * on the page even with nothing between them - and a run of lines is one block only while every line reads as
+ * the same kind.
+ */
+type LineKind = "h" | "hr" | "quote" | "ul" | "ol" | "p";
+const lineKind = (line: string): LineKind => {
+  const t = line.trim();
+  if (/^(---|___|\*\*\*)$/.test(t)) return "hr";
+  if (/^#{1,3}\s+/.test(t)) return "h";
+  if (/^>\s?/.test(t)) return "quote";
+  if (/^[-*]\s+/.test(t)) return "ul";
+  if (/^\d+[.)]\s+/.test(t)) return "ol";
+  return "p";
+};
+
+/**
+ * Grow a line index out to its whole block. "The block the caret is in" has to mean the same thing here as it
+ * does on the page, or a block command lands on the wrong words: a caret in the sentence under a heading used
+ * to grow across the heading (nothing but a blank line stopped the walk), so picking a typeface for that
+ * sentence wrote the attribute above the HEADING and restyled the heading instead - leaving the sentence, the
+ * one thing the reader had the caret in, untouched.
  */
 function blockAround(lines: string[], line: number): [number, number] {
+  const here = lines[line] ?? "";
   // A caret on a blank line is between blocks, which is to say it is at the start of the one about to be written.
   // That empty line is the block: walking out from it would reach back into the paragraph ABOVE and format that
   // instead - the finished text, rather than the text this is being pressed for.
-  if ((lines[line] ?? "").trim() === "") return [line, line];
+  if (here.trim() === "") return [line, line];
+  // An attribute line decorates the block UNDER it (that is how the renderer reads it), so a caret parked on one
+  // is a caret in that block.
+  if (isAttrLine(here) && (lines[line + 1] ?? "").trim() !== "" && !isAttrLine(lines[line + 1] ?? "")) {
+    return blockAround(lines, line + 1);
+  }
+  const kind = lineKind(here);
   let first = line;
   let last = line;
-  while (first > 0 && lines[first - 1]!.trim() !== "") first--;
-  while (last < lines.length - 1 && lines[last + 1]!.trim() !== "") last++;
-  if (isAttrLine(lines[first] ?? "")) first = Math.min(first + 1, last);
+  // A heading and a rule are a line each: two headings in a row are two blocks, never one to format together.
+  if (kind !== "h" && kind !== "hr") {
+    const joins = (i: number) => {
+      const l = lines[i] ?? "";
+      return l.trim() !== "" && !isAttrLine(l) && lineKind(l) === kind;
+    };
+    while (first > 0 && joins(first - 1)) first--;
+    while (last < lines.length - 1 && joins(last + 1)) last++;
+  }
   return [first, last];
 }
 

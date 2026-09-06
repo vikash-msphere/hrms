@@ -80,7 +80,9 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
   // Role titles for the applications on screen, and names for the interviewers / referrer on them. Read only
   // when there is something to label.
   const { rows: reqs } = useCollection<JobRequisition>("job-requisitions", { enabled: myApps.some((a) => a.requisition) });
-  const { rows: referrals } = useCollection<Referral>("referrals", { enabled: !!candidate?.referral });
+  // By id, not by scanning the collection: referrals list a page at a time, and the one that sent THIS
+  // candidate in is as likely as not past the cursor - which read as "nobody referred them".
+  const { row: referral } = useResource<Referral>("referrals", candidate?.referral ? idOf(candidate.referral) : null);
   const needNames = !!candidate?.referral || interviews.some((i) => (i.interviewers ?? []).length > 0);
   const { rows: employees } = useCollection<Employee>("employees", { enabled: needNames });
   const reqTitle = useMemo(() => {
@@ -97,11 +99,10 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
     [interviews, appIds],
   );
   const myOffers = useMemo(() => offers.filter((o) => o.application && appIds.has(idOf(o.application))), [offers, appIds]);
-  const referredBy = useMemo(() => {
-    if (!candidate?.referral) return null;
-    const r = referrals.find((x) => idOf(x.path) === idOf(candidate.referral!));
-    return r ? { name: empName(r.referrer), when: r.create_time } : null;
-  }, [candidate, referrals, empName]);
+  const referredBy = useMemo(
+    () => (referral ? { name: empName(referral.referrer), when: referral.create_time } : null),
+    [referral, empName],
+  );
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -128,7 +129,9 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   {candidate.source && <Badge variant="outline">{sourceLabel(candidate.source)}{candidate.source_detail ? ` · ${candidate.source_detail}` : ""}</Badge>}
-                  {referredBy && <Badge variant="secondary" className="gap-1"><UserCheck className="h-3 w-3" /> Referred by {referredBy.name}</Badge>}
+                  {/* No literal space after the icon - the badge already sets `gap-1`, and the stray one only
+                      ends up at the front of the badge's own text. */}
+                  {referredBy && <Badge variant="secondary" className="gap-1"><UserCheck className="h-3 w-3" />Referred by {referredBy.name}</Badge>}
                   {(candidate.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean).map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
                 </div>
               </div>

@@ -1,13 +1,13 @@
 import * as React from "react";
 import { UserSearch, Check, X, ShieldOff } from "lucide-react";
-import { api, listAll } from "@/api";
+import { api } from "@/api";
 import { usePermission } from "@/lib/perm";
 import { roleLabel } from "@/lib/roles";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Combobox } from "@/components/ui/combobox";
-import type { User } from "@/types";
 import type { AccessTargetRef } from "./AccessModeProvider";
+import { fetchSubjectOptions } from "./subjectOptions";
 
 // "View as": ask the ENGINE (POST /v1/access-rules:preview) what a chosen person can actually do on the
 // modal's current target, and show the verdict. This is the ground truth the whole modal edits toward -
@@ -45,16 +45,6 @@ export function fetchPreview(
 // Options for a preview-subject picker: every EMPLOYEE (person), plus sign-in accounts with no employee
 // link (service/admin accounts). People are what an admin thinks in - a users-only list silently misses
 // everyone who hasn't signed in yet (the server grades those as the default-role account they'd get).
-export async function fetchSubjectOptions(): Promise<{ value: string; label: string }[]> {
-  const [emps, accounts] = await Promise.all([
-    listAll<{ path: string; first_name: string; last_name: string; work_email?: string }>("employees"),
-    listAll<User>("users"),
-  ]);
-  const empOpts = emps.map((e) => ({ value: e.path, label: `${e.first_name} ${e.last_name}${e.work_email ? ` · ${e.work_email}` : ""}` }));
-  const unlinked = accounts.filter((u) => !u.employee).map((u) => ({ value: u.path, label: `${u.email} (account)` }));
-  return [...empOpts, ...unlinked].sort((a, b) => a.label.localeCompare(b.label));
-}
-
 const WHY_TEXT: Record<string, string> = {
   self: "via their own record",
   dept: "via their department",

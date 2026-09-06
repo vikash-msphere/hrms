@@ -44,6 +44,14 @@ export function SubjectPermissionsDialog({
   const canWrite = usePermission("access-rules.write");
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const [busy, setBusy] = React.useState(false);
+  // The level a cell is being MOVED to, per collection, while its write is in flight.
+  //
+  // Setting a level is delete-then-create followed by a re-fetch of every access rule in the org, so the
+  // truth this dialog reads from is a second or more behind the press. Without this the dropdown snapped back
+  // to the old level for that whole window - the level you just chose, shown as not chosen - and one shared
+  // `busy` flag disabled all sixty rows while it happened, so the obvious response (press it again) was also
+  // impossible. Only the row being written is frozen now, and it shows what it is being set to.
+  const [saving, setSaving] = React.useState<Record<string, string>>({});
 
   const reload = React.useCallback(async () => {
     setBusy(true);
@@ -156,7 +164,7 @@ export function SubjectPermissionsDialog({
       });
       if (!ok) return;
     }
-    setBusy(true);
+    setSaving((s) => ({ ...s, [collection]: value }));
     try {
       for (const r of cellRules(collection)) await remove(r.path, r.etag); // edit = delete + create
       if (value !== "none") {
@@ -167,7 +175,14 @@ export function SubjectPermissionsDialog({
       await reload();
     } catch (e) {
       toast({ variant: "destructive", title: "Could not update", description: String((e as Error).message) });
-      setBusy(false);
+    } finally {
+      // Cleared in the same tick the reload's rules land in, so the cell moves straight from the level it was
+      // being set to to the level the server confirms - and falls back to the old one if the write failed.
+      setSaving((s) => {
+        const next = { ...s };
+        delete next[collection];
+        return next;
+      });
     }
   }
 
@@ -241,7 +256,7 @@ export function SubjectPermissionsDialog({
                 <React.Fragment key={group}>
                   <p className="sticky top-0 z-10 bg-background px-2 pb-0.5 pt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</p>
                   {cols.map((c) => {
-                    const v = valueOf(c);
+                    const v = saving[c] ?? valueOf(c);
                     const inherited = subjectKind === "user" ? roleValueOf(c) : "none";
                     return (
                       <div key={c} className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-accent/40">
@@ -258,7 +273,7 @@ export function SubjectPermissionsDialog({
                         {isGlobal || !canWrite ? (
                           <Badge variant={v === "deny" ? "destructive" : v === "none" ? "muted" : "secondary"} className={v === "deny" || v === "none" ? undefined : accessTone(v).text}>{v}</Badge>
                         ) : (
-                          <Select value={v} onValueChange={(nv) => setCell(c, nv)} disabled={busy}>
+                          <Select value={v} onValueChange={(nv) => setCell(c, nv)} disabled={c in saving}>
                             {/* line-clamp-none + flex: the default value slot is a -webkit-box, which breaks the dot+label row. */}
                             <SelectTrigger className="h-8 w-32 shrink-0 [&>span]:flex [&>span]:items-center [&>span]:line-clamp-none"><SelectValue /></SelectTrigger>
                             <SelectContent>

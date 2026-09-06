@@ -22,7 +22,7 @@ import { settings } from "./routes/settings";
 import { roles } from "./routes/roles";
 import { policy } from "./routes/policy";
 import { accessRules } from "./routes/accessRules";
-import { accessPreviewRoute, accessRequestRoute, accessApproveRoute, accessRejectRoute } from "./routes/accessPreview";
+import { accessPreviewRoute, accessRequestRoute, accessApproveRoute, accessRejectRoute, accessCloneRoute } from "./routes/accessPreview";
 import { employees } from "./routes/employees";
 import { departments } from "./routes/departments";
 import { leaveRequests } from "./routes/leaveRequests";
@@ -214,6 +214,7 @@ app.route("/v1/access-rules:preview", accessPreviewRoute); // effective-access p
 app.route("/v1/access-rules:requestAccess", accessRequestRoute); // ask access admins for a missing grant
 app.route("/v1/access-rules:approve", accessApproveRoute); // four-eyes: apply a pending permission change
 app.route("/v1/access-rules:reject", accessRejectRoute); // four-eyes: turn down a pending permission change
+app.route("/v1/access-rules:clone", accessCloneRoute); // copy one subject's rules onto another as one traceable act
 app.route("/v1/access-rules", accessRules);
 app.route("/v1/batch:run", batch); // multi-read batch: re-dispatches GET sub-requests through the full chain
 app.route("/v1/search", search); // cross-collection search: per-collection list decision + scope inside the service

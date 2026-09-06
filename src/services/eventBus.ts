@@ -3,7 +3,7 @@
 // which runs any matching data-defined rules. BEST-EFFORT, exactly like notify(): an event or automation
 // failure must NEVER break the action that triggered it (an approval still succeeds if logging fails) - so the
 // whole thing is wrapped and swallowed. This is what lets cross-module workflows be data instead of inline code.
-import { allocFlatCode, allocFlatCodes } from "./codeAlloc";
+import { allocFlatCode, allocFlatCodes, withFreshCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -40,19 +40,25 @@ export async function emitEvent(deps: Deps, actor: AppUser | null, type: string,
   };
   let eventId: string | null = null;
   try {
-    const [row] = await deps.db
-      .insert(schema.eventLog)
-      .values({
-        code: await allocFlatCode(deps, schema.eventLog),
-        type: event.type,
-        subject: event.subject,
-        actorId: event.actorId,
-        employeeId: event.employeeId,
-        payloadJson: JSON.stringify(event.payload),
-        correlationId,
-        occurredAt: event.occurredAt,
-      })
-      .returning();
+    // Retried on a lost code race, and for the same reason the notify path is: the catch below is
+    // non-fatal, so a collision here means an action that happened with no event to show for it - no trail,
+    // and no automation fired off it. The event log is written by EVERY action in the app, which makes it the
+    // one scope where two writers at the same instant is the normal case rather than the unlucky one.
+    const [row] = await withFreshCode(async () =>
+      deps.db
+        .insert(schema.eventLog)
+        .values({
+          code: await allocFlatCode(deps, schema.eventLog),
+          type: event.type,
+          subject: event.subject,
+          actorId: event.actorId,
+          employeeId: event.employeeId,
+          payloadJson: JSON.stringify(event.payload),
+          correlationId,
+          occurredAt: event.occurredAt,
+        })
+        .returning(),
+    );
     eventId = row?.uuid ?? null;
   } catch (e) {
     console.error("[emitEvent] event_log insert failed (non-fatal)", e);

@@ -37,6 +37,9 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const { rows: users } = useCollection<User>("users");
   const canWrite = usePermission("roles.write");
   const canManagePerms = usePermission("access-rules.write");
+  // Copying a whole role's permissions is its own custom method (`access-rules:clone`), grantable apart from
+  // authoring rules one at a time - so the "Start from" field only renders for callers who hold it.
+  const canClonePerms = usePermission("access-rules.clone");
   const { toast } = useToast();
   const confirm = useConfirm();
 
@@ -234,7 +237,7 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
           {/* Most new roles are a near-copy of an existing one ("Finance Lead is Manager plus payroll"), and
               building that by hand across sixty collections is why a fresh role sits unused. Copying is
               additive and goes through the same grant API, so the audit trail and any four-eyes queue apply. */}
-          {!editing && canManagePerms && roles.length > 0 && (
+          {!editing && canManagePerms && canClonePerms && roles.length > 0 && (
             <Field label="Start from" hint="Copies that role's permissions into the new one. You can change them straight afterwards.">
               <Select value={form.cloneFrom} onValueChange={(v) => setForm({ ...form, cloneFrom: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>

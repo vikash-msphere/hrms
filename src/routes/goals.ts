@@ -39,6 +39,17 @@ export const goals = collectionRoutes<GoalInput, typeof schema.goals>({
   createSchema,
   updateSchema,
   serialize: toGoalResource,
+  // A hard purge takes the goal's conversation with it, and cuts the two links that point AT the goal without
+  // being part of it: a child goal aligned under it, and a task card linked to it. Both records have a life of
+  // their own and outlive the goal with the pointer cleared - unlike the comments, which are unreachable once
+  // the goal is gone. Undeclared, all three were foreign keys that turned `DELETE ?force=true` into a 500.
+  purgeCascade: {
+    remove: [{ table: schema.goalComments, column: schema.goalComments.goalId }],
+    detach: [
+      { table: schema.goals, column: schema.goals.parentId },
+      { table: schema.cards, column: schema.cards.goalId },
+    ],
+  },
   // The linked-task delivery rollup ("3/5 tasks · 8/13 pts"), resolved once per page rather than per row - and
   // so a client can render it without reading the whole `cards` collection to group it itself.
   decorate: async (deps, _actor, rows) => {

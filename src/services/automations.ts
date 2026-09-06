@@ -142,6 +142,12 @@ export async function deleteAutomation(deps: Deps, actor: AppUser, id: string, i
   if (!row) throw notFound("automation not found");
   assertNotLocked(row);
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  // Bottom-up, because both children are foreign keys SQLite refuses the delete over - which is what made
+  // removing any rule that had ever fired a 500. Neither outlives the rule: a suspended workflow instance is
+  // runtime state that can never resume without the rule to resume INTO, and a run row exists only to explain
+  // one of that rule's firings. What the rule WAS survives in the audit entry written below.
+  await deps.db.delete(schema.workflowInstances).where(eq(schema.workflowInstances.automationId, id));
+  await deps.db.delete(schema.automationRuns).where(eq(schema.automationRuns.automationId, id));
   await deps.db.delete(schema.automations).where(eq(schema.automations.uuid, id));
   // A hard delete: the rule and its trigger/action wiring survive only as this entry.
   await audit(deps, actor, "automation.delete", "automations", id, removedMeta(row, "automations"), row);

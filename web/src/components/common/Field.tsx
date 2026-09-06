@@ -52,21 +52,35 @@ const EMPTY_FIELD_ERRORS: Record<string, string> = {};
 // will not honour. Anything not named here keeps the old behaviour (no association) until it is taught to
 // accept an id, which is a visible gap rather than a silent lie.
 //
+// A field whose control is wrapped in a layout `<div>` (a stepper on each side, a row of chips underneath)
+// still needs `htmlFor` from the caller: the control is not a child of the Field then, and this cannot see
+// past the wrapper without cloning blindly, which is the thing above.
+//
 // Matched on displayName because a minified build mangles Function.name - hence the explicit assignments in
 // ui/combobox.tsx and friends.
-const LABELABLE = new Set(["input", "textarea", "select", "button", "Input", "Textarea", "Combobox"]);
+const LABELABLE = new Set(["input", "textarea", "select", "button", "Input", "Textarea", "Combobox", "MoneyInput", "Select"]);
+
+/** Is this child a control a `<label for>` may point at? */
+function labelable(child: React.ReactNode): child is React.ReactElement<{ id?: string }> {
+  if (!React.isValidElement(child)) return false;
+  const type = child.type as string | { displayName?: string };
+  const name = typeof type === "string" ? type : type.displayName;
+  return !!name && LABELABLE.has(name);
+}
 
 function useLabelledControl(children: React.ReactNode, htmlFor?: string): [React.ReactNode, string | undefined] {
   const generated = React.useId();
   if (htmlFor) return [children, htmlFor]; // the caller wired it up itself
-  const child = React.Children.count(children) === 1 ? React.Children.toArray(children)[0] : null;
-  if (!React.isValidElement(child)) return [children, undefined];
-  const type = child.type as string | { displayName?: string };
-  const name = typeof type === "string" ? type : type.displayName;
-  if (!name || !LABELABLE.has(name)) return [children, undefined];
-  const existing = (child.props as { id?: string }).id;
+  // The FIRST labelable child, not "the only child". A field very often holds more than one thing - an input
+  // plus its datalist, a stepper either side of it, a row of quick-set chips under it - and requiring a lone
+  // child meant every one of those fields had a label that named nothing, silently. The first labelable
+  // child is the field's control by construction: the extras are its helpers, and they come after it.
+  const kids = React.Children.toArray(children);
+  const control = kids.find(labelable);
+  if (!control) return [children, undefined];
+  const existing = control.props.id;
   if (existing) return [children, existing]; // the control already has an identity; name that one
-  return [React.cloneElement(child as React.ReactElement<{ id?: string }>, { id: generated }), generated];
+  return [kids.map((k) => (k === control ? React.cloneElement(control, { id: generated }) : k)), generated];
 }
 
 export function Field({

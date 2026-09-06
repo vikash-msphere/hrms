@@ -109,7 +109,7 @@ export default function Profile({ me }: { me: Me }) {
                 department={deptName(emp.department)}
                 bio={emp.bio}
                 onEditBio={() => setBioOpen(true)}
-                avatar={<PhotoAvatar employeeId={me.employee_id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
+                avatar={<PhotoAvatar className="h-16 w-16 sm:h-[72px] sm:w-[72px]" employeeId={me.employee_id} name={`${emp.first_name} ${emp.last_name}`} photo={emp.photo} editable onChanged={reload} open={photoOpen} onOpenChange={setPhotoOpen} />}
                 meta={
                   <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                     {emp.employee_number && (

@@ -4,8 +4,9 @@
 //   2. a short TTL so navigations within the window reuse the cached rows instead of refetching,
 //   3. subscribe/notify + mutation-driven invalidation so a write refreshes every mounted view of a collection.
 // Cloudflare caps request COUNT (not payload), so collapsing duplicate reads is the lever.
-import { list, changesSince } from "@/api";
+import { list, listConditional, changesSince } from "@/api";
 import { publish, subscribeTopic } from "@/lib/crossTabBus";
+import { openFor, registerHydrator, put, del } from "@/lib/clientStore";
 
 // ---- Freshness tiers ----------------------------------------------------------------------------------------
 // D1 bills rows read, so the question for every cached collection is "how long may this be reused before we pay
@@ -22,11 +23,12 @@ const TTL_DEFAULT_MS = 20_000;
 const TTL_SEMI_MS = 60_000;
 const TTL_CATALOG_MS = 5 * 60_000;
 
-const CATALOG_COLLECTIONS = new Set([
+// Exported for test/changeDdlDrift.test.ts: a catalog is reused for minutes and stored on disk, so one with no
+// change stamp is stale until something writes to it locally - the one failure this cache cannot recover from.
+export const CATALOG_COLLECTIONS = new Set([
   "departments", "leave-types", "pay-components", "pay-grades", "salary-structures", "pay-periods", "holidays",
   "projects", "shifts", "asset-categories", "expense-categories", "reimbursement-categories", "vendors",
   "benefit-plans", "letter-templates", "letterheads", "bank-formats", "ticket-checklists", "roles", "compliance-rules",
-  "leave-encashment-rules", "board-templates",
 ]);
 const SEMI_COLLECTIONS = new Set(["employees"]);
 
@@ -35,12 +37,43 @@ export const freshnessMs = (collection: string) =>
   CATALOG_COLLECTIONS.has(collection) ? TTL_CATALOG_MS : SEMI_COLLECTIONS.has(collection) ? TTL_SEMI_MS : TTL_DEFAULT_MS;
 const ttlFor = freshnessMs;
 
-// Everything non-ephemeral is worth storing now, not just the long tiers. Before the change feed below, a
-// stored copy of a 20-second collection was pointless - it was stale by the time the page loaded again, so it
-// bought a faster first paint and no fewer reads. With `GET /v1/changes` answering "has this collection been
-// written to", a stored copy is trustworthy however old it is, so a reload can serve leave requests, tickets and
-// board cards from disk too. What stays out is decided in writeDisk: searches and trash views (one-off answers).
-const persistable = (_collection: string) => true;
+// ---- What may be written to disk ----------------------------------------------------------------------------
+// Everything non-ephemeral is worth STORING, not just the long tiers: with `GET /v1/changes` answering "has this
+// collection been written to", a stored copy is trustworthy however old it is, so a reload can serve leave
+// requests, tickets and board cards from disk instead of re-reading them.
+//
+// With one exception, which is not about freshness. Persisting a collection means its rows sit on the disk of
+// whatever machine the browser is on, for as long as the cache keeps them, readable by anything with access to
+// that profile. For a department list or the directory that is a cache. For someone's pay, their tax
+// declarations, their loan balance or their identity documents it is a copy of the most sensitive data the
+// system holds, in plaintext, on a machine the org may not own - and it buys almost nothing, because these are
+// read on one page each rather than on every page. So they are cached in MEMORY for the page life (same dedup,
+// same TTL, same cross-tab sharing) and never written down.
+//
+// Listed explicitly rather than inferred: a new collection that belongs here must be added here, which is what
+// test/resourceStoreCache.test.ts pins.
+const MEMORY_ONLY = new Set([
+  "compensation",
+  "salary-structures",
+  "pay-grades",
+  "payslips",
+  "payroll-runs",
+  "loans",
+  "tax-declarations",
+  "tax-verifications",
+  "settlements",
+  "bonuses",
+  "dependents",
+  "benefit-enrollments",
+  "personal-documents",
+  "document-acknowledgements",
+  "background-checks",
+  "api-keys",
+  "bank-formats",
+]);
+
+/** Whether a loaded copy of this collection may be written to disk (see MEMORY_ONLY above). */
+export const persistable = (collection: string) => !MEMORY_ONLY.has(collection);
 
 // `meta` carries any non-`results` fields the list response returned (e.g. notifications' `snoozed_count`), so a
 // consumer can read a piggybacked count without a second request.
@@ -62,8 +95,13 @@ type Entry = {
   snap: Snapshot; // stable identity; replaced only when it changes (required by useSyncExternalStore)
   ts: number; // last successful load
   inflight: Promise<void> | null;
+  // A forced read that arrived while `inflight` was already running, waiting for its turn - see ensureFetch.
+  queuedForce: Promise<void> | null;
   subs: Set<() => void>;
   fromDisk?: boolean; // adopted from the stored copy and not re-read since - see syncChanges
+  // The server's validator for these exact rows. Sent back on the next revalidation, which is what turns a
+  // lapsed freshness window from a page of rows into one indexed row (see ensureFetch).
+  etag?: string;
 };
 
 const entries = new Map<string, Entry>();
@@ -137,7 +175,7 @@ function getEntry(collection: string, opts: ListOpts): Entry {
   const key = keyOf(collection, opts);
   let e = entries.get(key);
   if (!e) {
-    e = { key, collection, opts, snap: { rows: [], state: "loading", error: null }, ts: 0, inflight: null, subs: new Set() };
+    e = { key, collection, opts, snap: { rows: [], state: "loading", error: null }, ts: 0, inflight: null, queuedForce: null, subs: new Set() };
     entries.set(key, e);
     evictIfNeeded(key);
     // First touch in this page life: adopt whatever the last page life left on disk. A copy still inside its
@@ -151,34 +189,42 @@ function getEntry(collection: string, opts: ListOpts): Entry {
       e.ts = trustDisk ? Date.now() : disk.ts;
       e.fromDisk = true;
       if (trustDisk) adoptedFromDisk.add(e.collection); // what to give up if the reconciliation falls through
+      e.etag = disk.etag; // so revalidating an adopted copy costs one indexed row, not a page of them
       e.snap = { rows: disk.rows, state: "ready", error: null, meta: disk.meta };
     }
   }
   return e;
 }
 
-// ---- Disk layer (localStorage) -------------------------------------------------------------------------------
+// ---- Disk layer ---------------------------------------------------------------------------------------------
 // A reload used to start from nothing: every collection the first screen touches was read again, even the
-// department list nobody had edited in months. Persisting the long-lived tiers means a reload (or a second visit
-// in the same browser) serves them from disk and pays for no read at all.
+// department list nobody had edited in months. Persisting means a reload (or a second visit in the same browser)
+// serves those rows and pays for no read at all.
 //
-// Bounded and disposable by construction:
-//   - keyed by the CALLER (and their active simulation), so nobody ever adopts another identity's rows,
-//   - versioned, so a shape change orphans old copies instead of deserialising them,
-//   - size-capped per entry, and the whole namespace is dropped if the browser refuses a write (quota),
-//   - only ever a cache: any read that finds nothing behaves exactly as before.
-const DISK_PREFIX = "rs1:"; // bump the digit to orphan every stored copy after a shape change
-const DISK_MAX_BYTES = 96 * 1024; // one entry; a bigger payload isn't worth a quota risk
-// Every collection is stored now (not just the two long tiers), each with a few option variants, so the cap is
-// higher - and reaching it evicts the oldest fifth rather than everything (evictOldestDisk). Real entries are a
-// few KB; the per-entry ceiling above is what bounds the worst case, and a quota refusal drops to memory-only.
-const DISK_MAX_ENTRIES = 150;
+// The storage itself belongs to lib/clientStore.ts, which namespaces it to the caller (and their active
+// simulation), holds it to a budget, evicts by recency and purges it on sign-out. What is left here is the
+// policy: which keys are worth storing, and when a stored copy may be believed.
+//
+// Payloads are handed over and hydrated back as UNPARSED JSON, so a page load pays no parse for a collection
+// nothing on the first screen touches. `hydrated` holds them until the key is first mounted; a key that is
+// mounted, dropped from `entries` by the LRU and mounted again re-reads from here rather than from the server.
 let diskUser: string | null = null; // set by setResourceStoreUser; until then, disk is off
-let diskOk = true; // flipped off for the session if storage throws (private mode, quota)
-// The keys this page life has stored, so the entry cap is a Set size instead of a walk over every key in the
-// origin. Seeded lazily on first write (a reload starts with whatever the last one left behind).
-let owned: Set<string> = new Set();
-let ownedSeeded = false;
+// Availability is the record store's problem, not this module's: a browser that refuses to store anything
+// hydrates nothing and accepts writes as no-ops, so every read here simply misses and the store works from
+// memory. There is no session-wide "disk is off" flag to keep in step any more.
+const hydrated = new Map<string, { raw: string; ts: number; etag?: string }>();
+
+registerHydrator("rows", {
+  onRecords: (records) => {
+    for (const r of records) hydrated.set(r.key, { raw: r.value, ts: r.ts, etag: r.etag });
+  },
+  // Evicted for budget: the copy is gone from disk, so stop offering it as one.
+  onEvict: (keys) => {
+    for (const k of keys) hydrated.delete(k);
+  },
+  // A different caller (or a simulation starting): whatever is held here is the previous identity's.
+  onReset: () => hydrated.clear(),
+});
 
 // ---- Trusting the stored copies -----------------------------------------------------------------------------
 // A stored copy used to be worth only a faster paint: whatever its freshness tier said, a page load minutes or
@@ -194,7 +240,19 @@ let ownedSeeded = false;
 // governs how long this page life reuses it. And the trust has an escape hatch at both ends: a client with no
 // reference point (first visit, cleared storage) is told so and revalidates normally, and a reconciliation that
 // fails or cannot be answered gives the stored copies up rather than presenting them as fresh.
-const SYNC_KEY = "rs1sync:"; // `${SYNC_KEY}<user>` -> { at: <server ms at the last successful sync> }
+// One thing the change feed alone cannot answer: WHOSE rows these are allowed to be. Every stored row carries
+// decisions baked in at serialize time - the per-object `access.can` hints, and which fields were redacted -
+// and those come from the caller's grants, not from the collection's contents. So narrowing a grant, dropping
+// an ACL, changing a role or moving someone's department leaves a stored copy that is stale in a way no
+// collection stamp reports: nothing was written to the collection, and a collection they can no longer list is
+// not even named in the answer. The feed therefore also reports an `authz_epoch`, and a move in it gives up
+// EVERY stored copy for that identity - nothing narrower would be truthful.
+//
+// The reference point stays in localStorage rather than in the record store: it has to be read synchronously,
+// before the first entry is mounted, to decide whether stored copies may be adopted at all. It is two numbers
+// and no personal data, and sign-out clears it with everything else.
+const SYNC_KEY = "hrms.sync:"; // `${SYNC_KEY}<identity>` -> { at: <server ms of the last sync>, authz: <version> }
+type SyncPoint = { at: number; authz: string };
 let trustDisk = false; // set once the sync is in flight with a usable `since`
 let syncedFor: string | null = null; // the identity the current reconciliation belongs to
 // Collections served from a stored copy this page life. If the reconciliation cannot vouch for them after all,
@@ -203,19 +261,20 @@ const adoptedFromDisk = new Set<string>();
 
 const syncKey = () => `${SYNC_KEY}${diskUser}`;
 
-function readSyncedAt(): number {
+function readSyncPoint(): SyncPoint {
   try {
     const raw = localStorage.getItem(syncKey());
-    const at = raw ? (JSON.parse(raw) as { at?: number }).at : undefined;
-    return typeof at === "number" && at > 0 ? at : 0;
+    const rec = raw ? (JSON.parse(raw) as Partial<SyncPoint>) : null;
+    const at = typeof rec?.at === "number" && rec.at > 0 ? rec.at : 0;
+    return { at, authz: typeof rec?.authz === "string" ? rec.authz : "" };
   } catch {
-    return 0;
+    return { at: 0, authz: "" };
   }
 }
 
-function writeSyncedAt(at: number) {
+function writeSyncPoint(p: SyncPoint) {
   try {
-    localStorage.setItem(syncKey(), JSON.stringify({ at }));
+    localStorage.setItem(syncKey(), JSON.stringify(p));
   } catch {
     /* storage refused; this page life just won't trust disk next time */
   }
@@ -229,40 +288,70 @@ function writeSyncedAt(at: number) {
  */
 export const storedCopiesTrusted = () => trustDisk;
 
+// The reconciliation, as something to WAIT for. Cached rows do not need to: they are painted immediately and
+// corrected in place when the answer lands, because a list that gains a row a moment later is what every
+// subscriber already handles.
+//
+// A CONFIG READ is different. `getSetting` is awaited once, early, and its answer decides behaviour for the
+// rest of the page life - which rounding to use, whether backdating is allowed, what the working week is. There
+// is no second render to correct: whoever asked has the value. So a stored copy of the config may be served
+// only once the feed has vouched for it, and that is what this is for. It costs no extra request (the feed
+// call is already in the page's first batch) and no extra wait in the common case, where the answer is
+// "nothing changed".
+let reconciliation: Promise<void> = Promise.resolve();
+export const reconciled = () => reconciliation;
+
 /** The identity everything stored is namespaced to, or null before it is known. Other stores key their own
  *  copies off this so a browser shared by two people (or a running simulation) never serves one of them the
- *  other's numbers. */
-export const storedIdentity = () => diskUser;
+ *  other's numbers. Re-exported from the record store, which owns the namespace, so there is one answer. */
+export { storedIdentity } from "@/lib/clientStore";
 
-/** Namespace the disk cache to the signed-in caller (plus any active "view as" subject), then reconcile what is
- *  stored with what has been written since we last looked. */
-export function setResourceStoreUser(key: string | undefined) {
+/**
+ * Namespace the record store to the signed-in caller (plus any active "view as" subject), hydrate it, then
+ * reconcile what is stored with what has been written since we last looked.
+ *
+ * Returns the hydration promise: the shell holds its first data-reading render on it (see App.tsx), because a
+ * read fired before the stored copies are in memory pays for rows this browser already had.
+ */
+export function setResourceStoreUser(key: string | undefined): Promise<void> {
   diskUser = key || null;
+  const hydrating = openFor(key);
   // Re-run per IDENTITY, not once per page life: signing in as someone else - or starting a simulation - is a
   // different disk namespace with its own reconciliation point, and trusting the previous identity's would
-  // vouch for copies that were never checked.
+  // vouch for copies that were never checked. `trustDisk` is decided SYNCHRONOUSLY here, before hydration
+  // resolves and therefore before any entry can adopt a stored copy.
   if (diskUser && syncedFor !== diskUser) {
     syncedFor = diskUser;
-    trustDisk = false;
-    void syncChanges();
+    const point = readSyncPoint();
+    // No previous sync (or storage is off): nothing stored can be trusted, so revalidate the ordinary way. The
+    // first successful sync below arms the next page load.
+    trustDisk = point.at > 0;
+    // Published as a promise, so a config read can wait for the verdict rather than answer ahead of it.
+    reconciliation = hydrating.then(() => syncChanges(point));
   }
+  return hydrating;
 }
 
-async function syncChanges() {
-  const since = readSyncedAt();
-  // No previous sync (or storage is off): nothing stored can be trusted, so behave exactly as before. The first
-  // successful sync below arms the next page load.
-  if (since > 0) trustDisk = true;
+async function syncChanges(point: SyncPoint) {
   try {
-    const r = await changesSince(since);
-    // Either the server cannot speak for a gap this wide, or it named collections that have been written to.
-    // In both cases the answer is the same shape: give up the copies in question. `invalidateCollections` is
-    // the one path for that - it drops them on disk, marks them stale in memory, refetches whatever is mounted,
-    // and tells the other stores (the settings snapshot listens for exactly this).
-    const stale = r.unknown_window ? [...adoptedFromDisk, "settings"] : (r.collections ?? []).filter(Boolean);
-    if (r.unknown_window) trustDisk = false;
+    const r = await changesSince(point.at);
+    // A different authz version says the caller's own permissions changed, so every stored row is suspect: the
+    // rows carry the old `access.can` hints and the old redaction shape, and a collection they have just lost
+    // cannot be named in the answer at all. Give the lot up. Compared for INEQUALITY - it is a hash of what
+    // they may do, not a clock, so "different" is the only question it answers.
+    const authzMoved = !!r.authz_version && !!point.authz && r.authz_version !== point.authz;
+    if (authzMoved || r.unknown_window) {
+      trustDisk = false;
+      clearCache();
+      writeSyncPoint({ at: r.now, authz: r.authz_version ?? point.authz });
+      return;
+    }
+    // Otherwise the answer names exactly the collections that have been written to. `invalidateCollections` is
+    // the one path for giving those up - it drops them on disk, marks them stale in memory, refetches whatever
+    // is mounted, and tells the other stores (the settings snapshot listens for exactly this).
+    const stale = (r.collections ?? []).filter(Boolean);
     if (stale.length) invalidateCollections(stale);
-    writeSyncedAt(r.now);
+    writeSyncPoint({ at: r.now, authz: r.authz_version ?? point.authz });
   } catch {
     // A failed reconciliation must never leave stored rows presented as fresh: give up the ones adopted from
     // disk, which puts this page life back on the ordinary freshness tiers.
@@ -271,101 +360,70 @@ async function syncChanges() {
   }
 }
 
-const diskKey = (key: string) => `${DISK_PREFIX}${diskUser}:${key}`;
+// A tab left open all day used to reconcile exactly once, at boot: the in-session freshness tiers cover what is
+// mounted, but a stored copy kept an age the next page load would trust. Coming back to a backgrounded tab is
+// the moment that matters (someone returning after lunch), and it costs the same one small request.
+const RESYNC_MIN_GAP_MS = 5 * 60_000;
+let lastResync = Date.now();
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible" || !diskUser) return;
+    if (Date.now() - lastResync < RESYNC_MIN_GAP_MS) return;
+    lastResync = Date.now();
+    void syncChanges(readSyncPoint());
+  });
+}
 
 type DiskRecord = { rows: unknown[]; ts: number; meta?: Record<string, unknown> };
+// What `readDisk` hands back: the stored payload plus the validator it was fetched under, so a page load can
+// revalidate the copy it adopted with one indexed row rather than a page of them.
+type Adopted = DiskRecord & { etag?: string };
 
-function readDisk(key: string): DiskRecord | null {
-  if (!diskUser || !diskOk) return null;
+/** The stored copy of this key, parsed on demand. Kept in `hydrated` afterwards, so a key the LRU drops and
+ *  something mounts again is served from here rather than re-read from the server. */
+function readDisk(key: string): Adopted | null {
+  const held = hydrated.get(key);
+  if (!held) return null;
   try {
-    const raw = localStorage.getItem(diskKey(key));
-    if (!raw) return null;
-    const rec = JSON.parse(raw) as DiskRecord;
-    return Array.isArray(rec?.rows) && typeof rec.ts === "number" ? rec : null;
+    const rec = JSON.parse(held.raw) as DiskRecord;
+    if (!Array.isArray(rec?.rows)) return null;
+    // The record store owns the timestamp now, so a payload written by an older build (or one whose `ts` did
+    // not survive) still gets an honest age.
+    return { rows: rec.rows, ts: typeof rec.ts === "number" ? rec.ts : held.ts, meta: rec.meta, etag: held.etag };
   } catch {
+    hydrated.delete(key); // unparseable: nothing will ever get anything out of it
     return null;
   }
 }
 
-/** The stored keys we already own, read once per page life rather than on every write. */
-function seedOwned(): void {
-  if (ownedSeeded) return;
-  ownedSeeded = true;
-  for (let i = localStorage.length - 1; i >= 0; i--) {
-    const k = localStorage.key(i);
-    if (k?.startsWith(DISK_PREFIX)) owned.add(k);
-  }
-}
-
 function writeDisk(e: Entry) {
-  if (!diskUser || !diskOk || !persistable(e.collection)) return;
+  if (!diskUser || !persistable(e.collection)) return;
   // A search result or a trash view is a one-off answer to a question the user asked once: storing them would
   // grow a key per query typed and buy nothing (the next visit asks something else).
   if (e.opts.q || e.opts.deletedOnly) return;
-  try {
-    const payload = JSON.stringify({ rows: e.snap.rows, ts: e.ts, meta: e.snap.meta } satisfies DiskRecord);
-    if (payload.length > DISK_MAX_BYTES) return;
-    seedOwned();
-    const key = diskKey(keyOf(e.collection, e.opts));
-    // Counted from our own set of keys rather than by walking the whole localStorage keyspace, which this did on
-    // every persistable fetch - and every other origin's keys are in that walk too.
-    if (!owned.has(key) && owned.size >= DISK_MAX_ENTRIES) evictOldestDisk();
-    localStorage.setItem(key, payload);
-    owned.add(key);
-  } catch {
-    // Out of quota (or storage denied): drop everything we own and stop trying for this page life. The store
-    // keeps working entirely in memory.
-    diskOk = false;
-    dropDisk();
-  }
-}
-
-/**
- * Make room by dropping the OLDEST stored copies, a fifth of the cap at a time.
- *
- * This used to drop everything at the cap, which was defensible while only the two long tiers were stored (a
- * couple of dozen keys, rarely reached). Now that every collection is stored, reaching the cap is ordinary - and
- * wiping the lot would mean the next page load re-read everything, which is the cost this whole mechanism
- * exists to avoid. Oldest-first keeps what is most likely to be wanted again.
- */
-function evictOldestDisk() {
-  try {
-    seedOwned();
-    const aged = [...owned].map((k) => {
-      let ts = 0;
-      try {
-        ts = (JSON.parse(localStorage.getItem(k) ?? "{}") as { ts?: number }).ts ?? 0;
-      } catch {
-        /* unparseable: age 0, so it goes first */
-      }
-      return { k, ts };
-    });
-    aged.sort((a, b) => a.ts - b.ts);
-    for (const { k } of aged.slice(0, Math.max(1, Math.ceil(DISK_MAX_ENTRIES / 5)))) {
-      localStorage.removeItem(k);
-      owned.delete(k);
-    }
-  } catch {
-    dropDisk(); // storage is misbehaving: fall back to the blunt instrument
-  }
+  const key = keyOf(e.collection, e.opts);
+  const raw = JSON.stringify({ rows: e.snap.rows, ts: e.ts, meta: e.snap.meta } satisfies DiskRecord);
+  hydrated.set(key, { raw, ts: e.ts, etag: e.etag });
+  // Queued and written off the fetch's own turn; the record store holds the class to its budget and evicts by
+  // recency, so there is no cap to check and no keyspace to walk here.
+  put("rows", key, raw, { collection: e.collection, etag: e.etag });
 }
 
 /** Forget the stored copies of these collections (all of them when passed nothing). */
 function dropDisk(collections?: Set<string>) {
-  try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const k = localStorage.key(i);
-      if (!k?.startsWith(DISK_PREFIX)) continue;
-      if (collections) {
-        // key shape: "rs1:<user>:<collection>?<opts>"
-        const collection = k.slice(DISK_PREFIX.length).split(":").slice(1).join(":").split("?")[0];
-        if (!collection || !collections.has(collection)) continue;
-      }
-      localStorage.removeItem(k);
-      owned.delete(k);
+  if (!collections) {
+    for (const key of [...hydrated.keys()]) {
+      hydrated.delete(key);
+      del("rows", key);
     }
-  } catch {
-    /* nothing we can do; memory-only from here */
+    return;
+  }
+  // `hydrated` holds every stored key for this identity (hydration loads them all, and writeDisk adds its own),
+  // so this is the complete set - no keyspace walk, and the entry key's own prefix IS the collection.
+  for (const key of [...hydrated.keys()]) {
+    if (!collections.has(key.split("?")[0]!)) continue;
+    hydrated.delete(key);
+    del("rows", key);
   }
 }
 
@@ -406,21 +464,53 @@ export function collectionHasMore(collection: string | undefined): boolean {
 // Kick off a fetch if the entry is stale and not already loading. `force` bypasses the TTL (used by reload()).
 export function ensureFetch(collection: string, opts: ListOpts, force = false): Promise<void> {
   const e = getEntry(collection, opts);
-  if (e.inflight) return e.inflight;
+  // A FORCED read cannot ride an in-flight one. The request already on the wire may have been sent before the
+  // write that forced this - so its answer is the state the caller is trying to leave behind, and adopting it
+  // silently rolls the view back. (That is how a saved settings row kept reading as unsaved: the save's
+  // invalidation landed on top of a revalidation already in flight, the pre-write rows came back, and every
+  // form bound to them stayed dirty for the rest of the page's life.) Queue one behind it instead - one,
+  // however many forced calls arrive, since they all want the same thing: rows read after this moment.
+  if (e.inflight) {
+    if (!force) return e.inflight;
+    if (!e.queuedForce) {
+      e.queuedForce = e.inflight
+        .catch(() => {})
+        .then(() => {
+          e.queuedForce = null;
+          return ensureFetch(collection, opts, true);
+        });
+    }
+    return e.queuedForce;
+  }
   const fresh = e.snap.state === "ready" && Date.now() - e.ts < ttlFor(collection);
   if (fresh && !force) return Promise.resolve();
   if (e.snap.state !== "ready") setSnap(e, { state: "loading" }); // keep stale rows visible while revalidating
-  e.inflight = list<unknown>(collection, opts)
-    .then((resp) => {
+  // A REVALIDATION, when we already hold rows and their validator: the freshness window lapsing is not evidence
+  // that anything changed, and it usually hasn't. Sending the etag lets the server answer in one indexed row
+  // instead of a page of them (src/http/listEtag.ts). A first load has nothing to send and reads normally.
+  const validator = e.snap.state === "ready" && e.etag ? e.etag : undefined;
+  // `force` is always a read prompted by a write (or by the reader asking outright), so it must not be handed
+  // a request that was already on the wire before it - see the note on `fresh` in lib/getCoalescer.ts.
+  e.inflight = listConditional<unknown>(collection, opts, validator, force)
+    .then((answer) => {
       e.ts = Date.now();
+      if (answer.notModified) {
+        // The rows we hold ARE the answer. Re-stamp them so the window starts again, and store that - a
+        // reload should not have to re-establish what this just confirmed.
+        e.fromDisk = false;
+        writeDisk(e);
+        setSnap(e, {}); // notify: a view waiting on `loading` has its answer now
+        return;
+      }
       e.fromDisk = false; // these rows came from the server, not from the stored copy
-      const { results, ...meta } = resp as { results?: unknown[] } & Record<string, unknown>;
+      e.etag = answer.etag;
+      const { results, ...meta } = answer.response as { results?: unknown[] } & Record<string, unknown>;
       const rows = results ?? [];
       setSnap(e, { rows, state: "ready", error: null, meta });
       writeDisk(e); // so the next page life can skip this read entirely
       // Passive cross-tab share: whichever tab fetched hands the fresh rows to every sibling, so a subscribed
       // sibling adopts them (below) with NO request of its own. Free - the fetch already happened here.
-      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, meta } satisfies RowsMsg);
+      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, meta, etag: e.etag } satisfies RowsMsg);
     })
     .catch((err) => {
       setSnap(e, { state: "error", error: (err as Error).message });
@@ -539,11 +629,27 @@ export function refetchMounted(): Promise<void> {
  */
 export function clearCache(): void {
   dropDisk();
+  // Everything DERIVED from these rows has to go too - the org settings snapshot, the approvals badge, the
+  // cached faces. Each of those is its own store with no cached key here to drop, so they say so themselves
+  // rather than this module keeping a list of what they are.
+  purgeSubs.forEach((cb) => cb());
   for (const e of [...entries.values()]) {
     e.ts = 0; // mark stale
     if (e.subs.size === 0 && !e.inflight) dropEntry(e);
     else ensureFetch(e.collection, e.opts, true);
   }
+}
+
+// "Give up everything you have stored." Distinct from subscribeInvalidations, which names collections: this
+// fires when no collection is the reason - the caller's own access changed, or a crash boundary is retrying -
+// and every derived store has to start again from nothing.
+const purgeSubs = new Set<() => void>();
+
+export function subscribePurge(cb: () => void): () => void {
+  purgeSubs.add(cb);
+  return () => {
+    purgeSubs.delete(cb);
+  };
 }
 
 // ---- Cross-tab coherence -----------------------------------------------------
@@ -555,12 +661,13 @@ export function clearCache(): void {
 //                 keys (one of us reads, then shares via TOPIC_ROWS). Applied WITHOUT re-broadcasting (no loop).
 const TOPIC_ROWS = "rs:rows";
 const TOPIC_INVAL = "rs:inval";
-type RowsMsg = { key: string; rows: unknown[]; ts: number; meta?: Record<string, unknown> };
+type RowsMsg = { key: string; rows: unknown[]; ts: number; meta?: Record<string, unknown>; etag?: string };
 
-subscribeTopic<RowsMsg>(TOPIC_ROWS, ({ key, rows, ts, meta }) => {
+subscribeTopic<RowsMsg>(TOPIC_ROWS, ({ key, rows, ts, meta, etag }) => {
   const e = entries.get(key);
   if (!e || ts <= e.ts) return; // not observed here, or we already hold equal/newer rows
   e.ts = ts;
+  e.etag = etag; // the sibling's validator describes these exact rows, so it is ours to revalidate with
   setSnap(e, { rows, state: "ready", error: null, meta });
   writeDisk(e); // a sibling's fetch is as good as our own - store it so a reload can reuse it
 });
@@ -642,6 +749,14 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "announcements:markAllRead": ["announcements"],
   "announcements:publish": ["announcements", "notifications"],
   "notifications:markAllRead": ["notifications"],
+  // The three collection-level methods that FILE a document: a generated letter, a generated Form 16, and the
+  // official TRACES upload. Each one adds a row that every mounted list of somebody's documents is showing -
+  // the profile's Documents card, the Documents page - so the collection has to be refetched. They used to go
+  // out through the raw `api()` helper, which invalidates nothing, and the row they created appeared only
+  // after a reload.
+  "personal-documents:generateLetter": ["personal-documents"],
+  "personal-documents:generateForm16": ["personal-documents"],
+  "personal-documents:uploadForm16": ["personal-documents"],
 };
 
 // Collections a mutation on `path` (custom `verb` optional) should invalidate.

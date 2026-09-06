@@ -192,6 +192,19 @@ export function setQueryParams(patch: Record<string, string | null>) {
 // outbound half that was missing, which is why no task or ticket has ever been linkable.
 //
 // A `sub` segment describes the open record, so clearing the id clears it too: `#/page//tab` is not a route.
+/**
+ * The record segment of the LIVE hash (`#/<page>/<id>` -> `<id>`), read straight from the URL.
+ *
+ * `useRoute` only re-parses on hashchange, and `setRouteRecord` deliberately fires none, so a route object can
+ * be a step behind on this one segment. Anything that acts on "which record is the URL pointing at" - opening
+ * a deep-linked row - has to ask the URL rather than the last parse.
+ */
+export function routeRecord(): string | null {
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  const [path = ""] = raw.split("?");
+  return path.split("/")[1] || null;
+}
+
 export function setRouteRecord(id: string | null) {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const [path, qs = ""] = raw.split("?");

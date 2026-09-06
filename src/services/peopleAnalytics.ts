@@ -6,6 +6,7 @@ import { getSettingValue } from "./settings";
 import type { ListScope } from "../domain/access";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
+import { chunk } from "../lib/dbBatch";
 import {
   METRICS,
   METRIC_GROUPS,
@@ -160,8 +161,8 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
 
   const truncated = roster.length > limit;
   const people = roster.slice(0, limit);
-  const ids = people.map((p) => p.uuid);
-  if (ids.length === 0) {
+  const allIds = people.map((p) => p.uuid);
+  if (allIds.length === 0) {
     return { window: { from: q.from, to: q.to, timezone: sched.timezone, working_days: 0 }, groups, metrics, people: [], team: {}, truncated: false };
   }
 
@@ -179,6 +180,10 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   // undefined - which is a wrong number, not an error. An alias per field makes that impossible.
   const cond = (name: string, c: SQL) => sql<number>`coalesce(sum(case when ${c} then 1 else 0 end), 0)`.as(name);
   const expr = (name: string, s: SQL<number>) => s.as(name);
+
+  // Ids per statement. Well under D1's 100-parameter cap, because every aggregate also binds its window dates
+  // and whatever its access scope adds - the roster is the only part that grows with the org.
+  const ID_CHUNK = 80;
 
   type Stmt = { id: string; sql: unknown };
   const stmts: Stmt[] = [];
@@ -203,6 +208,14 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     const [code, owner] = SCOPE_COLUMNS[collection]!;
     return and(...([applyScope(scopes.get(collection), code, owner), ...conds].filter(Boolean) as SQL[]));
   };
+
+  // Every aggregate below binds one parameter per person, and D1 caps a statement at 100 of them (PARAM_CAP),
+  // so a single IN list over a real roster takes the whole report down with `too many SQL variables`. The same
+  // aggregates are therefore built once per chunk of ids and merged by aggregate id after the batch - chunked
+  // statements inside one batch still cost the one subrequest. `ids` shadows the full list on purpose: each
+  // pass sees only its own chunk, so no aggregate can accidentally bind them all.
+  for (const idChunk of chunk(allIds, ID_CHUNK)) {
+  const ids = idChunk;
 
   if (wants("attendance")) {
     // Per (person, org-local day): the first punch in, the last punch out, whether anything is still open and
@@ -406,6 +419,7 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
         inArray(t.tickets.employeeId, ids)))
       .groupBy(t.tickets.employeeId));
   }
+  }
 
   // The absence denominator: the company calendar over the window, which the window's own working-day count
   // needs too. Read directly (like payroll's LOP does) - it is the schedule, not somebody's rows, and the
@@ -423,8 +437,15 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     : stmts.length === 1
       ? [await (stmts[0]!.sql as PromiseLike<unknown>)]
       : ((await db.batch(stmts.map((s) => s.sql) as unknown as Parameters<typeof db.batch>[0])) as unknown as unknown[]);
+  // One aggregate is now several statements (one per id chunk), so its rows are concatenated rather than
+  // assigned - the last chunk must not replace the people counted in the first.
   const byId = new Map<string, any[]>();
-  stmts.forEach((s, i) => byId.set(s.id, (results[i] as any[]) ?? []));
+  stmts.forEach((s, i) => {
+    const rows = (results[i] as any[]) ?? [];
+    const held = byId.get(s.id);
+    if (held) held.push(...rows);
+    else byId.set(s.id, [...rows]);
+  });
 
   /** Index an aggregate's rows by employee. */
   const index = (id: string): Map<string, any> => {

@@ -10,6 +10,7 @@ import { fireIntent, useIntent } from "@/lib/intent";
 import { navigate } from "@/router";
 import { exportTable } from "@/lib/exportTable";
 import { cn, idOf, formatDate } from "@/lib/utils";
+import { dateFormat } from "@/lib/intl";
 import {
   summarizeByDay, buildAttendanceRows, fmtHM, fmtDuration, fmtDurationShort, fmtMinOfDay, localDay, localMinutes, zonedInstant,
   weekdayOf, weekStartOf, monthStartOf, monthEndOf, monthGridDays, weekdayOrder, addMonths, hhmmToMin, STATUS_UI,
@@ -42,9 +43,12 @@ import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
 // Wall-clock "HH:MM" (24h) of an instant in the org timezone, for prefilling the correction modal's time inputs.
-const hhmm = (iso: string, tz: string) => new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
-// "Thu, Jun 12" for the history table's day column (the range caption above carries the year).
-const fmtDay = (ymd: string) => new Date(`${ymd}T00:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+const hhmm = (iso: string, tz: string) =>
+  dateFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
+// "Thu, Jun 12" for the history table's day column (the range caption above carries the year). One row per day
+// of the range, so the formatter is shared rather than rebuilt per cell (see lib/intl.ts).
+const DAY_OPTS: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" };
+const fmtDay = (ymd: string) => dateFormat(undefined, DAY_OPTS).format(new Date(`${ymd}T00:00:00`));
 // "Thursday, 12 June" for the calendar's selected-day panel, which has room to spell it out.
 const fmtDayLong = (ymd: string) => new Date(`${ymd}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
 const monthLabel = (ymd: string) => new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });

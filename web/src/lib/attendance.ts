@@ -1,4 +1,5 @@
 import type { AttendanceSession } from "@/types";
+import { dateFormat } from "./intl";
 
 // Org work schedule (stored in settings/attendance; HR edits it). Day status (late/early) is derived on the
 // client from sessions + this schedule. Times are wall-clock in `timezone`; punches are real instants.
@@ -53,9 +54,16 @@ export const hhmmToMin = (s: string) => {
   return (h || 0) * 60 + (m || 0);
 };
 
+// These three run once per PUNCH when a month of attendance is assembled, so the formatter is shared rather
+// than rebuilt per call (see lib/intl.ts). The cache is keyed on the options, so a second timezone gets its
+// own formatter rather than a wrong answer - in practice there is one, the org's.
+const HM_24 = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+const YMD = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+const HM_12 = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: true });
+
 // Minutes-since-midnight of an instant in the org timezone (so 09:05 IST -> 545 regardless of viewer tz).
 export function localMinutes(iso: string, tz: string): number {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(iso));
+  const parts = dateFormat("en-GB", HM_24(tz)).formatToParts(new Date(iso));
   const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
   const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
   return h * 60 + m;
@@ -63,7 +71,7 @@ export function localMinutes(iso: string, tz: string): number {
 
 // The org-local calendar day ("YYYY-MM-DD") of an instant - used to group punches into days.
 export function localDay(iso: string, tz: string): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso));
+  return dateFormat("en-CA", YMD(tz)).format(new Date(iso));
 }
 
 // Inverse of localDay+wall-clock: the ISO instant for a wall-clock "HH:MM" on calendar day "YYYY-MM-DD" read
@@ -218,8 +226,7 @@ export function buildAttendanceRows(opts: {
   return rows.sort((a, b) => b.day.localeCompare(a.day));
 }
 
-export const fmtHM = (iso: string, tz: string) =>
-  new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: true }).format(new Date(iso));
+export const fmtHM = (iso: string, tz: string) => dateFormat(undefined, HM_12(tz)).format(new Date(iso));
 
 export const fmtDuration = (min: number) => `${Math.floor(min / 60)}h ${min % 60}m`;
 

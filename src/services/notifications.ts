@@ -1,5 +1,4 @@
-import { allocOwnedCode, CODE_WIDTH } from "./codeAlloc";
-import { nextChildCode } from "../domain/codes";
+import { allocOwnedCode, allocOwnedCodesFor, withFreshCode, CODE_WIDTH } from "./codeAlloc";
 import { and, or, eq, gt, lte, isNull, isNotNull, inArray, count } from "drizzle-orm";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -86,19 +85,28 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
       await queueForDigest(deps, { recipientId, type: input.type, title: input.title, body: input.body, link: input.link });
       return;
     }
-    await deps.db.insert(schema.notifications).values({
-      code: await allocOwnedCode(deps, schema.notifications, schema.notifications.recipientId, recipientId),
-      recipientId,
-      type: input.type,
-      title: input.title,
-      body: input.body?.trim() || null,
-      link: input.link?.trim() || null,
-      subject: input.subject?.trim() || null,
-      priority,
-      action: input.action?.trim() || null,
-      actorId: input.actorId || null,
-      actorName: input.actorId ? nameOf(byId.get(input.actorId)) : null,
-    });
+    // Retried on a lost code race, because the catch below is the difference between "told" and "not told":
+    // two things happening to one person at the same moment used to have the second notification collide on
+    // its code, and the failure was swallowed as non-fatal - a notification nobody ever saw. Everything the
+    // app tells anybody comes through here, so this is the write most likely to be racing in the first place.
+    await withFreshCode(async (attempt) =>
+      deps.db.insert(schema.notifications).values({
+        // `attempt > 1` re-establishes this person's counter against what is actually stored. A counter left
+        // behind by an older write path hands out numbers that are already on disk, and retrying without the
+        // resync walks it forward one place per attempt - which is exactly how it used to run out of attempts.
+        code: await allocOwnedCode(deps, schema.notifications, schema.notifications.recipientId, recipientId, CODE_WIDTH.owned, attempt > 1),
+        recipientId,
+        type: input.type,
+        title: input.title,
+        body: input.body?.trim() || null,
+        link: input.link?.trim() || null,
+        subject: input.subject?.trim() || null,
+        priority,
+        action: input.action?.trim() || null,
+        actorId: input.actorId || null,
+        actorName: input.actorId ? nameOf(byId.get(input.actorId)) : null,
+      }),
+    );
     // Bonus channel: mirror the notification to the recipient's registered browsers (only when VAPID keys are
     // configured AND this person opted in). Deliberately single-recipient only - the notifyMany broadcast path
     // must not fan external fetches out per device x per employee inside one request (subrequest cap).
@@ -113,9 +121,10 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
 }
 
 // Fan-out the same notification to many recipients (e.g. a published announcement). Resolves every recipient's
-// owner code in TWO reads (employee codes + existing notification codes) and writes via chunked multi-row
-// inserts, instead of the per-recipient read+read+insert that an announcement broadcast would otherwise do
-// O(employees) times in one request (a CPU/duration/subrequest DoS at scale). Best-effort: never throws.
+// prefs and owner code in ONE read plus one batch of counter bumps, and writes via chunked multi-row inserts,
+// instead of the per-recipient read+read+insert that an announcement broadcast would otherwise do
+// O(employees) times in one request (a CPU/duration/subrequest DoS at scale). Best-effort: never throws - but
+// a lost code race is retried rather than swallowed, so "best-effort" never quietly means "not told".
 export async function notifyMany(deps: Deps, recipients: string[], input: Omit<NotifyInput, "recipient">): Promise<void> {
   const uniq = [...new Set(recipients.filter(Boolean))];
   if (!uniq.length || !input.title) return;
@@ -142,16 +151,6 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
     const mutedFor = new Set(emps.filter((e) => isMutedByUser(parseNotificationPrefs(e.prefs), input.type)).map((e) => e.uuid));
     // Denormalize the actor's display name once (a broadcast usually has none - it's a system event).
     const actorName = input.actorId ? nameOf(emps.find((e) => e.uuid === input.actorId)) : null;
-    // Existing notification codes per owner, so each new code is the next free child in that owner's namespace.
-    const existing = await inChunks(uniq, (c) =>
-      deps.db.select({ recipientId: schema.notifications.recipientId, code: schema.notifications.code }).from(schema.notifications).where(inArray(schema.notifications.recipientId, c)),
-    );
-    const siblings = new Map<string, (string | null)[]>();
-    for (const r of existing) {
-      const arr = siblings.get(r.recipientId) ?? [];
-      arr.push(r.code);
-      siblings.set(r.recipientId, arr);
-    }
     const body = input.body?.trim() || null;
     const link = input.link?.trim() || null;
     // The resource this is about. notify() has always stored it; the fan-out silently dropped it, so every
@@ -159,10 +158,21 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
     // it was about, and the "New" marker the web draws from `subject` never appeared for any of them.
     const subject = input.subject?.trim() || null;
     const actorId = input.actorId || null;
-    const rows = uniq
-      .filter((rid) => !mutedFor.has(rid))
-      .map((rid) => ({
-        code: nextChildCode(siblings.get(rid) ?? [], empCode.get(rid) ?? null, CODE_WIDTH.owned),
+    const targets = uniq.filter((rid) => !mutedFor.has(rid));
+    if (!targets.length) return;
+    // Retried on a lost code race, for the reason notify() is: allocation and insert are not one statement, so
+    // a burst against the same person can still have a loser, and the whole batch used to go out through the
+    // catch below as "non-fatal" - a notification nobody ever saw.
+    //
+    // The codes come from the SAME per-(table, recipient) counters the single-recipient path takes, allocated
+    // for the whole audience at once. Composing them from a sibling read instead (which is what this did) left
+    // every broadcast row invisible to the counter, so the next single notify() to a busy person handed out
+    // numbers that were already on disk and lost the notification four retries later. Re-allocated per attempt,
+    // so a loser takes numbers the winner has already moved past.
+    await withFreshCode(async (attempt) => {
+      const codes = await allocOwnedCodesFor(deps, schema.notifications, schema.notifications.recipientId, targets, CODE_WIDTH.owned, empCode, attempt > 1);
+      const rows = targets.map((rid) => ({
+        code: codes.get(rid)!,
         recipientId: rid,
         type: input.type,
         title: input.title,
@@ -174,9 +184,10 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
         actorId,
         actorName,
       }));
-    // One batch = one subrequest for the whole fan-out (each chunk is a statement inside it), and the
-    // broadcast lands atomically - no half-notified audience on a crash.
-    await runBatch(deps.db, insertBatches(rows, (c) => deps.db.insert(schema.notifications).values(c)));
+      // One batch = one subrequest for the whole fan-out (each chunk is a statement inside it), and the
+      // broadcast lands atomically - no half-notified audience on a crash.
+      await runBatch(deps.db, insertBatches(rows, (c) => deps.db.insert(schema.notifications).values(c)));
+    });
   } catch (e) {
     console.error("[notifyMany] broadcast failed (non-fatal)", e);
   }

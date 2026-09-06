@@ -163,7 +163,8 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
               </p>
             )}
             <FieldRow>
-              <Field label="Contact email" error={emailBad ? "That doesn't look like an email address." : undefined}>
+              {/* Eager: this is what disables Save, so waiting for a blur to say it leaves a dead button. */}
+              <Field label="Contact email" eager error={emailBad ? "That doesn't look like an email address." : undefined}>
                 <Input type="email" value={form.contact_email} onChange={(e) => setForm({ ...form, contact_email: e.target.value })} placeholder="accounts@vendor.com" />
               </Field>
               <Field label="Contact phone"><Input type="tel" inputMode="tel" value={form.contact_phone} onChange={(e) => setForm({ ...form, contact_phone: e.target.value })} /></Field>

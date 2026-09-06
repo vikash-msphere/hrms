@@ -247,8 +247,11 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
   }, [rows, validRange, form, attendees, editing?.path]);
 
   async function submit() {
+    // An all-day event still travels as an INSTANT (midnight UTC of its date), not as a bare date: the wire
+    // contract types these fields as date-time, and the app has to speak the contract it publishes. The
+    // server keeps only the date part for an all-day event either way.
     const times = form.all_day
-      ? { start_time: form.start_date, end_time: form.end_date }
+      ? { start_time: `${form.start_date}T00:00:00.000Z`, end_time: `${form.end_date}T00:00:00.000Z` }
       : { start_time: new Date(form.start_dt).toISOString(), end_time: new Date(form.end_dt).toISOString() };
     const body = { title: form.title, all_day: form.all_day, count_as_work: form.count_as_work, requires_clock_in: form.count_as_work && form.requires_clock_in, ...times, color: form.color, description: form.description || null, attendees, repeat: (form.repeat || null) as EventRepeat | null };
     if (editing) {
@@ -447,7 +450,16 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
           </label>
           {form.all_day ? (
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Start date"><Input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} /></Field>
+              <Field label="Start date">
+                {/* Moving the start past the end drags the end along, as the remote-work form does: without
+                    it, picking a date next month leaves the range inverted and the save disabled, with the
+                    error pointing at a field the reader has not touched. */}
+                <Input
+                  type="date"
+                  value={form.start_date}
+                  onChange={(e) => setForm({ ...form, start_date: e.target.value, end_date: form.end_date && form.end_date < e.target.value ? e.target.value : form.end_date })}
+                />
+              </Field>
               <Field label="End date" error={form.end_date && form.end_date < form.start_date ? "End date is before the start date." : undefined}><Input type="date" value={form.end_date} min={form.start_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} /></Field>
             </div>
           ) : (

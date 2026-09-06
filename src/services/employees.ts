@@ -1,4 +1,4 @@
-import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
+import { allocFlatCode, allocUnderDept, withFreshCode, CODE_WIDTH } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
@@ -10,7 +10,7 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, fieldDiff } from "../lib/audit";
 import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
-import { invalidArgument, notFound, aborted } from "../lib/errors";
+import { invalidArgument, notFound, aborted, isCodeCollision, isEmployeeNumberCollision } from "../lib/errors";
 import { moveEmployee } from "./codeCascade";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
@@ -83,14 +83,48 @@ export async function getEmployee(deps: Deps, actor: AppUser, id: string) {
   return row;
 }
 
+// Give the person a sign-in account. An access rule names a `users/{id}` subject (domain/policyValidate.ts),
+// so somebody with no account row cannot be granted anything and does not appear in the people pickers at all -
+// which is why the access modal used to offer only the handful who had already signed in. Provisioning here
+// makes the account exist from the moment the employee does, and first login then finds it by email instead of
+// minting a second one (middleware/auth.ts).
+//
+// An account with the same email may already exist (they signed in before HR added them, or an earlier record
+// used the address): link it if it is unlinked, and otherwise leave it alone rather than steal it from the
+// employee it points at. `email` is UNIQUE, so this must look before it inserts.
+async function provisionAccount(deps: Deps, employeeId: string, workEmail: string) {
+  const email = workEmail.toLowerCase();
+  const existing = (
+    await deps.db
+      .select({ uuid: schema.users.uuid, employeeId: schema.users.employeeId })
+      .from(schema.users)
+      .where(sql`lower(${schema.users.email}) = ${email}`)
+      .limit(1)
+  )[0];
+  if (existing) {
+    if (!existing.employeeId) {
+      await deps.db
+        .update(schema.users)
+        .set({ employeeId, updatedAt: new Date() })
+        .where(and(eq(schema.users.uuid, existing.uuid), isNull(schema.users.employeeId)));
+    }
+    return;
+  }
+  await deps.db
+    .insert(schema.users)
+    .values({ code: await allocFlatCode(deps, schema.users), email: workEmail, role: "employee", employeeId });
+}
+
 export async function createEmployee(deps: Deps, actor: AppUser, input: EmployeeInput, id?: string) {
   if (!input.first_name || !input.last_name || !input.work_email)
     throw invalidArgument("first_name, last_name, work_email are required");
+  // Read out here rather than off `input` below: the insert runs inside a closure (the allocation retry), and
+  // a narrowing from the guard above does not survive into one.
+  const { first_name: firstName, last_name: lastName, work_email: workEmail } = input;
   const nationalIdEnc = input.national_id ? await deps.encryptor.encrypt(input.national_id) : null;
   // Human ID: an HR-provided override (validated unique), else auto-assigned from the org format.
   const override = input.employee_number?.trim();
   if (override) await assertNumberFree(deps, override);
-  const employeeNumber = override || (await allocEmployeeNumber(deps));
   const startDate = dateMs(input.start_date);
   // Default probation end to start_date + the org default probation period when not given explicitly.
   let probationEndDate = dateMs(input.probation_end_date);
@@ -98,18 +132,29 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
     const { default_months } = await getSettingValue(deps, "probation", { default_months: 3 });
     probationEndDate = addMonths(+startDate, default_months);
   }
-  const row = (await deps.db
+  // Both allocated numbers sit inside the retry: the authz `code` under the department, and the human
+  // employee number - each read-max-then-write, each unique, so two people added at once collide on one of
+  // them (codeAlloc.ts withFreshCode). An HR admin pasting a new intake while a manager adds one hire is
+  // exactly that. A number typed in by hand is not re-allocated: it is the number the org has decided on,
+  // and a second attempt would not free it, so that collision still reaches the caller as a conflict.
+  const row = (await withFreshCode(
+    async () =>
+      deps.db
     .insert(schema.employees)
     .values({
-      ...(id ? { id } : {}),
-      firstName: input.first_name,
-      lastName: input.last_name,
+      // `uuid`, which is the primary key (schema.ts). Spelled `{ id }` this named no column at all, so a
+      // caller-specified id was silently dropped and a random one minted - and that path exists to make a
+      // create IDEMPOTENT, so a client retrying a timed-out request made a second person instead of being
+      // told the first already existed.
+      ...(id ? { uuid: id } : {}),
+      firstName,
+      lastName,
       // Empty string clears, like an omitted field: the SPA sends "" for a text box the user left blank
       // (nothing on the wire is ever null - see web/src/api.ts).
       legalName: input.legal_name?.trim() || null,
-      workEmail: input.work_email,
+      workEmail,
       jobTitle: input.job_title?.trim() || null,
-      employeeNumber,
+      employeeNumber: override || (await allocEmployeeNumber(deps)),
       code: await allocUnderDept(deps, idFromPath(input.department) ?? null, CODE_WIDTH.employee),
       departmentId: idFromPath(input.department),
       managerId: idFromPath(input.manager),
@@ -117,19 +162,37 @@ export async function createEmployee(deps: Deps, actor: AppUser, input: Employee
       probationEndDate,
       nationalIdEnc,
     })
-    .returning())[0]!;
+        .returning(),
+    (e) => isCodeCollision(e) || (!override && isEmployeeNumberCollision(e)),
+  ))[0]!;
   await audit(deps, actor, "employee.create", "employees", row.uuid, createdMeta(row, "employees"), row);
-  // Auto-link an existing, unlinked user account that signed in with this email.
-  await deps.db
-    .update(schema.users)
-    .set({ employeeId: row.uuid, updatedAt: new Date() })
-    .where(and(sql`lower(${schema.users.email}) = ${row.workEmail.toLowerCase()}`, isNull(schema.users.employeeId)));
+  await provisionAccount(deps, row.uuid, row.workEmail);
   await emitEvent(deps, actor, "employee.created", {
     subject: `employees/${row.uuid}`,
     employeeId: row.uuid,
     payload: { departmentId: row.departmentId ?? null, startDate: row.startDate ? new Date(row.startDate).toISOString() : null },
   });
   return row;
+}
+
+// Move the linked account onto the employee's new work email (or provision one, for an employee created
+// before accounts were provisioned on create). A DIFFERENT account already holding the new address is left
+// alone: `email` is UNIQUE, and stealing or clobbering it would sign somebody else out of their own account -
+// the employee edit still stands, and the two rows are reconciled by whoever owns that other account.
+async function syncAccountEmail(deps: Deps, employeeId: string, workEmail: string) {
+  const taken = (
+    await deps.db
+      .select({ uuid: schema.users.uuid })
+      .from(schema.users)
+      .where(and(sql`lower(${schema.users.email}) = ${workEmail.toLowerCase()}`, sql`${schema.users.employeeId} is not ${employeeId}`))
+      .limit(1)
+  ).length > 0;
+  if (taken) return;
+  const linked = (
+    await deps.db.select({ uuid: schema.users.uuid }).from(schema.users).where(eq(schema.users.employeeId, employeeId)).limit(1)
+  )[0];
+  if (!linked) return provisionAccount(deps, employeeId, workEmail);
+  await deps.db.update(schema.users).set({ email: workEmail, updatedAt: new Date() }).where(eq(schema.users.uuid, linked.uuid));
 }
 
 // JSON Merge Patch: present = set, explicit null = clear, absent = unchanged.
@@ -167,6 +230,9 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
 
   const [updated] = await deps.db.update(schema.employees).set(set).where(eq(schema.employees.uuid, id)).returning();
   // Diff non-sensitive fields (never the encrypted national id) for the activity trail; fall back to field names.
+  // The sign-in account is keyed by email, so a corrected work address has to move with it - otherwise the
+  // account keeps the old address and the person's next login mints a SECOND one under the new email.
+  if (set.workEmail && set.workEmail.toLowerCase() !== row.workEmail.toLowerCase()) await syncAccountEmail(deps, id, set.workEmail);
   const keys = Object.keys(set).filter((k) => k !== "updatedAt" && k !== "nationalIdEnc");
   const diff = fieldDiff(row, updated!, keys);
   const changedSensitive = "nationalIdEnc" in set;

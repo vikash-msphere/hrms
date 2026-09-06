@@ -279,7 +279,9 @@ export default function Stocktakes({ me }: { me: Me }) {
                     <Button size="sm" variant="ghost" onClick={() => closeCount(c)}><Flag className="h-4 w-4" /> Close</Button>
                   </AccessAction>
                   <AccessAction collection="stocktakes" objectPath={c.path} can={c.access?.can} label="Abandon count">
-                    <Button size="sm" variant="ghost" onClick={() => abandon(c)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                    {/* Named, because it is an icon alone: the one destructive control in this row must not
+                        be announced as "button" and nothing else. */}
+                    <Button size="sm" variant="ghost" aria-label="Abandon count" title="Abandon this count" onClick={() => abandon(c)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
                   </AccessAction>
                 </div>
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">

@@ -2,6 +2,7 @@ import { KeyRound, LogOut, ShieldCheck, ChevronDown, Sun, Moon, Monitor, Check }
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/roles";
 import { useTheme, type Theme } from "@/lib/theme";
+import { purgeAll } from "@/lib/clientStore";
 import { useEmployee } from "@/hooks/useEmployee";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
@@ -15,7 +16,13 @@ import type { Me } from "@/types";
 // Sign-out is mode-agnostic: the server clears its own session (a no-op cookie delete under Cloudflare
 // Access) and says where signing in again happens - the Google login route, or Access's edge logout. If the
 // call itself fails, still leave the app; landing on "/" unauthenticated shows the sign-in screen.
+//
+// It also takes this person's data off the machine. Signing out used to end the session and leave everything
+// behind: the cached rows of every collection they had opened, their colleagues' faces, the org's configuration,
+// their drafts - all of it still on disk, under their identity, indefinitely, on what may well be a shared
+// computer. So the purge is part of signing out, and it is awaited: navigating first would abandon it.
 async function signOut() {
+  await purgeAll();
   try {
     const res = await fetch("/auth/logout", { method: "POST", headers: { "X-Requested-By": "hrms-spa" } });
     const { signin_url } = (await res.json()) as { signin_url?: string };

@@ -19,7 +19,8 @@ let loaded: Promise<Map<string, unknown>> | null = null;
 function load(): Promise<Map<string, unknown>> {
   return (loaded ??= list<Row>("preferences", { max: 200 })
     .then((r) => new Map((r.results ?? []).map((p) => [p.key, p.value])))
-    .catch(() => new Map<string, unknown>())); // no rows / offline: every key reads as absent
+    .catch(() => new Map<string, unknown>()) // no rows / offline: every key reads as absent
+    .then(adoptUnconfirmed));
 }
 
 /** The caller's stored value for `key`, or undefined if they have no row for it yet. */
@@ -32,6 +33,9 @@ export async function readPref<T>(key: string): Promise<T | undefined> {
 /** Persist a preference and keep the shared snapshot in step. Fire-and-forget: a failed save is not fatal. */
 export function writePref(key: string, value: unknown): Promise<void> {
   apply(key, value);
+  // This value is newer than anything a deferred write left outstanding for the key, so that record must not
+  // outlive it and overlay a stale value on the next page life.
+  clearUnconfirmed(key);
   // A sibling tab of the same user holds its own snapshot. Hand it the new value directly rather than telling
   // it to re-read: we know exactly what changed, so a write costs no reads anywhere.
   publish(TOPIC_SET, { key, value } satisfies SetMsg);
@@ -70,30 +74,99 @@ export function stagePref(key: string, value: unknown): void {
 
 export function writePrefDeferred(key: string, value: unknown, delayMs: number): void {
   stagePref(key, value);
+  markUnconfirmed(key, value);
   const existing = pending.get(key);
   if (existing) clearTimeout(existing.timer);
   pending.set(key, { value, timer: setTimeout(() => flushPref(key), delayMs) });
 }
 
-function flushPref(key: string) {
+// ---- Unconfirmed writes -------------------------------------------------------------------------------------
+// A deferred write is only staged in memory until its quiet window lapses, so a reload inside that window used
+// to LOSE it: the timer died with the document, the next page life read the older server row, and the change
+// the reader had just made was silently undone in front of them (hide a dashboard card, reload, and it is
+// back). Flushing on the way out narrows that, but cannot close it - the parting write and the next page's read
+// are two requests in flight at once, and either can land first.
+//
+// So a deferred value is also written down as UNCONFIRMED, and cleared only once the server has taken it. A
+// page that starts while one is outstanding believes the local copy over the row it fetched, and re-sends it.
+// This device therefore never forgets what it was told; another device sees it as soon as one of the sends
+// lands. It is one small object, so it is stored whole rather than a key at a time.
+const UNCONFIRMED_LS = "prefs.unconfirmed";
+
+function readUnconfirmed(): Record<string, unknown> {
+  try {
+    const raw = localStorage.getItem(UNCONFIRMED_LS);
+    const v = raw ? (JSON.parse(raw) as unknown) : null;
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {}; // private mode, or something else's key under this name
+  }
+}
+
+function saveUnconfirmed(map: Record<string, unknown>) {
+  try {
+    if (Object.keys(map).length) localStorage.setItem(UNCONFIRMED_LS, JSON.stringify(map));
+    else localStorage.removeItem(UNCONFIRMED_LS);
+  } catch {
+    /* private mode: the write still goes out, it just cannot survive this page */
+  }
+}
+
+function markUnconfirmed(key: string, value: unknown) {
+  saveUnconfirmed({ ...readUnconfirmed(), [key]: value });
+}
+
+function clearUnconfirmed(key: string) {
+  const map = readUnconfirmed();
+  if (!(key in map)) return;
+  delete map[key];
+  saveUnconfirmed(map);
+}
+
+/** Overlay whatever this device wrote but never saw stored, and send it again. */
+function adoptUnconfirmed(all: Map<string, unknown>): Map<string, unknown> {
+  for (const [key, value] of Object.entries(readUnconfirmed())) {
+    all.set(key, value);
+    void patch(`preferences/${key}`, { value }).then(
+      () => clearUnconfirmed(key),
+      () => {}, // still unconfirmed: the next page life tries again
+    );
+  }
+  return all;
+}
+
+function flushPref(key: string, unloading = false) {
   const p = pending.get(key);
   if (!p) return;
   clearTimeout(p.timer);
   pending.delete(key);
-  void patch(`preferences/${key}`, { value: p.value }).catch(() => {});
+  // `keepalive` on the way out: a request started by a document that is going away is CANCELLED with it, so
+  // without this the last change before a reload or a navigation was staged locally, never sent, and then
+  // silently undone - the next page load read the older server row and overwrote the local copy with it.
+  // (Hide a dashboard card and reload straight away, and it came back.) Preference blobs are far inside the
+  // 64KB keepalive budget.
+  void patch(`preferences/${key}`, { value: p.value }, undefined, unloading ? { keepalive: true } : undefined).then(
+    () => clearUnconfirmed(key),
+    () => {}, // left unconfirmed, so the next page life re-sends it rather than reading the older row back
+  );
 }
 
-/** Send every deferred preference now. */
-export function flushPrefs(): void {
-  for (const key of [...pending.keys()]) flushPref(key);
+/** Send every deferred preference now. `unloading` when the document may not outlive the request. */
+export function flushPrefs(unloading = false): void {
+  for (const key of [...pending.keys()]) flushPref(key, unloading);
 }
 
-// `visibilitychange` (not `beforeunload`/`unload`, which mobile browsers skip) is the reliable last chance to
-// carry pending preferences off this device.
+// The last chances to carry pending preferences off this device. `visibilitychange` covers the tab being
+// backgrounded and is the one mobile browsers honour; `pagehide` covers what it does not - a reload, a
+// same-tab navigation away, a close - none of which need ever hide the tab first. Neither `beforeunload` nor
+// `unload` is used: mobile browsers skip them.
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flushPrefs();
+    if (document.visibilityState === "hidden") flushPrefs(true);
   });
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => flushPrefs(true));
 }
 
 // A preference written in ANOTHER TAB arrives as the value itself, and is applied here directly. Deliberately

@@ -1,5 +1,5 @@
 import { eq, inArray } from "drizzle-orm";
-import { allocFlatCode } from "./codeAlloc";
+import { allocFlatCode, withFreshCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -60,25 +60,28 @@ export async function cardCountsFor(deps: Deps, boardIds: string[]): Promise<Map
 
 export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput, id?: string) {
   if (!input.name?.trim()) throw invalidArgument("name is required");
+  const name = input.name.trim();
   const mode = (input.swimlane_mode ?? "none") as SwimlaneMode;
   if (!SWIMLANE_MODES.includes(mode)) throw invalidArgument("swimlane_mode is invalid");
   const columns = input.columns != null ? asArgError(() => normalizeColumns(input.columns)) : input.mode === "scrum" ? DEFAULT_SCRUM_COLUMNS : DEFAULT_BOARD_COLUMNS;
   const swimlanes = asArgError(() => normalizeSwimlanes(input.swimlanes ?? []));
-  const row = (await deps.db
+  // The code is allocated inside the retry, so a board created at the same moment as somebody else's takes
+  // the next number instead of failing (services/codeAlloc.ts withFreshCode).
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.boards)
     .values({
       code: await allocFlatCode(deps, schema.boards),
       ...(id ? { uuid: id } : {}),
-      name: input.name.trim(),
+      name,
       description: input.description?.trim() || null,
-      taskPrefix: input.task_prefix != null ? normalizePrefix(input.task_prefix) : derivePrefix(input.name.trim()),
+      taskPrefix: input.task_prefix != null ? normalizePrefix(input.task_prefix) : derivePrefix(name),
       mode: input.mode === "scrum" ? "scrum" : "kanban",
       columnsJson: JSON.stringify(columns),
       swimlaneMode: mode,
       swimlanesJson: JSON.stringify(swimlanes),
       labelsJson: JSON.stringify(input.labels != null ? asArgError(() => normalizeLabels(input.labels)) : []),
     })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "board.create", "boards", row.uuid, createdMeta(row, "boards"), row);
   return row;
 }

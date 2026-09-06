@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { PlayCircle, Plus, Hammer, Send, CheckCircle2, Rocket, Loader2, FileSpreadsheet, Trash2, Eye, ChevronRight, AlertTriangle } from "lucide-react";
 import { api, get, create, invoke, download, remove } from "@/api";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
@@ -88,6 +88,10 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
 
   // Per-employee breakdown review (opened from a run row).
   const [reviewRun, setReviewRun] = useState<PayrollRun | null>(null);
+  // Which run the OPEN review is for, readable from inside the fetch below. A breakdown is two requests over a
+  // whole payroll, so it is perfectly normal to close it before they land - and applying their answers then
+  // would reopen a dialog the reader has already dismissed.
+  const reviewFor = useRef<string | null>(null);
   const [items, setItems] = useState<PayrollRunItem[] | null>(null);
   type SplitDrift = { stale: string[]; skipped: string[] };
   const [reviewStale, setReviewStale] = useState<{ stale: boolean; changes: string[]; split_drift?: SplitDrift } | null>(null);
@@ -104,6 +108,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   // The detail response has a fresh etag, so it's stored as reviewRun and drives an in-place rebuild.
   type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift };
   async function openReview(run: PayrollRun) {
+    reviewFor.current = idOf(run.path);
     setReviewRun(run);
     setItems(null);
     setReviewStale(null);
@@ -115,10 +120,14 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
         get<RunDetail>("payroll-runs/" + idOf(run.path)),
         get<{ results: PayrollRunItem[] }>("payroll-runs/" + idOf(run.path) + "/items"),
       ]);
+      // Closed (or moved to another run) while these were in flight: their answers belong to a dialog that is
+      // no longer open, and setting the run again would put it back on screen.
+      if (reviewFor.current !== idOf(run.path)) return;
       setReviewRun(detail);
       setReviewStale({ stale: !!detail.stale, changes: detail.changes ?? [], split_drift: detail.split_drift });
       setItems(r.results ?? []);
     } catch (e) {
+      if (reviewFor.current !== idOf(run.path)) return;
       setItems([]);
       toast({ title: "Couldn't load breakdown", description: (e as Error).message, variant: "destructive" });
     }
@@ -482,6 +491,15 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
 
   return (
     <div>
+      {/* The page's own heading, above the tab bar rather than inside the Runs tab: the Pay periods and
+          Bonuses tabs embed panels that carry no header of their own, so a header living in one tab's content
+          left the other two as pages with no title at all - nothing for a screen reader to land on, and
+          nothing on screen saying where you are. The create actions stay with the tab they act on. */}
+      <PageHeader
+        title="Payroll"
+        description="Build, review and publish payroll."
+        actions={<>{activeTab === "runs" && runActions}<PageSettings me={me} host="payroll-runs" /></>}
+      />
       <Tabs value={activeTab} onValueChange={(v) => navigate(`payroll-runs/${v}`)}>
         <TabsList variant="underline">
           <AccessTab value="runs" target={{ collection: "payroll-runs", label: "Payroll Runs" }}>Runs<ActivityBadge count={tabBadge("runs")} /></AccessTab>
@@ -490,7 +508,6 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
         </TabsList>
 
         <TabsContent value="runs">
-          <PageHeader title="Payroll" description="Build, review and publish payroll." actions={<>{runActions}<PageSettings me={me} host="payroll-runs" /></>} />
           <DataState state={state} error={error} onRetry={reload}>
             {rows.length === 0 ? (
               <EmptyState
@@ -633,7 +650,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
       </Dialog>
 
       {/* Per-employee breakdown - the review surface */}
-      <Dialog open={!!reviewRun} onOpenChange={(o) => !o && setReviewRun(null)}>
+      <Dialog open={!!reviewRun} onOpenChange={(o) => { if (!o) { reviewFor.current = null; setReviewRun(null); } }}>
         {/* 85vh from `sm` up; a phone keeps the shared keyboard-aware sheet height (see ui/dialog.tsx). */}
         <DialogContent className="flex max-w-4xl flex-col overflow-hidden sm:max-h-[85vh]">
           <AccessScope collection="payroll-runs" objectPath={reviewRun?.path}>

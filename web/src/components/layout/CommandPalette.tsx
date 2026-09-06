@@ -344,6 +344,13 @@ export function CommandPalette({
     } else if (e.key === "Enter") {
       e.preventDefault();
       go(flat[active]);
+    } else if (e.key === "Escape") {
+      // Closed here rather than left to the dismissable layer. The layer's Escape handler lives on the
+      // content node, and this content re-renders every time a search result lands - so a press that arrives
+      // in that window was sometimes swallowed, leaving the palette open over a page the person had already
+      // moved on from. Closing on the input, which is where the focus always is, has no such window.
+      e.preventDefault();
+      onOpenChange(false);
     }
   };
 

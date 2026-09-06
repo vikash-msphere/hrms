@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 
 // Moving a card between columns, and having it stay there.
 //
@@ -22,6 +22,7 @@ test("a card moves column through the actions menu and stays moved", async ({ as
   });
   expect(boardRes.status(), await boardRes.text()).toBe(200);
   const board = (await boardRes.json()) as { path: string };
+  const boardId = board.path.split("/")[1]!;
 
   const title = `E2E card ${stamp}`;
   const cardRes = await page.request.post("/v1/cards", {
@@ -32,7 +33,9 @@ test("a card moves column through the actions menu and stays moved", async ({ as
   });
   expect(cardRes.status(), await cardRes.text()).toBe(200);
 
-  await gotoRoute(page, "boards");
+  // Opened ON this spec's board rather than on whatever board the page picks by itself: every other spec that
+  // needs a wall makes one too, and the page opens the first board it finds - which is a race, not a choice.
+  await gotoRoute(page, `boards?board=${boardId}`);
   // Each column is a named group (web/src/pages/Boards.tsx), so "is this card in that column" is a real
   // containment question rather than a guess about the DOM shape.
   const column = (label: string) => page.getByRole("group", { name: label, exact: true });
@@ -49,4 +52,10 @@ test("a card moves column through the actions menu and stays moved", async ({ as
   // It was written, not just re-rendered.
   await page.reload();
   await expect(column("In progress").getByText(title)).toBeVisible();
+
+  // Taken away again: a board is visible to every spec that opens the page, and a list of them is a board
+  // somebody else has to scroll past.
+  const filed = (await cardRes.json()) as { path: string };
+  await purge(page, filed.path);
+  await purge(page, board.path);
 });

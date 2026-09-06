@@ -327,8 +327,11 @@ export default function RemoteWork({ me }: { me: Me }) {
               <span className="block text-xs">Calendar days in the range. Remote days aren't charged to any leave balance.</span>
             </p>
           )}
-          <Field label="Location" hint="Where you'll work from.">
-            <Input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} placeholder="e.g. Home" list="remote-locations" />
+          {/* `htmlFor` by hand: Field can only bind its label when the field holds a SINGLE control, and this
+              one also carries a datalist and the recent-location chips - so without this the label named
+              nothing, for a screen reader or for anything else looking the control up by its name. */}
+          <Field label="Location" htmlFor="remote-location" hint="Where you'll work from.">
+            <Input id="remote-location" value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} placeholder="e.g. Home" list="remote-locations" />
             <datalist id="remote-locations">{knownLocations.map((l) => <option key={l} value={l} />)}</datalist>
             {knownLocations.length > 1 && (
               <div className="mt-2 flex flex-wrap gap-1.5">

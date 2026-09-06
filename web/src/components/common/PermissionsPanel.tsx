@@ -37,6 +37,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const confirm = useConfirm();
   const am = useAccessMode();
   const canManage = usePermission("access-rules.write");
+  const canClone = usePermission("access-rules.clone"); // bulk copying is its own verb, granted separately
   const [compare, setCompare] = React.useState<{ a: string; b: string } | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
   const [rules, setRules] = React.useState<AccessRule[]>([]);
@@ -79,13 +80,21 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     }
   }
 
+  // The subjects first, the rules after - two stages, not one `Promise.all`.
+  //
+  // The grid's SHAPE is roles (or users) down the top and collections down the side, and neither of those
+  // needs a single access rule to be known: the rules only decide what each cell says. But `fetchAllAccessRules`
+  // walks the whole collection a cursor at a time, and an org with the seeded grants is a dozen sequential
+  // round trips - so waiting for it before drawing anything left this page as a column of collection names
+  // with NO roles on it for as long as the walk took. That empty grid does not read as "still loading", it
+  // reads as "no role has any access anywhere", which on the permissions page is the worst thing it could say.
   const reload = React.useCallback(async () => {
     setBusy(true);
     try {
-      const [allRules, ro, us] = await Promise.all([fetchAllAccessRules(), list<Role>("roles"), list<User>("users")]);
-      setRules(allRules);
+      const [ro, us] = await Promise.all([list<Role>("roles"), list<User>("users")]);
       setRoles(ro.results);
       setUsers(us.results.map((u) => ({ path: u.path, email: u.email })));
+      setRules(await fetchAllAccessRules());
     } catch (e) {
       toast({ variant: "destructive", title: "Could not load permissions", description: String((e as Error).message) });
     } finally {
@@ -254,11 +263,17 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // Copy every rule one subject holds onto another - the honest way to make "same as HR, plus payroll"
   // instead of hand-rebuilding 40 rules and missing three.
   async function cloneRules(from: { kind: Kind; subject: string }, to: { kind: Kind; subject: string }) {
-    const source = rules.filter((r) => r.subject_kind === from.kind && r.subject === from.subject);
-    if (!(await confirm({ title: `Copy ${source.length} rules?`, description: `Every rule ${from.kind === "role" ? roleLabel(from.subject) : from.subject} holds is added to ${to.kind === "role" ? roleLabel(to.subject) : to.subject}. Existing rules there are kept; nothing is removed.`, confirmLabel: "Copy" }))) return;
+    // Only ACTIVE rules are copied (the server's rule): a rule still waiting on a second approver is a
+    // request, not a grant, so the count in the prompt has to leave those out or it promises more than lands.
+    const source = rules.filter((r) => r.subject_kind === from.kind && r.subject === from.subject && (r.status ?? "active") === "active");
+    if (!(await confirm({ title: `Copy ${source.length} rules?`, description: `Every rule ${from.kind === "role" ? roleLabel(from.subject) : from.subject} holds is added to ${to.kind === "role" ? roleLabel(to.subject) : to.subject}. Existing rules there are kept; nothing is removed. The whole copy is recorded as one change in the activity trail.`, confirmLabel: "Copy" }))) return;
     setBusy(true);
-    const { added, skipped } = await cloneAccessRules(from, to, rules);
-    toast({ title: `Copied ${added} rules${skipped ? ` · ${skipped} already there` : ""}`, variant: "success" });
+    const { added, skipped, failed, first_error } = await cloneAccessRules(from, to);
+    toast({
+      title: `Copied ${added} rules${skipped ? ` · ${skipped} already there` : ""}${failed ? ` · ${failed} rejected` : ""}`,
+      ...(failed ? { description: first_error } : {}),
+      variant: failed ? "destructive" : "success",
+    });
     await reload();
   }
 
@@ -326,19 +341,24 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
               <label className="mb-1 block text-xs font-medium">{side === "a" ? "Role A" : "Role B"}</label>
               <Select value={compare[side]} onValueChange={(v) => setCompare({ ...compare, [side]: v })}>
                 <SelectTrigger className="h-8 w-44"><SelectValue /></SelectTrigger>
-                <SelectContent>{roles.map((r) => <SelectItem key={r.name} value={r.name}>{roleLabel(r.name)}</SelectItem>)}</SelectContent>
+                <SelectContent>{roles.map((r) => <SelectItem key={r.name} value={r.name}>{r.label || roleLabel(r.name)}</SelectItem>)}</SelectContent>
               </Select>
             </div>
           ))}
-          {canManage && (
-            <>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => cloneRules({ kind: "role", subject: compare.a }, { kind: "role", subject: compare.b })}>
-                Copy A → B
-              </Button>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => cloneRules({ kind: "role", subject: compare.b }, { kind: "role", subject: compare.a })}>
-                Copy B → A
-              </Button>
-            </>
+          {canClone && (
+            // Copying a whole role's rules is its own grantable custom method (`access-rules:clone`), so it
+            // carries its own verb target - an org can hand bulk copying to a specific role, or keep it back
+            // from admins who may still author rules one at a time.
+            <AccessAction verb="clone" collection="access-rules" label="Copy permissions between subjects">
+              <span className="flex gap-2">
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => cloneRules({ kind: "role", subject: compare.a }, { kind: "role", subject: compare.b })}>
+                  Copy A → B
+                </Button>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => cloneRules({ kind: "role", subject: compare.b }, { kind: "role", subject: compare.a })}>
+                  Copy B → A
+                </Button>
+              </span>
+            </AccessAction>
           )}
         </div>
         {(() => {
@@ -461,8 +481,11 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
                 <thead>
                   <tr className="border-b bg-muted/40">
                     <th className="sticky left-0 z-10 bg-muted/40 px-3 py-2 text-left font-semibold">Collection</th>
+                    {/* The role's OWN label first: `roleLabel` only knows the built-in roles and falls back
+                        to the raw identifier, so a role the org created and named read as `finance_lead`
+                        here while every picker called it "Finance Lead". */}
                     {roles.map((r) => (
-                      <th key={r.name} className="whitespace-nowrap px-3 py-2 text-left font-semibold">{roleLabel(r.name)}</th>
+                      <th key={r.name} className="whitespace-nowrap px-3 py-2 text-left font-semibold">{r.label || roleLabel(r.name)}</th>
                     ))}
                   </tr>
                 </thead>

@@ -27,6 +27,7 @@ import { useConfirm } from "@/components/common/confirm";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
+import { readDraft, writeDraft, clearDraft } from "@/lib/draftStore";
 
 // The review stage machine, in order. Every card renders it as a trail so "where is this review and
 // who moves it next" reads at a glance.
@@ -560,11 +561,14 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   // who, which cycle, what stage, and the outcome once shared.
   const feedback = review.feedback ?? [];
 
-  // Long-form review text survives navigating away: drafts persist per review until submitted.
-  const draftKey = (field: string) => `review-draft:${review.path}:${field}`;
-  const loadDraft = (field: string) => { try { return localStorage.getItem(draftKey(field)) ?? ""; } catch { return ""; } };
-  const saveDraft = (field: string, v: string) => { try { v.trim() ? localStorage.setItem(draftKey(field), v) : localStorage.removeItem(draftKey(field)); } catch { /* private mode */ } };
-  const clearDraft = (field: string) => { try { localStorage.removeItem(draftKey(field)); } catch { /* private mode */ } };
+  // Long-form review text survives navigating away: drafts persist per review until submitted. Held in the
+  // shared draft store (lib/draftStore.ts), which namespaces them to the author and expires them - this is one
+  // manager's assessment of a named colleague, so it has no business sitting on a shared machine indefinitely
+  // or being offered back to the next person who signs in, which is what an un-namespaced local key did.
+  const draftKey = (field: string) => `review:${review.path}:${field}`;
+  const loadDraft = (field: string) => readDraft<string>(draftKey(field))?.value ?? "";
+  const saveDraft = (field: string, v: string) => (v.trim() ? writeDraft(draftKey(field), v) : clearDraft(draftKey(field)));
+  const clearDraftFor = (field: string) => clearDraft(draftKey(field));
 
   const [selfText, setSelfText] = useState(review.self_comment || loadDraft("self"));
   const [selfRatings, setSelfRatings] = useState<Record<string, number>>(() => {
@@ -643,9 +647,9 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
     }
     await run("manager", async () => {
       await onSubmitManager({ ratings, overall_rating: overall, manager_comment: mgrComment.trim() });
-      clearDraft("manager");
-      clearDraft("ratings");
-      clearDraft("overall");
+      clearDraftFor("manager");
+      clearDraftFor("ratings");
+      clearDraftFor("overall");
     })();
   };
 
@@ -763,7 +767,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <AccessAction verb="submitSelf" can={can} label="Submit self-assessment">
-                <Button size="sm" loading={busy === "self"} disabled={!selfText.trim()} onClick={run("self", async () => { await onSubmitSelf(selfText.trim(), selfRatings); clearDraft("self"); clearDraft("selfRatings"); })}>Submit self-assessment <ChevronRight className="h-3.5 w-3.5" /></Button>
+                <Button size="sm" loading={busy === "self"} disabled={!selfText.trim()} onClick={run("self", async () => { await onSubmitSelf(selfText.trim(), selfRatings); clearDraftFor("self"); clearDraftFor("selfRatings"); })}>Submit self-assessment <ChevronRight className="h-3.5 w-3.5" /></Button>
               </AccessAction>
               {skipBtn}
               {!!selfText.trim() && <span className="ml-auto text-xs text-muted-foreground">Draft saved on this device</span>}

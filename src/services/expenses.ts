@@ -2,7 +2,7 @@
 // vendor expenses, or mirrored from the linked reimbursement for employee-fronted ones - never by hand).
 // Owner-embedded code on the submitter (like reimbursements), so a manager's dept breadth sees their reports'
 // expenses and finance (all breadth) sees everything. `departmentId` is cost-centre attribution, not the scope key.
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { eq, and, lte, lt, gte, ne } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
@@ -111,7 +111,8 @@ export async function createExpense(deps: Deps, actor: AppUser, input: ExpenseIn
     if (!nextOccurrenceOn) throw invalidArgument("next_occurrence_on is required for a recurring expense");
   }
 
-  const row = (await deps.db
+  // Allocated inside the retry (codeAlloc.ts): month end is everybody filing their expenses at once.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.expenses)
     .values({
       code: await allocOwnedCode(deps, schema.expenses, schema.expenses.employeeId, employeeId),
@@ -133,7 +134,7 @@ export async function createExpense(deps: Deps, actor: AppUser, input: ExpenseIn
       recurrenceRule: recurring ? input.recurrence_rule : null,
       nextOccurrenceOn,
     })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "expense.create", "expenses", row.uuid, createdMeta(row, "expenses"), row);
   return row;
 }
@@ -331,7 +332,7 @@ export async function generateRecurringExpenses(deps: Deps, now: Date = new Date
       .returning();
     if (!claimed.length) continue;
     try {
-      const clone = (await deps.db
+      const clone = (await withFreshCode(async () => deps.db
         .insert(schema.expenses)
         .values({
           code: await allocOwnedCode(deps, schema.expenses, schema.expenses.employeeId, t.employeeId),
@@ -348,7 +349,7 @@ export async function generateRecurringExpenses(deps: Deps, now: Date = new Date
           state: defaultState,
           templateId: t.uuid,
         })
-        .returning())[0]!;
+        .returning()))[0]!;
       await audit(deps, "system", "expense.generate", "expenses", clone.uuid, createdMeta(clone, "expenses"), clone);
       if (defaultState === "SUBMITTED") {
         await emitEvent(deps, null, "expense.submitted", { subject: `expenses/${clone.uuid}`, employeeId: clone.employeeId, payload: { amount: clone.amount, categoryId: clone.categoryId, vendorId: clone.vendorId, departmentId: clone.departmentId } });

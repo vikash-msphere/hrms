@@ -241,7 +241,13 @@ Every layer that shows or fetches is capability-gated, each at ONE central place
   approve/reject buttons (each a grantable verb target of its own) and the switch that turns the
   requirement on.
 - **Compare roles**: two roles side by side, differing collections first, with one-click copy of either
-  role's rules onto the other.
+  role's rules onto the other. The copy is `POST /v1/access-rules:clone` (`{from, to}`, each
+  `{subject_kind, subject}`) - one request, own fail-closed verb (`access-rules.clone`, so bulk copying is
+  grantable apart from authoring single rules), and ACTIVE rules only. The server authors each rule through
+  the normal create path (same validation, same four-eyes queue, one audit entry each) and parks one
+  correlation id on all of them plus an `access-rule.clone` summary entry, so the whole copy replays as a
+  single act in the activity feed; the response returns that `correlation_id` with `added`/`skipped`/
+  `failed`. One notification covers the batch instead of one per rule.
 - **Export / import**: every rule as JSON for review, backup or promotion between environments. Import
   replays the bodies through the same POST endpoint, so validation, the four-eyes queue and the audit trail
   all apply; it only ever ADDS (duplicates are skipped, nothing is removed).

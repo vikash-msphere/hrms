@@ -11,7 +11,10 @@ import type { makeDocumentService } from "../services/documentService";
 // path by grants. `employee` applies to personal-documents only (org ignores it).
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
-  document_type: z.enum(["CONTRACT", "ID", "PAYSLIP", "POLICY", "LETTER", "INSURANCE", "OTHER"]).optional(),
+  // The full set from services/documentsCommon.ts VALID_DOC_TYPES - FORM16 included. It is the type the
+  // dedicated Form 16 routes write, and openapi.yaml has always published it here, so leaving it out of the
+  // request schema made a document the app files itself impossible to file over the wire.
+  document_type: z.enum(["CONTRACT", "ID", "PAYSLIP", "POLICY", "LETTER", "FORM16", "INSURANCE", "OTHER"]).optional(),
   display_name: z.string().min(1).optional(),
   content_type: z.string().nullable().optional(),
   size_bytes: z.number().int().nullable().optional(),
@@ -62,7 +65,9 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
       purge: (deps, actor, id, ifMatch) => svc.purge(deps, actor, id, ifMatch),
       restore: (deps, actor, id) => svc.restore(deps, actor, id),
     },
-    list: (c, page) => svc.list(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.get("user")),
+    // `?employee=employees/<id>` narrows personal-documents to one person (org-documents have no owner and
+    // ignore it). The ref arrives already wire-decoded, like every other inbound ref.
+    list: (c, page) => svc.list(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.get("user"), c.req.query("employee") || undefined),
     verbs: {
       // The signatory name comes from the employee's legal name on file (not the request) - see the service.
       acknowledge: { run: (deps, user, id) => svc.acknowledge(deps, user, id) },

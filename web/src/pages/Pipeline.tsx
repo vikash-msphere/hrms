@@ -330,6 +330,11 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
               return (
                 <div
                   key={col.key}
+                  // A named group, like the task board's columns: the stage a card sits in is the single most
+                  // important thing about it, and a column of unnamed divs says nothing to a reader who
+                  // cannot see the header above them.
+                  role="group"
+                  aria-label={col.label}
                   className={cn(
                     "flex w-[86vw] max-w-[20rem] shrink-0 snap-start flex-col rounded-lg border bg-muted/20 transition-colors sm:w-72 sm:max-w-none",
                     overCol === col.key && "border-primary bg-primary/5",

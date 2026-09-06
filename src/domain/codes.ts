@@ -86,6 +86,22 @@ export function nextChildCode(siblingCodes: (string | null | undefined)[], paren
   return nextChildCodes(siblingCodes, parentCode, minWidth, 1)[0]!;
 }
 
+/**
+ * The highest child segment in use under `parentCode`, as a number; -1 when the scope is empty.
+ *
+ * Exported so the allocator can SEED its counter (schema `code_sequences`) from whatever a scope already
+ * holds. That read happens once per scope; after it, allocation is arithmetic on the counter rather than a
+ * pass over every sibling.
+ */
+export function maxChildSeg(siblingCodes: (string | null | undefined)[], parentCode: string | null): number {
+  return maxSeg(childSegsOf(siblingCodes, parentCode));
+}
+
+/** The child code for a given sequence value - the inverse of `maxChildSeg`, for a counter-driven allocator. */
+export function childCodeAt(parentCode: string | null, value: number, minWidth: number): string {
+  return compose(parentCode, padSeg(value, minWidth));
+}
+
 // Allocate the next own-segment within a scope, given the sibling segments already in use.
 // Sequential (max+1, never reused even across gaps), base32, left-padded to `minWidth`, and spilling to
 // a wider segment once the width is exhausted. Raising `minWidth` later does not rewrite existing codes.
@@ -103,10 +119,25 @@ function childSegsOf(siblingCodes: (string | null | undefined)[], parentCode: st
   return segs;
 }
 
+// A segment this alphabet cannot read is SKIPPED, not thrown on.
+//
+// Every allocation in the app decodes its siblings to find the next free leaf, so one unreadable stored code
+// used to fail every create in that scope - not the row with the bad code, all of them, with a 500 and nothing
+// an operator could do from the app. That is not hypothetical: scripts/genSeed.ts once emitted codes in base36,
+// whose alphabet includes `i`, and the next holiday anybody added came back 500 for exactly this reason. The
+// seeds are base32 now, but a hand-edited row or an import can put one back.
+//
+// Skipping is safe because a malformed segment is not part of the sequence this is measuring: it cannot be the
+// max of a well-formed run, and the UNIQUE index on `code` is what actually guarantees the result is free.
 function maxSeg(segs: string[]): number {
   let max = -1;
   for (const s of segs) {
-    const v = decodeBase32(s);
+    let v: number;
+    try {
+      v = decodeBase32(s);
+    } catch {
+      continue;
+    }
     if (v > max) max = v;
   }
   return max;

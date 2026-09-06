@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -79,10 +79,11 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
   if (!body) throw invalidArgument("body is required");
   const submitterId = actor.employeeId;
   if (!submitterId) throw invalidArgument("only an employee can submit a suggestion");
-  const row = (await deps.db
+  // Allocated inside the retry, so two people submitting at once both get a suggestion (codeAlloc.ts).
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.suggestions)
     .values({ code: await allocOwnedCode(deps, schema.suggestions, schema.suggestions.submitterId, submitterId), submitterId, anonymous: !!input.anonymous, category: input.category?.trim() || null, title, body })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "suggestion.create", "suggestions", row.uuid, createdMeta(row, "suggestions"), row);
   await emitEvent(deps, actor, "suggestion.submitted", { subject: `suggestions/${row.uuid}`, employeeId: submitterId, payload: { anonymous: !!input.anonymous, category: row.category } });
   // Nudge the reviewers so a new idea doesn't sit unseen. Respect anonymity: no actor face on an anonymous

@@ -99,7 +99,8 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
+    // `null` as well as undefined: an unassigned row carries the field as null, and both mean "nobody".
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
   }, [employees]);
 
   // "Mine" and "due this week" are the two questions a filer actually opens this page with, so they are
@@ -497,6 +498,10 @@ export default function Compliance({ me, openId }: { me: Me; openId?: string }) 
             <Field
               label="Reference"
               hint="Challan / acknowledgement no."
+              // `eager`: this message is not about what is being typed HERE - it appears because Status was
+              // moved to Filed, in another field entirely. Held back until Reference had been focused and left,
+              // it stayed invisible to everyone who set the status and pressed save, which is everyone.
+              eager
               error={form.status === "filed" && !form.reference.trim() && !form.document && !proof ? "Filed with neither a reference nor a receipt - nothing proves it later." : undefined}
             >
               <Input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} placeholder={form.status === "filed" ? "Challan no." : "Optional"} />

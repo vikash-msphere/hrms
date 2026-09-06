@@ -16,6 +16,7 @@ import { useMentions } from "@/components/common/MentionPicker";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { MakeTaskDialog } from "@/components/common/MakeTaskDialog";
 import type { Employee, Department, Ticket, TicketCategory, TicketChecklist, Me } from "@/types";
+import { seedSeen, saveSeen, type SeenMap } from "@/lib/ticketsSeen";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
@@ -55,12 +56,8 @@ import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const TERMINAL = new Set(["CLOSED", "CANCELLED"]);
-// "Updated since you last opened it" is tracked client-side (localStorage): map of ticket path -> the
-// update_time you last saw, plus a _baseline stamped on first visit so old history doesn't all light up.
-const SEEN_KEY = "tickets-last-seen";
-const loadSeen = (): Record<string, string> => {
-  try { return JSON.parse(localStorage.getItem(SEEN_KEY) ?? "{}") as Record<string, string>; } catch { return {}; }
-};
+// "Updated since you last opened it" is tracked client-side; the map and its pruning rule live in
+// lib/ticketsSeen.ts, which the boot-time sweep also reaches.
 // Comment/date stamps in the thread need the time of day - several replies can land on the same date.
 const fmtDateTime = (iso?: string) =>
   iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "-";
@@ -194,21 +191,14 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   const [files, setFiles] = useState<File[]>([]);
   const [active, setActive] = useState<Ticket | null>(null); // the ticket open in the detail drawer
 
-  // Last-seen tracking for the "updated" dot on rows (see SEEN_KEY above).
-  const [seen, setSeen] = useState<Record<string, string>>(() => {
-    const s = loadSeen();
-    if (!s._baseline) {
-      s._baseline = new Date().toISOString();
-      try { localStorage.setItem(SEEN_KEY, JSON.stringify(s)); } catch { /* private mode */ }
-    }
-    return s;
-  });
+  // Last-seen tracking for the "updated" dot on rows (see lib/ticketsSeen.ts).
+  const [seen, setSeen] = useState<SeenMap>(seedSeen);
   const markSeen = useCallback((t: Ticket) => {
     const at = t.update_time ?? new Date().toISOString();
     setSeen((prev) => {
       if ((prev[t.path] ?? "") >= at) return prev;
       const next = { ...prev, [t.path]: at };
-      try { localStorage.setItem(SEEN_KEY, JSON.stringify(next)); } catch { /* private mode */ }
+      saveSeen(next);
       return next;
     });
   }, []);
@@ -1065,9 +1055,12 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
         {/* Actions: reassign + priority (when modifiable), then the state-machine buttons. */}
         {modifiable && (
           <FieldRow>
-            <Field label="Assignee">
+            {/* `htmlFor` on each of the three: the control is wrapped in <AccessAction>, so Field cannot see
+                it to bind its own label, and without this the label names nothing to a screen reader. */}
+            <Field label="Assignee" htmlFor="ticket-assignee">
               <AccessAction collection="tickets" objectPath={t.path} verb="assign" can={can} label="Reassign">
                 <Combobox
+                  id="ticket-assignee"
                   value={t.assignee ? `employees/${idOf(t.assignee)}` : "none"}
                   onValueChange={(v) => act("assign", { assignee: v === "none" ? null : v })}
                   disabled={!!busy}
@@ -1079,9 +1072,10 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
                 />
               </AccessAction>
             </Field>
-            <Field label="Department">
+            <Field label="Department" htmlFor="ticket-department">
               <AccessAction collection="tickets" objectPath={t.path} verb="route" can={can} label="Route to a department">
                 <Combobox
+                  id="ticket-department"
                   value={t.department ? `departments/${idOf(t.department)}` : "none"}
                   onValueChange={(v) => act("route", { department: v === "none" ? null : v })}
                   disabled={!!busy}
@@ -1093,10 +1087,10 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
                 />
               </AccessAction>
             </Field>
-            <Field label="Priority">
+            <Field label="Priority" htmlFor="ticket-priority">
               <AccessAction collection="tickets" objectPath={t.path} verb="prioritize" can={can} label="Change priority">
                 <Select value={t.priority} disabled={!!busy} onValueChange={(v) => act("prioritize", { priority: v })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="ticket-priority"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="low">Low</SelectItem>
                     <SelectItem value="medium">Medium</SelectItem>

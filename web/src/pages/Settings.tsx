@@ -1036,7 +1036,7 @@ function StageAutomationPreview({ stages }: { stages: AtsStage[] }) {
                 <ul className="ml-3 mt-0.5 space-y-0.5">
                   {rules.map((r) => (
                     <li key={r.path}>
-                      <button type="button" className="text-left text-primary hover:underline" onClick={() => navigate(`workflows/${idOf(r.path)}`)} title={r.description}>
+                      <button type="button" className="text-left text-primary hover:underline" onClick={() => navigate(`workflows/${idOf(r.path)}`)} title={r.description ?? undefined}>
                         {r.name}
                       </button>
                     </li>
@@ -1514,13 +1514,25 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
   const [name, setName] = useState(checklist.display_name);
   const [items, setItems] = useState(original);
   const [busy, setBusy] = useState(false);
-  const dirty = name !== checklist.display_name || items !== original;
+  // What the server was last TOLD, which is what makes this row clean. The props only catch up when the list
+  // refetch behind the save lands, and the row is not unsaved in the meantime - leaving it dirty until then
+  // means pressing Save and immediately leaving the page is answered with "you have unsaved changes".
+  const [saved, setSaved] = useState<{ name: string; items: string } | null>(null);
+  const base = saved ?? { name: checklist.display_name, items: original };
+  const dirty = name !== base.name || items !== base.items;
   useUnsavedTracker(dirty, () => (name.trim() ? save() : undefined));
 
   async function save() {
     setBusy(true);
     try {
-      await patch(checklist.path, { display_name: name.trim(), items: items.split("\n").map((s) => s.trim()).filter(Boolean) }, checklist.etag);
+      // Normalized here as well as sent, so what the box shows afterwards is what was actually stored - a
+      // trailing blank line would otherwise leave the row reading as edited the moment it was saved.
+      const cleanName = name.trim();
+      const cleanItems = items.split("\n").map((s) => s.trim()).filter(Boolean);
+      await patch(checklist.path, { display_name: cleanName, items: cleanItems }, checklist.etag);
+      setName(cleanName);
+      setItems(cleanItems.join("\n"));
+      setSaved({ name: cleanName, items: cleanItems.join("\n") });
       reload();
       toast({ title: "Checklist saved", variant: "success" });
     } catch (e) {

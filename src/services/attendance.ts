@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { and, eq, isNull } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -92,10 +92,11 @@ export async function clockIn(deps: Deps, actor: AppUser, origin: PunchOrigin) {
   const at = +deps.clock.now();
   await assertPunchOrigin(deps, employeeId, at, origin);
   if (await openSessionFor(deps, employeeId)) throw failedPrecondition("already clocked in");
-  const row = (await deps.db
+  // Allocated inside the retry: a shift change is everybody clocking in at once (codeAlloc.ts).
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.attendanceSessions)
     .values({ code: await allocOwnedCode(deps, schema.attendanceSessions, schema.attendanceSessions.employeeId, employeeId), employeeId, clockIn: new Date(at), source: "clock" })
-    .returning())[0]!;
+    .returning()))[0]!;
   return row;
 }
 

@@ -192,3 +192,47 @@ describe("automations - authoring is privileged (HR/super only)", () => {
     expect(can("super_admin", "GET", "/v1/event-log")).toBe(true);
   });
 });
+
+// ---- The write schema names every writable field of the contract ----
+//
+// `writeSchema` in routes/automations.ts is `.strict()`, so a field the contract declares writable but the
+// schema does not name is not ignored - it makes the WHOLE body invalid. `schedule` shipped that way: the
+// builder sends it on every save (null for an event-triggered rule), so no rule of any kind could be created
+// from the dialog, and a scheduled rule could not be authored at all. The route answered 400 with a Zod
+// "unrecognized key" and the dialog simply stayed open. Both halves of that are invisible to the pure tests
+// above, which call the service directly.
+const routeSrc = Object.values(
+  import.meta.glob("../src/routes/automations.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>,
+)[0]!;
+const specSrc = Object.values(
+  import.meta.glob("../openapi.yaml", { query: "?raw", import: "default", eager: true }) as Record<string, string>,
+)[0]!;
+
+describe("automations - the route accepts every writable field in the contract", () => {
+  // The `automation` schema's properties, read as text. A property starts at a known indent and runs to the
+  // next one, which is what makes `readOnly` findable whether it sits inline (`etag: { ..., readOnly: true }`)
+  // or on its own line under the key (`path:`).
+  const writable = (() => {
+    const start = specSrc.indexOf("\n    automation:\n");
+    expect(start, "openapi.yaml no longer declares an `automation` schema").toBeGreaterThan(0);
+    const block = specSrc.slice(start).split("\n      x-aep-resource:")[0]!;
+    const heads = [...block.matchAll(/^ {8}([a-z_]+):/gm)];
+    return heads
+      .filter(([, name], i) => {
+        const body = block.slice(heads[i]!.index!, heads[i + 1]?.index ?? block.length);
+        return !/readOnly:\s*true/.test(body) && name !== "access";
+      })
+      .map(([, name]) => name!);
+  })();
+
+  it("found the contract's fields (sanity: the spec still parses this way)", () => {
+    expect(writable).toEqual(["name", "description", "trigger_type", "condition", "actions", "schedule", "enabled"]);
+  });
+
+  it("names each of them in writeSchema", () => {
+    const schemaBlock = routeSrc.split("const writeSchema = z.object({")[1]!.split("}).strict();")[0]!;
+    const named = new Set([...schemaBlock.matchAll(/^\s{2}([a-z_]+):/gm)].map(([, k]) => k!));
+    const missing = writable.filter((f) => !named.has(f));
+    expect(missing, "writable in openapi.yaml but not named in the .strict() writeSchema - the route 400s the whole body").toEqual([]);
+  });
+});

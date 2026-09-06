@@ -16,7 +16,7 @@ import { fetchAllAccessRules, scopeText, permText, accessTone, type AccessRule }
 import { ruleSentence, expiryLabel, denyBlocking } from "./ruleLogic";
 import { usePaged, Pager } from "@/components/common/Pager";
 import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
-import type { User } from "@/types";
+import type { Employee, User } from "@/types";
 import type { AccessTargetRef } from "./AccessModeProvider";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
 import { customMethodsFor } from "./customMethods";
@@ -87,6 +87,10 @@ export function AclModal({
   const confirm = useConfirm();
   const [rules, setRules] = React.useState<AccessRule[]>([]);
   const [users, setUsers] = React.useState<User[]>([]);
+  // employees/{id} -> display name, so the people picker reads "Priya Nair · priya.nair@acme.com" rather than a
+  // column of raw addresses. Every employee has an account (services/employees.ts provisions one at create), so
+  // this list is as long as the company and a name is what somebody actually searches by.
+  const [names, setNames] = React.useState<Record<string, string>>({});
   const [roles, setRoles] = React.useState<Role[]>([]);
   const [busy, setBusy] = React.useState(false);
   // Bulk grant: the add form collects a LIST of people (chips) and writes one rule each, because granting the
@@ -158,7 +162,14 @@ export function AclModal({
     setBusy(true);
     try {
       const tasks: Promise<unknown>[] = [fetchAllAccessRules().then((r) => setRules(r as AccessRule[]))];
-      if (showUsers) tasks.push(listAll<User>("users").then(setUsers));
+      if (showUsers) {
+        tasks.push(listAll<User>("users").then(setUsers));
+        tasks.push(
+          listAll<Employee>("employees").then((emps) =>
+            setNames(Object.fromEntries(emps.map((e) => [e.path, `${e.first_name} ${e.last_name}`.trim()]))),
+          ),
+        );
+      }
       if (showRoles) tasks.push(listAll<Role>("roles").then(setRoles));
       await Promise.all(tasks);
       // Every rule mutation funnels through reload(), so this counter is the modal's "rules changed" signal -
@@ -242,7 +253,16 @@ export function AclModal({
 
   const userMatched = rules.filter((r) => r.subject_kind === "user" && matchesTarget(r));
   const userShown = verbMode ? userMatched.filter((r) => r.verb === activeVerb) : userMatched.filter((r) => !r.verb);
-  const emailOf = (subject: string) => users.find((u) => u.path === subject)?.email ?? subject;
+  // How a person is named everywhere in this modal - the picker, the chips, the rule rows and the plain-English
+  // grant sentence. Name AND email: two people share a first name, nobody shares an address.
+  const labelOfUser = (u: User) => {
+    const name = u.employee ? names[u.employee] : undefined;
+    return name ? `${name} · ${u.email}` : u.email;
+  };
+  const emailOf = (subject: string) => {
+    const u = users.find((x) => x.path === subject);
+    return u ? labelOfUser(u) : subject;
+  };
 
   // Paginate the in-modal lists so a long role catalog / many per-user rules don't overflow the dialog.
   // Pin the reserved "everyone" subject to the top - it's the "allow everyone" primitive, the common reach.
@@ -261,7 +281,7 @@ export function AclModal({
     const q = userFilter.trim().toLowerCase();
     return q ? userShown.filter((r) => emailOf(r.subject).toLowerCase().includes(q)) : userShown;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userShown, userFilter, users]);
+  }, [userShown, userFilter, users, names]);
   const rolePaged = usePaged(shownRoles, 8);
   const userPaged = usePaged(shownUserRules, 8);
 
@@ -732,7 +752,7 @@ export function AclModal({
                 Per-user access on {scopeNote}. {verbMode ? "A custom method is denied unless explicitly allowed; a deny always wins." : "A deny always wins."}
                 {!verbMode && !createMode && " Levels nest: read ⊂ write ⊂ full (full = delete + purge)."}
               </p>
-              {userShown.length > 8 && <Input className="h-8" placeholder="Filter by email…" value={userFilter} onChange={(e) => setUserFilter(e.target.value)} />}
+              {userShown.length > 8 && <Input className="h-8" placeholder="Filter by name or email…" value={userFilter} onChange={(e) => setUserFilter(e.target.value)} />}
               <div className="space-y-2">
                 {userShown.length === 0 && <p className="text-sm text-muted-foreground">No per-user rules here.</p>}
                 {userShown.length > 0 && shownUserRules.length === 0 && <p className="text-sm text-muted-foreground">No rule matches "{userFilter}".</p>}
@@ -818,7 +838,7 @@ export function AclModal({
                     <Combobox
                       value=""
                       onValueChange={(v) => v && setAddUsers((xs) => (xs.includes(v) ? xs : [...xs, v]))}
-                      options={users.filter((u) => !addUsers.includes(u.path)).map((u) => ({ value: u.path, label: u.email }))}
+                      options={users.filter((u) => !addUsers.includes(u.path)).map((u) => ({ value: u.path, label: labelOfUser(u) }))}
                       placeholder="Search people…"
                     />
                   </div>

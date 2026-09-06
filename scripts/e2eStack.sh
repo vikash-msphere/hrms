@@ -22,24 +22,46 @@
 # stack the specs see:
 #   scripts/e2eStack.sh                    # reset + seed the e2e DB, then serve on :5174
 #   E2E_KEEP_DB=1 scripts/e2eStack.sh      # keep the DB as the last run left it (faster)
+#   E2E_LANE=1 scripts/e2eStack.sh         # a SECOND stack alongside it: own ports, own database, own logs
 set -euo pipefail
 cd "$(dirname "$0")/.."   # project root
 
-STATE="${E2E_STATE:-.wrangler/e2e-state}"
+# The lane: which copy of this stack we are. Everything that must not be shared with a second run on the same
+# machine - three ports, the database, the logs - comes off it, so `E2E_LANE=1` is a whole separate stack and
+# lane 0 is exactly the historical one. e2e/lane.ts does this arithmetic for Playwright's half; keep them in
+# step. Ten ports per lane, so the three below never reach into the next lane's range.
+LANE="${E2E_LANE:-0}"
+case "$LANE" in ([0-9]) ;; (*) echo "e2e: E2E_LANE must be a whole number 0-9 (got '$LANE')" >&2; exit 1 ;; esac
+if [ "$LANE" = "0" ]; then SUFFIX=""; else SUFFIX="-$LANE"; fi
+
+STATE="${E2E_STATE:-.wrangler/e2e-state$SUFFIX}"
 # None of these are the dev stack's ports (8787 / 4010 / 5173). Playwright's `reuseExistingServer` would
 # happily attach to a dev stack on the usual ports and hand every "role" the same dev-bypass identity, failing
 # the specs for a reason that looks nothing like the cause.
-WORKER_PORT="${E2E_WORKER_PORT:-8788}"
-PRISM_PORT="${E2E_PRISM_PORT:-4011}"
-WEB_PORT="${E2E_PORT:-5174}"
+WORKER_PORT="${E2E_WORKER_PORT:-$((8788 + LANE * 10))}"
+PRISM_PORT="${E2E_PRISM_PORT:-$((4011 + LANE * 10))}"
+WEB_PORT="${E2E_PORT:-$((5174 + LANE * 10))}"
 VARS_FILE="e2e/e2e.vars"
 LOG_DIR="tmp"
+WORKER_LOG="$LOG_DIR/e2e-worker$SUFFIX.log"
+PRISM_LOG="$LOG_DIR/e2e-prism$SUFFIX.log"
+WEB_LOG="$LOG_DIR/e2e-web$SUFFIX.log"
 
 if [ "${E2E_KEEP_DB:-0}" != "1" ]; then
   echo "→ [e2e] resetting $STATE and seeding demo data…"
   rm -rf "$STATE"
   npx wrangler d1 migrations apply hrms --local --persist-to "$STATE"
-  npx wrangler d1 execute hrms --local --persist-to "$STATE" --file=scripts/seed.sql
+  # `migrations apply` reports success and exits while its miniflare still has the schema in the write-ahead
+  # log, so the very next `d1 execute` occasionally opens the database before the tables are readable and the
+  # seed dies on "no such table: departments" - which reads like a broken migration on a fresh checkout. The
+  # retry is on the seed itself rather than a readiness probe: every `wrangler d1` call is a ~15s cold start,
+  # and the whole reset has to fit inside Playwright's `webServer` timeout.
+  for attempt in 1 2 3; do
+    if npx wrangler d1 execute hrms --local --persist-to "$STATE" --file=scripts/seed.sql; then break; fi
+    if [ "$attempt" = 3 ]; then echo "→ [e2e] seeding failed three times - see the error above"; exit 1; fi
+    echo "→ [e2e] seeding failed (the migration is not readable yet); retrying…"
+    sleep 2
+  done
   npx wrangler d1 execute hrms --local --persist-to "$STATE" --file=scripts/templates.sql
 fi
 
@@ -67,10 +89,10 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-: > "$LOG_DIR/e2e-worker.log"; : > "$LOG_DIR/e2e-prism.log"; : > "$LOG_DIR/e2e-web.log"
+: > "$WORKER_LOG"; : > "$PRISM_LOG"; : > "$WEB_LOG"
 
 npx wrangler dev --persist-to "$STATE" --port "$WORKER_PORT" --ip 127.0.0.1 "${VARS[@]}" \
-  > "$LOG_DIR/e2e-worker.log" 2>&1 & PIDS+=($!)
+  > "$WORKER_LOG" 2>&1 & PIDS+=($!)
 
 # Wait for the Worker before starting Prism: Prism reads nothing from upstream at boot, but a proxy pointed at
 # a dead port produces a confusing first page of 500s in the log.
@@ -81,7 +103,7 @@ for _ in $(seq 1 120); do
 done
 
 npx prism proxy openapi.yaml "http://127.0.0.1:$WORKER_PORT" --errors -p "$PRISM_PORT" \
-  > "$LOG_DIR/e2e-prism.log" 2>&1 & PIDS+=($!)
+  > "$PRISM_LOG" 2>&1 & PIDS+=($!)
 
 # Vite starts LAST, and only once Prism answers. Playwright waits on the Vite port and nothing else, so if
 # Vite came up first the specs would start against a proxy still parsing 600 kB of openapi.yaml - which is a
@@ -91,10 +113,16 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
-echo "→ [e2e] SPA http://127.0.0.1:$WEB_PORT  ·  Prism :$PRISM_PORT  ·  Worker :$WORKER_PORT  (Google cookie mode, dev bypass off)"
+echo "→ [e2e] lane $LANE  ·  SPA http://127.0.0.1:$WEB_PORT  ·  Prism :$PRISM_PORT  ·  Worker :$WORKER_PORT  ·  db $STATE  (Google cookie mode, dev bypass off)"
+# Sentry is off in a dev server by default (web/src/instrument.ts). `opt-in` makes it AVAILABLE without
+# arming it: only a page that asks (`enableTelemetry` in e2e/fixtures.ts) boots the SDK, which is `reportProblem`
+# and `replayMasking` and nothing else. Those two stub `/diag` in the page, so nothing is sent anywhere. Plain
+# `=1` here would arm all ~350 specs, and the rest stub nothing - their errors would be relayed to the live
+# Sentry project, and the outbound subrequests would load the Worker the suite is timing.
+VITE_SENTRY_IN_DEV=opt-in \
 HRMS_WORKER_ORIGIN="http://127.0.0.1:$WORKER_PORT" \
 HRMS_PRISM_ORIGIN="http://127.0.0.1:$PRISM_PORT" \
   npx vite --config web/vite.config.ts --host 127.0.0.1 --port "$WEB_PORT" --strictPort \
-  > "$LOG_DIR/e2e-web.log" 2>&1 & PIDS+=($!)
+  > "$WEB_LOG" 2>&1 & PIDS+=($!)
 
 wait

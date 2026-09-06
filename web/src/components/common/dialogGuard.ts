@@ -1,5 +1,16 @@
 import * as React from "react";
 import { useConfirm } from "@/components/common/confirm";
+import { storedIdentity } from "@/lib/clientStore";
+
+/**
+ * The storage key for an in-progress form, namespaced to the caller.
+ *
+ * Exported because three dialogs kept their own draft plumbing before this - the announcement composer, the
+ * leave request and the review write-up - and two of them wrote to local storage under an un-namespaced key,
+ * with no expiry. So a performance review's free text about a named person stayed on a shared machine
+ * indefinitely and was offered back to the next person who signed in.
+ */
+export const draftKey = (key: string) => `draft:${storedIdentity() ?? "anon"}:${key}`;
 
 /**
  * Stops a half-filled dialog from evaporating on a stray click.
@@ -64,15 +75,20 @@ export function useDialogGuard(open: boolean, value: unknown, close: () => void,
 }
 
 /**
- * Survives more than a stray click: keeps a long form's in-progress values in sessionStorage, so a reload, a
- * crash, or a phone switching apps mid-claim doesn't cost the work. Session-scoped on purpose - a draft is
- * meant for "I'll finish this in a minute", not for holding someone's salary figures indefinitely.
+ * Survives more than a stray click: keeps a long form's in-progress values, so a reload, a crash, or a phone
+ * switching apps mid-claim doesn't cost the work.
  *
- * The caller owns the shape; this only stores and returns it, plus a `restored` flag to show the
- * "picked up where you left off" strip and a `clear` for a successful submit or an explicit start-over.
+ * The caller owns the shape; this only stores and returns it, plus a `restored` flag to show the "picked up
+ * where you left off" strip and a `clear` for a successful submit or an explicit start-over.
+ *
+ * Two properties that are not incidental. The key is namespaced to the SIGNED-IN CALLER: an un-namespaced
+ * draft on a shared machine is offered back to whoever opens the same dialog next, which for a review write-up
+ * or a leave reason means handing one person another's words. And it is session-scoped, so a draft is "I'll
+ * finish this in a minute" rather than something that sits on the disk indefinitely; `lib/clientStore.ts` `gc`
+ * sweeps whatever an older build left behind in local storage.
  */
 export function useDialogDraft<T>(key: string, open: boolean, value: T, apply: (draft: T) => void, enabled = true) {
-  const storageKey = `draft:${key}`;
+  const storageKey = draftKey(key);
   const [restored, setRestored] = React.useState(false);
   // Restoring must happen once per opening, and only when there is something worth restoring.
   const applyRef = React.useRef(apply);

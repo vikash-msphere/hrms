@@ -24,8 +24,12 @@ import { app, getCodec } from "../index";
 // in-memory decide + the data query; a modest cap bounds total CPU/DB work per request. The client coalescer
 // splits larger ticks across multiple batches.
 const MAX_REQUESTS = 20;
+// `etag` is the sub-request's `If-None-Match`. Every list read the SPA makes is coalesced through here, so
+// without it conditional GET would be unreachable from the client that needs it most: a cached list whose
+// freshness window has lapsed would go on re-reading a page of rows to learn nothing had changed. The
+// sub-response carries the answer's own `etag` back for the client to store.
 const schema = z
-  .object({ requests: z.array(z.object({ method: z.string().optional(), path: z.string() })).max(MAX_REQUESTS) })
+  .object({ requests: z.array(z.object({ method: z.string().optional(), path: z.string(), etag: z.string().max(200).optional() })).max(MAX_REQUESTS) })
   .strict();
 
 export const batch = new Hono<AppEnv>().post("/", zValidator("json", schema), async (c) => {
@@ -59,6 +63,7 @@ export const batch = new Hono<AppEnv>().post("/", zValidator("json", schema), as
         return { status: 400, body: { title: "sub-request path must start with /v1/" } };
       }
       const headers = new Headers({ "X-Requested-By": "hrms-spa" });
+      if (r.etag) headers.set("If-None-Match", r.etag);
       // A SHALLOW COPY of the caller per sub-request, not the one object twenty times.
       //
       // The sub-requests run concurrently (Promise.all), and the authz middleware WRITES to the user it is
@@ -87,7 +92,10 @@ export const batch = new Hono<AppEnv>().post("/", zValidator("json", schema), as
       } catch {
         /* non-JSON: leave as text */
       }
-      return { status: res.status, body };
+      // The validator rides back so the client can store it against the rows it just cached. A 304 carries one
+      // and no body: the caller keeps what it has.
+      const etag = res.headers.get("ETag") ?? undefined;
+      return { status: res.status, body, ...(etag ? { etag } : {}) };
     }),
   );
   return c.json({ responses });

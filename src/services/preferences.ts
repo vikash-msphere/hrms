@@ -25,26 +25,20 @@ export async function getPreference(deps: Deps, actor: AppUser, key: string) {
 }
 
 // Upsert: create the caller's preference for this key, or replace its value.
+//
+// ONE statement, resolved by the (userId, key) unique index rather than by looking first. A person is more
+// than one session - a second tab, a phone, the theme being written the moment two of them load - and a
+// look-then-insert loses that race against its own index, which surfaced as a 500 on something as ordinary
+// as remembering the theme. `createdAt` survives the conflict path, so the row keeps the day it was made.
 export async function upsertPreference(deps: Deps, actor: AppUser, key: string, value: unknown) {
   const json = JSON.stringify(value ?? {});
-  const existing = (
-    await deps.db
-      .select()
-      .from(schema.preferences)
-      .where(and(eq(schema.preferences.userId, actor.uuid), eq(schema.preferences.key, key)))
-      .limit(1)
-  )[0];
-  if (existing) {
-    const [updated] = await deps.db
-      .update(schema.preferences)
-      .set({ value: json, updatedAt: new Date() })
-      .where(eq(schema.preferences.uuid, existing.uuid))
-      .returning();
-    return updated!;
-  }
-  const [inserted] = await deps.db
+  const [row] = await deps.db
     .insert(schema.preferences)
     .values({ userId: actor.uuid, key, value: json })
+    .onConflictDoUpdate({
+      target: [schema.preferences.userId, schema.preferences.key],
+      set: { value: json, updatedAt: new Date() },
+    })
     .returning();
-  return inserted!;
+  return row!;
 }

@@ -156,7 +156,7 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
           <Field label="Name">
             <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Laptop" autoFocus />
           </Field>
-          <Field label="Tag code" hint="Left blank, the first three letters of the name are used. Assets already tagged keep the tag they are wearing.">
+          <Field label="Tag code" hint="Left blank, the first three letters of the name are used - numbered (LAP2) when another category already answers to them. Assets already tagged keep the tag they are wearing.">
             <Input value={form.tagCode} onChange={(e) => setForm({ ...form, tagCode: e.target.value.toUpperCase() })} placeholder="e.g. LAP" className="max-w-32 font-mono" maxLength={8} />
           </Field>
           <div className="flex items-center gap-2">

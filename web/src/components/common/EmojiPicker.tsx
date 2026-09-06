@@ -74,7 +74,9 @@ export function EmojiPicker({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
       <PopoverContent align={align} className="w-72 p-2">
-        <div className="mb-2 flex flex-wrap gap-1 border-b pb-2">
+        {/* Named, because every glyph in it appears again in its own category below: without a group there are
+            two identical "🎉" buttons in the popover and nothing to say which one is the shortcut. */}
+        <div role="group" aria-label="Quick picks" className="mb-2 flex flex-wrap gap-1 border-b pb-2">
           {QUICK.map((e) => (
             <button key={e} type="button" className="rounded p-1 text-xl leading-none hover:bg-accent" onClick={() => pick(e)}>
               {e}

@@ -83,7 +83,8 @@ function periodKeyOf(dateStr: string, type?: string): string {
 }
 
 // The next few dates a schedule will fire, so "monthly from the 1st" can be read as dates instead of trusted.
-function nextOccurrences(from: string | undefined, rule: string | undefined, count: number): string[] {
+// `rule` is nullable on the wire (a one-off expense has no schedule), so this takes null as "no rule".
+function nextOccurrences(from: string | undefined, rule: string | null | undefined, count: number): string[] {
   if (!from || !rule) return [];
   const out: string[] = [];
   let d = new Date(`${from}T00:00:00Z`);
@@ -445,7 +446,10 @@ export default function Expenses({ me }: { me: Me }) {
         description: form.description,
         reimbursable: form.reimbursable,
         recurring: form.recurring,
-        recurrence_rule: form.recurring ? form.recurrence_rule : "",
+        // A one-off expense has NO rule, and "no rule" on the wire is null: the field is an enum
+        // (monthly/quarterly/yearly), so an empty string is not a value it has - it is rejected outright, and
+        // every plain expense filed from this form came back 400.
+        recurrence_rule: form.recurring ? form.recurrence_rule : null,
         ...(form.recurring && form.next_occurrence_on ? { next_occurrence_on: form.next_occurrence_on } : {}),
       };
       // Who fronted it: only settable at create, and only by someone recording on another's behalf.

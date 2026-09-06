@@ -5,13 +5,49 @@ import { and, eq } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
-import { notFound, aborted } from "../lib/errors";
+import { notFound, aborted, failedPrecondition, isForeignKeyViolation } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lockGuard";
 
 // Drizzle tables are heavily generic; we treat them structurally here.
 type Table = any;
 type Row = { uuid: string; updatedAt: Date | number; deleteTime?: Date | number | null; locked?: boolean | null; [k: string]: unknown };
+
+/**
+ * What a hard purge takes with it, declared once beside the collection rather than open-coded per service.
+ *
+ * A purge is a real SQL DELETE, and every table that references the row is a foreign key SQLite will refuse
+ * the delete over. There are exactly two honest answers to such a reference, and the difference is ownership:
+ *
+ *  - `remove`: rows that exist only AS PART of this one - a post's reads, reactions, replies, poll options and
+ *    votes. They are unreachable once the parent is gone, so they go with it. Listed PARENT-FIRST within the
+ *    group where children reference each other (a reaction points at a reply), because the deletes run in the
+ *    order given.
+ *  - `detach`: a column that merely POINTS at this row from a record with a life of its own - the goal a task
+ *    card is linked to, the parent an aligned goal hangs under. Cleared to null so the pointer does not
+ *    outlive its target, and the referencing record survives.
+ *
+ * Anything NOT declared here still blocks the purge, which is the point: an employee with payslips is a row
+ * the org may not quietly erase, and that now answers 409 with a reason instead of the 500 it used to.
+ */
+export type PurgeCascade = {
+  remove?: { table: Table; column: Table }[];
+  detach?: { table: Table; column: Table }[];
+};
+
+/**
+ * The TypeScript property a column is reachable under on its table (`cards.goalId`, not `"goal_id"`).
+ *
+ * `update().set()` is keyed by the drizzle property name while a `PurgeCascade` entry carries the column
+ * OBJECT - which is what makes the declaration compile-checked against the schema instead of a string nobody
+ * would notice going stale. The table exposes its columns as own properties under exactly those names, so the
+ * identity match recovers the key without a second thing to keep in sync.
+ */
+function columnKey(table: Table, column: Table): string {
+  const hit = Object.keys(table).find((k) => table[k] === column);
+  if (!hit) throw new Error("purge cascade: column does not belong to the table it was declared with");
+  return hit;
+}
 
 async function fetchRow(deps: Deps, table: Table, id: string): Promise<Row | undefined> {
   const rows = (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1)) as Row[];
@@ -108,6 +144,7 @@ export async function purgeRow(
   id: string,
   ifMatch?: string,
   onPurge?: (row: Row) => Promise<void>,
+  cascade?: PurgeCascade,
 ) {
   const row = await fetchRow(deps, table, id);
   if (!row) throw notFound(`${singular} not found`);
@@ -117,7 +154,25 @@ export async function purgeRow(
   // go. The cost of the reverse order on a lost race is a deleted blob whose row is still live - unrecoverable
   // - against an orphaned blob, which is reclaimable.
   if (onPurge) await onPurge(row);
-  const purged = await deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid });
+  // Then the declared teardown, in the same bottom-up order the hand-written purges use: clear the pointers
+  // that are only pointers, delete the rows that are part of this one, and only then the row itself.
+  for (const { table: t, column } of cascade?.detach ?? []) {
+    // `updated_at` moves with the clearing, because it IS a change to that record: its etag has to stop
+    // matching, or a client holding the pre-detach read would go on offering an If-Match that still passes.
+    const set: Record<string, unknown> = { [columnKey(t, column)]: null };
+    if (t.updatedAt) set.updatedAt = new Date();
+    await deps.db.update(t).set(set).where(eq(column, id));
+  }
+  for (const { table: t, column } of cascade?.remove ?? []) await deps.db.delete(t).where(eq(column, id));
+  let purged: { uuid: string }[];
+  try {
+    purged = await deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid });
+  } catch (e) {
+    // Something the row does not own still references it. That is a precondition the caller can act on, so it
+    // answers 409 with the reason rather than surfacing as an unhandled 500 with a SQL string in the log.
+    if (isForeignKeyViolation(e)) throw failedPrecondition(`this ${singular} is still referenced by other records and cannot be permanently deleted`);
+    throw e;
+  }
   if (!purged.length) await versionConflict(deps, table, singular, id);
   // The row is gone for good after this, so its values survive only here.
   await audit(deps, actor, `${singular}.purge`, collection, id, removedMeta(row, collection), row);

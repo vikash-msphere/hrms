@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 // WORKFLOW resource template (custom methods :approve/:reject/:cancel).
 import { eq, and, gte, sql } from "drizzle-orm";
 import { applyScope } from "./listScope";
@@ -190,10 +190,12 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
       throw failedPrecondition(`exceeds the probation cap of ${lt.probationCapDays} day(s) for this leave type (already used ${used})`);
     }
   }
-  const row = (await deps.db
+  // Allocated inside the retry (codeAlloc.ts): a long weekend is booked by the whole team in one afternoon,
+  // and the second person to press should get their request rather than an error telling them to try again.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.leaveRequests)
     .values({ code: await allocOwnedCode(deps, schema.leaveRequests, schema.leaveRequests.employeeId, employeeId), employeeId, leaveTypeId, startDate: new Date(start), endDate: new Date(end), days, startSession, endSession, reason: input.reason?.trim() || null, state: "PENDING" })
-    .returning())[0]!;
+    .returning()))[0]!;
   // Reserve the balance at request time; released if later rejected/cancelled. For a paid (entitlement) type
   // decrement CONDITIONALLY (WHERE balance_days >= days) so two concurrent requests can't both clear the
   // read-time check above and overdraw the balance - the loser matches 0 rows and we unwind the just-created
@@ -237,9 +239,11 @@ async function adjustLeaveBalance(deps: Deps, employeeId: string, leaveTypeId: s
       .set({ balanceDays: sql`round((${schema.leaveBalances.balanceDays} + ${delta}) * 100) / 100`, updatedAt: new Date() })
       .where(eq(schema.leaveBalances.uuid, bal.uuid));
   } else {
-    await deps.db
-      .insert(schema.leaveBalances)
-      .values({ code: await allocOwnedCode(deps, schema.leaveBalances, schema.leaveBalances.employeeId, employeeId), employeeId, leaveTypeId, balanceDays: round2(delta) });
+    await withFreshCode(async () =>
+      deps.db
+        .insert(schema.leaveBalances)
+        .values({ code: await allocOwnedCode(deps, schema.leaveBalances, schema.leaveBalances.employeeId, employeeId), employeeId, leaveTypeId, balanceDays: round2(delta) }),
+    );
   }
 }
 

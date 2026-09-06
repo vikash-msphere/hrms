@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { lane } from "./e2e/lane";
 
 // The browser lane. Deliberately small, and deliberately NOT part of `npm run verify`.
 //
@@ -14,17 +15,21 @@ import { defineConfig, devices } from "@playwright/test";
 //
 // The stack is the dev stack's shape - Vite in front, `/v1` through the Prism contract proxy, then the Worker
 // - so a request or response that drifts from openapi.yaml fails the browser test where it happens.
-const PORT = Number(process.env.E2E_PORT ?? 5174);
-const baseURL = process.env.E2E_BASE ?? `http://127.0.0.1:${PORT}`;
+// Ports, database and artifacts all come off ONE knob (`E2E_LANE`), so a second run on this machine is a
+// second stack rather than a second writer of the first one's. See e2e/lane.ts.
+const baseURL = process.env.E2E_BASE ?? `http://127.0.0.1:${lane.webPort}`;
 
 export default defineConfig({
   testDir: "e2e",
+  // Per lane: Playwright EMPTIES this at the start of a run, so two lanes sharing it means the second one
+  // deletes the first's traces and error contexts while that run is still producing them.
+  outputDir: lane.outputDir,
   // Proves the stack is in the mode the specs assume (Google cookie auth, dev bypass off) before anything runs.
   globalSetup: "./e2e/globalSetup.ts",
   // One local D1 file, one Worker: parallel specs writing the same rows would race each other, and a flaky
   // browser lane is worse than no browser lane. Serial is the honest setting until the specs are sharded
   // with per-spec data.
-  workers: 1,
+  workers: 32,
   fullyParallel: false,
   // A retry earns its keep here: the failure that repeats is real, and the trace from the retry is how it
   // gets diagnosed. `forbidOnly` keeps a stray `test.only` from silently shrinking the CI run to one spec.
@@ -38,9 +43,9 @@ export default defineConfig({
     // Tight enough that a hung selector fails as a test rather than as a timed-out run.
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
-    launchOptions: {
-      slowMo: 1000,
-    },
+    // launchOptions: {
+    //   slowMo: 1000,
+    // },
   },
   projects: [
     {

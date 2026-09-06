@@ -6,8 +6,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // and every reload started from nothing - so both are pinned here, including the parts that must NOT happen
 // (transactional collections stay short-lived; stored rows never cross identities).
 
-// The store reads localStorage lazily, inside its functions, so a stand-in installed before the first call is
-// enough (the workers runtime has no localStorage of its own).
+// Two stand-ins, both installed before the first call (the workers runtime has neither).
+//
+// localStorage still holds ONE thing: the reconciliation point (`hrms.sync:<identity>`), which has to be read
+// synchronously, before the first entry can adopt anything.
 class FakeStorage {
   map = new Map<string, string>();
   get length() {
@@ -32,38 +34,100 @@ class FakeStorage {
 const store = new FakeStorage();
 (globalThis as unknown as { localStorage: FakeStorage }).localStorage = store;
 
+// The stored copies themselves live in IndexedDB (web/src/lib/clientStore.ts). The fake below is the smallest
+// thing that behaves like one: two keyed object stores, and requests that settle in a microtask - which is what
+// makes the asynchrony real here, since that is exactly what the boot-time hydration has to wait for.
+const idb = { meta: new Map<string, Record<string, unknown>>(), data: new Map<string, Record<string, unknown>>() };
+
+function request<T>(value: T) {
+  const r: Record<string, unknown> = { result: value };
+  queueMicrotask(() => (r.onsuccess as (() => void) | undefined)?.());
+  return r;
+}
+
+const objectStore = (name: "meta" | "data") => ({
+  getAll: () => request([...idb[name].values()]),
+  get: (k: string) => request(idb[name].get(k)),
+  put: (v: { k: string }) => {
+    idb[name].set(v.k, v);
+    return request(undefined);
+  },
+  delete: (k: string) => {
+    idb[name].delete(k);
+    return request(undefined);
+  },
+  createIndex: () => {},
+});
+
+(globalThis as unknown as { indexedDB: unknown }).indexedDB = {
+  open: () => {
+    const r: Record<string, unknown> = {};
+    queueMicrotask(() => {
+      r.result = { objectStoreNames: { contains: () => true }, transaction: () => ({ objectStore }), close: () => {} };
+      (r.onsuccess as (() => void) | undefined)?.();
+    });
+    return r;
+  },
+  deleteDatabase: () => {
+    idb.meta.clear();
+    idb.data.clear();
+    return request(undefined);
+  },
+};
+
 // The store asks `GET /v1/changes` once per identity to decide whether its stored copies can be trusted, and
 // `list()` whenever it does read a collection. Both are stubbed so the tests below are about the store's
 // decisions rather than about the network: `changesAnswer` is what the feed replies, `listed` records every
 // collection the store actually went and read.
 const listed: string[] = [];
-let changesAnswer: { now: number; collections?: string[]; unknown_window?: boolean } | Error = { now: Date.now(), collections: [] };
+let changesAnswer: { now: number; collections?: string[]; unknown_window?: boolean; authz_version?: string } | Error = { now: Date.now(), collections: [], authz_version: "v1" };
+// `notModified` is what the store gets back when it revalidates with a validator the server still agrees with
+// (conditional GET, src/http/listEtag.ts). Off by default so these tests are about the store's decisions;
+// switched on where the point IS the revalidation.
+let answerNotModified = false;
 vi.mock("@/api", () => ({
   list: (collection: string) => {
     listed.push(collection);
     return Promise.resolve({ results: [] });
   },
+  listConditional: (collection: string, _opts: unknown, etag?: string) => {
+    listed.push(collection);
+    if (answerNotModified && etag) return Promise.resolve({ notModified: true as const });
+    return Promise.resolve({ response: { results: [{ path: `${collection}/fetched` }] }, etag: 'W/"fresh"' });
+  },
   changesSince: () => (changesAnswer instanceof Error ? Promise.reject(changesAnswer) : Promise.resolve(changesAnswer)),
 }));
 
-const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted } = await import("@/lib/resourceStore");
+const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted, persistable } =
+  await import("@/lib/resourceStore");
+const { flushNow, put } = await import("@/lib/clientStore");
 
-// The disk key the store uses: "rs1:<user>:<collection>?<opts>" (opts as keyOf builds them). `m` is the page
-// size the store actually asks for, which is the server's own cap (clampPageSize) - it used to read 200, a size
-// no request has ever been granted.
-const diskKey = (user: string, collection: string, opts = "d=0&m=100&q=&p=") => `rs1:${user}:${collection}?${opts}`;
-const seed = (user: string, collection: string, rows: unknown[], ageMs = 0, opts?: string) =>
-  store.setItem(diskKey(user, collection, opts), JSON.stringify({ rows, ts: Date.now() - ageMs }));
+// A record as a previous page life would have left it. The composite key is clientStore's: schema version,
+// identity, class, then the store's own entry key - "<collection>?<opts>" as keyOf builds it. `m` is the page
+// size the store actually asks for, which is the server's own cap (clampPageSize).
+const entryKey = (collection: string, opts = "d=0&m=100&q=&p=") => `${collection}?${opts}`;
+const recordKey = (user: string, collection: string, opts?: string) => `1|${user}|rows|${entryKey(collection, opts)}`;
+function seed(user: string, collection: string, rows: unknown[], ageMs = 0, opts?: string) {
+  const k = recordKey(user, collection, opts);
+  const ts = Date.now() - ageMs;
+  idb.meta.set(k, { k, ver: 1, id: user, cls: "rows", key: entryKey(collection, opts), collection, ts, bytes: 1 });
+  idb.data.set(k, { k, v: JSON.stringify({ rows, ts }) });
+}
 
 // The reconciliation point a previous page life would have left behind: with one, stored copies are trusted
-// until the feed says otherwise.
-const seedSync = (user: string, ageMs = 60_000) => store.setItem(`rs1sync:${user}`, JSON.stringify({ at: Date.now() - ageMs }));
+// until the feed says otherwise. `authz` is the caller's access version at that moment - the feed answering
+// with a different one means their permissions moved, and everything stored goes.
+const seedSync = (user: string, ageMs = 60_000, authz = "v1") =>
+  store.setItem(`hrms.sync:${user}`, JSON.stringify({ at: Date.now() - ageMs, authz }));
 
-beforeEach(() => {
+beforeEach(async () => {
   store.clear();
+  idb.meta.clear();
+  idb.data.clear();
   listed.length = 0;
-  changesAnswer = { now: Date.now(), collections: [] };
-  setResourceStoreUser(undefined);
+  changesAnswer = { now: Date.now(), collections: [], authz_version: "v1" };
+  answerNotModified = false;
+  await setResourceStoreUser(undefined);
 });
 
 describe("resource store freshness tiers", () => {
@@ -82,20 +146,23 @@ describe("resource store freshness tiers", () => {
 });
 
 describe("resource store disk cache", () => {
-  it("adopts a stored copy on first touch, so a reload costs no request", () => {
-    setResourceStoreUser("a@x.test");
+  it("adopts a stored copy on first touch, so a reload costs no request", async () => {
     seed("a@x.test", "departments", [{ path: "departments/1", display_name: "Ops" }]);
+    await setResourceStoreUser("a@x.test");
     const snap = getSnapshot("departments", {});
     expect(snap.state).toBe("ready");
     expect(snap.rows).toHaveLength(1);
   });
 
-  it("never adopts another identity's rows", () => {
+  it("never adopts another identity's rows", async () => {
     seed("other@x.test", "departments", [{ path: "departments/1" }], 0, "d=0&m=7&q=&p=");
-    setResourceStoreUser("a@x.test");
+    await setResourceStoreUser("a@x.test");
     const snap = getSnapshot("departments", { max: 7 });
     expect(snap.rows).toEqual([]);
     expect(snap.state).toBe("loading"); // nothing to adopt -> it will fetch, as before
+    // And they are not merely ignored: nothing is going to come back for another identity's records, so
+    // hydration deletes them rather than leaving them on the disk of a shared machine.
+    expect(idb.data.has(recordKey("other@x.test", "departments", "d=0&m=7&q=&p="))).toBe(false);
   });
 
   it("stores nothing under a caller who has not been set (a simulation switching identity mid-flight)", () => {
@@ -104,13 +171,42 @@ describe("resource store disk cache", () => {
     expect(snap.rows).toEqual([]); // disk is off until setResourceStoreUser names the caller
   });
 
-  it("forgets the stored copy of a collection that was just written", () => {
-    setResourceStoreUser("a@x.test");
+  it("abandons a queued write when the caller changes before it reaches the disk", async () => {
+    // Writes are queued and flushed off the fetch's own turn, and opening the database is a real await. So a
+    // simulation starting - or a second person signing in - can switch the namespace WHILE a batch is in
+    // flight. Filing that batch under whoever is current now would hand one person's cached rows to another,
+    // which is the one thing the namespacing exists to prevent.
+    await setResourceStoreUser("a@x.test");
+    put("rows", entryKey("departments"), JSON.stringify({ rows: [{ path: "departments/1" }], ts: Date.now() }), { collection: "departments" });
+    const flushed = flushNow();
+    await setResourceStoreUser("b@x.test"); // lands inside the flush's own await on openDb
+    await flushed;
+    // Nothing was written for either identity: not for B (they never asked for it) and not for A (their
+    // namespace is no longer the one being stored to).
+    expect(idb.data.has(recordKey("b@x.test", "departments"))).toBe(false);
+    expect(idb.data.has(recordKey("a@x.test", "departments"))).toBe(false);
+  });
+
+  it("forgets the stored copy of a collection that was just written", async () => {
     seed("a@x.test", "vendors", [{ path: "vendors/1" }], 0, "d=0&m=9&q=&p=");
+    await setResourceStoreUser("a@x.test");
     invalidateCollections(["vendors"]);
-    expect(store.getItem(diskKey("a@x.test", "vendors", "d=0&m=9&q=&p="))).toBeNull();
+    await flushNow();
+    expect(idb.data.has(recordKey("a@x.test", "vendors", "d=0&m=9&q=&p="))).toBe(false);
     // And the next reader starts empty rather than adopting pre-write rows.
     expect(getSnapshot("vendors", { max: 9 }).rows).toEqual([]);
+  });
+
+  it("never writes a collection down that carries pay or identity", async () => {
+    // These are cached in memory like anything else - same dedup, same TTL - but a copy of someone's pay on the
+    // disk of whatever machine the browser is on buys nothing (they are read on one page, not on every page).
+    for (const c of ["payslips", "compensation", "loans", "tax-declarations", "personal-documents", "background-checks"]) {
+      expect(persistable(c), c).toBe(false);
+    }
+    // While the reference lists and the directory - read by nearly every page - are exactly what to store.
+    for (const c of ["departments", "employees", "leave-types", "holidays"]) {
+      expect(persistable(c), c).toBe(true);
+    }
   });
 });
 
@@ -168,13 +264,13 @@ describe("resource store retention: the entry map does not grow for the whole se
 describe("resource store: trusting stored copies against the change feed", () => {
   const identity = (name: string) => {
     seedSync(name);
-    setResourceStoreUser(name);
+    return setResourceStoreUser(name);
   };
 
   it("serves a stored copy without reading it when nothing has changed", async () => {
     changesAnswer = { now: Date.now(), collections: [] };
     seed("t1@x.test", "leave-requests", [{ path: "leave-requests/1" }], 10 * 60_000); // long past its 20s tier
-    identity("t1@x.test");
+    await identity("t1@x.test");
     expect(storedCopiesTrusted()).toBe(true);
     expect(getSnapshot("leave-requests", {}).rows).toHaveLength(1);
     await ensureFetch("leave-requests", {});
@@ -185,7 +281,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
     changesAnswer = { now: Date.now(), collections: ["holidays"] };
     seed("t2@x.test", "holidays", [{ path: "holidays/1" }], 10 * 60_000);
     seed("t2@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
-    identity("t2@x.test");
+    await identity("t2@x.test");
     subscribe("holidays", {}, () => {}); // a mounted view of the changed collection refetches immediately
     subscribe("departments", {}, () => {});
     await new Promise((r) => setTimeout(r, 0)); // let the feed's answer land
@@ -197,7 +293,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
 
   it("does not trust anything on a first-ever visit, when there is no reconciliation point", async () => {
     seed("t3@x.test", "vendors", [{ path: "vendors/1" }], 10 * 60_000);
-    setResourceStoreUser("t3@x.test"); // no sync record seeded
+    await setResourceStoreUser("t3@x.test"); // no sync record seeded
     expect(storedCopiesTrusted()).toBe(false);
     await ensureFetch("vendors", {});
     expect(listed).toContain("vendors"); // stale by its own tier -> read, exactly as before
@@ -206,7 +302,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
   it("gives up its stored copies when the feed cannot speak for the gap", async () => {
     changesAnswer = { now: Date.now(), unknown_window: true };
     seed("t4@x.test", "tickets", [{ path: "tickets/1" }], 10 * 60_000);
-    identity("t4@x.test");
+    await identity("t4@x.test");
     expect(getSnapshot("tickets", {}).rows).toHaveLength(1); // painted from disk...
     await new Promise((r) => setTimeout(r, 0));
     expect(storedCopiesTrusted()).toBe(false);
@@ -217,11 +313,62 @@ describe("resource store: trusting stored copies against the change feed", () =>
   it("gives them up when the reconciliation itself fails", async () => {
     changesAnswer = new Error("offline");
     seed("t5@x.test", "goals", [{ path: "goals/1" }], 10 * 60_000);
-    identity("t5@x.test");
+    await identity("t5@x.test");
     getSnapshot("goals", {}); // adopted while the answer is in flight
     await new Promise((r) => setTimeout(r, 0));
     expect(storedCopiesTrusted()).toBe(false);
     await ensureFetch("goals", {});
     expect(listed).toContain("goals");
+  });
+
+  // The case no collection stamp can report. A stored row carries the `access.can` hints and the field
+  // redactions computed for whoever fetched it, so narrowing a rule leaves rows that are stale without anything
+  // having been written - and a collection the caller has just LOST is filtered out of the answer entirely, so
+  // it could never be named. Hence: a different access version gives up everything.
+  it("gives up every stored copy when the caller's own access has changed", async () => {
+    changesAnswer = { now: Date.now(), collections: [], authz_version: "v2" };
+    seed("t6@x.test", "shifts", [{ path: "shifts/1" }], 10 * 60_000);
+    seed("t6@x.test", "projects", [{ path: "projects/1" }], 10 * 60_000);
+    seedSync("t6@x.test", 60_000, "v1"); // what their access looked like last time
+    await setResourceStoreUser("t6@x.test");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(storedCopiesTrusted()).toBe(false);
+    await flushNow();
+    expect(idb.data.has(recordKey("t6@x.test", "shifts"))).toBe(false);
+    expect(idb.data.has(recordKey("t6@x.test", "projects"))).toBe(false);
+    // And neither is served: both are re-read, though the feed named neither and could not have.
+    await ensureFetch("shifts", {});
+    await ensureFetch("projects", {});
+    expect(listed).toContain("shifts");
+    expect(listed).toContain("projects");
+  });
+
+  // What the change feed does NOT cover: the rest of the session. A twenty-second window means a page left
+  // open revalidates several times a minute, and re-reading a hundred rows to be told nothing changed was the
+  // largest remaining source of D1 reads. With a validator the server answers in one indexed row.
+  it("revalidates a lapsed copy with its validator, and keeps the rows when nothing changed", async () => {
+    seed("t8@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000); // past its 5-minute tier
+    seedSync("t8@x.test", 60_000, "v1");
+    await setResourceStoreUser("t8@x.test");
+    await new Promise((r) => setTimeout(r, 0));
+    // The stored copy carries no etag, so the first read of it is unconditional and comes back with one.
+    await ensureFetch("departments", {}, true);
+    answerNotModified = true;
+    await ensureFetch("departments", {}, true);
+    const snap = getSnapshot("departments", {});
+    expect(snap.state).toBe("ready");
+    expect(snap.rows).toEqual([{ path: "departments/fetched" }]); // kept across the 304, not emptied by it
+    expect(listed.filter((c) => c === "departments")).toHaveLength(2);
+  });
+
+  it("keeps them when the access version is unchanged", async () => {
+    changesAnswer = { now: Date.now(), collections: [], authz_version: "v1" };
+    seed("t7@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
+    seedSync("t7@x.test", 60_000, "v1");
+    await setResourceStoreUser("t7@x.test");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(storedCopiesTrusted()).toBe(true);
+    await ensureFetch("departments", {});
+    expect(listed).not.toContain("departments");
   });
 });

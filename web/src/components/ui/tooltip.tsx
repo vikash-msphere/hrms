@@ -55,7 +55,10 @@ const TooltipTrigger = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Trigger>
 >((props, ref) => {
   const touch = React.useContext(TouchContext);
-  return touch ? <PopoverPrimitive.Trigger ref={ref} {...props} /> : <TooltipPrimitive.Trigger ref={ref} {...props} />;
+  // The marker lib/clippedTitle.ts looks for: a clipped string under a trigger already has a tooltip, and a
+  // native `title` on top of it would pop a second, unstyled box over the first on the same hover.
+  const marked = { "data-tooltip-trigger": "", ...props };
+  return touch ? <PopoverPrimitive.Trigger ref={ref} {...marked} /> : <TooltipPrimitive.Trigger ref={ref} {...marked} />;
 });
 TooltipTrigger.displayName = TooltipPrimitive.Trigger.displayName;
 

@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { dateFormat, numberFormat } from "./intl";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -48,11 +49,16 @@ export function initials(name: string): string {
   return matches.slice(0, 2).join("").toUpperCase();
 }
 
+// `dateFormat(...).format(d)` rather than `d.toLocaleDateString(...)`: the two produce identical output for
+// the same options, but the method builds a formatter per call. This is the most-called formatter in the app
+// (207 call sites), and a table re-renders all of them on every keystroke in a column filter.
+const DATE_OPTS: Intl.DateTimeFormatOptions = { year: "numeric", month: "short", day: "numeric" };
+
 export function formatDate(value?: string | null): string {
   if (!value) return "-";
   const d = new Date(value);
   if (isNaN(d.getTime())) return value;
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return dateFormat(undefined, DATE_OPTS).format(d);
 }
 
 /** A file size a person can read: "812 B", "44 KB", "2.1 MB". Null for nothing/zero, so callers can skip it. */
@@ -111,7 +117,9 @@ export function round2(n: number): number {
 export function formatMoney(value: number, currency = "INR", decimals?: number): string {
   const dp = decimals == null ? undefined : Math.min(4, Math.max(0, Math.trunc(decimals)));
   try {
-    return new Intl.NumberFormat(undefined, {
+    // The catch still guards CONSTRUCTION: an unrecognised currency code throws inside `numberFormat`, and a
+    // failed construction is never cached, so a bad code falls through to `toFixed` on every call as before.
+    return numberFormat(undefined, {
       style: "currency",
       currency,
       ...(dp == null ? {} : { minimumFractionDigits: dp, maximumFractionDigits: dp }),
@@ -121,10 +129,11 @@ export function formatMoney(value: number, currency = "INR", decimals?: number):
   }
 }
 
-/** Deterministic pastel-ish accent color from a string, for avatars. */
-export function colorFromString(input: string): string {
+/** Deterministic pastel-ish accent color from a string, for avatars. `alpha` (0-1) returns the SAME
+ *  hue translucent, for tints drawn from a person's colour (the profile header's avatar ring). */
+export function colorFromString(input: string, alpha?: number): string {
   let hash = 0;
   for (let i = 0; i < input.length; i++) hash = input.charCodeAt(i) + ((hash << 5) - hash);
   const hue = Math.abs(hash) % 360;
-  return `hsl(${hue} 65% 45%)`;
+  return alpha === undefined ? `hsl(${hue} 65% 45%)` : `hsl(${hue} 65% 45% / ${alpha})`;
 }

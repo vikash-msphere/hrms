@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { and, eq } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
@@ -58,10 +58,11 @@ export async function createRemoteWorkRequest(deps: Deps, actor: AppUser, input:
   // middleware's owner_refs check, so a non-admin can only create under their own employee).
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
-  const row = (await deps.db
+  // Allocated inside the retry (codeAlloc.ts): filing at the same moment as somebody else is not an error.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.remoteWorkRequests)
     .values({ code: await allocOwnedCode(deps, schema.remoteWorkRequests, schema.remoteWorkRequests.employeeId, employeeId), employeeId, startDate: new Date(start), endDate: new Date(end), startSession, endSession, location: input.location?.trim() || null, reason: input.reason?.trim() || null, state: "PENDING" })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "remote_work_request.create", "remote-work-requests", row.uuid, createdMeta(row, "remote-work-requests"), row);
   await notifyManager(deps, employeeId, { type: "remote.requested", noun: "remote work request" });
   await emitEvent(deps, actor, "remoteWork.requested", { subject: `remote-work-requests/${row.uuid}`, employeeId, payload: { from: new Date(start).toISOString(), to: new Date(end).toISOString() } });

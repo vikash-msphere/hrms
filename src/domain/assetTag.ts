@@ -49,6 +49,28 @@ export function deriveTagCode(name: string): string {
   return letters || FALLBACK_TAG_CODE;
 }
 
+/**
+ * The derived code, moved out of the way of the codes already in use.
+ *
+ * Two names can easily want the same three letters ("Laptop" and "Laptop dock" both derive LAP), and codes
+ * have to stay unique because each one is its own tag sequence. A default nobody typed must not be the reason
+ * a category will not save, so the second one takes LAP2. An explicitly typed code is never moved: there the
+ * clash is the author's to resolve, and being handed a different code than the one printed on the stickers
+ * would be worse than the error.
+ *
+ * `taken` is compared case-insensitively, the way the uniqueness check reads it.
+ */
+export function freeTagCode(base: string, taken: Iterable<string>): string {
+  const used = new Set([...taken].map((c) => c.trim().toLowerCase()));
+  if (!used.has(base.toLowerCase())) return base;
+  // Numbered from 2, so the first clash reads as "the second LAP" rather than starting at a bare LAP1.
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${base}${n}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return base; // 998 categories deep on one code: hand back the clash and let the uniqueness check say so.
+}
+
 /** Compose a tag from the config, the category's code (absent = uncategorised) and a sequence. */
 export function formatAssetTag(cfg: AssetTagConfig, tagCode: string | null | undefined, seq: number): string {
   const code = tagCode?.trim().toUpperCase() || FALLBACK_TAG_CODE;

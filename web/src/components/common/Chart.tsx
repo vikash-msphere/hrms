@@ -30,7 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 // ACCESSIBILITY. An SVG of coloured paths is nothing to a screen reader, so every chart also emits its own
 // numbers as a table in the accessibility tree, and the figure carries a caption naming what it shows. Charts
 // with an axis are keyboard-navigable (frappe's `isNavigable` moves a highlight along the series with the
-// arrow keys). Animation is skipped entirely when the reader has asked for reduced motion.
+// arrow keys). Charts do not animate at all - see the ANIMATION block above `guardNavOverlay`.
 
 export type ChartSeries = {
   /** Series name - shown in the legend and the tooltip. Required whenever there is more than one. */
@@ -100,8 +100,53 @@ export type ChartProps = {
   className?: string;
 };
 
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+// ANIMATION IS OFF, for every reader, not only the ones who asked for reduced motion.
+//
+// frappe does not animate a chart in place. `render(components, animate)` hands its elements to
+// `runSMILAnimation`, which REMOVES the live `<svg>` from the container, appends a `<animate>`-carrying CLONE
+// of it in its place, and swaps the original back 250ms later (frappe-charts.esm.js, `runSMILAnimation`). For
+// a quarter of a second after every animated draw the node on the page is therefore a throwaway: anything
+// holding a reference to the chart's SVG - a measurement, a hover, a screenshot - is holding a node that has
+// just been detached, and the picture re-mounts under the reader rather than moving.
+//
+// Pie and donut make that visible at once: `initTimeout = 0` on those two classes, so the animated re-draw
+// lands in the same frame as the mount and the SVG the reader first sees is gone milliseconds later.
+//
+// The same animation is where the rest of this file's scar tissue comes from: `runSMILAnimation`'s swap-back
+// timer, the `CHART_POST_ANIMATE_TIMEOUT` that re-makes components and moves the navigation overlay, and the
+// deferred init update all fire from timers no caller can await - see `guardNavOverlay`, the shadowed methods
+// in the teardown below, and the try/catch around `update`. A draw-in that costs the picture its identity is
+// not worth any of that, so the numbers simply appear.
+
+/**
+ * Keep frappe's keyboard-navigation overlay from taking the page down with it.
+ *
+ * A navigable chart (every line/bar/axis-mixed one here) draws a highlight over the point at
+ * `state.currentIndex`, and it re-makes that highlight from a timer after each animated draw. The index is
+ * carried over from the previous draw, so any draw that ends up with fewer data units than the last one -
+ * fewer points after a filter, a redraw that raced a rebuild - has it read `units[currentIndex]` off the end:
+ * `makeOverlay` then throws on `nodeName` of the missing unit, leaves `overlay` unset, and the next call
+ * throws again on `parentNode` of the overlay that was never made. Both come from a timer, so no try/catch
+ * around our own calls can see them, and what the reader loses is the highlight - not a number on the chart.
+ *
+ * So the two methods that touch the overlay are wrapped on the instance. Everything else in the library is
+ * left exactly as it is.
+ */
+function guardNavOverlay(chart: FrappeChart | null): void {
+  const inst = chart as unknown as Record<string, unknown> | null;
+  if (!inst) return;
+  for (const name of ["makeOverlay", "updateOverlayGuides"]) {
+    const original = inst[name];
+    if (typeof original !== "function") continue;
+    inst[name] = function (this: unknown, ...args: unknown[]) {
+      try {
+        return (original as (...a: unknown[]) => unknown).apply(this, args);
+      } catch {
+        return undefined; // a highlight that could not be drawn over a point that is no longer there
+      }
+    };
+  }
+}
 
 const isEmpty = (p: ChartProps) =>
   p.type === "heatmap"
@@ -109,7 +154,22 @@ const isEmpty = (p: ChartProps) =>
     : (p.labels?.length ?? 0) === 0 || (p.datasets ?? []).every((d) => d.values.every((v) => !v));
 
 export function Chart(props: ChartProps) {
-  const { type, labels, datasets, points, start, end, ariaLabel, height = 240, colors, format, markers, stacked, areaFill, spline, hideDots, maxSlices, countLabel, onSelect, emptyText, className } = props;
+  const { labels, datasets, points, start, end, ariaLabel, height = 240, colors, format, markers, stacked, areaFill, spline, hideDots, maxSlices, countLabel, onSelect, emptyText, className } = props;
+  // ONE POINT IS NOT A LINE. frappe cannot draw a line series through a single x: it emits
+  // `d="Mundefined,undefined"` for the path and `cx="undefined"` for the dots, which the browser rejects
+  // outright - so the series is absent from the picture and the console fills with SVG parse errors. It is
+  // not a rare shape either: any chart of "the biggest N" is a one-bar chart on the day the org has one of
+  // them (a single budget cap, one project, one open requisition).
+  //
+  // A line through one point has nothing to say anyway - there is no slope to read - so a one-point chart is
+  // drawn as columns instead, which is the same numbers in the shape that survives. The accessible table
+  // below is unaffected either way.
+  const onePoint = props.type !== "heatmap" && (labels?.length ?? 0) === 1;
+  const type = onePoint && props.type === "line" ? "bar" : props.type;
+  const drawDatasets = React.useMemo(
+    () => (onePoint ? (datasets ?? []).map((d) => (d.chartType === "line" ? { ...d, chartType: "bar" as const } : d)) : datasets),
+    [onePoint, datasets],
+  );
   const { resolved } = useTheme();
   const host = React.useRef<HTMLDivElement>(null);
   const chart = React.useRef<FrappeChart | null>(null);
@@ -118,10 +178,16 @@ export function Chart(props: ChartProps) {
   // Bumped when the data changes shape (see the update effect); a build dep, so the chart is rebuilt rather
   // than updated in place.
   const [rebuild, setRebuild] = React.useState(0);
+  // How many points and series the chart on screen was DRAWN with - frappe's arrays are that long, and an
+  // update carrying a different count walks off the end of them.
   const shapeRef = React.useRef("");
   const builtData = React.useRef<FrappeData | null>(null);
   const builtWidth = React.useRef(0);
   const empty = isEmpty(props);
+  const shape =
+    props.type === "heatmap"
+      ? `h${Object.keys(props.points ?? {}).length}`
+      : `${(props.labels ?? []).length}x${(props.datasets ?? []).length}`;
 
   // Fetch the engine the first time a chart is actually on screen. A failure is not fatal: the data table
   // below is the same information, so the page keeps working with the picture missing.
@@ -142,16 +208,29 @@ export function Chart(props: ChartProps) {
         ? { dataPoints: points ?? {}, start, end }
         : {
             labels: labels ?? [],
-            datasets: (datasets ?? []).map((d) => ({ name: d.name, values: d.values, ...(d.chartType ? { chartType: d.chartType } : {}) })),
+            datasets: (drawDatasets ?? []).map((d) => ({ name: d.name, values: d.values, ...(d.chartType ? { chartType: d.chartType } : {}) })),
             ...(markers?.length ? { yMarkers: markers.map((m) => ({ label: m.label, value: m.value, options: { labelPos: "left" as const } })) } : {}),
           },
-    [type, labels, datasets, points, start, end, markers],
+    [type, labels, drawDatasets, points, start, end, markers],
   );
 
   // Build (and rebuild on a theme flip, a type change or a resize of the box).
   React.useEffect(() => {
     if (!lib || !host.current || empty) return;
     const el = host.current;
+    // Nothing is drawn into a box with no width, and the observer below builds it the moment there is one.
+    // A hidden box is an ordinary state here - a chart on the tab that is not the open one, a panel that has
+    // not been shown yet - and frappe draws into it regardless: it lays out a chart of zero width, makes no
+    // data units, and its own post-animation timer then reads `units[currentIndex]` off the end of that empty
+    // array and throws (`nodeName`, then `parentNode` of the overlay it tried to move). Waiting for a real
+    // width is also simply correct: the picture is measured against the space it will actually occupy.
+    if (el.clientWidth <= 0) {
+      const wait = new ResizeObserver(() => {
+        if (el.clientWidth > 0) setRebuild((n) => n + 1);
+      });
+      wait.observe(el);
+      return () => wait.disconnect();
+    }
     el.innerHTML = ""; // frappe appends; without this a rebuild would stack charts on top of each other
     const palette = colors ?? (type === "heatmap" ? heatmapColors(resolved) : chartColors(resolved, Math.max(datasets?.length ?? 1, labels?.length ?? 1)));
     const options: FrappeOptions = {
@@ -159,7 +238,7 @@ export function Chart(props: ChartProps) {
       type,
       height,
       colors: palette,
-      animate: prefersReducedMotion() ? 0 : 1,
+      animate: 0, // never - see the ANIMATION block above `guardNavOverlay`
       truncateLegends: true,
       isNavigable: type === "line" || type === "bar" || type === "axis-mixed",
       ...(maxSlices ? { maxSlices } : {}),
@@ -176,12 +255,14 @@ export function Chart(props: ChartProps) {
       tooltipOptions: format ? { formatTooltipY: (v: number) => format(v) } : undefined,
     };
     chart.current = new lib.Chart(el, options);
+    guardNavOverlay(chart.current);
     // The numbers this chart was BUILT with. The update effect below compares against it and does nothing when
     // they are the same object, which is the case on the render that built the chart: frappe is still inside
     // its init animation there, its data units and navigable overlays are not drawn yet, and an `update()`
     // landing in that window throws inside the library (`nodeName` of the missing unit, then `parentNode` of a
     // detached overlay) and leaves the picture half drawn.
     builtData.current = data;
+    shapeRef.current = shape;
 
     // frappe redraws itself on a resize, and that redraw is broken for a navigable chart (which is every
     // line/bar/axis-mixed chart here): `draw(true)` re-makes the data units and then asks its overlay code for
@@ -199,6 +280,9 @@ export function Chart(props: ChartProps) {
     }
     builtWidth.current = el.clientWidth;
     const ro = new ResizeObserver(() => {
+      // A box that has just lost its width was hidden, not resized - the reader moved to another tab. There
+      // is nothing to redraw for, and rebuilding at zero width is the state the guard above exists to avoid.
+      if (el.clientWidth <= 0) return;
       // Integer width only: a fractional reflow is not a redraw, and a rebuild that changes the width it just
       // measured would loop.
       if (Math.abs(el.clientWidth - builtWidth.current) < 1) return;
@@ -218,6 +302,22 @@ export function Chart(props: ChartProps) {
       // node is not a teardown: the old chart keeps being asked to redraw, into a container that is no longer
       // in the document, and throws inside the library on the next resize (`nodeName` of undefined). Every
       // theme flip and route change left one more of those behind.
+      //
+      // `destroy()` takes those three off (frappe-charts.esm.js), but it cancels none of the timers the
+      // library sets for itself, and every draw sets some: `setup()` ends with
+      // `setTimeout(() => this.update(this.data), initTimeout)` (the animated draw-in, ~700ms out), and each
+      // `render()` queues `components.forEach(c => c.make()); this.updateNav()` for when the animation ends.
+      // A reader who switches tab, flips the theme or leaves the page inside that window has those timers
+      // fire over nodes this cleanup already removed, and they throw from inside the library - `nodeName` of
+      // a data unit that is gone, then `parentNode` of a detached overlay - where no try/catch of ours can
+      // reach them. So the methods those timers call are shadowed with no-ops first: the timers still fire,
+      // and find nothing to do.
+      const pending = chart.current as unknown as { update?: () => void; render?: () => void; updateNav?: () => void } | null;
+      if (pending) {
+        pending.update = () => {};
+        pending.render = () => {};
+        pending.updateNav = () => {};
+      }
       chart.current?.destroy();
       chart.current = null;
       el.innerHTML = "";
@@ -233,21 +333,30 @@ export function Chart(props: ChartProps) {
   // library (`nodeName` / `parentNode` of undefined) and leaving the old picture on screen. That is not a rare
   // case - it is what a page does normally, since a list arrives in two passes (cache, then the server), and
   // the second pass is the one that adds the twelfth department. A count change therefore rebuilds.
+  //
+  // Compared against what the CHART ON SCREEN was built with, not against the previous props. A rebuild is a
+  // state change, so it lands a render later: between the count changing and the new chart existing there can
+  // be another render carrying the new numbers, and measuring that one against its predecessor says the shape
+  // held - while the chart still standing there has the old number of points. That is the update that walks
+  // off the end of frappe's arrays, and it is the one this spent a lane's worth of runs throwing from.
   React.useEffect(() => {
-    const shape =
-      type === "heatmap"
-        ? `h${Object.keys(points ?? {}).length}`
-        : `${(labels ?? []).length}x${(datasets ?? []).length}`;
-    const had = shapeRef.current;
-    shapeRef.current = shape;
-    if (had && had !== shape) {
+    // Already drawn with exactly these numbers (this is the render that built it) - see `builtData`.
+    if (builtData.current === data) return;
+    if (shapeRef.current !== shape) {
       setRebuild((n) => n + 1);
       return;
     }
-    // Already drawn with exactly these numbers (this is the render that built it) - see `builtData`.
-    if (builtData.current === data) return;
-    chart.current?.update(data);
-  }, [data, type, points, labels, datasets]);
+    try {
+      chart.current?.update(data);
+    } catch {
+      // The shape held and the numbers are good, so an exception here came from INSIDE frappe: an update that
+      // landed in a window it did not expect (an init animation still running, an overlay already detached by
+      // a tab switch), where it walks its own half-built nodes and throws on `nodeName` / `parentNode`. The
+      // picture is then half drawn and the page has logged a stack nobody can act on. Rebuilding draws the
+      // same numbers from scratch, which is what the reader wanted from the update.
+      setRebuild((n) => n + 1);
+    }
+  }, [data, shape]);
 
   const fmt = format ?? ((v: number) => String(v));
 

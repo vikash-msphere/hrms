@@ -55,8 +55,9 @@ export type Bindings = {
   FIELD_ENCRYPTION_KEY: string;
   WIRE_ID_KEY: string; // master key for the wire-id codec (encrypts the internal id -> opaque token)
   // Transactional email. EMAIL_PROVIDER selects the vendor (default "resend"); one of resend|brevo|sendgrid|
-  // postmark|mailgun. EMAIL_API_KEY is that vendor's secret, EMAIL_FROM the verified sender. EMAIL_REGION is
-  // provider-specific (Mailgun sending domain); unused by the rest.
+  // postmark|mailgun, or "console" to log the message instead of sending it (preview stacks and the browser
+  // suite; preflight refuses it for a production deploy). EMAIL_API_KEY is that vendor's secret, EMAIL_FROM
+  // the verified sender. EMAIL_REGION is provider-specific (Mailgun sending domain); unused by the rest.
   EMAIL_PROVIDER?: string;
   EMAIL_API_KEY: string;
   EMAIL_FROM: string;

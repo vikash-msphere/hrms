@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -101,6 +101,26 @@ export const checkInSpec: CrudSpec<CheckInInput, typeof schema.checkIns> = {
       set.pulse = patch.pulse ?? null;
     }
     return set;
+  },
+  // Both attendees' names, on the row.
+  //
+  // An employee holds `employees.me` and nothing more, so a page resolving the other attendee out of the
+  // employees collection has nothing to resolve it from - their own 1:1 list named the person they met "-".
+  // The names are not a secret from the two people in the meeting (or from an HR reader who can already read
+  // the row), so they travel with it.
+  decorate: async (deps, _actor, rows) => {
+    const ids = [...new Set(rows.flatMap((r) => [r.employeeId, r.counterpartId]).filter((x): x is string => !!x))];
+    if (ids.length === 0) return rows;
+    const people = await deps.db
+      .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName })
+      .from(schema.employees)
+      .where(inArray(schema.employees.uuid, ids));
+    const name = new Map(people.map((p) => [p.uuid, `${p.firstName} ${p.lastName}`.trim()]));
+    return rows.map((r) => ({
+      ...r,
+      employeeName: r.employeeId ? name.get(r.employeeId) : undefined,
+      counterpartName: r.counterpartId ? name.get(r.counterpartId) : undefined,
+    }));
   },
   // Tell the other party (or both, if HR logged it) that a 1:1 was recorded.
   afterCreate: async (deps, actor, row, input) => {

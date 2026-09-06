@@ -267,7 +267,11 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
           </DialogBody>
           <DialogFooter>
             <Button variant="outline" onClick={() => guard.onOpenChange(false)}>Cancel</Button>
-            <Button onClick={submit} loading={busy} disabled={!form.name.trim()}>{editing ? "Save changes" : "Create"}</Button>
+            {/* Refused, not just flagged: at 100% or more the percentage lines claim the whole of basic, so
+                there is no CTC this structure can split and nothing it could be applied to. Saving it puts a
+                dead structure in the catalog that only fails later, on somebody's compensation revision, far
+                from the form that made it - which is what the line above already says out loud. */}
+            <Button onClick={submit} loading={busy} disabled={!form.name.trim() || percentOfBasic >= 100}>{editing ? "Save changes" : "Create"}</Button>
           </DialogFooter>
           </AccessScope>
         </DialogContent>

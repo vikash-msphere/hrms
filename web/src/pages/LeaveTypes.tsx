@@ -84,7 +84,10 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       min_balance_retained_days: Number(form.minRetained) || 0,
       carry_forward: form.carryForward,
       carry_forward_cap_days: form.carryForwardCap.trim() === "" ? null : Number(form.carryForwardCap),
-      color: form.color,
+      // "Auto" (no colour picked) is NULL on the wire, not "": the field is a `#rrggbb` string or nothing,
+      // so an empty string was rejected outright - every leave type saved without touching the swatch came
+      // back 400.
+      color: form.color || null,
     };
     if (editing) {
       await patch("leave-types/" + idOf(editing.path), body, editing.etag);
@@ -236,7 +239,9 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         onSubmit={submit}
         className="sm:max-w-2xl lg:max-w-4xl"
       >
-          <Field label="Name" info="The color sets this type's pills on the calendar/timeline. Click the swatch to change it; 'Auto' picks a stable color.">
+          {/* `htmlFor` by hand: the field holds the colour swatch beside the input, so Field has no single
+              child to bind its label to and the label named nothing. */}
+          <Field label="Name" htmlFor="leave-type-name" info="The color sets this type's pills on the calendar/timeline. Click the swatch to change it; 'Auto' picks a stable color.">
             <div className="flex items-center gap-2">
               <Popover>
                 <PopoverTrigger asChild>
@@ -269,7 +274,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
                   </button>
                 </PopoverContent>
               </Popover>
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Annual Leave" autoFocus />
+              <Input id="leave-type-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Annual Leave" autoFocus />
             </div>
           </Field>
           <FieldRow>

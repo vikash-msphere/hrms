@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useCollection } from "@/hooks/useCollection";
 import { get } from "@/api";
-import { subscribeInvalidations, storedCopiesTrusted, storedIdentity } from "@/lib/resourceStore";
+import { subscribeInvalidations, storedCopiesTrusted, storedIdentity, subscribePurge } from "@/lib/resourceStore";
+import { registerHydrator, put, del } from "@/lib/clientStore";
 import type { LeaveRequest, Reimbursement, OvertimeRequest, RemoteWorkRequest, AttendanceRegularization, LeaveEncashment, Loan, TimeEntry, Expense, AssetRequest } from "@/types";
 
 // A prior-employer tax declaration awaiting HR/payroll verification (GET /v1/tax-verifications). Not a
@@ -88,27 +89,44 @@ type Summary = { counts?: Record<string, number>; total?: number };
 // store's change feed reports whether any of those has been written to - so an unchanged queue set means the
 // stored numbers are still the right numbers, and the page load costs no request for them. A write anywhere in
 // a queue invalidates that collection, which the subscription below turns into a refresh.
-const SUMMARY_DISK_PREFIX = "ap1:";
-const summaryDiskKey = () => `${SUMMARY_DISK_PREFIX}${storedIdentity() ?? ""}`;
+const SUMMARY_KEY = "approvals-summary";
+let storedSummary: Summary | null = null;
+
+registerHydrator("snapshot", {
+  onRecords: (records) => {
+    const rec = records.find((r) => r.key === SUMMARY_KEY);
+    if (!rec) return;
+    try {
+      const parsed = JSON.parse(rec.value) as Summary;
+      if (parsed && typeof parsed === "object") storedSummary = parsed;
+    } catch {
+      /* unparseable: the badge costs its request this load, as it did before any of this */
+    }
+  },
+  onEvict: () => {
+    storedSummary = null;
+  },
+  // A different caller decides in different queues, so the counts are not theirs.
+  onReset: () => {
+    storedSummary = null;
+  },
+});
+
+// A whole-store purge means the caller's rights changed: which queues they may decide in is exactly what these
+// counts are about, so the stored numbers are not theirs to keep.
+subscribePurge(() => {
+  storedSummary = null;
+  del("snapshot", SUMMARY_KEY);
+});
 
 function readSummaryDisk(): Summary | null {
-  if (!storedIdentity()) return null;
-  try {
-    const raw = localStorage.getItem(summaryDiskKey());
-    const rec = raw ? (JSON.parse(raw) as Summary) : null;
-    return rec && typeof rec === "object" ? rec : null;
-  } catch {
-    return null;
-  }
+  return storedIdentity() ? storedSummary : null;
 }
 
 function writeSummaryDisk(s: Summary) {
   if (!storedIdentity()) return;
-  try {
-    localStorage.setItem(summaryDiskKey(), JSON.stringify(s));
-  } catch {
-    /* private mode / quota: the badge just costs its request every load, as before */
-  }
+  storedSummary = s;
+  put("snapshot", SUMMARY_KEY, JSON.stringify(s));
 }
 
 function ActiveProvider({ queues, withHistory, children }: { queues: readonly string[]; withHistory: boolean; children: ReactNode }) {

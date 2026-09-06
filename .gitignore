@@ -30,6 +30,8 @@ web/src/web/dummy-non-existing-folder/
 
 # Playwright
 /test-results/
+# A second run on this machine (E2E_LANE=1..9) keeps its artifacts apart from the first's - see e2e/lane.ts.
+/test-results-*/
 /playwright-report/
 /blob-report/
 /playwright/.cache/

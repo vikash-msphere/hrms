@@ -77,7 +77,20 @@ export function setForbiddenHandler(fn: ((collection: string) => void) | null) {
 //     both wrong and self-locking (it would hide the exit),
 //   - `asRealCaller` lets a caller opt out explicitly (App re-reads /users/me as the admin for the pill).
 const REAL_CALLER_PATHS = /^\/access-rules/;
-export type ApiInit = RequestInit & { skipForbiddenHandler?: boolean; asRealCaller?: boolean };
+export type ApiInit = RequestInit & {
+  skipForbiddenHandler?: boolean;
+  asRealCaller?: boolean;
+  /**
+   * This call has no side effect, so a gateway that refuses it can simply be asked again.
+   *
+   * Method is the usual proxy for that, and it is wrong for the two calls the SPA leans on hardest: the read
+   * batch (`batch:run`) and the avatar batch are POSTs because they carry a body, not because they change
+   * anything - the batch envelope is GET-only sub-requests by construction. Left to the method rule they were
+   * the only reads in the app with no retry, so one 503 from a restarting edge showed up as a page of missing
+   * data rather than a moment's delay.
+   */
+  safeToRepeat?: boolean;
+};
 
 function viewAsHeader(path: string, init: ApiInit): Record<string, string> {
   const va = getViewAs();
@@ -120,17 +133,64 @@ function networkError(): ApiError {
   );
 }
 
+// The identity request is started by web/public/theme-init.js, a blocking <head> script that runs while this
+// bundle is still downloading, and parked on `window`. Claim it here rather than in useMe so the answer goes
+// through the SAME 401/403/problem handling as any other call - a prefetch that bypassed that would have to
+// re-implement the session-expiry path.
+//
+// Claimed at most once (a Response body can only be read once) and only for the exact request the prefetch
+// made: GET /users/me with no extra headers and no view-as. `asRealCaller` is the read that only ever happens
+// DURING a simulation, which is the case theme-init.js declines to prefetch - so it never matches, and never
+// steals a Response answered for the wrong principal.
+declare global {
+  interface Window {
+    __hrmsMePrefetch?: Promise<Response | null>;
+  }
+}
+
+function claimMePrefetch(path: string, init: ApiInit): Promise<Response | null> | undefined {
+  if (path !== "/users/me") return undefined;
+  if ((init.method ?? "GET").toUpperCase() !== "GET") return undefined;
+  if (init.headers || init.asRealCaller || getViewAs()) return undefined;
+  const pending = window.__hrmsMePrefetch;
+  window.__hrmsMePrefetch = undefined;
+  return pending;
+}
+
+// A gateway saying "not right now": the edge is between isolates, the origin is starting, a proxy is
+// reloading. None of them mean anything about the request, and all of them are over in a moment.
+const TRANSIENT = new Set([502, 503, 504]);
+// Only READS are retried, and only twice. A read has no side effect, so asking again is free; a write may
+// have landed before the gateway gave up on the response, and repeating it is how one expense becomes two.
+const READ_ATTEMPTS = 3;
+const settle = (attempt: number) => new Promise((r) => setTimeout(r, 150 * attempt));
+
 export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   guardReadOnly(path, init);
   let res: Response;
-  try {
-    res = await fetch(`/v1${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...viewAsHeader(path, init), ...(init.headers ?? {}) },
-      credentials: "include",
-    });
-  } catch {
-    throw networkError();
+  // `?? await fetch(...)`: the prefetch resolves to null when it failed, so a dead one falls straight
+  // through to a real request rather than turning a transient boot-time blip into a failed sign-in. It is
+  // claimed OUTSIDE the retry - it is a single in-flight response, not a request that can be made again.
+  const prefetched = await claimMePrefetch(path, init);
+  const isRead = (init.method ?? "GET").toUpperCase() === "GET" || !!init.safeToRepeat;
+  const attempts = isRead ? READ_ATTEMPTS : 1;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res =
+        (attempt === 1 ? prefetched : undefined) ??
+        (await fetch(`/v1${path}`, {
+          ...init,
+          headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa", ...viewAsHeader(path, init), ...(init.headers ?? {}) },
+          credentials: "include",
+        }));
+    } catch {
+      // The request never reached anybody: worth another go for a read, and the offline banner for the rest.
+      if (attempt >= attempts) throw networkError();
+      await settle(attempt);
+      continue;
+    }
+    if (!TRANSIENT.has(res.status) || attempt >= attempts) break;
+    await settle(attempt);
   }
   if (res.status === 401) handle401();
   if (!res.ok) {
@@ -179,15 +239,16 @@ async function withInvalidation<T>(path: string, verb: string | undefined, p: Pr
 // The distinction that survives is between OMITTED and PRESENT, and it is load-bearing on a merge patch: the
 // services test `hasOwnProperty`, so an omitted key leaves the stored value alone and `""` empties it. Do not
 // "tidy" an empty string into an omitted field, or an edit that clears a note will silently keep the old one.
-export function patch<T>(path: string, body: Record<string, unknown>, etag?: string) {
+export function patch<T>(path: string, body: Record<string, unknown>, etag?: string, init?: ApiInit) {
   return withInvalidation(path, undefined, api<T>(`/${path}`, {
+    ...init,
     method: "PATCH",
     headers: { "Content-Type": "application/merge-patch+json", ...(etag ? { "If-Match": etag } : {}) },
     body: JSON.stringify(body),
   }));
 }
 
-import { coalescedGet } from "@/lib/getCoalescer";
+import { coalescedGet, NOT_MODIFIED, etagOf } from "@/lib/getCoalescer";
 
 // ---- AEP-shaped helpers -----------------------------------------------------
 
@@ -209,12 +270,11 @@ export type AepResource = {
 
 export type ListResponse<T> = { results: T[]; next_page_token?: string };
 
-/** List a collection. `collection` is the kebab path segment, e.g. "employees". Routed through the GET
- *  coalescer, so all reads fired in the same tick collapse into one /v1/batch:run request. */
-export function list<T>(
-  collection: string,
-  opts: { max?: number; showDeleted?: boolean; deletedOnly?: boolean; q?: string; pageToken?: string; params?: Record<string, string> } = {}
-): Promise<ListResponse<T>> {
+export type ListOptions = { max?: number; showDeleted?: boolean; deletedOnly?: boolean; q?: string; pageToken?: string; params?: Record<string, string> };
+
+/** The request path for a list read. One place, because three things must agree on it byte for byte: the
+ *  coalescer's dedup key, the etag it holds for that path, and the store's own cache key. */
+export function listPath(collection: string, opts: ListOptions): string {
   // 100 is what the server actually grants (http/pagination.ts clampPageSize caps there), so asking for more
   // just made every caller's stated page size a fiction. Truncation is reported through `next_page_token`
   // either way; the two numbers should agree so nobody sizes a view against a page they will never get.
@@ -236,7 +296,36 @@ export function list<T>(
   if (opts.q) params.set("q", opts.q);
   // Cursor from a previous page's next_page_token - used by the store's loadMore to follow the server cursor.
   if (opts.pageToken) params.set("page_token", opts.pageToken);
-  return coalescedGet<ListResponse<T>>(`${collection}?${params.toString()}`);
+  return `${collection}?${params.toString()}`;
+}
+
+/** List a collection. `collection` is the kebab path segment, e.g. "employees". Routed through the GET
+ *  coalescer, so all reads fired in the same tick collapse into one /v1/batch:run request. */
+export function list<T>(collection: string, opts: ListOptions = {}): Promise<ListResponse<T>> {
+  return coalescedGet<ListResponse<T>>(listPath(collection, opts));
+}
+
+/**
+ * The same read, made CONDITIONAL on a copy the caller already holds.
+ *
+ * Only the resource store calls this, and only when its cached page has gone stale by its own freshness window.
+ * That revalidation is where the reads were going: a twenty-second window means a page that stays open re-reads
+ * up to a hundred rows several times a minute, almost always to be handed back what it had. With a validator
+ * the server answers from one indexed row (src/http/listEtag.ts) and this resolves `notModified`, which costs
+ * the store nothing but a new timestamp.
+ *
+ * `etag` is what came back with the rows being held; the fresh one rides back so it can be stored with them.
+ */
+export async function listConditional<T>(
+  collection: string,
+  opts: ListOptions = {},
+  etag?: string,
+  fresh = false,
+): Promise<{ notModified: true } | { notModified?: false; response: ListResponse<T>; etag?: string }> {
+  const path = listPath(collection, opts);
+  const body = await coalescedGet<ListResponse<T> | typeof NOT_MODIFIED>(path, etag, fresh);
+  if (body === NOT_MODIFIED) return { notModified: true };
+  return { response: body, etag: etagOf(path) };
 }
 
 /** Follow the cursor to the end: EVERY row of a collection (the server caps a page at 100). For pickers
@@ -256,7 +345,11 @@ export function get<T>(path: string): Promise<T> {
   return coalescedGet<T>(path);
 }
 
-export type ChangesResponse = { now: number; collections?: string[]; unknown_window?: boolean };
+// `authz_version` stamps what the caller may currently do (src/domain/authzVersion.ts). It is separate from
+// `collections` because it invalidates differently: a stored row carries the access hints and field redactions
+// computed for the caller who fetched it, so a DIFFERENT version gives up every stored copy rather than any
+// named collection. Compared for inequality, not order - it is a hash, not a clock.
+export type ChangesResponse = { now: number; collections?: string[]; unknown_window?: boolean; authz_version?: string };
 
 /** Which collections have been written to since `since` (epoch ms). One indexed read that lets the store keep
  *  its stored copies instead of revalidating them - see lib/resourceStore.ts#syncChanges. Rides the coalescer
@@ -265,14 +358,21 @@ export function changesSince(since: number): Promise<ChangesResponse> {
   return coalescedGet<ChangesResponse>(`changes?since=${Math.floor(since)}`);
 }
 
-/** Execute several GET reads in ONE request via /v1/batch:run. `paths` are full sub-request paths, e.g.
- *  "/v1/leave-requests?max_page_size=200". Returns per-sub {status, body} in order. Reads only - no cache
- *  invalidation. Used to collapse the cold-load fan-out (notifications + the approval collections). */
-export async function batchGet(paths: string[]): Promise<{ status: number; body: unknown }[]> {
-  if (!paths.length) return [];
-  const resp = await api<{ responses: { status: number; body: unknown }[] }>(`/batch:run`, {
+/** Execute several GET reads in ONE request via /v1/batch:run. Each entry is a full sub-request path, e.g.
+ *  "/v1/leave-requests?max_page_size=200", optionally with the `etag` the caller already holds for it - the
+ *  sub-request then carries it as `If-None-Match` and may come back 304 with no body. Returns per-sub
+ *  {status, body, etag} in order. Reads only - no cache invalidation. */
+export async function batchGet(reads: (string | { path: string; etag?: string })[]): Promise<{ status: number; body: unknown; etag?: string }[]> {
+  if (!reads.length) return [];
+  const resp = await api<{ responses: { status: number; body: unknown; etag?: string }[] }>(`/batch:run`, {
     method: "POST",
-    body: JSON.stringify({ requests: paths.map((path) => ({ method: "GET", path })) }),
+    safeToRepeat: true,
+    body: JSON.stringify({
+      requests: reads.map((r) => {
+        const { path, etag } = typeof r === "string" ? { path: r, etag: undefined } : r;
+        return { method: "GET", path, ...(etag ? { etag } : {}) };
+      }),
+    }),
   });
   return resp.responses ?? [];
 }

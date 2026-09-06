@@ -45,6 +45,11 @@ export const alreadyExists = (d?: string) => new AppError(409, "/errors/already-
 export const failedPrecondition = (d?: string) => new AppError(409, "/errors/failed-precondition", "Failed Precondition", d);
 export const aborted = (d?: string) => new AppError(409, "/errors/aborted", "Aborted", d);
 export const unimplemented = (d?: string) => new AppError(501, "/errors/unimplemented", "Not Implemented", d);
+// A third party we call out to failed - the mail vendor, an e-sign provider. NOT a 500: nothing here
+// malfunctioned, the hop did, and the two want different reactions (retry the send vs. read a stack trace).
+// Emitting it as a 500 also buries a vendor outage under "unhandled error" in the log, which is where an
+// afternoon goes.
+export const upstreamFailed = (d?: string) => new AppError(502, "/errors/upstream-failed", "Upstream Failed", d);
 
 /** Every message in an error's `cause` chain, joined - what to pattern-match a DRIVER error against.
  *
@@ -60,4 +65,50 @@ export function errorChainText(err: unknown, depth = 8): string {
     parts.push(typeof m === "string" ? m : String(e));
   }
   return parts.join(" ");
+}
+
+/** A create that lost the code-allocation race: the UNIQUE index on `code` rejected the loser.
+ *
+ *  Allocation is read-max-then-write (services/codeAlloc.ts), so two creates in the same scope at the same
+ *  moment compose the SAME next code and the index is what stops the duplicate from being minted. The loser
+ *  has nothing wrong with it - it only needs to look again - which is why services/crud.ts retries on this
+ *  and middleware/errorHandler.ts reports what survives the retries as a retryable 409 rather than a 500. */
+export function isCodeCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\.code\b/i.test(errorChainText(err));
+}
+
+/** The same lost race on a card's per-board number: allocated max+1, kept unique by card_board_seq_idx. */
+export function isCardSeqCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bcards\.(board_id|seq)\b/i.test(errorChainText(err));
+}
+
+/** And on the tag printed on an asset: also allocated max+1 within its category, also unique. */
+export function isAssetTagCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bassets\.asset_tag\b/i.test(errorChainText(err));
+}
+
+/** And on a person's human ID (EMP-0042), allocated max+1 from the org's format and unique. */
+export function isEmployeeNumberCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bemployees\.employee_number\b/i.test(errorChainText(err));
+}
+
+/** Two callers both found no `settings` row for a key and both tried to create it; the primary key on
+ *  `settings.key` rejected the loser.
+ *
+ *  Same shape as the code races above and the same answer: nothing is wrong with the losing request, it only
+ *  needs to read the row that now exists and apply itself to that. services/settings.ts turns this into the
+ *  retryable 409 rather than the 500 an unhandled constraint failure would be. */
+export function isSettingKeyCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bsettings\.key\b/i.test(errorChainText(err));
+}
+
+/** A DELETE that SQLite refused because another table still points at the row.
+ *
+ *  A hard purge tears down what a row OWNS first (services/softDelete.ts `cascade`), so reaching this means
+ *  something the row does not own still references it - a person who still has payslips, a goal somebody
+ *  aligned a child to. That is a precondition the caller can act on ("detach it first"), not a bug in the
+ *  request, so it belongs in the 409 lane rather than as the unhandled 500 it used to be. Read through the
+ *  drizzle wrapper for the same reason every other matcher here does. */
+export function isForeignKeyViolation(err: unknown): boolean {
+  return /FOREIGN KEY constraint failed/i.test(errorChainText(err));
 }

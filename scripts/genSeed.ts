@@ -6,7 +6,9 @@
 //
 //   Run:  node --import ./scripts/tsResolve.mjs scripts/genSeed.ts > scripts/seed.sql
 import { renderAccessRulesSeed, seedRuleId } from "./genAccessRulesSeed";
+import { kudos as kudosSettings } from "../bootstrap/collections/kudos";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
+import { encodeBase32 } from "../src/domain/codes";
 import { bytesToBase32 } from "../src/lib/idCodec";
 
 const T0 = 1700000000000; // fixed created/updated stamp (matches the prior seed)
@@ -148,12 +150,23 @@ emit(`INSERT INTO access_rules (uuid,subject,subject_kind,namespace,pattern,scop
  (${q(seedRuleId(900_003))},'everyone','role','notifications','notifications.me.**','self','',NULL,'write','allow',${T0},${T0}),
  (${q(seedRuleId(900_004))},'everyone','role','notifications','notifications.markAllRead','all','',NULL,NULL,'allow',${T0},${T0});`);
 emit(`INSERT INTO policy (key,value_json,updated_at) VALUES\n ('manifest',${q(JSON.stringify(DEFAULT_POLICY))},${T0});`);
+// One sign-in account per employee, which is what the app does at create time (services/employees.ts
+// provisionAccount): an access rule names a `users/{id}` subject, so an employee with no account row cannot be
+// granted anything and does not appear in the access modal's people picker. Seeding only the five role logins
+// left that picker showing five names out of a hundred. The five keep their fixed ids, emails and roles
+// (start.sh signs in as them); everyone else is a plain `employee`.
 emit(`INSERT INTO users (uuid,email,role,status,employee_id,created_at,updated_at) VALUES
  ('2rn42k33dszrc','super@example.com','super_admin','active','00000000033kg',${T0},${T0}),
  ('2wn44k34dszre','mgr@example.com','manager','active','28n3tk2zdszr4',${T0},${T0}),
  ('30n46k35dszrg','hr@example.com','hr_admin','active','2gn3yk31dszr8',${T0},${T0}),
  ('34n48k36dszrj','pay@example.com','payroll_admin','active','2mn40k32dszra',${T0},${T0}),
- ('38n4ak37dszrm','emp@example.com','employee','active','2cn3wk30dszr6',${T0},${T0});`);
+ ('38n4ak37dszrm','emp@example.com','employee','active','2cn3wk30dszr6',${T0},${T0}),
+${employees
+  .filter((e) => !FIXED.includes(e))
+  // Ids from a range of their own rather than the shared `nid()` counter, so adding this block leaves every
+  // id emitted after it byte-identical to what it was before.
+  .map((e, i) => ` (${q(idOf(800_000 + i))},${q(e.email)},'employee','active',${q(e.uuid)},${T0},${T0})`)
+  .join(",\n")};`);
 
 // --- Config: leave types, holidays, reimbursement categories, compliance --------------------------------------
 const LT = [
@@ -177,7 +190,10 @@ const HOL = [
   ["Christmas Eve","fixed",Date.UTC(2026, 11, 24),null,1],
 ] as const;
 emit("INSERT INTO holidays (uuid,code,date,name,kind,location,half_day,created_at,updated_at) VALUES");
-emit(HOL.map(([n, k, d, loc, half], i) => ` (${q(nid())},${q((i + 10).toString(36))},${d},${q(n)},${q(k)},${loc === null ? "NULL" : q(loc)},${half},${T0},${T0})`).join(",\n") + ";");
+// Codes are the app's own base32 (domain/codes.ts), NOT base36: the alphabet deliberately omits i/l/o/u, and
+// a seeded `i` made every later `code` allocation in the collection throw - the next holiday anybody added
+// came back 500, because allocation reads its siblings' codes to find the next one.
+emit(HOL.map(([n, k, d, loc, half], i) => ` (${q(nid())},${q(encodeBase32(i + 10))},${d},${q(n)},${q(k)},${loc === null ? "NULL" : q(loc)},${half},${T0},${T0})`).join(",\n") + ";");
 
 const RC = [
   { uuid: nid(), code: "0a", name: "Travel" }, { uuid: nid(), code: "0b", name: "Meals" },
@@ -194,6 +210,15 @@ emit(`INSERT INTO compliance_events (uuid,code,title,category,frequency,due_date
  ('cmpev4d5e6f7g','0d','PF (EPF) contribution (Jun 2026)','EPFO','monthly',1784073600000,'Jun 2026','pending',NULL,NULL,NULL,NULL,${T0},${T0}),
  ('cmpev5e6f7g8g','0e','TDS deposit (Jun 2026)','Income Tax (TDS)','monthly',1783382400000,'Jun 2026','pending',NULL,NULL,NULL,NULL,${T0},${T0}),
  ('cmpev6f7g8h9j','0f','Annual Return (FY 2025-26)','MCA / Registrar','annual',1790726400000,'FY 2025-26','pending',NULL,NULL,NULL,NULL,${T0},${T0});`);
+
+// The kudos ladder and category taxonomy, from the SAME module bootstrap.sql renders (no second copy).
+//
+// Categories have no code-level default on purpose - `lib/kudosLevels.ts` ships levels and leaves categories
+// empty until HR adds some, and the composer hides the Category field entirely when there are none. A real org
+// never sees that state, because bootstrap.sql seeds ten; this seed did not, so the dev and browser-test org
+// was the one org in existence where kudos had no categories - and every surface built on them (the picker,
+// the per-category sticker sets, the prompt rotation) was unreachable in the app a developer actually runs.
+emit(kudosSettings());
 
 // --- Activity ------------------------------------------------------------------------------------------------
 const ownSeq: Record<string, number> = {};
@@ -368,7 +393,9 @@ const ANN = [
   ["Welcome our new hires","Please welcome the 12 new folks who joined this month across Engineering, Sales and Product."],
 ];
 emit("INSERT INTO announcements (uuid,code,kind,title,body,author_employee_id,published,publish_time,created_at,updated_at) VALUES");
-emit(ANN.map(([t, b], i) => ` (${q(nid())},${q((i + 10).toString(36))},'announcement',${q(t)},${q(b)},'2gn3yk31dszr8',1,${NOW - (i + 1) * 3 * DAY},${T0},${T0})`).join(",\n") + ";");
+// Base32, like every other seeded code: base36 would eventually emit an `i` and break code allocation for
+// the whole collection (see the holidays block above).
+emit(ANN.map(([t, b], i) => ` (${q(nid())},${q(encodeBase32(i + 10))},'announcement',${q(t)},${q(b)},'2gn3yk31dszr8',1,${NOW - (i + 1) * 3 * DAY},${T0},${T0})`).join(",\n") + ";");
 
 // Notifications: per-recipient unread/read items so the bell badge + page light up. emp@ (Eve, 04-002) gets
 // several UNREAD so the demo login sees badges immediately. (notifications are normally emitted by events;

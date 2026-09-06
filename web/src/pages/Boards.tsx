@@ -1169,8 +1169,10 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       ...(due ? { due_date: due } : {}),
       ...(board.swimlane_mode === "custom" ? { swimlane_key: swimlane } : {}),
     };
-    // "" = untouched new card -> omit so the server applies the org default. Otherwise send the choice.
-    if (department !== "") body.department = department === NO_DEPT ? null : `departments/${department}`;
+    // "" = untouched new card -> omit so the server applies the org default. Otherwise send the choice, and
+    // send a CLEARED reference as "" rather than null: the contract types it as a string (see api.ts, "No
+    // nulls on the wire"), so a null is refused by the proxy with a 422 the worker never sees.
+    if (department !== "") body.department = department === NO_DEPT ? "" : `departments/${department}`;
     try {
       if (editing) {
         const saved = await patch<CardT>(`cards/${idOf(card!.path)}`, body, etag);

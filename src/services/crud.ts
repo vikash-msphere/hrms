@@ -9,7 +9,7 @@
 // each service was written by hand. `assertNotLocked` is a workflow precondition, not access control.
 import { and, eq, isNotNull, isNull, type SQL } from "drizzle-orm";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
-import { allocFlatCode } from "./codeAlloc";
+import { allocFlatCode, withFreshCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
@@ -19,7 +19,7 @@ import { notFound, aborted, alreadyExists, unimplemented, invalidArgument, error
 // caller-supplied `?id` may be, since it becomes the row's primary key.
 const INTERNAL_ID_RE = /^[0-9a-hj-km-np-tv-z]{13}$/;
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -116,6 +116,14 @@ export type CrudSpec<I, T extends Table = Table> = {
    * insert values, since an owned code is allocated under the row's owner.
    */
   allocCode?: (deps: Deps, table: Table, values: SetOf<T>) => Promise<string>;
+  /**
+   * What a HARD purge (`DELETE ?force=true`) takes with it: the sub-resource rows that only exist as part of
+   * this one, and the columns elsewhere that merely point at it. See services/softDelete.ts#PurgeCascade.
+   *
+   * Undeclared references still block the purge - deliberately - and now answer 409 with a reason instead of
+   * failing the request as an unhandled 500 out of SQLite.
+   */
+  purgeCascade?: PurgeCascade;
 };
 
 export type CrudService<I> = {
@@ -186,23 +194,29 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
       // again. Omit over a generic `T["$inferInsert"]` does not resolve to a concrete key set, so the two
       // consumers below need the un-narrowed shape - the constraint's whole job is at the spec boundary above.
       const values = (await spec.insert(input, deps, actor)) as SetOf<T>;
-      const code = await alloc(deps, table, values);
-      let row: Row;
-      try {
-        // Identity spreads LAST, after the spec's columns: the allocated `code` is the code and an explicit
-        // `?id` is the id, so neither can be shadowed by a mapper. `InsertOf` already makes both a compile
-        // error in a spec, and this is the belt to that braces - an `as any` at one call site should not be
-        // able to reach the authz scope key.
-        row = ((await deps.db
-          .insert(table)
-          .values({ ...values, code, ...(id ? { uuid: id } : {}) })
-          .returning()) as unknown as Row[])[0]!;
-      } catch (e) {
-        // A caller-supplied `?id` that is already taken is a CONFLICT, not a server fault - the resource it
-        // names exists. Without this the raw D1 constraint error surfaces as a 500.
-        if (id && /UNIQUE|PRIMARY KEY|constraint/i.test(errorChainText(e))) throw alreadyExists(`${collection}/${id} already exists`);
-        throw e;
-      }
+      // Allocated INSIDE the retry: a create that loses the code race re-reads the scope and composes the
+      // next code rather than handing the caller a 409 to press again (services/codeAlloc.ts withFreshCode).
+      // Two people adding a record at the same moment is an ordinary Tuesday.
+      const row = await withFreshCode(async () => {
+        const code = await alloc(deps, table, values);
+        try {
+          // Identity spreads LAST, after the spec's columns: the allocated `code` is the code and an explicit
+          // `?id` is the id, so neither can be shadowed by a mapper. `InsertOf` already makes both a compile
+          // error in a spec, and this is the belt to that braces - an `as any` at one call site should not be
+          // able to reach the authz scope key.
+          return ((await deps.db
+            .insert(table)
+            .values({ ...values, code, ...(id ? { uuid: id } : {}) })
+            .returning()) as unknown as Row[])[0]!;
+        } catch (e) {
+          // A caller-supplied `?id` that is already taken is a CONFLICT, not a server fault - the resource it
+          // names exists. Without this the raw D1 constraint error surfaces as a 500. Translated before the
+          // retry sees it: re-allocating a code would not free the id, so that collision is never worth
+          // another go, and an AppError is not a code collision.
+          if (id && /UNIQUE|PRIMARY KEY|constraint/i.test(errorChainText(e))) throw alreadyExists(`${collection}/${id} already exists`);
+          throw e;
+        }
+      });
       // What the record was made AS, not just that it was made. A create used to be the one write in the app
       // whose trail said nothing about its content, which is the write you most often want to read back.
       await audit(deps, actor, `${auditName}.create`, collection, row.uuid, createdMeta(row, collection), row);
@@ -255,6 +269,6 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
 
     remove: (deps, actor, id, ifMatch) => softDeleteRow(deps, actor, table, auditName, collection, id, ifMatch),
     restore: (deps, actor, id) => restoreRow(deps, actor, table, auditName, collection, id),
-    purge: (deps, actor, id, ifMatch) => purgeRow(deps, actor, table, auditName, collection, id, ifMatch),
+    purge: (deps, actor, id, ifMatch) => purgeRow(deps, actor, table, auditName, collection, id, ifMatch, undefined, spec.purgeCascade),
   };
 }

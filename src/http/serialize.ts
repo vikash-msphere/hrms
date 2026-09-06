@@ -96,6 +96,18 @@ const safeJson = (s: string | null | undefined): unknown => {
   }
 };
 
+/**
+ * The `photo` marker for an employee row, or `undefined` when they have none.
+ *
+ * The `v=` is the photo's own version (see schema `photo_at`): the client's face cache KEYS on it, so a
+ * replaced picture misses in every browser instead of only in the one that uploaded it. One function because
+ * every surface that hands the SPA a face has to agree on it - a marker built without the version keys on the
+ * bare employee id, and nothing outside the uploading tab ever invalidates that key.
+ */
+export function photoMarker(r: { uuid: string; photoKey?: string | null; photoAt?: Date | number | null }): string | undefined {
+  return r.photoKey ? `employees/${r.uuid}:getPhoto?v=${r.photoAt ? +new Date(r.photoAt) : 0}` : undefined;
+}
+
 export function toEmployeeResource(r: any): Wire<"employee"> {
   return {
     ...baseResource(r, "employees"),
@@ -112,7 +124,7 @@ export function toEmployeeResource(r: any): Wire<"employee"> {
     probation_end_date: r.probationEndDate ? iso(r.probationEndDate).slice(0, 10) : undefined,
     epf_enrolled: !!r.epfEnrolled,
     eps_excluded: !!r.epsExcluded,
-    photo: r.photoKey ? `employees/${r.uuid}:getPhoto` : undefined,
+    photo: photoMarker(r),
     signature: r.signatureKey ? `employees/${r.uuid}:getSignature` : undefined,
     // national_id / bank_details intentionally omitted (write-only, encrypted at rest).
   };
@@ -267,21 +279,30 @@ export function toRoleResource(r: any): Wire<"role"> {
 // and effect. `field` and `verb` are read back from the verbatim pattern (tokens after the id position); for
 // an exact rule, `scope_ref` is rebuilt as `<collection>/<objectUuid>` (resolved by the caller). The outbound
 // edge encodes the `users/<uuid>` and `<col>/<uuid>` refs to wire tokens.
-export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"access-rule"> {
-  const toks = String(r.pattern).split(".");
+// The authoring shape, read back out of a stored pattern. ONE parser, because the wire resource is no longer
+// the only reader: the audit trail describes rules from the same tokens, and a second copy of this arithmetic
+// is a second chance for the two to disagree about what a pattern means.
+export function parseRulePattern(pattern: string, level: string | null | undefined): { verb?: string; field?: string; createGate: boolean } {
+  const toks = String(pattern).split(".");
   const tail = toks[toks.length - 1];
-  // A custom-method rule (allow OR deny) has no level and a non-`**` tail (the verb). Deny rules carry the verb
-  // too, so a verb-deny round-trips as a custom-method rule (not misread as an object-level deny).
-  const verb = r.level === null && tail !== "**" ? tail : undefined;
-  // <col>.<id>.<field...>.** - the field is everything between the id token and the `**` tail, so a sub-resource
-  // field path (identity.uan) round-trips whole (not just its last token).
-  const field = toks.length >= 4 && tail === "**" ? toks.slice(2, -1).join(".") : undefined;
-  // The CREATE gate is the bare 1-token collection pattern (`<collection>`). It is stored with scope_kind "all"
-  // (a broad rule on the narrowing lane, like every non-exact rule), so scope_kind alone cannot tell it apart
-  // from `<collection>.**` (write on every object) - it has to be read back from the pattern. Without this, a
-  // create-gate rule round-trips as scope "all": the ACL modal's create dropdown never matches its own rule
-  // (stuck on "cannot create") and the rule shows up under the all-objects target instead.
-  const createGate = toks.length === 1 && tail !== "**";
+  return {
+    // A custom-method rule (allow OR deny) has no level and a non-`**` tail (the verb). Deny rules carry the verb
+    // too, so a verb-deny round-trips as a custom-method rule (not misread as an object-level deny).
+    verb: (level === null || level === undefined) && tail !== "**" ? tail : undefined,
+    // <col>.<id>.<field...>.** - the field is everything between the id token and the `**` tail, so a sub-resource
+    // field path (identity.uan) round-trips whole (not just its last token).
+    field: toks.length >= 4 && tail === "**" ? toks.slice(2, -1).join(".") : undefined,
+    // The CREATE gate is the bare 1-token collection pattern (`<collection>`). It is stored with scope_kind "all"
+    // (a broad rule on the narrowing lane, like every non-exact rule), so scope_kind alone cannot tell it apart
+    // from `<collection>.**` (write on every object) - it has to be read back from the pattern. Without this, a
+    // create-gate rule round-trips as scope "all": the ACL modal's create dropdown never matches its own rule
+    // (stuck on "cannot create") and the rule shows up under the all-objects target instead.
+    createGate: toks.length === 1 && tail !== "**",
+  };
+}
+
+export function toAccessRuleResource(r: any, objectUuid: string | null): Wire<"access-rule"> {
+  const { verb, field, createGate } = parseRulePattern(r.pattern, r.level);
   return {
     path: `access-rules/${r.uuid}`,
     create_time: iso(r.createdAt),
@@ -695,6 +716,11 @@ export function toCheckInResource(r: any, user?: AppUser): Wire<"check-in"> {
     ...baseResource(r, "check-ins"),
     employee: ref("employees", r.employeeId),
     counterpart: ref("employees", r.counterpartId),
+    // The two names, served with the row. An employee may read only their OWN employee record, so a page
+    // that resolved the other attendee client-side had nothing to resolve it FROM: their own 1:1 list named
+    // the person they met as "-". Decorated by the service (see checkInSpec.decorate).
+    employee_name: r.employeeName ?? undefined,
+    counterpart_name: r.counterpartName ?? undefined,
     meeting_date: r.meetingDate ? iso(r.meetingDate).slice(0, 10) : undefined,
     notes: r.notes ?? undefined,
     action_items: r.actionItemsJson ? JSON.parse(r.actionItemsJson) : [],

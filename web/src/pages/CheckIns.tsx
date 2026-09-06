@@ -60,7 +60,7 @@ export default function CheckIns({ me }: { me: Me }) {
   const confirm = useConfirm();
   // Prefill for the dialog. "Schedule next" from a past 1:1 carries the person AND its open action
   // items over; `source` is that past 1:1, whose carried items get marked done once the new one exists.
-  const [creating, setCreating] = useState<{ counterpart?: string; date?: string; action_items?: CheckInActionItem[]; source?: CheckIn } | null>(null);
+  const [creating, setCreating] = useState<{ counterpart?: string; counterpartName?: string; date?: string; action_items?: CheckInActionItem[]; source?: CheckIn } | null>(null);
   const [personFilter, setPersonFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showAllPast, setShowAllPast] = useState(false);
@@ -74,7 +74,11 @@ export default function CheckIns({ me }: { me: Me }) {
 
   // The other person in the 1:1, from the caller's side of it.
   const otherRef = (c: CheckIn) => (idOf(c.employee ?? "") === me.employee_id ? c.counterpart : c.employee);
-  const otherParty = (c: CheckIn) => empName(otherRef(c));
+  // The name comes off the ROW first. An employee can read only their own employee record, so resolving the
+  // other attendee out of the employees collection works for a manager and leaves an employee looking at "-"
+  // on their own 1:1 - which is why the server serves both names with the row.
+  const otherParty = (c: CheckIn) =>
+    (idOf(c.employee ?? "") === me.employee_id ? c.counterpart_name : c.employee_name) || empName(otherRef(c));
 
   // Everyone the caller has 1:1s with, plus cadence health: days since the last logged 1:1, and
   // whether a next one is already on the calendar (scheduled pairs don't need the overdue nudge).
@@ -247,6 +251,10 @@ export default function CheckIns({ me }: { me: Me }) {
       onScheduleNext={() =>
         setCreating({
           counterpart: otherRef(c),
+          // Carried as a NAME as well as a ref: an employee can read only their own employee record, so the
+          // composer's picker holds no option for their manager and the carried person would be drawn as an
+          // empty box - the row is where their name comes from (see `otherParty`).
+          counterpartName: otherParty(c),
           date: plusDays(todayStr(), 7),
           action_items: (c.action_items ?? []).filter((i) => !i.done).map((i) => ({ text: i.text, done: false })),
           source: c,
@@ -684,7 +692,7 @@ function CheckInCard({ checkIn: c, withName, startCollapsed, carryCount, mine, i
 function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreated }: {
   me: Me;
   employees: Employee[];
-  initial: { counterpart?: string; date?: string; action_items?: CheckInActionItem[] };
+  initial: { counterpart?: string; counterpartName?: string; date?: string; action_items?: CheckInActionItem[] };
   /** Every 1:1 the caller can see - what the duplicate warning and the cadence echo read from. */
   existing: CheckIn[];
   nameOf: (ref?: string) => string;
@@ -699,6 +707,21 @@ function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreate
   });
   const carried = initial.action_items?.length ?? 0;
   const [building, setBuilding] = useState(false);
+
+  // Who this may be with. The list is the people the caller can READ, which for an employee is only
+  // themselves - so a 1:1 carried over from a past meeting would arrive with its person set to a value the
+  // picker has no option for, and draw as an empty box. The carried person is added back by name (the row
+  // carries it, which is the only place an employee can learn it).
+  const counterpartOptions = useMemo(() => {
+    const opts = employees
+      .filter((e) => idOf(e.path) !== me.employee_id)
+      .map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }));
+    const carriedRef = initial.counterpart;
+    if (carriedRef && initial.counterpartName && !opts.some((o) => o.value === carriedRef)) {
+      opts.unshift({ value: carriedRef, label: initial.counterpartName });
+    }
+    return opts;
+  }, [employees, me.employee_id, initial.counterpart, initial.counterpartName]);
 
   /**
    * An agenda made of what is actually happening, rather than four headings and a blank page.
@@ -804,7 +827,7 @@ function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreate
             onValueChange={(v) => setForm({ ...form, counterpart: v })}
             placeholder="Your manager"
             searchPlaceholder="Search people…"
-            options={employees.filter((e) => idOf(e.path) !== me.employee_id).map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
+            options={counterpartOptions}
           />
         </Field>
         <FieldRow>

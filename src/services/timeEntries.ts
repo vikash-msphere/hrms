@@ -1,5 +1,5 @@
 import { eq, and, gte, lte } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -50,7 +50,8 @@ export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEnt
   const ms = dayMs(input.date);
   if (Number.isNaN(ms)) throw invalidArgument("date is required");
   if (input.hours != null && (typeof input.hours !== "number" || input.hours < 0 || input.hours > 24)) throw invalidArgument("hours must be between 0 and 24");
-  const row = (await deps.db.insert(schema.timeEntries).values({
+  // Allocated inside the retry: a timesheet is filled in a burst of rows (codeAlloc.ts).
+  const row = (await withFreshCode(async () => deps.db.insert(schema.timeEntries).values({
     code: await allocOwnedCode(deps, schema.timeEntries, schema.timeEntries.employeeId, employeeId),
     ...(id ? { uuid: id } : {}),
     employeeId,
@@ -59,7 +60,7 @@ export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEnt
     hours: input.hours ?? 0,
     description: input.description?.trim() || null,
     billable: input.billable ?? true,
-  }).returning())[0]!;
+  }).returning()))[0]!;
   await audit(deps, actor, "time-entry.create", "time-entries", row.uuid, createdMeta(row, "time-entries"), row);
   return row;
 }

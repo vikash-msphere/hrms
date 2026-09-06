@@ -23,6 +23,7 @@ import { useMentions } from "@/components/common/MentionPicker";
 import { useConfirm } from "@/components/common/confirm";
 import { FormError } from "@/components/common/FormError";
 import { describeError } from "@/lib/formError";
+import { readDraft, writeDraft, clearDraft } from "@/lib/draftStore";
 import { useMedia } from "@/hooks/useMedia";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -184,6 +185,8 @@ type Form = typeof EMPTY;
 // mirrored to localStorage under the row being edited (or "new"), and offered back - never silently restored -
 // the next time that same composer opens. Cleared on a successful post and on an explicit discard, because a
 // draft that outlives the thing it became is just a trap.
+// Namespaced to the caller by the store, so the "new post" draft on a shared machine is never offered to the
+// next person to sign in, and swept with the rest of the `draft` class when it is a week old.
 const draftKey = (editing: Announcement | null) => `board:composer:${editing ? idOf(editing.path) : "new"}`;
 
 // Who a post notifies. Named for what each one DOES, because "audience" on its own reads like a permission -
@@ -198,33 +201,14 @@ const AUDIENCE_CHOICES: { value: Exclude<AudienceScope, "department">; label: st
 type StoredDraft = { at: number; form: Form };
 
 function loadDraft(key: string): StoredDraft | null {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredDraft;
-    if (!parsed || typeof parsed.at !== "number" || !parsed.form) return null;
-    // Laid over a blank form, never used as one. What comes back is whatever this browser wrote the last time
-    // this composer was open, which may predate a field the dialog now reads - and a form missing `options` is
-    // not a stale draft, it is a crash on the next render.
-    return { at: parsed.at, form: { ...EMPTY, ...parsed.form } };
-  } catch {
-    return null;
-  }
+  const stored = readDraft<Form>(key);
+  if (!stored?.value) return null;
+  // Laid over a blank form, never used as one. What comes back is whatever this browser wrote the last time
+  // this composer was open, which may predate a field the dialog now reads - and a form missing `options` is
+  // not a stale draft, it is a crash on the next render.
+  return { at: stored.at, form: { ...EMPTY, ...stored.value } };
 }
-function saveDraft(key: string, form: Form) {
-  try {
-    localStorage.setItem(key, JSON.stringify({ at: Date.now(), form } satisfies StoredDraft));
-  } catch {
-    /* private mode / quota - the in-memory form is unaffected */
-  }
-}
-function clearDraft(key: string) {
-  try {
-    localStorage.removeItem(key);
-  } catch {
-    /* ignore */
-  }
-}
+const saveDraft = (key: string, form: Form) => writeDraft(key, form);
 const sameForm = (a: Form, b: Form) => JSON.stringify(a) === JSON.stringify(b);
 function agoLabel(at: number): string {
   const min = Math.round((Date.now() - at) / 60000);

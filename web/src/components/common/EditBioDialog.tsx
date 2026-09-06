@@ -27,8 +27,18 @@ export function EditBioDialog({
     if (open) setValue(current ?? "");
   }, [open, current]);
 
+  // Line breaks are kept (the profile renders them), so only the noise goes: trailing spaces on each
+  // line, and runs of three-plus newlines squashed to one blank line - a bio is not a document, and a
+  // ten-line gap in the middle of one is always a paste artefact rather than intent.
+  const clean = value
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
   async function save() {
-    await patch(`employees/${employeeId}/bio`, { bio: value.trim() || null });
+    await patch(`employees/${employeeId}/bio`, { bio: clean || null });
     toast({ title: "Bio saved", variant: "success" });
     onSaved?.();
   }
@@ -45,7 +55,7 @@ export function EditBioDialog({
       objectPath={`employees/${employeeId}`}
       guardLabel="bio"
       form={value}
-      submitLabel={value.trim() ? "Save" : current ? "Clear bio" : "Save"}
+      submitLabel={clean ? "Save" : current ? "Clear bio" : "Save"}
       onSubmit={save}
       className="sm:max-w-md"
     >
@@ -53,13 +63,18 @@ export function EditBioDialog({
         <Textarea
           value={value}
           onChange={(e) => setValue(e.target.value.slice(0, MAX))}
-          rows={3}
+          rows={4}
           placeholder="A line about what you do and what to ping you for…"
           autoFocus
         />
-        <p className={`mt-1 text-right text-xs ${left <= 20 ? "font-medium text-warning" : "text-muted-foreground"}`}>
-          {left <= 20 ? `${left} left` : `${value.length}/${MAX}`}
-        </p>
+        {/* The counter used to sit alone on the right, which left the box silent about the two things
+            people got wrong: that Enter is a newline here (not submit) and that those newlines survive. */}
+        <div className="mt-1.5 flex items-start justify-between gap-3 text-xs">
+          <p className="text-muted-foreground">Line breaks are kept. ⌘/Ctrl + Enter saves.</p>
+          <p className={`shrink-0 tabular-nums ${left <= 20 ? "font-medium text-warning" : "text-muted-foreground"}`}>
+            {left <= 20 ? `${left} left` : `${value.length}/${MAX}`}
+          </p>
+        </div>
       </div>
     </WriteDialog>
   );

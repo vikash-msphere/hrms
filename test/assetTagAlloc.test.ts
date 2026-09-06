@@ -132,6 +132,19 @@ describe("asset categories", () => {
     expect(recoded.tagCode).toBe("FRN");
   });
 
+  it("moves a derived code out of the way rather than refusing the name", async () => {
+    const admin = await seedActor();
+    // Nobody typed a code here, so a clash between two names that derive the same three letters is the
+    // product's problem to solve, not the author's: refusing "Monitor arm" over a code they never saw leaves
+    // them with no way to add the category at all.
+    expect((await category(admin, { display_name: "Monitor" })).tagCode).toBe("MON");
+    expect((await category(admin, { display_name: "Monitor arm" })).tagCode).toBe("MON2");
+    expect((await category(admin, { display_name: "Monitors, spare" })).tagCode).toBe("MON3");
+    // Clearing a code asks for the default again, and gets a free one.
+    const arm = await category(admin, { display_name: "Monitor mount", tag_code: "MNT" });
+    expect((await categories.update(deps, admin, arm.uuid, { tag_code: null })).tagCode).toBe("MON4");
+  });
+
   it("a category can insist on a serial number", async () => {
     const admin = await seedActor();
     const laptops = await category(admin, { display_name: "Laptop", tag_code: "LAP", requires_serial: true });

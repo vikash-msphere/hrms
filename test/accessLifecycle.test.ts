@@ -9,7 +9,7 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules } from "../src/services/accessRules";
+import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules, cloneAccessRules } from "../src/services/accessRules";
 import { previewAccess } from "../src/services/accessPreview";
 import { loadRoleGrantUncached } from "../src/lib/policyLoad";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
@@ -34,7 +34,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const ids = { anaEmp: genId(), boEmp: genId(), ana: genId(), bo: genId() };
+const ids = { anaEmp: genId(), boEmp: genId(), carlaEmp: genId(), ana: genId(), bo: genId(), carla: genId() };
 
 // Two access admins: `ana` authors, `bo` approves (four eyes needs two humans).
 const actor = (uuid: string, email: string, employeeId: string): AppUser =>
@@ -184,5 +184,131 @@ describe("the audit trail names the change", () => {
     expect(meta.collection).toBe("leave-requests");
     expect(meta.rule_id).toBeTruthy();
     expect(meta.sentence).toContain("leave requests");
+  });
+
+  // Every rule event, not just the create. The delete, the reject and the expiry all HARD-DELETE the row, so
+  // an entry that carries only a pattern and a uuid leaves nothing to read back - which is what made the
+  // permission feed unreadable: no field diff, no sentence, nothing but an actor and an id.
+  it("names the rule on a revocation too, and says who it was for", async () => {
+    const rule = await createAccessRule(deps, ana(), grantEmployeeRead());
+    await deleteAccessRule(deps, ana(), rule.uuid);
+    const entry = (await deps.db.select().from(schema.auditLog)).find((r) => r.action === "access-rule.delete")!;
+    const meta = JSON.parse(entry.meta!) as { sentence: string; subject_label: string; scope: string; effect: string };
+    expect(meta.sentence).toContain("read access");
+    expect(meta.subject_label).toBe("the employee role");
+    expect(meta.scope).toBe("all");
+    expect(meta.effect).toBe("allow");
+    // The label is snapshotted at write time, so the deleted rule still names itself in the feed's Record cell.
+    expect(entry.entityName).toBe("employee → leave-requests");
+  });
+
+  // A USER rule stores a users uuid: the one fact in the entry a reader can do nothing with. The trail carries
+  // the email and the employee ref instead, so the feed can name the person after the row (and the rule) is gone.
+  it("resolves a user subject to a person", async () => {
+    const rule = await createAccessRule(deps, ana(), { subject_kind: "user", subject: `users/${ids.bo}`, collection: "leave-requests", scope: "all", level: "read" });
+    await deleteAccessRule(deps, ana(), rule.uuid);
+    const entry = (await deps.db.select().from(schema.auditLog)).find((r) => r.action === "access-rule.delete")!;
+    const meta = JSON.parse(entry.meta!) as { subject_label: string; subject_employee: string };
+    expect(meta.subject_label).toBe("bo@test.example");
+    expect(meta.subject_employee).toBe(`employees/${ids.boEmp}`);
+  });
+
+  // A four-eyes decision approves either a grant or a REMOVAL under one action code; without `decided` the two
+  // opposite outcomes render identically.
+  it("says which pending change a decision decided, and who asked for it", async () => {
+    const rule = await createAccessRule(deps, ana(), grantEmployeeRead());
+    await setApproval(true);
+    await deleteAccessRule(deps, ana(), rule.uuid); // marks pending_delete
+    await decideAccessRule(deps, bo(), rule.uuid, "approve");
+    const entry = (await deps.db.select().from(schema.auditLog)).find((r) => r.action === "access-rule.approve")!;
+    const meta = JSON.parse(entry.meta!) as { decided: string; requested_by: string; sentence: string };
+    expect(meta.decided).toBe("removal");
+    expect(meta.requested_by).toBe(`employees/${ids.anaEmp}`);
+    expect(meta.sentence).toContain("leave requests");
+  });
+
+  // The pattern is the only place a verb or a field path lives; a rule about ONE field read as a rule about the
+  // whole collection.
+  it("reads the field back out of the pattern", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead({ collection: "employees", field: "bank-account", scope: "all" }));
+    const entry = (await deps.db.select().from(schema.auditLog)).find((r) => r.action === "access-rule.create")!;
+    const meta = JSON.parse(entry.meta!) as { field: string; sentence: string };
+    expect(meta.field).toBe("bank-account");
+    expect(meta.sentence).toContain("bank-account");
+  });
+});
+
+// Copying a role's permissions onto another is what the compare view exists for, and it used to be a CLIENT
+// loop of N creates: N requests, N unrelated audit entries, N notifications, and no way to ask the trail who
+// copied what onto whom. One request, one correlation id, one summary entry.
+describe("copying one subject's rules onto another", () => {
+  const manager = () => ({ subject_kind: "role", subject: "manager" }) as const;
+  const employee = () => ({ subject_kind: "role", subject: "employee" }) as const;
+
+  beforeEach(async () => {
+    await deps.db.insert(schema.roles).values({ name: "manager", label: "Manager" });
+    // One holder of the TARGET role, so the notification count is observable (a copy onto a role nobody holds
+    // notifies nobody, which would prove nothing about the per-rule cards being suppressed).
+    await deps.db.insert(schema.employees).values({ uuid: ids.carlaEmp, code: "04-003", firstName: "Carla", lastName: "T", workEmail: "carla@test.example", status: "active" });
+    await deps.db.insert(schema.users).values({ uuid: ids.carla, code: `u-${genId().slice(0, 6)}`, email: "carla@test.example", role: "manager", employeeId: ids.carlaEmp });
+    clearCachePrefix("");
+  });
+
+  it("copies every active rule and ties the whole copy to one correlation id", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    await createAccessRule(deps, ana(), grantEmployeeRead({ collection: "attendance" }));
+    const before = await deps.db.select().from(schema.auditLog);
+
+    const res = await cloneAccessRules(deps, ana(), { from: employee(), to: manager() });
+    expect(res).toMatchObject({ added: 2, skipped: 0, failed: 0, source_total: 2 });
+    expect(res.correlation_id).toBeTruthy();
+
+    // The target holds the same two rules, authored as its own.
+    const mine = (await deps.db.select().from(schema.accessRules)).filter((r) => r.subject === "manager");
+    expect(mine.map((r) => r.pattern).sort()).toEqual(["attendance.**", "leave-requests.**"]);
+    expect(mine.every((r) => r.status === "active" && r.level === "read")).toBe(true);
+
+    // ONE act: the two per-rule creates AND the summary all carry the copy's correlation id - which is what
+    // lets the feed's act view replay the copy as the single change it was.
+    const written = (await deps.db.select().from(schema.auditLog)).filter((r) => !before.some((b) => b.uuid === r.uuid));
+    expect(written).toHaveLength(3);
+    expect(new Set(written.map((r) => r.correlationId))).toEqual(new Set([res.correlation_id]));
+    const summary = written.find((r) => r.action === "access-rule.clone")!;
+    const meta = JSON.parse(summary.meta!) as { from_subject: string; subject: string; added: number; sentence: string };
+    expect(meta.from_subject).toBe("employee");
+    expect(meta.subject).toBe("manager");
+    expect(meta.added).toBe(2);
+    expect(meta.sentence).toContain("copied from the employee role");
+    // The rules authored BEFORE the copy are not part of it.
+    expect(before.every((r) => r.correlationId !== res.correlation_id)).toBe(true);
+  });
+
+  it("sends ONE notification for the copy, not one per rule", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    await createAccessRule(deps, ana(), grantEmployeeRead({ collection: "attendance" }));
+    await cloneAccessRules(deps, ana(), { from: employee(), to: manager() });
+    const notes = (await deps.db.select().from(schema.notifications)).filter((n) => n.recipientId === ids.carlaEmp);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.body).toContain("2 permissions");
+  });
+
+  it("is safe to run twice: what the target already holds is skipped, not failed", async () => {
+    await createAccessRule(deps, ana(), grantEmployeeRead());
+    await cloneAccessRules(deps, ana(), { from: employee(), to: manager() });
+    const again = await cloneAccessRules(deps, ana(), { from: employee(), to: manager() });
+    expect(again).toMatchObject({ added: 0, skipped: 1, failed: 0 });
+  });
+
+  it("copies nothing that is still awaiting approval", async () => {
+    await setApproval(true);
+    await createAccessRule(deps, ana(), grantEmployeeRead()); // lands `pending`
+    const res = await cloneAccessRules(deps, ana(), { from: employee(), to: manager() });
+    expect(res).toMatchObject({ added: 0, source_total: 0 });
+  });
+
+  it("refuses the role the caller is using, and a copy onto itself", async () => {
+    await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "hr_admin" } })).rejects.toThrow(/role you are using/);
+    await expect(cloneAccessRules(deps, ana(), { from: employee(), to: employee() })).rejects.toThrow(/different subjects/);
+    await expect(cloneAccessRules(deps, ana(), { from: employee(), to: { subject_kind: "role", subject: "nope" } })).rejects.toThrow(/target role not found/);
   });
 });

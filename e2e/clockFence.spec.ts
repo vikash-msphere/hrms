@@ -1,4 +1,4 @@
-import { allowConsoleErrors, gotoRoute, test, expect, toast } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, test, expect, toast, ymd } from "./fixtures";
 
 // The way out of the attendance clock's network fence.
 //
@@ -37,13 +37,33 @@ async function fenceThePunch(page: Parameters<typeof gotoRoute>[0]) {
   );
 }
 
+/**
+ * The top bar's "Clock in", once it is the punch on offer.
+ *
+ * This person is on the clock for a few seconds while `clock.spec.ts` runs, and the bar then reads "Clock
+ * out" instead. The state is read when the page loads, so the page is re-read until the punch this spec is
+ * about is the one being offered. Nothing here clocks anybody in or out: the punch is stubbed to a refusal,
+ * and taking a shared person off the clock to suit this test would break the spec that is using them.
+ */
+function offeredClockIn(page: import("@playwright/test").Page) {
+  const punch = page.getByRole("banner").getByRole("button", { name: /^Clock in$/ });
+  return {
+    async click() {
+      await expect(async () => {
+        if (!(await punch.count())) await page.reload();
+        await expect(punch).toBeVisible({ timeout: 10_000 });
+      }).toPass({ timeout: 90_000 });
+      await punch.click();
+    },
+  };
+}
+
 test("an off-network punch offers the remote-work request and opens the form", async ({ as }) => {
   const page = await as("employee");
   await fenceThePunch(page);
   await gotoRoute(page, "dashboard");
 
-  const bar = page.getByRole("banner");
-  await bar.getByRole("button", { name: /^Clock in$/ }).click();
+  await offeredClockIn(page).click();
 
   // Not a toast. The refusal is a question, because the answer is a request the person can file right now.
   const offer = page.getByRole("dialog").filter({ hasText: "You're not on a work network" });
@@ -66,7 +86,9 @@ test("an off-network punch offers the remote-work request and opens the form", a
   // Dated today, so the common case (I am at home right now) is submit-and-done. Reached BY LABEL, which is
   // also the assertion that <Field> binds its label to the control it names (components/common/Field.tsx):
   // located positionally this would pass just as well with every label in the app naming nothing.
-  const today = new Date().toISOString().slice(0, 10);
+  // The LOCAL day: the form offers "today" as the reader sees it, which is a different date from
+  // `toISOString()` for part of every day in most timezones.
+  const today = ymd();
   await expect(form.getByLabel("From")).toHaveValue(today);
   await expect(form.getByLabel("To")).toHaveValue(today);
   // The same binding on a control that is not an <input>: the employee picker is a Combobox, whose label
@@ -80,7 +102,7 @@ test("declining the offer leaves you where you were, still clocked out", async (
   await gotoRoute(page, "dashboard");
 
   const bar = page.getByRole("banner");
-  await bar.getByRole("button", { name: /^Clock in$/ }).click();
+  await offeredClockIn(page).click();
 
   const offer = page.getByRole("dialog").filter({ hasText: "You're not on a work network" });
   await expect(offer).toBeVisible();

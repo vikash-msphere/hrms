@@ -89,7 +89,7 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   offers: ["update", "delete", "approve", "extend", "accept", "decline", "rescind", "letter"],
   expenses: ["update", "delete", "submit", "approve", "reject", "cancel", "pay", "upload", "download"],
   automations: ["update", "delete", "enable", "disable", "test"],
-  "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject"],
+  "access-rules": ["update", "delete", "preview", "requestAccess", "approve", "reject", "clone"],
 };
 const DEFAULT_VERBS = ["update", "delete"];
 
@@ -144,6 +144,7 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "enrollDefaultBenefits", // auto-enrol a new hire in default benefit plans (employees; wired via automation)
   "test", // dry-run an automation rule against a sample event (automations)
   "requestAccess", // ask access admins for a missing grant (access-rules)
+  "clone", // copy every rule one subject holds onto another, as one act (access-rules)
   "printTag", "reissueTag", // asset sticker: stamp it as printed / rotate its secret so a lost tag dies (assets)
   "batchCreate", // add a whole delivery of assets in one call - a quantity of identical things, or a list of serials (assets)
   "recordFound", // log a scan that matched no asset during an inventory count (stocktakes)

@@ -1,15 +1,6 @@
 import type { Context } from "hono";
 import { ZodError } from "zod";
-import { AppError, aborted, errorChainText } from "../lib/errors";
-
-// A concurrent create that lost the code-allocation race trips the UNIQUE index on `code` (codeAlloc is
-// read-max-then-write; the index is the backstop that makes a collision fail SAFE instead of minting a
-// duplicate code). Surface it as a retryable 409, not a raw 500 - the client just retries the create.
-//
-// The driver's message lives down the `cause` chain rather than on the error itself - see errorChainText.
-function isCodeCollision(err: Error): boolean {
-  return /UNIQUE constraint failed:[^:]*\.code\b/i.test(errorChainText(err));
-}
+import { AppError, aborted, errorChainText, isCodeCollision } from "../lib/errors";
 
 // Which fields a validation failure was about, and what was wrong with each.
 //
@@ -42,12 +33,24 @@ export const errorHandler = (err: Error, c: Context) => {
         // A validation failure is a client error, not a 500. Field paths and Zod's reasons travel; the values
         // the caller sent do not.
         ? { type: "/errors/invalid-argument", title: "Invalid argument", status: 400, instance: c.req.path, fields: zodFields(err) }
+        // A create that lost the code-allocation race trips the UNIQUE index on `code`. The create path
+        // already re-allocates and tries again a few times (services/codeAlloc.ts withFreshCode), so a
+        // collision reaching here means the scope stayed contended throughout - rare, and still the client's
+        // to retry rather than a server fault, so it answers 409 and not a 500.
         : isCodeCollision(err)
           ? aborted("resource id collision; please retry").toProblem(c.req.path)
           : { type: "/errors/internal", title: "Internal Server Error", status: 500 };
   // Log any unexpected (non-AppError, non-Zod) failure server-side. The client body stays generic, but with
   // [observability] on this is the only trace of a 500 - without it a production 500 is undebuggable.
-  if (problem.status >= 500) console.error(`unhandled error [${c.get("requestId") ?? "-"}] ${c.req.method} ${c.req.path}:`, err);
+  //
+  // A DELIBERATE 5xx (upstreamFailed: the mail vendor is down) is logged too, but not as "unhandled error"
+  // with a stack: the stack points at our own fetch call and says nothing, while the detail carries the
+  // vendor's own words. Filing a vendor outage under the same heading as a real crash is how a real crash
+  // gets skimmed past.
+  if (problem.status >= 500) {
+    if (isAppError) console.error(`upstream failure [${c.get("requestId") ?? "-"}] ${c.req.method} ${c.req.path}: ${err.message}`);
+    else console.error(`unhandled error [${c.get("requestId") ?? "-"}] ${c.req.method} ${c.req.path}:`, err);
+  }
   return c.body(JSON.stringify(problem), problem.status as 500, {
     "Content-Type": "application/problem+json",
   });

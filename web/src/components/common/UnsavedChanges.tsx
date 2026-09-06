@@ -46,8 +46,14 @@ export function useUnsaved(value: unknown, ready: boolean, save: () => void | Pr
 }
 
 // Wraps a settings panel body. While any registered form inside is dirty, a sticky banner pins to the top of
-// the scroll area: the unsaved hint plus a Save button that saves every dirty form. `bannerClassName` sets the
+// the scroll area: the unsaved hint plus a button that saves every dirty form. `bannerClassName` sets the
 // sticky offset for the surface (top-0 in the settings Sheet; below the sticky TopBar on the full page).
+//
+// The banner's button says "Save all", not "Save", and the difference is not cosmetic. It sits ON TOP of a
+// panel whose own form already has a Save, so two buttons were on screen at once carrying the same name for
+// two different acts - this one commits EVERY dirty form in the panel, that one commits its own. "Click Save"
+// then has two answers, whether the reader is using a screen reader, voice control, or a keyboard and a list
+// of controls; the panels' own specs had already started reaching past it with `.first()`.
 export function UnsavedScope({ children, bannerClassName = "top-0" }: { children: React.ReactNode; bannerClassName?: string }) {
   const [entries, setEntries] = React.useState<ReadonlyMap<string, Entry>>(new Map());
   const report = React.useCallback((id: string, entry: Entry | null) => {
@@ -76,7 +82,7 @@ export function UnsavedScope({ children, bannerClassName = "top-0" }: { children
           <TriangleAlert className="h-4 w-4 shrink-0 text-warning" />
           <p className="flex-1 text-sm">You have unsaved changes - they're lost if you leave this page without saving.</p>
           <Button size="sm" onClick={saveAll} loading={saving}>
-            {!saving && <Save className="h-4 w-4" />} Save
+            {!saving && <Save className="h-4 w-4" />} Save all
           </Button>
         </div>
       )}

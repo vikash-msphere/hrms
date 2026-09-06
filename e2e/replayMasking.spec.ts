@@ -1,6 +1,6 @@
 import { inflateSync } from "node:zlib";
 import type { Page, Route } from "@playwright/test";
-import { gotoRoute, test, expect } from "./fixtures";
+import { enableTelemetry, gotoRoute, test, expect } from "./fixtures";
 
 // What session replay actually records - read out of the recording bytes, not inferred from the config.
 //
@@ -27,6 +27,9 @@ import { gotoRoute, test, expect } from "./fixtures";
  */
 async function captureRecording(page: Page): Promise<{ all: () => string }> {
   const chunks: string[] = [];
+  // The lane leaves the SDK inert unless a page asks for it; the stub below is what keeps this one's
+  // recordings on the machine. Both have to be in place before the first navigation.
+  await enableTelemetry(page);
   await page.route("**/diag", (route: Route) => {
     const raw = route.request().postDataBuffer();
     if (raw?.includes("replay_recording")) {

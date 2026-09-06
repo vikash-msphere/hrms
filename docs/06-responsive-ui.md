@@ -233,6 +233,23 @@ Plus `pb-safe` / `pt-safe-t` spacing steps for the device safe areas (zero on a 
       measuring `document.scrollingElement.scrollWidth` at a phone viewport. The gate that keeps it from coming
       back (`sr-only` is never on a `<table>`) was written after the measurement, not instead of it.
 
+28. **Clipped text carries its full text on hover, and nobody writes that per site.** `truncate` and
+    `line-clamp-N` are the right way to hold a fixed shape whatever the data does, but an ellipsis says "there
+    is more" and then offers no way to read it. `web/src/lib/clippedTitle.ts` (started once from `main.tsx`)
+    measures the rendered tree and sets `title` to the full string on every box that is clipping *right now*,
+    removing it again when the box grows enough to show everything. It is a live measurement rather than a
+    class-list rule because whether a given cell clips is a fact about the running layout — the same name fits
+    at 1440px and clips at 390px — and because a per-site `title` would have to be remembered by every future
+    `truncate`.
+
+    Two things it leaves alone, and both are opt-outs a call site can use on purpose:
+
+    - **An element that already has a `title`.** That sentence was chosen by a human and usually says something
+      the visible text does not; the module only ever rewrites titles it marked with `data-clipped-title`.
+    - **Anything inside a `<TooltipTrigger>`** (`data-tooltip-trigger`). A styled Radix tooltip and a native one
+      firing on the same hover stack two boxes over each other, so the styled one wins. If a truncated label
+      under a trigger needs its own full text, put it in that tooltip's content.
+
 ## Platform behaviour the shell owns
 
 These are app-wide and already wired; a page neither implements nor opts into them.
@@ -274,6 +291,8 @@ These are app-wide and already wired; a page neither implements nor opts into th
 - `.table-stack` (`index.css`) — the hand-written table that becomes labelled rows below `sm` (rule 18).
 - `components/common/Skeletons.tsx` — the shapes the app waits in (rule 20), and `components/common/DataState.tsx`
   — the wrapper that picks the default one and turns a failed read into a retryable panel.
+- `lib/clippedTitle.ts` — the app-wide hover tooltip for clipped text (rule 28). Started from `main.tsx`;
+  nothing opts in, and the two ways to opt out are an existing `title` and `data-tooltip-trigger`.
 - `components/common/PageHeader.tsx` — title, description and action slot. The description clamps to two lines
   below `sm` with a More/Less toggle: at full width it costs one line, and on a phone the longest of them ran
   to four lines of a screen already carrying a title, a metric strip and a toolbar before any content.

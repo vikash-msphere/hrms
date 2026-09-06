@@ -1,4 +1,4 @@
-import { allocFlatCode, allocFlatCodes } from "./codeAlloc";
+import { allocFlatCode, allocFlatCodes, withFreshCode } from "./codeAlloc";
 import { and, eq, gte, inArray, lt, ne, or, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -9,7 +9,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, auditMany, createdMeta, diffMeta, removedMeta } from "../lib/audit";
 import { chunk, insertBatches, runBatch } from "../lib/dbBatch";
-import { invalidArgument, notFound, aborted, forbidden, failedPrecondition } from "../lib/errors";
+import { invalidArgument, notFound, aborted, forbidden, failedPrecondition, isCodeCollision, isAssetTagCollision } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { genId } from "../lib/idCodec";
 import { notify } from "./notifications";
@@ -237,6 +237,7 @@ export async function getAsset(deps: Deps, id: string) {
 // "assign a laptop to new hires" rule posts `assigned`) - neither of which has seen the physical thing.
 export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput) {
   if (!input.name || !input.name.trim()) throw invalidArgument("name is required");
+  const name = input.name.trim();
   const assignedTo = idFromPath(input.assigned_to) ?? null;
   const policy = await policyOf(deps);
   const wanted = input.status ? provableStatus(policy, input.status, null) : statusForAssignment(policy, assignedTo);
@@ -251,13 +252,18 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
   // on who happened to open the printer first. A typed override wins, once it is known to be free.
   const override = input.asset_tag ? normalizeTag(input.asset_tag) : "";
   if (override) await assertTagFree(deps, override);
-  const assetTag = override || (await allocAssetTag(deps, category?.tagCode ?? null));
-  const row = (await deps.db
+  // BOTH allocated numbers are inside the retry: the row's `code` and the printed asset tag are each
+  // read-max-then-write, and each is unique, so two assets booked in at the same moment collide on one or the
+  // other. A caller-supplied tag is not re-allocated - it is the number on the sticker in their hand, and a
+  // second attempt would not free it - so that collision still surfaces as a conflict.
+  const row = (await withFreshCode(
+    async () =>
+      deps.db
     .insert(schema.assets)
     .values({
       code: await allocFlatCode(deps, schema.assets),
-      assetTag,
-      name: input.name.trim(),
+      assetTag: override || (await allocAssetTag(deps, category?.tagCode ?? null)),
+      name,
       categoryId: category?.uuid ?? null,
       serialNumber,
       status,
@@ -268,7 +274,9 @@ export async function createAsset(deps: Deps, actor: AppUser, input: AssetInput)
       custodySince: isPending(status) ? now : null,
       notes: input.notes?.trim() || null,
     })
-    .returning())[0]!;
+        .returning(),
+    (e) => isCodeCollision(e) || (!override && isAssetTagCollision(e)),
+  ))[0]!;
   await audit(deps, actor, "asset.create", "assets", row.uuid, createdMeta(row, "assets"), row);
   await emitEvent(deps, actor, "asset.created", { subject: `assets/${row.uuid}`, employeeId: assignedTo, payload: { categoryId: row.categoryId, assetTag: row.assetTag } });
   if (assignedTo && assignedTo !== actor.employeeId) await notifyAssignee(deps, actor, row);

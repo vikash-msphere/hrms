@@ -58,6 +58,97 @@ test.describe("phone", () => {
     await expect(page).toHaveURL(/#\/payroll-runs/);
   });
 
+  test("the drawer freezes the page behind it, and Escape gives both back", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "dashboard");
+
+    // The drawer is not a Radix layer (Sidebar.tsx says so directly) - Radix brings its own scroll lock, so
+    // this is the one place `lib/scrollLock.ts` itself is exercised rather than assumed alongside it.
+    const overflowY = () => page.evaluate(() => document.documentElement.style.overflowY);
+    const before = await overflowY();
+    expect(before, "the page starts unlocked").not.toBe("hidden");
+
+    const bar = page.getByRole("navigation", { name: "Primary" });
+    await bar.getByRole("button", { name: "Menu" }).click();
+    const drawer = page.getByRole("dialog", { name: "Navigation" });
+    await expect(drawer).toBeVisible();
+    await expect.poll(overflowY).toBe("hidden");
+
+    // Escape is the drawer's own close, not the browser's - and it has to hand back exactly what it locked,
+    // not just any unlocked value, in case something else is holding a lock of its own underneath.
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+    await expect.poll(overflowY).toBe(before);
+  });
+
+  test("swiping the drawer left closes it, but a mostly-vertical drag does not", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "dashboard");
+
+    const bar = page.getByRole("navigation", { name: "Primary" });
+    await bar.getByRole("button", { name: "Menu" }).click();
+    const drawer = page.getByRole("dialog", { name: "Navigation" });
+    await expect(drawer).toBeVisible();
+
+    // A mostly-vertical drag first, so this proves the axis lock (the nav list has to keep scrolling under a
+    // finger, not close the drawer every time someone scrolls it) rather than assuming the closing gesture is
+    // the only one that has ever been tried.
+    await page.evaluate(() => {
+      const el = document.querySelector('aside[role="dialog"]')!;
+      const fire = (type: string, x: number, y: number) => {
+        const t = new Touch({ identifier: 1, target: el, clientX: x, clientY: y });
+        el.dispatchEvent(new TouchEvent(type, { touches: type === "touchend" ? [] : [t], targetTouches: type === "touchend" ? [] : [t], changedTouches: [t], bubbles: true, cancelable: true }));
+      };
+      fire("touchstart", 150, 300);
+      fire("touchmove", 150, 380); // dy -80, dx 0: vertical, not the swipe this component listens for
+      fire("touchend", 150, 380);
+    });
+    await expect(drawer).toBeVisible();
+
+    // Left, past the 56px the component itself requires - one touchmove is enough: the handler decides the
+    // axis and checks the distance in the same call, unlike the pull-to-refresh gesture next to this test.
+    await page.evaluate(() => {
+      const el = document.querySelector('aside[role="dialog"]')!;
+      const fire = (type: string, x: number, y: number) => {
+        const t = new Touch({ identifier: 2, target: el, clientX: x, clientY: y });
+        el.dispatchEvent(new TouchEvent(type, { touches: type === "touchend" ? [] : [t], targetTouches: type === "touchend" ? [] : [t], changedTouches: [t], bubbles: true, cancelable: true }));
+      };
+      fire("touchstart", 300, 400);
+      fire("touchmove", 220, 400); // dx -80, dy 0: past the -56px threshold, horizontal
+      fire("touchend", 220, 400);
+    });
+    await expect(drawer).toHaveCount(0);
+  });
+
+  test("pulling down from the top re-reads the page", async ({ as }) => {
+    const page = await as("super");
+    await gotoRoute(page, "dashboard");
+    await page.waitForLoadState("networkidle").catch(() => {});
+
+    let reads = 0;
+    page.on("request", (r) => {
+      if (new URL(r.url()).pathname === "/v1/batch:run") reads++;
+    });
+
+    // A real drag needs real Touch objects - Playwright has no higher-level API for a multi-point touch
+    // move, so this dispatches the same three events `usePullToRefresh` listens for on `window`. Two
+    // touchmoves, not one: the hook's first move past 8px only DECIDES the gesture is vertical and returns
+    // without setting the pull distance, so the distance that actually clears the 72px threshold has to be
+    // the second one.
+    await page.evaluate(() => {
+      const fire = (type: string, y: number) => {
+        const t = new Touch({ identifier: 1, target: document.body, clientX: 200, clientY: y });
+        window.dispatchEvent(new TouchEvent(type, { touches: type === "touchend" ? [] : [t], targetTouches: type === "touchend" ? [] : [t], changedTouches: [t], bubbles: true, cancelable: true }));
+      };
+      fire("touchstart", 60);
+      fire("touchmove", 90); // +30px: past the 8px axis-lock, but this move alone sets no pull distance
+      fire("touchmove", 260); // +200px from the start: comfortably past the 72px refresh threshold once damped
+      fire("touchend", 260);
+    });
+
+    await expect.poll(() => reads, { timeout: 15_000 }).toBeGreaterThan(0);
+  });
+
   test("a dialog's actions stay on screen", async ({ as }) => {
     const page = await as("super");
     await gotoRoute(page, "vendors");

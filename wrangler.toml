@@ -30,13 +30,15 @@ run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "
 # The app's DB access is shaped for the free plan's 50-subrequests-per-invocation budget: whole-table
 # prefetch + one atomic db.batch write group (see src/lib/dbBatch.ts), so payroll builds and the nightly
 # cron stay well under it at any headcount.
-[limits]
-cpu_ms = 60000
+#[limits]
+#cpu_ms = 60000
 
 [vars]
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
-EMAIL_PROVIDER = "resend"
-EMAIL_FROM = "hr@msphere.io"
+# Also `console`, which logs the message instead of sending it - for a preview stack and the browser suite
+# only; `npm run preflight` refuses it for the environment being deployed.
+EMAIL_PROVIDER = "brevo"
+EMAIL_FROM = "HR | Metasphere <hr@msphere.io>"
 # The org perimeter under Google sign-in: only these email domains may sign in / auto-provision on first
 # login. Comma-separated. Never deploy unset - that would let ANY Google account in.
 ALLOWED_EMAIL_DOMAINS = "msphere.io"
@@ -44,7 +46,12 @@ ALLOWED_EMAIL_DOMAINS = "msphere.io"
 # IPv6 may be mixed) that `attendance/me:clockIn` / `:clockOut` are accepted from - the office egress IPs and
 # the VPN. Unset or empty = no fence (punch from anywhere). An APPROVED remote-work request eases it for
 # exactly its dates. A malformed entry is refused at startup.
-# ATTENDANCE_ALLOWED_IPS = "203.0.113.7, 198.51.100.0/24, 2001:db8::/32"
+# UNSET deliberately. It held one bare host address - the shape a fence takes when somebody pastes the machine
+# they were testing from - and shipping that is an outage rather than a control: a single address admits nobody
+# remote and nobody on a phone, and the day the ISP reassigns it the office cannot punch either. To turn the
+# fence on, list the ranges you actually egress from (office prefixes and the VPN); a single host is only ever
+# right for a static address you control.
+# ATTENDANCE_ALLOWED_IPS = "203.0.113.0/24, 198.51.100.7, 2001:db8::/32"
 # The one destination the /diag relay forwards the SPA's error/trace/replay envelopes to (routes/diag.ts).
 # A plain var, not a secret: a DSN only permits WRITING events, and the same string is already baked into the
 # bundle as VITE_SENTRY_DSN. It must BE that same DSN - the relay refuses an envelope addressed anywhere else,
@@ -53,7 +60,7 @@ SENTRY_DSN = "https://b0783df050ada7c6adc0a89aaa15b4f4@o4511976927461376.ingest.
 # Which build the Worker's own errors belong to. Set it in CI to the SAME value the SPA is built with
 # (VITE_APP_VERSION) so both halves of a distributed trace land on one release, and so the uploaded source maps
 # match. Left unset, every server issue is tagged "unknown release".
-# SENTRY_RELEASE = "abc1234"
+SENTRY_RELEASE = "0.1.0"
 SENTRY_ENVIRONMENT = "production"
 
 [[d1_databases]]
@@ -91,6 +98,8 @@ run_worker_first = ["/v1/*", "/esign/*", "/auth/*", "/found/*", "/calendar/*", "
 
 [env.staging.vars]
 # EMAIL_PROVIDER: resend (default) | brevo | sendgrid | postmark | mailgun. Secret is EMAIL_API_KEY.
+# Also `console`, which logs the message instead of sending it - for a preview stack and the browser suite
+# only; `npm run preflight` refuses it for the environment being deployed.
 EMAIL_PROVIDER = "resend"
 EMAIL_FROM = "hr@msphere.io"
 ALLOWED_EMAIL_DOMAINS = "msphere.io"

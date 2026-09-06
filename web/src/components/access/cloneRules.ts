@@ -1,5 +1,5 @@
-import { create } from "@/api";
-import { fetchAllAccessRules, type AccessRule } from "./permMatrix";
+import { invoke } from "@/api";
+import type { AccessRule } from "./permMatrix";
 
 // One access rule as the API's own create body - the shape export, import and clone all speak, so a rule that
 // round-trips through any of them lands identical.
@@ -17,31 +17,33 @@ export function ruleBody(r: AccessRule) {
   };
 }
 
+export type CloneResult = {
+  added: number;
+  skipped: number;
+  failed: number;
+  source_total: number;
+  /** Groups every audit entry the copy wrote - the whole copy replays as ONE act in the activity feed. */
+  correlation_id: string;
+  first_error?: string;
+};
+
 /**
- * Copy every rule one subject holds onto another, through the SAME create API (so the same validation,
- * four-eyes queue and audit trail apply - never a direct write). Additive: nothing on the target is removed.
+ * Copy every rule one subject holds onto another, through `access-rules:clone` - ONE request, one act.
  *
- * A rule the target already has comes back as a conflict; that one is counted as skipped rather than failing
- * the batch, so cloning twice is safe and the caller can report what actually landed.
+ * The server still authors each rule through the normal create path (same validation, same four-eyes queue,
+ * one audit entry per rule), and parks a single correlation id on all of them. This used to be a client loop
+ * of N creates, which made a 40-rule copy 40 unrelated requests: 40 audit entries with nothing tying them
+ * together, 40 notifications, and no way to answer "who copied HR onto this role, and when" from the trail.
+ *
+ * Additive: nothing on the target is removed, and a rule it already holds comes back counted as skipped, so
+ * copying twice is safe.
  */
 export async function cloneAccessRules(
   from: { kind: "role" | "user"; subject: string },
   to: { kind: "role" | "user"; subject: string },
-  source?: AccessRule[],
-): Promise<{ added: number; skipped: number }> {
-  const all = source ?? (await fetchAllAccessRules());
-  const mine = all.filter((r) => r.subject_kind === from.kind && r.subject === from.subject);
-  let added = 0;
-  let skipped = 0;
-  for (const r of mine) {
-    try {
-      await create("access-rules", { ...ruleBody(r), subject_kind: to.kind, subject: to.subject });
-      added++;
-    } catch {
-      // Already there, or not grantable to this subject kind. Counted, not thrown: one unrepeatable rule must
-      // not abandon the other forty.
-      skipped++;
-    }
-  }
-  return { added, skipped };
+): Promise<CloneResult> {
+  return invoke<CloneResult>("access-rules", "clone", undefined, {
+    from: { subject_kind: from.kind, subject: from.subject },
+    to: { subject_kind: to.kind, subject: to.subject },
+  });
 }

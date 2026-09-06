@@ -89,7 +89,7 @@ export async function createApiKey(deps: Deps, actor: AppUser, input: ApiKeyInpu
       .insert(schema.apiKeys)
       .values({
         code: await allocFlatCode(deps, schema.apiKeys),
-        ...(id ? { id } : {}),
+        ...(id ? { uuid: id } : {}), // the primary key; `{ id }` named no column, so the caller's id was dropped
         name,
         description: input.description?.trim() || null,
         ownerUserId: owner.uuid,

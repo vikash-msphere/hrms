@@ -1,5 +1,5 @@
 import { eq, and, isNull } from "drizzle-orm";
-import { allocFlatCode } from "./codeAlloc";
+import { allocFlatCode, withFreshCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -43,18 +43,20 @@ export async function createSprint(deps: Deps, actor: AppUser, input: SprintInpu
   const board = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, boardId)).limit(1))[0];
   if (!board || board.deleteTime) throw notFound("board not found");
   for (const k of ["start_date", "end_date"] as const) if (input[k] && Number.isNaN(dayMs(input[k]))) throw invalidArgument(`${k} is invalid`);
-  const row = (await deps.db
+  const name = input.name.trim();
+  // Allocated inside the retry (codeAlloc.ts): planning day is several boards starting a sprint at once.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.sprints)
     .values({
       code: await allocFlatCode(deps, schema.sprints),
       ...(id ? { uuid: id } : {}),
       boardId,
-      name: input.name.trim(),
+      name,
       goal: input.goal?.trim() || null,
       startDate: dateOrNull(input.start_date),
       endDate: dateOrNull(input.end_date),
     })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "sprint.create", "sprints", row.uuid, createdMeta(row, "sprints"), row);
   return row;
 }

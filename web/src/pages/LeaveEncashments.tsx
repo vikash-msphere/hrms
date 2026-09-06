@@ -280,6 +280,7 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
           </Field>
           <Field
             label="Days to encash"
+            htmlFor="encashment-days"
             hint={
               selectedBalance != null && maxEncashable != null
                 ? [
@@ -301,7 +302,7 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
             }
           >
             <div className="flex items-center gap-2">
-              <Input type="number" min={0} step="0.5" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} />
+              <Input id="encashment-days" type="number" min={0} step="0.5" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} />
               {/* "Cash out everything I'm allowed to" is the request people actually make; making them work
                   the retained minimum and the annual cap out by hand invites a rejected request. */}
               {maxEncashable != null && maxEncashable > 0 && (

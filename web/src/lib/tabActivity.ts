@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { get } from "@/api";
 import { readPref, stagePref, writePrefDeferred } from "@/lib/prefs";
 import { subscribe, getSnapshot } from "@/lib/resourceStore";
+import { storedIdentity } from "@/lib/clientStore";
 
 // Per-tab "new activity" badges. A tab lights up with a count of items created since the last time the caller
 // viewed that tab. Unlike the notification badges (private, per-recipient), this is a pure content signal:
@@ -13,7 +14,20 @@ import { subscribe, getSnapshot } from "@/lib/resourceStore";
 // localStorage cache for instant paint (same pattern as the theme preference), read through the shared
 // prefs snapshot (lib/prefs.ts) so it costs no request of its own.
 
-const LS_KEY = "tab_seen";
+// The local cache is namespaced to the caller; the server row is per-user already. It used to be one global
+// key, which was wrong in both directions on a shared browser: the next person to sign in measured "new"
+// against someone else's visits, and `syncTabSeenFromServer` merged those stamps INTO their preferences row
+// (newest wins), so the leak followed them to their other devices and silently suppressed badges they had
+// never seen. Read after identity is known - which is before any navigation can mark a tab seen.
+//
+// Null until the caller IS known, and every read and write of the cache is skipped while it is: an "anon"
+// fallback key is written by whoever navigates before identity lands and then never read back (the sync below
+// reads the real key), so those stamps were silently lost and the badge lit up again for activity the reader
+// had already looked at.
+const lsKey = () => {
+  const id = storedIdentity();
+  return id ? `tab_seen:${id}` : null;
+};
 const PREF_KEY = "tab_seen"; // /v1/preferences/{key}
 // Match the default page reads (max 200, live rows) so the activity fetch shares the store entry pages use.
 const OPTS = { showDeleted: false, max: 200 } as const;
@@ -21,15 +35,30 @@ const OPTS = { showDeleted: false, max: 200 } as const;
 type SeenMap = Record<string, number>; // tabKey -> epoch ms last viewed
 
 function loadLocal(): SeenMap {
+  const key = lsKey();
+  if (!key) return {};
   try {
-    const v = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    const v = JSON.parse(localStorage.getItem(key) || "{}");
     return v && typeof v === "object" ? v : {};
   } catch {
     return {};
   }
 }
 
-let seen: SeenMap = loadLocal();
+/** Mirror the in-memory map to this caller's cache. A no-op until the caller is known (see `lsKey`). */
+function writeLocal(): void {
+  const key = lsKey();
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(seen));
+  } catch {
+    /* ignore */
+  }
+}
+
+// Empty until `syncTabSeenFromServer` runs, which is the first moment the caller is known. Before that there is
+// no honest answer: reading a global key would be reading whoever used this browser last.
+let seen: SeenMap = {};
 const seenSubs = new Set<() => void>();
 const subscribeSeen = (cb: () => void) => {
   seenSubs.add(cb);
@@ -52,11 +81,7 @@ const SERVER_SAVE_DEBOUNCE_MS = 30_000;
 const shown = new Map<string, number>();
 
 function persist(toServer: boolean) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(seen));
-  } catch {
-    /* ignore */
-  }
+  writeLocal();
   if (toServer) writePrefDeferred(PREF_KEY, seen, SERVER_SAVE_DEBOUNCE_MS);
   else stagePref(PREF_KEY, seen);
 }
@@ -78,16 +103,21 @@ export async function syncTabSeenFromServer() {
   if (synced) return;
   synced = true;
   {
+    // Now that the caller is known, this browser's copy of THEIR map can be read; before this the module holds
+    // nothing, so a badge measures against the server row (or baselines itself) rather than against a stranger.
+    // MERGED, not assigned: a navigation between first paint and this moment advanced the in-memory map but
+    // could not write it (there was no key to write to), and that visit still counts as seen.
+    const local = loadLocal();
+    for (const [k, t] of Object.entries(seen)) local[k] = Math.max(local[k] ?? 0, t);
+    seen = local;
+    writeLocal();
+    notifySeen();
     const v = await readPref<SeenMap>(PREF_KEY);
     if (v && typeof v === "object") {
       const merged: SeenMap = { ...v };
       for (const [k, t] of Object.entries(seen)) merged[k] = Math.max(merged[k] ?? 0, t);
       seen = merged;
-      try {
-        localStorage.setItem(LS_KEY, JSON.stringify(seen));
-      } catch {
-        /* ignore */
-      }
+      writeLocal();
       notifySeen();
     }
     // No row yet (or offline): the local cache stands, and the first markTabSeen seeds the server row.

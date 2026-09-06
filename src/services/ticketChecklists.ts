@@ -37,7 +37,7 @@ export async function createTicketChecklist(deps: Deps, actor: AppUser, input: T
     .insert(schema.ticketChecklists)
     .values({
       code: await allocFlatCode(deps, schema.ticketChecklists),
-      ...(id ? { id } : {}),
+      ...(id ? { uuid: id } : {}), // the primary key; `{ id }` named no column, so the caller's id was dropped
       name,
       items: JSON.stringify(cleanItems(input.items)),
     })

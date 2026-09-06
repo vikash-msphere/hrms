@@ -335,6 +335,29 @@ describe("payroll: employer contributions ride on the item and follow each compo
     expect((await staleness()).split_drift).toBeUndefined();
   });
 
+  it("does not call a run stale for the payables it just paid itself", async () => {
+    // Staleness asks "was an income-affecting input touched after this run was built", and the build itself
+    // touches inputs: every payable it pays is marked paid-by-this-run, and every one of those tables -
+    // bonuses, encashments, overtime, arrears, claims, the loan ledger - is on the list it watches.
+    //
+    // So the build stamp has to be taken AFTER those markers, or a run flags itself the moment it finishes and
+    // rebuilding produces the same warning again. A permanent warning on a banner that exists to be believed
+    // is worse than none: it is read once and then ignored, including on the run where an input really did move.
+    const actor = await seedActor(await seedEmployee());
+    const emp = await seedEmployee({ code: short("04") });
+    await seedComp(emp, { basePay: 40000 });
+    await recordBonus(deps, actor, { employee: `employees/${emp}`, amount: 5000, kind: "Spot", reason: "self-stale", award_date: today() });
+
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    expect(await unpaidBonuses(deps, emp)).toHaveLength(0); // the run really did pay it, so it really did write to `bonuses`
+    expect(await runStaleness(deps, await getRun(deps, run.uuid))).toMatchObject({ stale: false, changes: [] });
+
+    // And a real change afterwards still reports, so the fix did not simply blind the check.
+    await recordBonus(deps, actor, { employee: `employees/${emp}`, amount: 100, kind: "Spot", reason: "after-build", award_date: today() });
+    expect(await runStaleness(deps, await getRun(deps, run.uuid))).toMatchObject({ stale: true, changes: ["Bonuses"] });
+  });
+
   it("keeps the employer ESI share in step with the employee's sticky eligibility", async () => {
     const actor = await seedActor(await seedEmployee());
     await seedComponent({ name: "ESI", kind: "deduction", method: "esi", rate: 0.75 });

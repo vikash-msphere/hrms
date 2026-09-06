@@ -285,13 +285,22 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
           <Field label="Notes"><Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Handover, exit interview, settlement…" /></Field>
           {!editing && (
             <div className="space-y-2 rounded-lg border p-3">
-              <label className="flex items-start gap-2">
-                <Checkbox checked={form.start_offboarding} onCheckedChange={(v) => setForm({ ...form, start_offboarding: v === true })} className="mt-0.5" />
+              {/* The hint stays OUT of the label: text inside one becomes part of the checkbox's accessible
+                  name, and a name carrying "…the last working day" makes this box answer to the same
+                  label as the date field above it. Described, not named. */}
+              <div className="flex items-start gap-2">
+                <Checkbox
+                  id="notice-start-offboarding"
+                  aria-describedby="notice-start-offboarding-hint"
+                  checked={form.start_offboarding}
+                  onCheckedChange={(v) => setForm({ ...form, start_offboarding: v === true })}
+                  className="mt-0.5"
+                />
                 <span>
-                  <span className="flex items-center gap-1.5 text-sm font-medium"><UserMinus className="h-4 w-4" /> Start offboarding</span>
-                  <span className="block text-xs text-muted-foreground">Creates an offboarding checklist anchored to the last working day.</span>
+                  <label htmlFor="notice-start-offboarding" className="flex items-center gap-1.5 text-sm font-medium"><UserMinus className="h-4 w-4" /> Start offboarding</label>
+                  <span id="notice-start-offboarding-hint" className="block text-xs text-muted-foreground">Creates an offboarding checklist anchored to the last working day.</span>
                 </span>
-              </label>
+              </div>
               {form.start_offboarding && (
                 <>
                   <Select value={form.template} onValueChange={(v) => setForm({ ...form, template: v })}>

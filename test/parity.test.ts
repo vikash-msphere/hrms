@@ -10,7 +10,8 @@ import { resolveRequest, decide } from "../src/domain/permissions";
 // Notable pinned cells (intentional today; flagged so any change is deliberate):
 //  - org-documents: HR/super only (company docs are private by default; employees see only personal docs).
 //  - payslips: HR is excluded (payroll/employee domain - separation of duties from hr_admin).
-//  - leave-balances / holiday-selections: owner/dept only; hr & payroll hold no grant. [review if HR needs it]
+//  - holiday-selections: owner/dept only; hr & payroll hold no grant.
+//  - leave-balances: hr_admin reads all (encashment page needs the real number); no create, payroll has none.
 //  - leave-requests: HR views all but does not create; payroll has none. personal-documents: employees read
 //    own, HR writes (employee files are HR-managed). users: super-only (others are auto-provisioned).
 const SELF = "04-002-001";
@@ -25,7 +26,7 @@ const MATRIX: Record<string, { employee: LC; manager: LC; hr_admin: LC; payroll_
   departments:          { employee: R, manager: R, hr_admin: T, payroll_admin: R },
   "leave-requests":     { employee: T, manager: T, hr_admin: R, payroll_admin: N },
   "leave-types":        { employee: R, manager: R, hr_admin: T, payroll_admin: R },
-  "leave-balances":     { employee: R, manager: R, hr_admin: N, payroll_admin: N },
+  "leave-balances":     { employee: R, manager: R, hr_admin: R, payroll_admin: N },
   holidays:             { employee: R, manager: R, hr_admin: T, payroll_admin: R },
   "holiday-selections": { employee: T, manager: T, hr_admin: N, payroll_admin: N },
   "org-documents":      { employee: N, manager: N, hr_admin: T, payroll_admin: N },

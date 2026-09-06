@@ -179,7 +179,9 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
                 }
               }} />
             </Field>
-            <Field label="Period end" error={form.start && form.end && form.end < form.start ? "End is before the start." : undefined}>
+            {/* Eager: Create goes disabled on this the moment the date is inverted, so holding the reason back
+                until the field is left would leave a dead button with nothing saying why. */}
+            <Field label="Period end" eager error={form.start && form.end && form.end < form.start ? "End is before the start." : undefined}>
               <Input type="date" value={form.end} min={form.start || undefined} onChange={(e) => setForm({ ...form, end: e.target.value })} />
             </Field>
           </FieldRow>

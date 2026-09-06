@@ -268,6 +268,22 @@ export function DataTable<T>({
   const urlKey = tableId ?? accessCollection;
   const urlInitial = React.useRef(readUrlTableState(urlKey));
   const [sort, setSort] = React.useState<SortState>(() => parseUrlSort(urlInitial.current?.s));
+  // The deep link is read again if the key ARRIVES after the first render.
+  //
+  // `urlKey` comes from props, and a page can render its table before they have settled - while permissions
+  // load, while a tab decides which table it is. The read above then happened under a key that did not exist
+  // yet, and a ref never looks again: the pasted link opened the default view, silently, and the more loaded
+  // the machine the more likely that was. Applied only when the key first becomes known (or changes, which
+  // is a tabbed page swapping tables), so it can never overwrite a sort the reader has since chosen.
+  const urlAppliedFor = React.useRef<string | undefined>(urlKey);
+  React.useEffect(() => {
+    if (!urlKey || urlAppliedFor.current === urlKey) return;
+    urlAppliedFor.current = urlKey;
+    const carried = readUrlTableState(urlKey);
+    if (!carried) return;
+    setSort(parseUrlSort(carried.s));
+    if (carried.f) setFilters(carried.f);
+  }, [urlKey]);
   const onFilterChangeRef = React.useRef(onFilterChange);
   onFilterChangeRef.current = onFilterChange;
   const [filters, setFilters] = React.useState<Record<string, string>>(() => {
@@ -402,15 +418,32 @@ export function DataTable<T>({
     savePrefs(tableId, payload);
   }, [hydrated, tableId, orderedManaged, hidden, widths, pageSize, density, views]);
 
+  // The filtering pass runs at a LOWER PRIORITY than the keystroke that caused it.
+  //
+  // A column filter is a text input, and every keystroke re-ran the memo below - a pass over every row per
+  // active filter, plus a full re-sort - and then re-rendered a page of rows, all inside the same commit as
+  // the input's own update. On a hundred-row table of formatted money and dates that is enough work per
+  // character to make typing feel like it lags behind the keyboard.
+  //
+  // `useDeferredValue` splits the two: `filters` updates immediately, so the input stays exactly as
+  // responsive as an uncontrolled one, while `deferredFilters` lags by a render and React can abandon a
+  // half-finished pass when the next character arrives. What the reader sees during those few milliseconds is
+  // the PREVIOUS result set, which is the right thing to show - it is what was on screen already.
+  //
+  // Only the filters are deferred. Sort is a click, not a stream of input, so deferring it would add latency
+  // to a gesture that has none to hide. Everything that must react to the typed value at once - the filter
+  // chips, the URL mirror, `onFilterChange`, the reset to page one - keeps reading `filters` directly.
+  const deferredFilters = React.useDeferredValue(filters);
+
   const filtered = React.useMemo(() => {
     let out = rows;
     // Columns can hide a value by default (e.g. "Deleted") unless the user filters for it.
     for (const col of columns) {
-      if (col.hideValueByDefault && col.accessor && !filters[col.id]) {
+      if (col.hideValueByDefault && col.accessor && !deferredFilters[col.id]) {
         out = out.filter((r) => String(col.accessor!(r) ?? "") !== col.hideValueByDefault);
       }
     }
-    for (const [colId, value] of Object.entries(filters)) {
+    for (const [colId, value] of Object.entries(deferredFilters)) {
       if (!value) continue;
       const col = colById[colId];
       if (!col?.accessor) continue;
@@ -430,7 +463,9 @@ export function DataTable<T>({
       }
     }
     return out;
-  }, [rows, filters, sort, colById]);
+    // `columns` is read for `hideValueByDefault` but is not listed: it is usually a fresh array per render,
+    // and `colById` is derived from it, so it already changes whenever the columns really do.
+  }, [rows, deferredFilters, sort, colById]);
 
   // --- bulk selection (only when the caller passes bulkActions) --------------------------------------------
   const confirmDialog = useConfirm();
@@ -584,6 +619,29 @@ export function DataTable<T>({
     return { title: ranked[0], meta: ranked.slice(1, 4) };
   }, [visibleColumns]);
 
+  // A row's own click only counts when the press STARTED on that row.
+  //
+  // A portalled layer over the table - the row-actions menu, a popover - is not a DOM descendant of the row,
+  // so a click inside it cannot bubble here. What does reach here is the browser's own retarget: the menu
+  // closes on pointerup, the item the press began on is gone by the time `click` is dispatched, and the event
+  // lands on whatever is now under the cursor, which is this row. Every use of a row-actions menu therefore
+  // opened the row's record as well - the menu appeared over a detail sheet nobody asked for, and the action
+  // then ran against a page that had moved underneath it. Recording where the press began is what tells the
+  // two apart; a reader opening a row always presses down on it first.
+  // A press that begins on a control INSIDE the row belongs to that control, never to the row: otherwise the
+  // press that opens the row-actions menu arms the row, and the retargeted click that closes the menu a moment
+  // later finds it still armed.
+  const pressedRow = React.useRef<string | null>(null);
+  const rowPress = (id: string) => (e: React.PointerEvent) => {
+    const control = (e.target as HTMLElement | null)?.closest?.("button, a, input, select, textarea, label, [role='menuitem'], [role='checkbox']");
+    pressedRow.current = control && control !== e.currentTarget ? null : id;
+  };
+  const rowClick = (r: T, id: string) => () => {
+    if (pressedRow.current !== id) return;
+    pressedRow.current = null;
+    onRowClick?.(r);
+  };
+
   const renderMobileCard = (r: T, isChild: boolean) => {
     const id = getRowId(r);
     const { title, meta } = mobileLayout;
@@ -591,7 +649,8 @@ export function DataTable<T>({
       <Card
         key={id}
         className={cn("p-3", isChild && "ml-6", onRowClick && "cursor-pointer transition-colors active:bg-muted/50", rowClassName?.(r))}
-        onClick={onRowClick ? () => onRowClick(r) : undefined}
+        onPointerDown={onRowClick ? rowPress(id) : undefined}
+        onClick={onRowClick ? rowClick(r, id) : undefined}
         role={onRowClick ? "button" : undefined}
         tabIndex={onRowClick ? 0 : undefined}
         onKeyDown={
@@ -1271,6 +1330,11 @@ export function DataTable<T>({
                 return (
                   <TableHead
                     key={col.id}
+                    // Which column the table is ordered by, and which way - the one thing a sorted table
+                    // says visually (an arrow in the header) that a screen reader was told nothing about.
+                    // `none` on the other sortable columns is what makes the sorted one stand out rather
+                    // than being the only header carrying the attribute at all.
+                    aria-sort={canSort ? (sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : "none") : undefined}
                     style={widthStyle(col.id)}
                     onDragOver={reorderable ? (e) => e.preventDefault() : undefined}
                     onDrop={reorderable ? () => onDrop(col.id) : undefined}
@@ -1327,6 +1391,10 @@ export function DataTable<T>({
                           <PopoverTrigger asChild>
                             <button
                               type="button"
+                              // Named, because it is an icon alone: without this it is a button a screen
+                              // reader announces as "button" and nothing else, on every filterable column of
+                              // every table in the app.
+                              aria-label={`Filter by ${col.header.toLowerCase()}`}
                               className={cn(
                                 "rounded p-0.5 transition-all hover:bg-accent",
                                 filterValue
@@ -1400,7 +1468,8 @@ export function DataTable<T>({
                       isChild && "bg-muted/30",
                       rowClassName?.(r),
                     )}
-                    onClick={onRowClick ? () => onRowClick(r) : undefined}
+                    onPointerDown={onRowClick ? rowPress(getRowId(r)) : undefined}
+                    onClick={onRowClick ? rowClick(r, getRowId(r)) : undefined}
                     // Make clickable rows operable from the keyboard: Tab to focus, Enter/Space to open, and
                     // ↑/↓ to move between rows. Guarded to e.target===currentTarget so keys typed inside a
                     // cell's own control (button, input, checkbox) aren't hijacked.

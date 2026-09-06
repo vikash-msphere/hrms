@@ -3,7 +3,7 @@ import type { AppEnv } from "../env";
 import { jsonBody } from "../http/jsonRequest";
 import { previewAccess, type PreviewBody } from "../services/accessPreview";
 import { requestAccess } from "../services/accessRequest";
-import { decideAccessRule, ruleIdFromRef } from "../services/accessRules";
+import { cloneAccessRules, decideAccessRule, ruleIdFromRef } from "../services/accessRules";
 
 // Collection-level custom methods on access-rules (each mounted whole in index.ts, like batch:run).
 // Authz rides the normal middleware lane: the resolver sees the custom keys (`access-rules.preview`,
@@ -29,3 +29,10 @@ const decideRoute = (decision: "approve" | "reject") =>
 
 export const accessApproveRoute = decideRoute("approve");
 export const accessRejectRoute = decideRoute("reject");
+
+// Copy every rule one subject holds onto another, in ONE request, under ONE correlation id. Collection-level
+// (both subjects travel in the body), so it keys as `access-rules.clone` - fail-closed like every custom
+// method, which is what makes bulk copying grantable separately from authoring rules one at a time.
+export const accessCloneRoute = new Hono<AppEnv>().post("/", async (c) =>
+  c.json(await cloneAccessRules(c.get("deps"), c.get("user"), await jsonBody(c))),
+);

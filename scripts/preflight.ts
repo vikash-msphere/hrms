@@ -64,6 +64,24 @@ if (plan === "free" && hasLimits) {
   warns.push("CF_PLAN=paid but wrangler.toml has no [limits] block - PDF/Form-16 rendering runs without an explicit CPU ceiling.");
 }
 
+// --- 2b. The email sink must not reach production -----------------------------------------------------
+// EMAIL_PROVIDER=console writes "would send to …" to the log and posts nothing (src/lib/email.ts). It is the
+// right setting for the browser suite and for a preview stack, and a silent disaster in production: every
+// offer letter, interview invite and payslip notification is accepted, recorded as sent, and thrown away.
+// Nothing downstream can tell - the send resolves - so this is the only place it can be caught.
+{
+  let section: string | undefined;
+  for (const line of wrangler.split("\n")) {
+    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
+    if (header) section = header[1];
+    if (!/^\s*EMAIL_PROVIDER\s*=\s*"console"/.test(line)) continue;
+    const where = section ? `env.${section}` : "the default (production) environment";
+    const msg = `wrangler.toml: EMAIL_PROVIDER = "console" in ${where} - that provider sends nothing, it only logs.`;
+    if (section === targetEnv || (!section && !targetEnv)) errors.push(msg);
+    else warns.push(`${msg} Fine for a preview environment; never deploy it as production.`);
+  }
+}
+
 // --- 3. Optional SPA features that ship switched off --------------------------------------------------
 // These are baked in at BUILD time by Vite, so an unset value cannot be fixed by a secret after the fact -
 // it needs another build. Absent is a valid choice; shipping it unknowingly is not.

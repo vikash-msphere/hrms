@@ -1,0 +1,1231 @@
+<title>HRMS Environment Reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Public+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #f5f7f3;
+    --surface: #ffffff;
+    --surface-2: #eaeee6;
+    --ink: #171b16;
+    --ink-2: #525c51;
+    --ink-3: #798577;
+    --rule: #d8ded3;
+    --rule-soft: #e6ebe1;
+    --accent: #1f6b5b;
+    --accent-ink: #12483d;
+    --accent-wash: #e2eee9;
+    --warn: #8c5c07;
+    --warn-wash: #f6ecd8;
+    --danger: #9d3226;
+    --danger-wash: #f8e5e1;
+    --on-accent: #ffffff;
+    --shadow: 0 1px 2px rgba(23, 27, 22, .05), 0 8px 24px -18px rgba(23, 27, 22, .35);
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body: "Public Sans", "Helvetica Neue", Arial, sans-serif;
+    --f-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #121510;
+      --surface: #1a1e18;
+      --surface-2: #232821;
+      --ink: #e8ece5;
+      --ink-2: #a3aea1;
+      --ink-3: #7c887a;
+      --rule: #2f3630;
+      --rule-soft: #262c25;
+      --accent: #63c1a6;
+      --accent-ink: #8fd6bf;
+      --accent-wash: #1a2f29;
+      --warn: #d8a545;
+      --warn-wash: #322810;
+      --danger: #e0857a;
+      --danger-wash: #351f1b;
+      --on-accent: #0f1712;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -20px rgba(0, 0, 0, .9);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #121510;
+    --surface: #1a1e18;
+    --surface-2: #232821;
+    --ink: #e8ece5;
+    --ink-2: #a3aea1;
+    --ink-3: #7c887a;
+    --rule: #2f3630;
+    --rule-soft: #262c25;
+    --accent: #63c1a6;
+    --accent-ink: #8fd6bf;
+    --accent-wash: #1a2f29;
+    --warn: #d8a545;
+    --warn-wash: #322810;
+    --danger: #e0857a;
+    --danger-wash: #351f1b;
+    --on-accent: #0f1712;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -20px rgba(0, 0, 0, .9);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent-ink); }
+
+  code, kbd {
+    font-family: var(--f-mono);
+    font-size: .88em;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface);
+  }
+
+  .masthead-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 34px 24px 26px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+    align-items: flex-end;
+    justify-content: space-between;
+  }
+
+  .masthead h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(28px, 4vw, 40px);
+    letter-spacing: -.02em;
+    line-height: 1.08;
+    margin: 6px 0 0;
+    text-wrap: balance;
+  }
+
+  .eyebrow {
+    font-family: var(--f-display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  .masthead p.lede {
+    margin: 12px 0 0;
+    max-width: 62ch;
+    color: var(--ink-2);
+  }
+
+  .meter {
+    flex: 0 0 auto;
+    min-width: 210px;
+  }
+
+  .meter-count {
+    font-family: var(--f-display);
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .meter-count span { color: var(--ink-3); font-weight: 500; }
+
+  .meter-label {
+    font-size: 12px;
+    color: var(--ink-2);
+    letter-spacing: .04em;
+  }
+
+  .meter-track {
+    height: 5px;
+    background: var(--surface-2);
+    border-radius: 99px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+
+  .meter-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 99px;
+    transition: width .25s ease;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .meter-fill { transition: none; }
+  }
+
+  /* ---------- toolbar ---------- */
+
+  .toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .toolbar-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 10px 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .filter {
+    font-family: var(--f-display);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    padding: 5px 12px;
+    border-radius: 99px;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+
+  .filter:hover { border-color: var(--accent); color: var(--ink); }
+
+  .filter[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+
+  .toolbar .spacer { flex: 1 1 auto; }
+
+  .reset {
+    font-family: var(--f-body);
+    font-size: 12px;
+    background: none;
+    border: 0;
+    color: var(--ink-3);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    padding: 5px 2px;
+  }
+
+  .reset:hover { color: var(--danger); }
+
+  /* ---------- page frame ---------- */
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 34px 24px 96px;
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 44px;
+    align-items: start;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 62px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 13px;
+  }
+
+  nav.toc a {
+    color: var(--ink-2);
+    text-decoration: none;
+    padding: 4px 0 4px 11px;
+    border-left: 2px solid var(--rule-soft);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  nav.toc a:hover { color: var(--ink); border-left-color: var(--accent); }
+
+  nav.toc a b {
+    font-family: var(--f-mono);
+    font-weight: 400;
+    font-size: 11px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stack { display: flex; flex-direction: column; gap: 44px; min-width: 0; }
+
+  /* ---------- lanes intro ---------- */
+
+  .lanes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .lane {
+    background: var(--surface);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .lane h3 {
+    font-family: var(--f-display);
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: .01em;
+  }
+
+  .lane code { color: var(--accent-ink); font-size: 12px; }
+
+  .lane p { margin: 0; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+
+  /* ---------- sections ---------- */
+
+  section > header {
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 10px;
+    margin-bottom: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 14px;
+  }
+
+  section h2 {
+    font-family: var(--f-display);
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    margin: 0;
+  }
+
+  .where {
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  section > header p {
+    flex: 1 0 100%;
+    margin: 4px 0 0;
+    font-size: 13.5px;
+    color: var(--ink-2);
+    max-width: 72ch;
+  }
+
+  .rows { display: flex; flex-direction: column; gap: 10px; }
+
+  /* ---------- a variable row ---------- */
+
+  .row {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 14px 16px 14px 14px;
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 0 12px;
+    box-shadow: var(--shadow);
+  }
+
+  .row[hidden] { display: none; }
+
+  .row.is-done { border-color: color-mix(in srgb, var(--accent) 45%, var(--rule)); }
+  .row.is-done .name { color: var(--ink-3); text-decoration: line-through; text-decoration-thickness: 1px; }
+
+  .row.never { border-left: 3px solid var(--danger); }
+
+  .row input[type="checkbox"] {
+    width: 17px;
+    height: 17px;
+    margin: 3px 0 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .row-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+  }
+
+  .name {
+    font-family: var(--f-mono);
+    font-weight: 500;
+    font-size: 14px;
+    color: var(--ink);
+    word-break: break-word;
+  }
+
+  .row .body { grid-column: 2; }
+
+  .row p {
+    margin: 7px 0 0;
+    font-size: 13.5px;
+    color: var(--ink-2);
+    max-width: 76ch;
+  }
+
+  .row p.risk {
+    color: var(--ink);
+    background: var(--warn-wash);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+  }
+
+  .row p.risk b { color: var(--warn); font-weight: 600; }
+
+  .row.never p.risk { background: var(--danger-wash); }
+  .row.never p.risk b { color: var(--danger); }
+
+  .cmd {
+    margin: 9px 0 0;
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--ink);
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  /* ---------- badges ---------- */
+
+  .tag {
+    font-family: var(--f-display);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+
+  .tag.req { background: var(--accent-wash); color: var(--accent-ink); }
+  .tag.opt { background: transparent; color: var(--ink-3); border: 1px solid var(--rule); }
+  .tag.no { background: var(--danger-wash); color: var(--danger); }
+  .tag.secret { background: var(--warn-wash); color: var(--warn); }
+
+  /* ---------- must-match block ---------- */
+
+  .match {
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    background: var(--accent-wash);
+    padding: 18px 20px;
+  }
+
+  .match h2 {
+    font-family: var(--f-display);
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    color: var(--accent-ink);
+  }
+
+  .match > p { margin: 0 0 14px; font-size: 13.5px; color: var(--ink-2); max-width: 72ch; }
+
+  .pairs { display: flex; flex-direction: column; gap: 10px; }
+
+  .pair {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    background: var(--surface);
+    border-radius: 7px;
+    padding: 9px 12px;
+  }
+
+  .pair .eq { color: var(--accent); font-weight: 500; }
+  .pair .why {
+    grid-column: 1 / -1;
+    font-family: var(--f-body);
+    font-size: 12.5px;
+    color: var(--ink-2);
+    line-height: 1.5;
+  }
+
+  /* ---------- footer ---------- */
+
+  footer.doc {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 24px 60px;
+    color: var(--ink-3);
+    font-size: 12.5px;
+  }
+
+  footer.doc p { max-width: 76ch; }
+
+  @media (max-width: 900px) {
+    .page { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+    nav.toc { position: static; flex-direction: row; flex-wrap: wrap; gap: 6px; }
+    nav.toc a { border-left: 0; border: 1px solid var(--rule); border-radius: 99px; padding: 4px 11px; }
+    .pair { grid-template-columns: minmax(0, 1fr); }
+    .pair .eq { display: none; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <div>
+      <p class="eyebrow">Cloudflare Workers &middot; production</p>
+      <h1>HRMS Environment Reference</h1>
+      <p class="lede">
+        Every value the Worker, the SPA build and the GitHub workflows read, with where it is set and what
+        breaks when it is wrong. Tick items off as you provision them &mdash; progress is kept in this
+        browser only.
+      </p>
+    </div>
+    <div class="meter">
+      <div class="meter-count"><span id="done">0</span> / <span id="total">0</span></div>
+      <div class="meter-label">values accounted for</div>
+      <div class="meter-track"><div class="meter-fill" id="fill"></div></div>
+    </div>
+  </div>
+</header>
+
+<div class="toolbar">
+  <div class="toolbar-inner">
+    <button class="filter" data-filter="all" aria-pressed="true" type="button">Everything</button>
+    <button class="filter" data-filter="required" aria-pressed="false" type="button">Required only</button>
+    <button class="filter" data-filter="secret" aria-pressed="false" type="button">Secrets</button>
+    <button class="filter" data-filter="build" aria-pressed="false" type="button">Build-time</button>
+    <button class="filter" data-filter="ci" aria-pressed="false" type="button">CI / GitHub</button>
+    <span class="spacer"></span>
+    <button class="reset" id="reset" type="button">Clear all ticks</button>
+  </div>
+</div>
+
+<main class="page">
+  <nav class="toc" aria-label="Sections">
+    <a href="#bindings">Bindings <b>3</b></a>
+    <a href="#secrets">Secrets <b>6</b></a>
+    <a href="#optional-secrets">Optional secrets <b>6</b></a>
+    <a href="#vars">Worker vars <b>8</b></a>
+    <a href="#spa">SPA build <b>6</b></a>
+    <a href="#build">Build machine <b>4</b></a>
+    <a href="#github">GitHub secrets <b>4</b></a>
+    <a href="#never">Never in prod <b>3</b></a>
+    <a href="#pairs">Must match</a>
+  </nav>
+
+  <div class="stack">
+
+    <section id="lanes" aria-label="How configuration reaches production">
+      <div class="lanes">
+        <div class="lane">
+          <h3>Runtime, committed</h3>
+          <code>wrangler.toml [vars]</code>
+          <p>Bindings, cron triggers and non-secret vars. In git. Changing one needs a redeploy.</p>
+        </div>
+        <div class="lane">
+          <h3>Runtime, secret</h3>
+          <code>wrangler secret put</code>
+          <p>Stored on the Worker, never in git, never in CI. Persists across deploys on its own.</p>
+        </div>
+        <div class="lane">
+          <h3>Baked into the bundle</h3>
+          <code>web/.env &rarr; VITE_*</code>
+          <p>Read by Vite at build time and compiled into the JavaScript. Public. A missing one needs a new build, not a secret.</p>
+        </div>
+        <div class="lane">
+          <h3>CI only</h3>
+          <code>GitHub &rarr; production env</code>
+          <p>Credentials the deploy and backup workflows use. They never reach the Worker.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="bindings">
+      <header>
+        <h2>Bindings</h2>
+        <span class="where">wrangler.toml &middot; committed</span>
+        <p>Declared once and left alone. Provision the resources first (<code>wrangler d1 create hrms</code>,
+          <code>wrangler r2 bucket create hrms</code>), then paste the ids.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="required">
+          <input type="checkbox" data-id="DB">
+          <div class="body">
+            <div class="row-head"><span class="name">DB</span><span class="tag req">required</span><span class="tag">binding</span></div>
+            <p>The D1 database. <code>database_id</code> comes from <code>wrangler d1 create hrms</code>;
+              <code>migrations_dir</code> is <code>src/db/migrations</code>. Staging carries its own id under
+              <code>[env.staging]</code>.</p>
+            <p class="risk"><b>Preflight blocks this.</b> A literal <code>REPLACE_WITH_STAGING_D1_ID</code> left in
+              the environment being deployed is a hard error, not a warning.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required">
+          <input type="checkbox" data-id="DOCS">
+          <div class="body">
+            <div class="row-head"><span class="name">DOCS</span><span class="tag req">required</span><span class="tag">binding</span></div>
+            <p>The R2 bucket holding every uploaded and generated document. Bodies are encrypted under
+              <code>FIELD_ENCRYPTION_KEY</code>, so the bucket alone restores nothing.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required">
+          <input type="checkbox" data-id="ASSETS">
+          <div class="body">
+            <div class="row-head"><span class="name">ASSETS</span><span class="tag req">required</span><span class="tag">binding</span></div>
+            <p>The built SPA in <code>web/dist</code>. <code>not_found_handling = "none"</code> is deliberate:
+              the Worker owns the SPA fallback so a missing <code>.js</code> returns 404 instead of an
+              <code>index.html</code> the browser caches as a script of the wrong type.</p>
+            <p class="risk"><b>Build the SPA before any wrangler command.</b> Wrangler validates
+              <code>[assets].directory</code> on every subcommand, so a missing <code>web/dist</code> fails
+              <code>d1 migrations apply</code> too.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="secrets">
+      <header>
+        <h2>Required secrets</h2>
+        <span class="where">wrangler secret put &middot; never committed</span>
+        <p>Generate fresh values for production. Never reuse anything from <code>.dev.vars</code>.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="required secret">
+          <input type="checkbox" data-id="FIELD_ENCRYPTION_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">FIELD_ENCRYPTION_KEY</span><span class="tag req">required</span><span class="tag secret">secret</span></div>
+            <p>Exactly 32 bytes, base64. Encrypts sensitive fields and every document body in R2.</p>
+            <div class="cmd">openssl rand -base64 32 | npx wrangler secret put FIELD_ENCRYPTION_KEY</div>
+            <p class="risk"><b>Escrow this outside Cloudflare.</b> The R2 backup is only as recoverable as this
+              key. Rotating it requires re-encrypting existing data; a wrong value makes all encrypted
+              fields and documents unreadable.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required secret">
+          <input type="checkbox" data-id="WIRE_ID_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">WIRE_ID_KEY</span><span class="tag req">required</span><span class="tag secret">secret</span></div>
+            <p>Exactly 32 bytes, base64. Master key for the wire-id codec that turns an internal row id into
+              the opaque token the API speaks.</p>
+            <div class="cmd">openssl rand -base64 32 | npx wrangler secret put WIRE_ID_KEY</div>
+            <p class="risk"><b>Rotation invalidates every token already issued</b> &mdash; bookmarked URLs and
+              in-flight links stop resolving.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required secret">
+          <input type="checkbox" data-id="AUTH_SESSION_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">AUTH_SESSION_KEY</span><span class="tag req">required</span><span class="tag secret">secret</span></div>
+            <p>At least 32 bytes, base64. HMAC key signing the stateless session cookie
+              (<code>src/lib/session.ts</code>). Sessions last 12h and re-auth is a silent Google redirect.</p>
+            <div class="cmd">openssl rand -base64 32 | npx wrangler secret put AUTH_SESSION_KEY</div>
+            <p class="risk"><b>This is the break-glass revocation lever.</b> Sessions carry no server-side
+              state, so rotating this key is what signs everybody out.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required secret">
+          <input type="checkbox" data-id="GOOGLE_CLIENT_ID">
+          <div class="body">
+            <div class="row-head"><span class="name">GOOGLE_CLIENT_ID</span><span class="tag req">required</span><span class="tag secret">secret</span></div>
+            <p>OAuth client id from the Google Cloud console (Web application). Its redirect URI must be
+              <code>https://&lt;hostname&gt;/auth/callback</code>, staging included.</p>
+            <p class="risk"><b>Setting this is what selects the auth mode.</b> Present &rarr; the Worker runs its
+              own Google OIDC sign-in. Absent &rarr; it falls back to Cloudflare Access mode and expects
+              <code>CF_ACCESS_*</code> instead.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required secret">
+          <input type="checkbox" data-id="GOOGLE_CLIENT_SECRET">
+          <div class="body">
+            <div class="row-head"><span class="name">GOOGLE_CLIENT_SECRET</span><span class="tag req">required</span><span class="tag secret">secret</span></div>
+            <p>The client secret for the same OAuth client. The authorization-code exchange happens
+              server-side only; this value never reaches the browser.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required secret">
+          <input type="checkbox" data-id="EMAIL_API_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">EMAIL_API_KEY</span><span class="tag req">required</span><span class="tag secret">secret</span></div>
+            <p>API key for whichever vendor <code>EMAIL_PROVIDER</code> names. Every transactional message
+              (approvals, reminders, digests, payslip notices) goes through it.</p>
+            <div class="cmd">npx wrangler secret put EMAIL_API_KEY</div>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="optional-secrets">
+      <header>
+        <h2>Optional secrets</h2>
+        <span class="where">wrangler secret put &middot; feature switches</span>
+        <p>Absent by default. Each one turns a feature on; leaving it unset degrades gracefully rather than
+          erroring.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="secret">
+          <input type="checkbox" data-id="VAPID_PUBLIC_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">VAPID_PUBLIC_KEY</span><span class="tag opt">optional</span><span class="tag secret">secret</span></div>
+            <p>Public half of the browser-push keypair, base64url P-256 (65 bytes, first byte
+              <code>0x04</code>). Generate once per deployment with
+              <code>scripts/genVapidKeys.ts</code>.</p>
+            <p class="risk"><b>Must equal <code>VITE_VAPID_PUBLIC_KEY</code>.</b> Nothing can check this before
+              deploy &mdash; wrangler never reveals a secret's value. After deploying, enable notifications on
+              one device and watch <code>npx wrangler tail</code> for a 401/403 from
+              <code>src/lib/webPush.ts</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="secret">
+          <input type="checkbox" data-id="VAPID_PRIVATE_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">VAPID_PRIVATE_KEY</span><span class="tag opt">optional</span><span class="tag secret">secret</span></div>
+            <p>Private half of the same pair. Without both halves push is off and the app degrades to the
+              in-app bell plus the email digest.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="secret">
+          <input type="checkbox" data-id="VAPID_SUBJECT">
+          <div class="body">
+            <div class="row-head"><span class="name">VAPID_SUBJECT</span><span class="tag opt">optional</span><span class="tag secret">secret</span></div>
+            <p>Contact address the push services see, e.g. <code>mailto:ops@example.com</code>. Defaults to
+              <code>mailto:</code> plus <code>EMAIL_FROM</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="secret">
+          <input type="checkbox" data-id="ESIGN_CASHFREE_CLIENT_ID">
+          <div class="body">
+            <div class="row-head"><span class="name">ESIGN_CASHFREE_CLIENT_ID</span><span class="tag opt">optional</span><span class="tag secret">secret</span></div>
+            <p>Only for the Cashfree Aadhaar e-sign provider. The app ships with in-app signature signing and
+              no external dependency.</p>
+            <p class="risk"><b>Set both Cashfree values before anyone picks that method.</b> Choosing
+              &ldquo;Aadhaar e-Sign&rdquo; on a template with these unset throws at signing time.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="secret">
+          <input type="checkbox" data-id="ESIGN_CASHFREE_CLIENT_SECRET">
+          <div class="body">
+            <div class="row-head"><span class="name">ESIGN_CASHFREE_CLIENT_SECRET</span><span class="tag opt">optional</span><span class="tag secret">secret</span></div>
+            <p>Client secret, and also the HMAC key that authenticates the webhook at
+              <code>POST /esign/callback/cashfree</code> &mdash; Cashfree issues no separate webhook secret.
+              That route is public and authenticated by this signature alone.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="secret">
+          <input type="checkbox" data-id="ESIGN_CASHFREE_PUBLIC_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">ESIGN_CASHFREE_PUBLIC_KEY</span><span class="tag opt">optional</span><span class="tag secret">secret</span></div>
+            <p>Cashfree's RSA public key (PEM or base64 SPKI), used to build the production
+              <code>X-Cf-Signature</code> 2FA header. The header is
+              <code>base64(RSA-OAEP-SHA1(clientId + "." + unixSeconds))</code> &mdash; an encryption Cashfree
+              decrypts, not a signature.</p>
+            <p class="risk"><b>Leave unset in sandbox</b> and on accounts still using client id + secret only.
+              Set it only once the account is in public-key 2FA mode, or every call is rejected.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="vars">
+      <header>
+        <h2>Worker vars</h2>
+        <span class="where">wrangler.toml [vars] &middot; committed, not secret</span>
+        <p>Redeclare each of these under <code>[env.staging.vars]</code> too &mdash; wrangler does not inherit
+          top-level vars into a named environment.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="required">
+          <input type="checkbox" data-id="ALLOWED_EMAIL_DOMAINS">
+          <div class="body">
+            <div class="row-head"><span class="name">ALLOWED_EMAIL_DOMAINS</span><span class="tag req">required</span><span class="tag">var</span></div>
+            <p>Comma-separated org domains permitted to sign in and auto-provision on first login, e.g.
+              <code>acme.com</code>. Under Google sign-in this is the org perimeter.</p>
+            <p class="risk"><b>Empty is refused at startup, not treated as &ldquo;no restriction&rdquo;.</b>
+              <code>makeDeps</code> throws and the OAuth callback returns 500 &mdash; deliberately, because the
+              permissive reading would let any Google account in as an employee.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required">
+          <input type="checkbox" data-id="EMAIL_FROM">
+          <div class="body">
+            <div class="row-head"><span class="name">EMAIL_FROM</span><span class="tag req">required</span><span class="tag">var</span></div>
+            <p>The verified sender, e.g. <code>hr@acme.com</code> or <code>Acme HR &lt;hr@acme.com&gt;</code>.
+              The sending domain must be verified with the provider first. Also the fallback for
+              <code>VAPID_SUBJECT</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="EMAIL_PROVIDER">
+          <div class="body">
+            <div class="row-head"><span class="name">EMAIL_PROVIDER</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p>One of <code>resend</code> (default), <code>brevo</code>, <code>sendgrid</code>,
+              <code>postmark</code>, <code>mailgun</code>. Selects which vendor <code>EMAIL_API_KEY</code>
+              belongs to.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="EMAIL_REGION">
+          <div class="body">
+            <div class="row-head"><span class="name">EMAIL_REGION</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p>Provider-specific: the Mailgun sending domain. Ignored by every other provider &mdash; omit it
+              unless <code>EMAIL_PROVIDER=mailgun</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="ATTENDANCE_ALLOWED_IPS">
+          <div class="body">
+            <div class="row-head"><span class="name">ATTENDANCE_ALLOWED_IPS</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p>Network fence on the attendance clock: comma-separated IPs and CIDR blocks, IPv4 and IPv6
+              mixed freely &mdash; office egress plus VPN. Unset or empty means employees punch from anywhere.</p>
+            <div class="cmd">ATTENDANCE_ALLOWED_IPS = "203.0.113.7, 198.51.100.0/24, 2001:db8::/32"</div>
+            <p class="risk"><b>The fence fails closed and is narrow on purpose.</b> Only
+              <code>cf-connecting-ip</code> counts, never the spoofable <code>x-forwarded-for</code>; a punch
+              whose client IP cannot be established is refused. It gates only
+              <code>attendance/me:clockIn</code> and <code>:clockOut</code> &mdash; an approved remote-work
+              request eases it for exactly its dates, and HR regularizations are never fenced. A malformed
+              entry is a startup error.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="SENTRY_DSN">
+          <div class="body">
+            <div class="row-head"><span class="name">SENTRY_DSN</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p>The one destination the <code>/diag</code> relay forwards the SPA's error, trace and replay
+              envelopes to. Not a secret: a DSN only permits writing events, and the same string is already
+              in the bundle.</p>
+            <p class="risk"><b>It must be the same DSN as <code>VITE_SENTRY_DSN</code>.</b> The relay refuses an
+              envelope addressed anywhere else &mdash; that is what stops it being an open relay. Unset means
+              the relay 404s and the SPA reports nothing.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="SENTRY_ENVIRONMENT">
+          <div class="body">
+            <div class="row-head"><span class="name">SENTRY_ENVIRONMENT</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p><code>production</code> or <code>staging</code>. Both deploy targets report into the same Sentry
+              project, so this is the only thing separating their issues. Defaults to
+              <code>production</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="SENTRY_RELEASE">
+          <div class="body">
+            <div class="row-head"><span class="name">SENTRY_RELEASE</span><span class="tag opt">optional</span><span class="tag">var</span></div>
+            <p>Which build the Worker's own errors belong to. Set it in CI to the same string the SPA is
+              built with so both halves of a distributed trace land on one release. Unset tags every server
+              issue &ldquo;unknown release&rdquo;.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="spa">
+      <header>
+        <h2>SPA build values</h2>
+        <span class="where">web/.env &middot; compiled into the bundle by Vite</span>
+        <p>Public by construction &mdash; never put a secret here. A value missing at build time cannot be
+          supplied later by a Worker secret; it needs another build.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="build">
+          <input type="checkbox" data-id="VITE_APP_NAME">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_APP_NAME</span><span class="tag opt">optional</span><span class="tag">build</span></div>
+            <p>Product name in the browser tab, the PWA manifest and the install prompt. Defaults to
+              <code>Meridian</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="build">
+          <input type="checkbox" data-id="VITE_VAPID_PUBLIC_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_VAPID_PUBLIC_KEY</span><span class="tag opt">optional</span><span class="tag">build</span></div>
+            <p>The public half of the Worker's VAPID pair. Unset ships push inert &mdash;
+              <code>pushSupported()</code> returns false and the toggle never appears.</p>
+            <p class="risk"><b>Preflight decodes this one.</b> It imports the key as a P-256 point, so a
+              truncated or half-pasted value is a blocking error rather than a toggle that renders and then
+              fails enrolment in the browser.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="build">
+          <input type="checkbox" data-id="VITE_SENTRY_DSN">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_SENTRY_DSN</span><span class="tag opt">optional</span><span class="tag">build</span></div>
+            <p>Sentry client key for the SPA. Unset means <code>instrument.ts</code> skips
+              <code>Sentry.init</code> entirely, so the SDK costs nothing at runtime.</p>
+            <p class="risk"><b>The DSN's ingest host must also be allowed by <code>connect-src</code></b> in
+              <code>web/public/_headers</code>, or the CSP blocks every report.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="build">
+          <input type="checkbox" data-id="VITE_SENTRY_ORG">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_SENTRY_ORG</span><span class="tag opt">optional</span><span class="tag">build</span></div>
+            <p>Organisation slug &mdash; the first label of your Sentry URL. Turns a session-replay id stored on
+              a ticket into a link support can click. Without it the ticket shows a bare id and someone
+              pastes it into Sentry by hand.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="build">
+          <input type="checkbox" data-id="VITE_APP_VERSION">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_APP_VERSION</span><span class="tag opt">optional</span><span class="tag">build</span></div>
+            <p>The release string every SPA event is tagged with. Set it in CI:</p>
+            <div class="cmd">VITE_APP_VERSION=$(git rev-parse --short HEAD)</div>
+            <p class="risk"><b>It cannot be backfilled.</b> Without it issues arrive as &ldquo;unknown
+              release&rdquo;, regression detection and &ldquo;resolved in next release&rdquo; have nothing to key
+              on, and the uploaded source maps match no event &mdash; the same as not uploading them.</p>
+          </div>
+        </label>
+
+        <label class="row never" data-kind="build">
+          <input type="checkbox" data-id="VITE_ESIGN_ALLOW_SANDBOX">
+          <div class="body">
+            <div class="row-head"><span class="name">VITE_ESIGN_ALLOW_SANDBOX</span><span class="tag no">never in prod</span><span class="tag">build</span></div>
+            <p>Trusts the eMudhra / CCA <em>test</em> certificate hierarchy alongside the production roots.
+              Development and sandbox builds only.</p>
+            <p class="risk"><b>Preflight fails the deploy if it is set.</b> Confirm it is absent from
+              <code>web/.env</code> on the build machine.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="build">
+      <header>
+        <h2>Build machine environment</h2>
+        <span class="where">process env at build / preflight time</span>
+        <p>Read by <code>web/vite.config.ts</code> and <code>scripts/preflight.ts</code>. Not
+          <code>VITE_</code>-prefixed, so none of these reach the bundle.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="ci">
+          <input type="checkbox" data-id="CF_PLAN">
+          <div class="body">
+            <div class="row-head"><span class="name">CF_PLAN</span><span class="tag opt">optional</span><span class="tag">ci var</span></div>
+            <p><code>paid</code> (default, Workers Standard) or <code>free</code>. A GitHub repository
+              <em>variable</em>, not a secret. Decides whether the <code>[limits]</code> block in
+              <code>wrangler.toml</code> is valid.</p>
+            <p class="risk"><b>The check only proves the two agree with each other.</b> Preflight cannot see
+              the Cloudflare account, so <code>plan=paid</code> in the output is not evidence you are on
+              Workers Standard &mdash; confirm that in the dashboard. On the free plan comment out
+              <code>[limits]</code> and set <code>CF_PLAN=free</code>, and expect the 10ms CPU cap to break
+              server-side PDF rendering.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="ci secret">
+          <input type="checkbox" data-id="SENTRY_AUTH_TOKEN">
+          <div class="body">
+            <div class="row-head"><span class="name">SENTRY_AUTH_TOKEN</span><span class="tag opt">optional</span><span class="tag secret">ci secret</span></div>
+            <p>Enables the Sentry Vite plugin and source-map upload. Its presence is also what sets
+              <code>build.sourcemap = "hidden"</code>.</p>
+            <p class="risk"><b>Absent means no source maps at all</b> &mdash; deliberately, so maps are never left
+              in <code>web/dist</code> to be served as public assets. The cost is that your first production
+              issue arrives as <code>index-a1b2c3.js:1:48213</code>.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="ci">
+          <input type="checkbox" data-id="SENTRY_ORG">
+          <div class="body">
+            <div class="row-head"><span class="name">SENTRY_ORG</span><span class="tag opt">optional</span><span class="tag">ci var</span></div>
+            <p>Organisation the source maps upload to. Needed alongside <code>SENTRY_AUTH_TOKEN</code>;
+              distinct from <code>VITE_SENTRY_ORG</code>, which only builds replay links.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="ci">
+          <input type="checkbox" data-id="SENTRY_PROJECT">
+          <div class="body">
+            <div class="row-head"><span class="name">SENTRY_PROJECT</span><span class="tag opt">optional</span><span class="tag">ci var</span></div>
+            <p>Project the source maps upload to. Same pairing as above.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="github">
+      <header>
+        <h2>GitHub repository secrets</h2>
+        <span class="where">Settings &rarr; Environments &rarr; production</span>
+        <p>Used by <code>deploy.yml</code>, <code>d1-backup.yml</code> and <code>r2-backup.yml</code>. No
+          application secret belongs here &mdash; those live on the Worker and persist across deploys.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row" data-kind="required ci secret">
+          <input type="checkbox" data-id="CLOUDFLARE_API_TOKEN">
+          <div class="body">
+            <div class="row-head"><span class="name">CLOUDFLARE_API_TOKEN</span><span class="tag req">required</span><span class="tag secret">ci secret</span></div>
+            <p>Created under My Profile &rarr; API Tokens with three permissions:
+              <code>Workers Scripts:Edit</code>, <code>D1:Edit</code>,
+              <code>Workers R2 Storage:Edit</code>. Drives the deploy and the nightly D1 export.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="required ci secret">
+          <input type="checkbox" data-id="CLOUDFLARE_ACCOUNT_ID">
+          <div class="body">
+            <div class="row-head"><span class="name">CLOUDFLARE_ACCOUNT_ID</span><span class="tag req">required</span><span class="tag secret">ci secret</span></div>
+            <p>From <code>npx wrangler whoami</code>. All three workflows read it; the R2 sync also builds its
+              S3 endpoint from it.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="ci secret">
+          <input type="checkbox" data-id="R2_ACCESS_KEY_ID">
+          <div class="body">
+            <div class="row-head"><span class="name">R2_ACCESS_KEY_ID</span><span class="tag opt">optional</span><span class="tag secret">ci secret</span></div>
+            <p>Half of an <em>R2 S3 API token</em> &mdash; a different credential from
+              <code>CLOUDFLARE_API_TOKEN</code>. Create it under R2 &rarr; Manage R2 API Tokens, Object Read
+              &amp; Write, scoped to <code>hrms</code> and <code>hrms-backup</code>.</p>
+            <p class="risk"><b>Only <code>r2-backup.yml</code> uses these,</b> and it fails loudly when they are
+              missing. Without the weekly sync, documents have exactly one copy &mdash; and an e-signed letter
+              is the one thing nothing else can rebuild.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="ci secret">
+          <input type="checkbox" data-id="R2_SECRET_ACCESS_KEY">
+          <div class="body">
+            <div class="row-head"><span class="name">R2_SECRET_ACCESS_KEY</span><span class="tag opt">optional</span><span class="tag secret">ci secret</span></div>
+            <p>The other half of the same R2 S3 API token. The workflow maps both onto
+              <code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code> for
+              <code>aws s3 sync</code>, because wrangler cannot list a bucket and so cannot sync one.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <section id="never">
+      <header>
+        <h2>Confirm these are absent</h2>
+        <span class="where">verify on the Worker before go-live</span>
+        <p>Not things to set &mdash; things to check are not set. Tick each once you have confirmed it.</p>
+      </header>
+      <div class="rows">
+
+        <label class="row never" data-kind="required">
+          <input type="checkbox" data-id="ALLOW_DEV_AUTH">
+          <div class="body">
+            <div class="row-head"><span class="name">ALLOW_DEV_AUTH</span><span class="tag no">never in prod</span><span class="tag">var</span></div>
+            <p>Local-only gate (<code>"true"</code>) that must accompany <code>DEV_FAKE_EMAIL</code>.</p>
+            <p class="risk"><b>Together these bypass authentication entirely.</b> See
+              <code>docs/deploy-security.md</code> &sect;3.</p>
+          </div>
+        </label>
+
+        <label class="row never" data-kind="required">
+          <input type="checkbox" data-id="DEV_FAKE_EMAIL">
+          <div class="body">
+            <div class="row-head"><span class="name">DEV_FAKE_EMAIL</span><span class="tag no">never in prod</span><span class="tag">var</span></div>
+            <p>The identity the local bypass assumes. Belongs in <code>.dev.vars</code>, which is gitignored
+              and read only by <code>wrangler dev</code>. Production reads no file at runtime.</p>
+          </div>
+        </label>
+
+        <label class="row" data-kind="">
+          <input type="checkbox" data-id="CF_ACCESS">
+          <div class="body">
+            <div class="row-head"><span class="name">CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD</span><span class="tag opt">legacy</span><span class="tag">var</span></div>
+            <p>The Cloudflare Access auth mode, used only when <code>GOOGLE_CLIENT_ID</code> is unset
+              (<code>src/middleware/auth.ts</code>). Google sign-in is the documented path &mdash; it carries no
+              per-seat cost. Leave these unset unless you are deliberately fronting the app with Access.</p>
+          </div>
+        </label>
+
+      </div>
+    </section>
+
+    <div class="match" id="pairs">
+      <h2>Values that must match across lanes</h2>
+      <p>Each pair spans two different places, so neither half can validate the other at deploy time. These
+        are the mismatches that ship green and fail silently.</p>
+      <div class="pairs">
+        <div class="pair">
+          <code>VITE_SENTRY_DSN</code><span class="eq">must equal</span><code>SENTRY_DSN</code>
+          <span class="why">The <code>/diag</code> relay only forwards envelopes addressed to its own DSN. A
+            mismatch drops every report from the SPA with no error anywhere.</span>
+        </div>
+        <div class="pair">
+          <code>VITE_VAPID_PUBLIC_KEY</code><span class="eq">must equal</span><code>VAPID_PUBLIC_KEY</code>
+          <span class="why">Wrangler never reveals a secret, so preflight validates only the shape of the
+            build-side key. Verify the pairing after deploy: enable notifications on one device and watch
+            <code>wrangler tail</code> for a 401.</span>
+        </div>
+        <div class="pair">
+          <code>VITE_APP_VERSION</code><span class="eq">must equal</span><code>SENTRY_RELEASE</code>
+          <span class="why">Both halves of a distributed trace need the same release string, or the client and
+            server sides of one incident land on different releases and the source maps match neither.</span>
+        </div>
+        <div class="pair">
+          <code>GOOGLE_CLIENT_ID</code><span class="eq">redirect URI</span><code>https://&lt;host&gt;/auth/callback</code>
+          <span class="why">Registered in the Google Cloud console, per hostname. Add the staging host as a
+            second authorized redirect URI at the same time.</span>
+        </div>
+        <div class="pair">
+          <code>EMAIL_FROM</code><span class="eq">verified at</span><code>EMAIL_PROVIDER</code>
+          <span class="why">The sending domain has to be verified with the vendor before anything sends.
+            <code>npm run test:email</code> against a real inbox is the cheapest proof.</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer class="doc">
+  <p>Sources of truth: <code>src/env.ts</code> (<code>Bindings</code>), <code>wrangler.toml</code>,
+    <code>web/.env.example</code>, <code>scripts/preflight.ts</code>, and the three workflows in
+    <code>.github/workflows/</code>. Narrative setup steps live in <code>docs/deploy.md</code>; hardening in
+    <code>docs/deploy-security.md</code>.</p>
+</footer>
+
+<script>
+  (function () {
+    var KEY = "hrms-env-checklist";
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('.row input[type="checkbox"]'));
+    var doneEl = document.getElementById("done");
+    var totalEl = document.getElementById("total");
+    var fillEl = document.getElementById("fill");
+
+    totalEl.textContent = String(boxes.length);
+
+    function load() {
+      try {
+        return JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function save(state) {
+      try {
+        localStorage.setItem(KEY, JSON.stringify(state));
+      } catch (e) {
+        /* private window or blocked storage: the page still works, ticks just don't persist */
+      }
+    }
+
+    var state = load();
+
+    function paint() {
+      var n = 0;
+      boxes.forEach(function (b) {
+        if (b.checked) n++;
+        b.closest(".row").classList.toggle("is-done", b.checked);
+      });
+      doneEl.textContent = String(n);
+      fillEl.style.width = boxes.length ? (n / boxes.length) * 100 + "%" : "0%";
+    }
+
+    boxes.forEach(function (b) {
+      b.checked = state[b.dataset.id] === true;
+      b.addEventListener("change", function () {
+        state[b.dataset.id] = b.checked;
+        save(state);
+        paint();
+      });
+    });
+
+    paint();
+
+    document.getElementById("reset").addEventListener("click", function () {
+      state = {};
+      save(state);
+      boxes.forEach(function (b) { b.checked = false; });
+      paint();
+    });
+
+    var filters = Array.prototype.slice.call(document.querySelectorAll(".filter"));
+    filters.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var want = btn.dataset.filter;
+        filters.forEach(function (f) { f.setAttribute("aria-pressed", String(f === btn)); });
+        document.querySelectorAll(".row").forEach(function (row) {
+          var kinds = (row.dataset.kind || "").split(/\s+/);
+          row.hidden = want !== "all" && kinds.indexOf(want) === -1;
+        });
+        document.querySelectorAll("section").forEach(function (sec) {
+          var rows = sec.querySelectorAll(".row");
+          if (!rows.length) return;
+          var anyVisible = Array.prototype.some.call(rows, function (r) { return !r.hidden; });
+          sec.hidden = !anyVisible;
+        });
+      });
+    });
+  })();
+</script>

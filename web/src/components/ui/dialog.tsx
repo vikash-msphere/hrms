@@ -2,7 +2,7 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { dropDialogEntry, pushDialogEntry } from "@/lib/dialogHistory";
+import { dropDialogEntry, isSelfPop, pushDialogEntry } from "@/lib/dialogHistory";
 // The keyboard measurement is shared with sheet.tsx and the bottom nav - see hooks/useKeyboardInset.ts for
 // why a bottom-anchored phone panel cannot trust `bottom: 0`.
 import { useKeyboardInset } from "@/hooks/useKeyboardInset";
@@ -57,6 +57,10 @@ function useHistoryClose(node: HTMLElement | null) {
 
     const onPop = () => {
       if (!pushed.current) return;
+      // A back() the APP asked for - a dialog above this one dropping its entry as it closes - is not the
+      // reader pressing back, and replaying it as Esc closes a dialog nobody asked to close (or, on a guarded
+      // form, re-raises the discard prompt they just dismissed). See lib/dialogHistory.ts#isSelfPop.
+      if (isSelfPop()) return;
       pushed.current = false;
       popping.current = true;
       nodeRef.current?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));

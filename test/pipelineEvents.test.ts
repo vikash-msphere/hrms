@@ -47,8 +47,9 @@ beforeEach(async () => {
   deps.clock = { now: () => new Date("2026-03-01T00:00:00Z") };
   // event_log carries audit lineage through an actor FK, so an actor with no users row would have its events
   // dropped (logged, non-fatal) - and these tests read the log.
-  // `users.role` is a FK to the roles catalog, so the role has to exist before the actor does.
-  await deps.db.insert(schema.roles).values({ name: "hr_admin", label: "HR admin" }).onConflictDoNothing();
+  // `users.role` is a FK to the roles catalog, so the role has to exist before the actor does. `employee` is
+  // there because creating an employee provisions their sign-in account at that role (services/employees.ts).
+  await deps.db.insert(schema.roles).values([{ name: "hr_admin", label: "HR admin" }, { name: "employee", label: "Employee" }]).onConflictDoNothing();
   await deps.db.insert(schema.users).values({ uuid: actor.uuid, code: `u-${genId().slice(0, 4)}`, email: actor.email, role: "hr_admin" });
 });
 

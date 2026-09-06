@@ -159,6 +159,7 @@ const employee: Grant = {
     "asset-requests.me.cancel",
     "time-entries.me.submit",
     "goals.me.updateProgress",
+    "goals.me.comment", // answer the coaching on own goal - a thread only one side may write to is not one
     "tax-declarations.me.upload", // attach/download own investment proofs
     "tax-declarations.me.download",
     "tickets.me.**", // every ticket verb on OWN tickets (comment/cancel/todos/...); others' via category shares
@@ -244,6 +245,7 @@ const manager: Grant = {
     "reviews.my-dept.nominate",
     "reviews.my-dept.nudge", // remind the current stage's owner on a stalled team review
     "reviews.my-dept.pdf", // record copy of a report's finished review
+    "goals.my-dept.comment", // coach on the team's goals - the thread under a goal is where that happens
     "expenses.my-dept.approve", // decide the dept's operational expenses (my-dept keeps it owned, not cross-dept)
     "expenses.my-dept.reject",
   ],
@@ -286,7 +288,9 @@ const hr_admin: Grant = {
     "bank-formats.**": "write", // HR defines per-bank bulk-payment Excel formats (mappings + template)
     "settings.**": "write",
     "leave-requests.**": "read", // HR can view all leave-requests
+    "leave-balances.**": "read", // HR can view everyone's leave balances (encashment page needs the real number)
     "reimbursements.**": "read", // HR can view + decide all reimbursement claims
+    expenses: "write", // HR (finance) RECORDS company spend (a vendor invoice arrives at finance, not at the employee who ordered it)
     "expenses.**": "read", // HR (finance) views + decides all operational expenses org-wide
     // Workflow engine: HR authors the automation rules (authoring is the privileged act - actions run with
     // system authority) and reads the event + run logs. Not granted to employee/manager (private-by-default).
@@ -434,6 +438,7 @@ const payroll_admin: Grant = {
     "payroll-runs.**": "write",
     "payslips.**": "read",
     "reimbursements.**": "read", // payroll views + decides + pays out reimbursement claims
+    expenses: "write", // payroll (finance) records company spend as well as paying it
     "expenses.**": "read", // payroll (finance) views + decides + pays operational expenses org-wide
     "vendors.**": "write", // finance maintains the vendor master
     "expense-budgets.**": "write", // finance sets + reviews budgets

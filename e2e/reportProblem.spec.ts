@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect, toast } from "./fixtures";
+import { enableTelemetry, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Reporting a problem, from the top bar's support menu.
 //
@@ -30,6 +30,9 @@ import { gotoRoute, test, expect, toast } from "./fixtures";
 // and forwarded mangled bytes while the client held a perfectly valid replay id.
 async function stubTelemetryRelay(page: Parameters<typeof gotoRoute>[0]) {
   const envelopes: { header: string; itemType: string }[] = [];
+  // The lane leaves the SDK inert unless a page asks for it; the stub below is what keeps this one's
+  // envelopes on the machine. Both have to be in place before the first navigation.
+  await enableTelemetry(page);
   await page.route("**/diag", (route) => {
     const raw = route.request().postDataBuffer();
     if (raw) {

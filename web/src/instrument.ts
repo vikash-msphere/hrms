@@ -4,11 +4,30 @@
 // would pull the app's module graph in ahead of init and defeat the ordering.
 //
 // The DSN is a BUILD-time value (Vite bakes VITE_* into the bundle), so a build made without it ships with
-// Sentry inert rather than half-configured. That is the intended default for local development: no DSN, no
-// init, no network calls, no cost. `npm run preflight` warns when a production build is missing it.
+// Sentry inert rather than half-configured. `npm run preflight` warns when a production build is missing it.
 import * as Sentry from "@sentry/react";
 
-const dsn = import.meta.env.VITE_SENTRY_DSN;
+// OFF IN DEV, whatever `web/.env` says.
+//
+// A DSN in `.env` is convenient for a production build and was quietly costly everywhere else: every error a
+// developer causes on purpose, and every page the browser suite walks, was relayed into the same project
+// people read when production breaks. It is noise in the place that must stay quiet, and with the suite
+// running sixteen browsers at once it is a rate-limited flood of relayed subrequests through the Worker too.
+//
+// `VITE_SENTRY_IN_DEV=1` turns it back on for a dev server that means it.
+//
+// `VITE_SENTRY_IN_DEV=opt-in` is the browser suite's setting, and it is a THIRD state, not a synonym for on.
+// Two specs (`reportProblem`, `replayMasking`) drive the real SDK and read the envelopes it produces, and both
+// stub `/diag` in the page so nothing leaves the machine - but a server-wide `=1` armed the SDK in all ~350
+// specs, and the other ~348 stub nothing: every error and trace they provoked was relayed through the Worker
+// to the live Sentry project (569 envelopes in one run), which is both real telemetry from a test run and a
+// few hundred outbound subrequests of load on the very Worker the suite is measuring. Under `opt-in` the SDK
+// stays inert unless the page itself asks for it, which only those two specs do (`enableTelemetry` in
+// e2e/fixtures.ts sets the flag before the app boots).
+const pageOptIn = (globalThis as { __hrmsSentryOptIn?: boolean }).__hrmsSentryOptIn === true;
+const inDev = import.meta.env.VITE_SENTRY_IN_DEV;
+const devOptIn = inDev === "1" || (inDev === "opt-in" && pageOptIn);
+const dsn = import.meta.env.DEV && !devOptIn ? undefined : import.meta.env.VITE_SENTRY_DSN;
 
 // The few routes where practically EVERYTHING on screen is a value, masked whole by `[data-page="…"]`
 // (App.tsx stamps the route key onto <main>).
@@ -184,22 +203,9 @@ const client = dsn
         },
       },
 
+      // Replay is NOT here. It is attached after first paint from web/src/sentryReplay.ts - see
+      // REPLAY_OPTIONS and the installer below.
       integrations: [
-        Sentry.replayIntegration({
-          ...REPLAY_PRIVACY,
-          networkCaptureBodies: false,
-          // A tab open across a deploy asks for a hashed chunk that no longer exists. The app already handles
-          // that as an expected condition (ErrorBoundary shows "This tab is out of date" and offers a reload),
-          // so the replay would be sixty seconds of someone clicking a nav link - no defect to see, and one
-          // upload per stale tab after every deploy. The pattern is the one lib/lazyPage.tsx matches on;
-          // it is restated because nothing in this file may import from the app.
-          beforeErrorSampling: (event) => {
-            const v = event.exception?.values?.[0];
-            return !/ChunkLoadError|Loading chunk|dynamically imported module|module script failed|Importing a module/i.test(
-              `${v?.type ?? ""}: ${v?.value ?? ""}`,
-            );
-          },
-        }),
         Sentry.browserTracingIntegration({
           // Both off, and driven by hand below. The app routes on the URL HASH (see router.ts), which the
           // automatic instrumentation cannot see: every route in the SPA is the same pathname, so every
@@ -232,9 +238,13 @@ const client = dsn
       // The default 100 is a few minutes on a busy page, which is shorter than the sessions people report from.
       maxBreadcrumbs: 300,
 
-      // Full sampling locally (a handful of page loads), a fraction in production, where every user's every
-      // navigation is a billable transaction.
-      tracesSampleRate: import.meta.env.DEV ? 1 : 0.2,
+      // A fraction in production, where every user's every navigation is a billable transaction - and NONE in
+      // dev, where a transaction per navigation buys nobody anything and costs plenty. "Full sampling locally"
+      // sounded free and was not: it ships a trace for every page a developer opens and every page the browser
+      // suite walks, into the same project people read when production breaks. Sixteen parallel browsers make
+      // that a rate-limited flood of relayed subrequests through the Worker. Errors and the replay that
+      // accompanies them are unaffected - those are the signals dev actually uses.
+      tracesSampleRate: import.meta.env.DEV ? 0 : 0.2,
       // The API is same-origin (`fetch("/v1…")` - see api.ts), so trace headers go to it and nowhere else.
       // Left unset the SDK would still default to same-origin, but the Worker is the only thing on the other
       // end of a trace and saying so keeps a future absolute URL from silently leaking headers off-origin.
@@ -259,7 +269,96 @@ function routePattern(): string {
   return `/${page || "dashboard"}${id ? "/:id" : ""}${sub ? `/${sub}` : ""}`;
 }
 
+// Everything the recorder is configured with. Data only - the recorder itself is 39.9 kB gz and is fetched
+// separately (web/src/sentryReplay.ts). The privacy policy stays HERE, next to the note explaining it and
+// where test/replayMaskCoverage.test.ts reads it.
+const REPLAY_OPTIONS = {
+  ...REPLAY_PRIVACY,
+  networkCaptureBodies: false,
+  // A tab open across a deploy asks for a hashed chunk that no longer exists. The app already handles that as
+  // an expected condition (ErrorBoundary shows "This tab is out of date" and offers a reload), so the replay
+  // would be sixty seconds of someone clicking a nav link - no defect to see, and one upload per stale tab
+  // after every deploy. The pattern is the one lib/lazyPage.tsx matches on; it is restated because nothing in
+  // this file may import from the app.
+  beforeErrorSampling: (event: { exception?: { values?: { type?: string; value?: string }[] } }) => {
+    const v = event.exception?.values?.[0];
+    return !/ChunkLoadError|Loading chunk|dynamically imported module|module script failed|Importing a module/i.test(
+      `${v?.type ?? ""}: ${v?.value ?? ""}`,
+    );
+  },
+};
+
+type ReplayModule = typeof import("./sentryReplay");
+
+/** The attached recorder module, or undefined if its chunk would not load. Never rejects - see loadReplay. */
+let replayReady: Promise<ReplayModule | undefined> | undefined;
+
+/**
+ * Fetch the recorder chunk and attach it, once.
+ *
+ * NEVER REJECTS, and that is the point rather than tidiness. The recorder is a diagnostic, never a
+ * dependency: a chunk that will not load - the browser is offline, or a tab open across a deploy is asking
+ * for a hashed file that no longer exists, which this very file treats as routine in `beforeErrorSampling` -
+ * has to leave the app working and every other Sentry signal (errors, breadcrumbs, traces) intact.
+ *
+ * A rejection here would surface in the worst possible place. `captureSessionReplay` is awaited by
+ * ReportProblemDialog's submit BEFORE its try block, and that dialog throws-to-fail, so a rejected load would
+ * pin an error in the form and stop the ticket being created at all - the person is reporting a fault and the
+ * report is what breaks. So the failure resolves to `undefined` instead, and the memo is cleared so a later
+ * report tries again rather than inheriting one bad moment for the rest of the session.
+ */
+function loadReplay(): Promise<ReplayModule | undefined> {
+  return (replayReady ??= import("./sentryReplay").then(
+    (m) => {
+      // Guarded separately from the handler beside it, which only ever sees the IMPORT fail: a throw in here -
+      // an SDK that refuses the integration - would reject the memo itself and be re-thrown to every later
+      // awaiter of it, which is the one thing this function promises not to do. The module is still returned:
+      // a recorder that would not attach is a recorder `activeReplay()` reports as absent.
+      try {
+        m.installReplay(REPLAY_OPTIONS);
+      } catch {
+        /* no recorder attached; every caller already treats that as "no replay to offer" */
+      }
+      return m;
+    },
+    () => {
+      replayReady = undefined;
+      return undefined;
+    },
+  ));
+}
+
+/**
+ * The running recorder, loading it first if it is not attached yet. Undefined when there is none, never a
+ * rejection - every caller below is documented as returning `undefined` rather than throwing.
+ *
+ * The wait matters for correctness, not just tidiness. Somebody who hits a fault in the first seconds and
+ * opens the report dialog straight away would otherwise find no recorder at all and get a ticket with no
+ * replay attached - the one report most worth having a film of. Awaiting the load means they get a recorder;
+ * what it holds is whatever has accumulated since it started, which is the same "sawtooth" caveat the buffer
+ * always had (see captureSessionReplay).
+ */
+async function currentReplay() {
+  if (!client) return undefined;
+  // The module the load resolved with, not a second `import()`. A second one would reject on a chunk that
+  // failed, which is exactly what the handler above exists to prevent.
+  return (await loadReplay())?.activeReplay();
+}
+
 if (client) {
+  // Started NOW, not on an idle callback.
+  //
+  // What takes the recorder off the critical path is that it is a dynamically imported chunk of its own, so
+  // index.html neither loads nor `modulepreload`s it and first paint never waits for it. WHEN the import
+  // fires changes nothing about that - only how early the recorder begins buffering.
+  //
+  // So there is nothing to buy by waiting, and something real to lose. The SDK drops any replay shorter than
+  // its 5s `minReplayDuration`, measured from when the recorder starts, so deferring the load to idle (~3s)
+  // would leave the first ~8 seconds of every session unable to produce a replay at all - and the reports
+  // worth the most are the ones somebody files the moment something breaks. A version of this that idled for
+  // 3s also put the recorder under that floor for e2e/replayMasking.spec.ts, which flushes at 6s.
+  void loadReplay();
+
   // Source "route" from the start, unlike the reference flow that opens on "url" and upgrades: the hash is
   // already in the address bar when this module runs, so the pattern is known before the first span exists
   // and there is nothing to wait for.
@@ -372,7 +471,7 @@ export const replayUrl = (id: string): string | undefined =>
  * possible when it does.
  */
 export async function captureSessionReplay(): Promise<string | undefined> {
-  const replay = Sentry.getReplay();
+  const replay = await currentReplay();
   if (!replay) return undefined;
   try {
     await replay.flush({ continueRecording: false });
@@ -400,9 +499,9 @@ export async function captureSessionReplay(): Promise<string | undefined> {
  * a dialog. Nothing is lost - the run-up was already flushed and uploaded when the dialog opened.
  */
 export function startManualRecording(): void {
-  const replay = Sentry.getReplay();
-  if (!replay) return;
   void (async () => {
+    const replay = await currentReplay();
+    if (!replay) return;
     try {
       await replay.stop({ flush: false });
       replay.start();
@@ -420,7 +519,7 @@ export function startManualRecording(): void {
  * to leave the app in its resting posture: the last minute in memory, nothing uploaded.
  */
 export async function finishManualRecording(): Promise<string | undefined> {
-  const replay = Sentry.getReplay();
+  const replay = await currentReplay();
   if (!replay) return undefined;
   try {
     // Read BEFORE stopping: once the replay has ended there is no current session to report an id for.

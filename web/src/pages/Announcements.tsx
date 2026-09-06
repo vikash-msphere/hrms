@@ -1161,7 +1161,9 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                         stickerLayout={a.illustration_layout}
                         recipientLayout={a.recipient_layout}
                         iconClassName={kt.icon}
-                        bodyValign={a.body_valign}
+                        // `?? undefined`: null and absent both mean "the card's own default" - null is what a
+                        // merge-patch sends to CLEAR a placement, and it arrives back on the row that way.
+                        bodyValign={a.body_valign ?? undefined}
                         headerExtra={headerMark}
                         headerClassName="pr-14"
                       />
@@ -1169,11 +1171,11 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
                       <div className={cn(clamped && "relative max-h-80 overflow-hidden")}>
                         <PostCardBody
                           title={a.title}
-                          titleAlign={a.title_align}
+                          titleAlign={a.title_align ?? undefined}
                           body={a.body}
                           artUrl={art}
                           stickerLayout={a.illustration_layout}
-                          bodyValign={a.body_valign}
+                          bodyValign={a.body_valign ?? undefined}
                           headerExtra={headerMark}
                           headerClassName="pr-14"
                           // A poll's question and options are short enough to share their line with a picture.

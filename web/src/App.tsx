@@ -26,6 +26,8 @@ import { CapabilitiesContext, hasCapability } from "./lib/perm";
 import { OrgProvider } from "./lib/org";
 import { setTablePrefsUser } from "./lib/tablePrefs";
 import { setResourceStoreUser } from "./lib/resourceStore";
+import { whenReady, gc } from "./lib/clientStore";
+import { sweepSeenTickets } from "./lib/ticketsSeen";
 import { setPhotoCacheUser } from "./lib/photoCache";
 import { setSettingsUser } from "./lib/settingsStore";
 import { syncThemeFromServer } from "./lib/theme";
@@ -98,9 +100,17 @@ function RouteAccessScope({ page, id, children }: { page: string; id?: string | 
   return <AccessScope collection={collection} objectPath={objectPath}>{children}</AccessScope>;
 }
 
-// Dashboard is the landing page - keep it in the main chunk so first paint needs no extra roundtrip.
-// Every other page is its own chunk, fetched on first visit (route-level code splitting).
-import Dashboard from "./pages/Dashboard";
+// Every page is its own chunk, fetched on first visit (route-level code splitting) and downloaded in
+// parallel with the `me` request via PAGE_CHUNK above, so the shell and the page still mount together.
+//
+// Dashboard is included, and was the one exception for a long time: as the landing page it was imported
+// statically so that landing on it needed no second roundtrip. That bought one route a roundtrip and charged
+// every other route 38 kB gz - it is the largest page in the app, and anyone opening a deep link, a
+// notification link or a bookmark downloaded and parsed all of it before their own page could render.
+// Measured across a build: index 46.7 -> 23.2 kB gz, shell 121.6 -> 107.2, the whole critical path
+// 373.6 -> 335.7. Dashboard's own chunk is 24.5 kB gz, and its `dashboard` entry in PAGE_CHUNK starts
+// downloading it at the same moment identity is fetched, so landing on the dashboard is no slower either.
+const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Approvals = lazy(() => import("./pages/Approvals"));
 const Notifications = lazy(() => import("./pages/Notifications"));
 const Profile = lazy(() => import("./pages/Profile"));
@@ -160,6 +170,7 @@ const Activity = lazy(() => import("./pages/Activity"));
 // ONE batch. The bundler dedups: this import and the lazy() above share the one chunk. Missing keys just fall
 // back to lazy timing (no breakage). Dashboard is in the main chunk already, so it's omitted.
 const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
+  dashboard: () => import("./pages/Dashboard"),
   approvals: () => import("./pages/Approvals"), notifications: () => import("./pages/Notifications"),
   profile: () => import("./pages/Profile"), employees: () => import("./pages/Directory"),
   "org-chart": () => import("./pages/OrgChart"), attendance: () => import("./pages/Attendance"),
@@ -312,6 +323,32 @@ export default function App() {
   setPhotoCacheUser(cacheUser); // faces are cached on disk too, under the same identity key
   setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
 
+  // The stored copies live in IndexedDB, which is asynchronous, so they are loaded into memory ONCE before the
+  // first read fires - a read that goes out first pays for rows this browser already has. The wait costs
+  // nothing in practice: it starts the moment identity is known and runs alongside the route's code chunk,
+  // which is a network fetch, and it replaces the hundred-odd synchronous localStorage reads this used to do
+  // during render.
+  const [hydratedFor, setHydratedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!cacheUser) return;
+    let live = true;
+    void whenReady().then(() => {
+      if (live) setHydratedFor(cacheUser);
+    });
+    return () => {
+      live = false;
+    };
+  }, [cacheUser]);
+  const storeReady = !cacheUser || hydratedFor === cacheUser;
+
+  // Sweep what nothing will read again: keys from a build that stored things differently, drafts left behind
+  // before they had an expiry, and the families that grow one entry per ticket or per board. Idle-scheduled, so
+  // it never competes with the first paint.
+  useEffect(() => {
+    if (!me) return;
+    gc({ seenTickets: sweepSeenTickets });
+  }, [me]);
+
   // A simulation belongs to the admin who started it: if someone else is signed in on this browser now, drop
   // it rather than showing them a shell they never asked for. (The server re-checks permission per request
   // anyway - this is hygiene, not the gate.)
@@ -364,7 +401,11 @@ export default function App() {
   const routeChunk = () => {
     if (route.page === "employees" && route.id) return () => import("./pages/EmployeeProfile");
     if (route.page === "candidates" && route.id) return () => import("./pages/CandidateProfile");
-    return PAGE_CHUNK[route.page];
+    // An unrecognised route (a typo, a stale bookmark, a link from a since-renamed page) renders the
+    // dashboard - see `default:` in renderPage. Say so here too, or the chunk gate below waves it straight
+    // through and the landing splits into two commits and two batch:run windows instead of one. Every key the
+    // switch handles is in PAGE_CHUNK, so this fallback is reached only by a route that has no case at all.
+    return PAGE_CHUNK[route.page] ?? PAGE_CHUNK.dashboard;
   };
 
   // Download the current page's chunk NOW - in parallel with the `me` request - and track when it's ready.
@@ -427,7 +468,7 @@ export default function App() {
   // INITIAL load only: hold the whole app until the first route's chunk is ready, so the shell and the page
   // mount together (one batch:run). Once booted, route changes fall through to <Suspense> below (the shell
   // stays mounted, so a nav only fires the new page's reads - already a single batch).
-  if (!booted.current && !chunkReady) {
+  if (!booted.current && (!chunkReady || !storeReady)) {
     return (
       <FullScreen>
         <p className="animate-pulse text-sm text-muted-foreground">Loading {APP_NAME}…</p>

@@ -1,11 +1,12 @@
 import * as React from "react";
 import { FileSearch, Loader2, PenLine, TriangleAlert, Users, X } from "lucide-react";
-import { api, blobUrl, download } from "@/api";
+import { blobUrl, download, invoke } from "@/api";
 import { documentFileName } from "@/lib/documents";
 import { runSequential, batchSummary, type BatchProgress } from "@/lib/batchRun";
 import { EmployeePicker } from "@/components/common/EmployeePicker";
 import { useLetterTemplates, groupByCategory, type LetterTemplateOption } from "@/lib/letterTemplates";
 import { useLetterheads } from "@/lib/letterheads";
+import { useCollection } from "@/hooks/useCollection";
 import { useOrg } from "@/lib/org";
 import { LetterInputFields, missingRequiredInputs } from "@/components/common/LetterInputFields";
 import { Field } from "@/components/common/Field";
@@ -41,7 +42,6 @@ export function GenerateLetterDialog({
   employee,
   employees,
   departments,
-  recent,
   onGenerated,
 }: {
   open: boolean;
@@ -52,8 +52,6 @@ export function GenerateLetterDialog({
   employees?: Employee[];
   /** Departments, so the extra-recipients picker can select by team. */
   departments?: Department[];
-  /** Documents the caller already has loaded, used to notice a duplicate letter before making a second one. */
-  recent?: DocumentResource[];
   onGenerated?: () => void;
 }) {
   const templates = useLetterTemplates();
@@ -126,15 +124,24 @@ export function GenerateLetterDialog({
 
   // A letter of this kind already made for this person in the last month. Warn, never block: a corrected offer
   // or a re-issued certificate is legitimate - what isn't is finding out afterwards that there are now two.
+  //
+  // Read for THIS subject rather than sifting whatever list the page behind happened to have loaded: that list
+  // is one page of documents for everyone, so the letter that makes this a duplicate is as likely as not off
+  // the end of it - and the profile entry point has no such list at all, which left it with no warning ever.
+  // Scoped to the subject and only once the dialog is open, so the page itself still pays nothing.
+  const { rows: subjectDocs } = useCollection<DocumentResource>("personal-documents", {
+    params: { employee: subjectPath },
+    enabled: open && !!subjectPath,
+  });
   const duplicate = React.useMemo(() => {
-    if (!recent || !template || recipients.length !== 1 || !subjectPath) return null;
+    if (!template || recipients.length !== 1 || !subjectPath) return null;
     const label = template.label.trim().toLowerCase();
     const cutoff = Date.now() - 30 * 86400000;
-    return recent.find((d) =>
+    return subjectDocs.find((d) =>
       !d.delete_time && !!d.employee && idOf(d.employee) === idOf(subjectPath) &&
       (d.display_name ?? "").toLowerCase().includes(label) &&
       !!d.create_time && Date.parse(d.create_time) >= cutoff) ?? null;
-  }, [recent, template, recipients.length, subjectPath]);
+  }, [subjectDocs, template, recipients.length, subjectPath]);
 
   async function renderPreview() {
     if (!canSubmit || !template) return;
@@ -158,16 +165,15 @@ export function GenerateLetterDialog({
     }
   }
 
+  // Through `invoke`, not the raw `api` helper: a generated letter is a new document row, and only the write
+  // helpers refresh the shared cache every list of somebody's documents reads from.
   const generateFor = (path: string) =>
-    api<DocumentResource>("/personal-documents:generateLetter", {
-      method: "POST",
-      body: JSON.stringify({
-        employee: path,
-        letter_type: typePath,
-        ...(template?.inputs?.length ? { input: form.inputs } : {}),
-        ...(form.logo !== null ? { letterhead: form.logo } : {}),
-        ...(form.esign !== null ? { esign: form.esign } : {}),
-      }),
+    invoke<DocumentResource>("personal-documents", "generateLetter", undefined, {
+      employee: path,
+      letter_type: typePath,
+      ...(template?.inputs?.length ? { input: form.inputs } : {}),
+      ...(form.logo !== null ? { letterhead: form.logo } : {}),
+      ...(form.esign !== null ? { esign: form.esign } : {}),
     });
 
   async function submit() {

@@ -2,12 +2,13 @@ import * as React from "react";
 import { Input } from "@/components/ui/input";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { cn, formatMoney } from "@/lib/utils";
+import { numberFormat } from "@/lib/intl";
 
 // Symbol for a currency, pulled out of the same formatter that renders amounts, so the prefix in the
 // field and the figure in the table can never disagree about what "₹" means.
 function symbolOf(currency: string): string {
   try {
-    const parts = new Intl.NumberFormat(undefined, { style: "currency", currency, minimumFractionDigits: 0 }).formatToParts(0);
+    const parts = numberFormat(undefined, { style: "currency", currency, minimumFractionDigits: 0 }).formatToParts(0);
     return parts.find((p) => p.type === "currency")?.value ?? currency;
   } catch {
     return currency;
@@ -20,7 +21,7 @@ function compact(n: number, currency: string): string | null {
   if (!Number.isFinite(n) || Math.abs(n) < 100000) return null;
   const locale = currency === "INR" ? "en-IN" : undefined;
   try {
-    return new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 2 }).format(n);
+    return numberFormat(locale, { notation: "compact", maximumFractionDigits: 2 }).format(n);
   } catch {
     return null;
   }
@@ -110,3 +111,9 @@ export function MoneyInput({
     </div>
   );
 }
+
+// Set explicitly, and matched by <Field> when it decides which controls its `<label for>` may point at: this
+// is a labelable control (it forwards `id` to the input inside it), and without the name here every money
+// field in the app - amount, principal, cap, rate - carried a label that named nothing. A minified build
+// mangles Function.name, hence the assignment rather than relying on it. Same reason as ui/combobox.tsx.
+MoneyInput.displayName = "MoneyInput";

@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, test, expect, toast, ownWeekday } from "./fixtures";
 
 // The one thing no single-page test can show: two people, two front ends, one request.
 //
@@ -12,7 +12,13 @@ import { SPA_HEADERS, gotoRoute, test, expect, toast } from "./fixtures";
 // so the request lands in that manager's queue rather than an admin's.
 test("an employee files leave and their manager decides it", async ({ as }) => {
   const employee = await as("employee");
+  const reason = `E2E two-roles ${Date.now()}`;
   const manager = await as("manager");
+
+  // The day this spec will ask for. A weekday of its OWN: several specs ask for leave for this same person at
+  // once, and two requests on one day overlap - which the form is right to refuse, leaving the submit disabled
+  // forever. Claimed here rather than at the form because the cleanup below is written in terms of it.
+  const day = ownWeekday();
 
   // Start from a known day. The form refuses a range that overlaps leave the person already has, so a rerun
   // (or a retry after a late failure) would otherwise be blocked by the request the previous attempt filed -
@@ -21,17 +27,17 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   // Resolved, never hardcoded: a record's public id is derived from WIRE_ID_KEY, so it is not the same string
   // on another machine.
   const me = (await (await employee.request.get("/v1/users/me")).json()) as { employee: string };
-  const today = new Date().toISOString().slice(0, 10);
+  // Asked for at the SERVER, as one person and one day: the only leave that can block the filing below is
+  // leave covering `day`. Cancelling every future request this person had took out the far-future days other
+  // specs file for the same person (fixtures `fileLeave`) seconds earlier - their calendars then drew an
+  // absence that no longer existed, and this spec's tidying failed theirs. Narrowing also reaches leftovers
+  // sitting past a 100-row page.
   for (const state of ["PENDING", "APPROVED"]) {
-    const res = await admin.request.get(`/v1/leave-requests?state=${state}&page_size=100`);
-    const rows = ((await res.json()) as { results?: { path: string; employee: string; start_date: string }[] }).results ?? [];
-    for (const row of rows) {
-      // Only this employee's, and only leave that has not started - a past absence is history, and cancelling
-      // it would be rewriting somebody's year to make a test pass.
-      if (row.employee === me.employee && row.start_date >= today) {
-        await admin.request.post(`/v1/${row.path}:cancel`, { headers: SPA_HEADERS });
-      }
-    }
+    const res = await admin.request.get(
+      `/v1/leave-requests?state=${state}&employee=${encodeURIComponent(me.employee)}&from=${day}&to=${day}&page_size=100`,
+    );
+    const rows = ((await res.json()) as { results?: { path: string }[] }).results ?? [];
+    for (const row of rows) await admin.request.post(`/v1/${row.path}:cancel`, { headers: SPA_HEADERS });
   }
 
   // What the manager has waiting before any of this, so the assertion is about THIS request and not about
@@ -41,7 +47,6 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   // have already worked through, this manager's queue starts empty, and that is a fine place to start.
   await manager.waitForLoadState("networkidle").catch(() => {});
   const managerQueue = manager.getByRole("button", { name: "Approve", exact: true });
-  const waitingBefore = await managerQueue.count();
 
   // The employee files a day off.
   await gotoRoute(employee, "leave-requests", "Leaves");
@@ -57,7 +62,14 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   await employee.getByRole("option").first().click();
   // A quick pick rather than typed dates: it sets both ends and the sessions in one press, and it is what a
   // person actually uses.
-  await form.getByRole("button", { name: "Tomorrow", exact: true }).click();
+  // A weekday rather than the "Tomorrow" chip: leave is priced in WORKING days, so the chip is (correctly)
+  // absent when tomorrow is a Saturday, and a spec must not depend on which day the suite runs on. `day` was
+  // claimed at the top of the test, where the cleanup is written in terms of it.
+  await form.getByLabel("Start date").fill(day);
+  await form.getByLabel("End date").fill(day);
+  // A reason of its own: it is how this request is told apart from the ones other specs file for the same
+  // person in the same seconds - on their list, and in the manager's shared inbox.
+  await form.getByLabel(/Reason/).fill(reason);
   await form.getByRole("button", { name: "Request leave", exact: true }).click();
 
   await expect(toast(employee, "Leave requested")).toBeVisible();
@@ -70,6 +82,9 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   // `tbody tr` rather than `getByRole("row")`: a clickable row is given `role="button"` so it can be operated
   // from the keyboard (DataTable), which takes it out of the table's accessibility tree entirely - and this
   // table's rows open a detail panel.
+  // This employee's OWN pending row, found by the reason typed into it: several specs share this person, so
+  // "exactly one pending request" is a fact about the suite rather than about the app.
+  await employee.getByPlaceholder(/Search all records/).fill(reason);
   await expect(employee.locator("tbody tr").filter({ hasText: /Pending/ })).toHaveCount(1);
 
   // The manager's queue grew by exactly this one, and it is the employee's. A reload, not a navigation: the
@@ -78,19 +93,22 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   // back to a stale queue and refreshing it is exactly what the manager does in real life.
   await manager.reload();
   await expect(manager.getByRole("main")).toBeVisible();
-  await expect(managerQueue).toHaveCount(waitingBefore + 1);
-  const row = manager.locator("li, div").filter({ hasText: "Eve Employee" }).filter({ has: managerQueue }).last();
+  // The row for THIS request. A count-delta would be a coin toss: the inbox is shared, and other specs file
+  // and decide things in the same seconds.
+  const row = manager.locator("li, div").filter({ hasText: reason }).filter({ has: managerQueue }).last();
+  await expect(row).toBeVisible({ timeout: 30_000 });
   await row.getByRole("button", { name: "Approve", exact: true }).click();
   await manager.getByRole("dialog").getByRole("button", { name: "Approve", exact: true }).click();
-  // The outcome rather than the toast: the decided request leaves the queue it was waiting in. (approval.spec
-  // is where the toast and the confirmation copy are pinned.)
-  await expect(managerQueue).toHaveCount(waitingBefore);
+  // The outcome rather than the toast: THIS request leaves the queue it was waiting in. (approval.spec is
+  // where the toast and the confirmation copy are pinned.)
+  await expect(manager.locator("li, div").filter({ hasText: reason }).filter({ has: managerQueue })).toHaveCount(0, { timeout: 30_000 });
 
   // And the employee's own page now says so. Approved-but-upcoming leave stays in the live Requests tab
   // (web/src/pages/Leaves.tsx `isLive`), so the row does not move - only its status changes.
   await employee.reload();
   await expect(employee.getByRole("main")).toBeVisible();
   await employee.getByRole("tab", { name: /^Requests/ }).click();
+  await employee.getByPlaceholder(/Search all records/).fill(reason);
   await expect(employee.locator("tbody tr").filter({ hasText: /Approved/ })).toHaveCount(1);
   await expect(employee.locator("tbody tr").filter({ hasText: /Pending/ })).toHaveCount(0);
 });

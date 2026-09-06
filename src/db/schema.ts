@@ -249,6 +249,11 @@ export const employees = sqliteTable("employees", {
   // Written only where taxDetailsEnc is (services/taxDetails.ts), so the two can't drift.
   taxVerificationStatus: text("tax_verification_status", { enum: ["DECLARED", "VERIFIED", "REJECTED"] }),
   photoKey: text("photo_key"), // R2 key of the profile photo (JPEG), null if none
+  // When the photo was last set or cleared. The R2 key is stable across uploads (`photos/<uuid>`), so this is
+  // the only thing that distinguishes one picture from the next - and the client's face cache keys on it, so a
+  // replaced photo is a cache miss in EVERY browser rather than only in the one that uploaded it. Deliberately
+  // not `updatedAt`: renaming someone must not cost a re-fetch of their face.
+  photoAt: integer("photo_at", { mode: "timestamp_ms" }),
   signatureKey: text("signature_key"), // R2 key of the uploaded signature image (PNG), null if none
   // Per-user in-app notification preferences (self-service): JSON `{ muted: string[] }` of event categories
   // this employee has silenced FOR THEMSELVES. Layered over the org-level settings/notifications config -
@@ -918,7 +923,11 @@ export const cards = sqliteTable("cards", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), goalIdx: index("card_goal_idx").on(t.goalId) }));
+// `seq` is UNIQUE per board because it is the card's human key (MS-4 on a sticky note, in a commit message,
+// said out loud in a stand-up). It is allocated max+1 like a code, so two cards filed at the same moment
+// compose the same number - and without the index both would keep it, leaving two different tasks answering
+// to one name. The index fails the loser instead, and services/cards.ts re-numbers it.
+}, (t) => ({ boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq) }));
 
 // Append-only movement log: one row per column transition of a card. INTERNAL (not a wire collection / route):
 // written only by the card `move` verb and read only server-side by the board analytics roll-up, so it needs no
@@ -2470,6 +2479,31 @@ export const ticketComments = sqliteTable("ticket_comments", {
 //
 // It is also cheap to ASK: one row per collection (about seventy in total), indexed on `at`, so the question
 // "what changed since T" reads a handful of rows no matter how much data or history the org has.
+// The high-water mark of each code namespace, so allocating a code is one indexed write instead of a read of
+// every sibling (services/codeAlloc.ts).
+//
+// WHY. A `code` is allocated as max+1 over the codes already in its scope, and that max came from
+// `SELECT code FROM <table>` - the WHOLE table for a flat namespace. For a bounded table (departments, boards)
+// that is cheap and stayed cheap. For the append-only ones it is not: `event_log` is written by essentially
+// every action in the app and is never pruned, so within a year each new action was reading a hundred thousand
+// rows to compose one code, on a platform that bills rows read and caps CPU per request. `jobs`,
+// `automation_runs`, `workflow_instances` and `cron_runs` have the same shape.
+//
+// `next` is the LAST value handed out for the scope, not the next one - a reservation of n values leaves it
+// at the end of the run, so `allocFlatCodes` can take twenty at once and still be a single statement.
+//
+// THE INVARIANT this rests on: every code in a scope is minted through codeAlloc.ts. The counter is seeded on
+// its first touch from the codes already there (one scan, once per scope ever), which is what lets it be
+// introduced over an existing database and what makes a seeded database correct. Rows inserted with codes
+// BEHIND the counter's back after that - a re-seed over a live database - would leave it stale; the unique
+// index still refuses the duplicate, and `withFreshCode` walks the counter forward, so the failure mode is a
+// retryable conflict rather than a duplicate code.
+export const codeSequences = sqliteTable("code_sequences", {
+  // "<table>" for a flat namespace, "<table>:<owner uuid>" for an owner-scoped one.
+  scope: text("scope").primaryKey(),
+  next: integer("next").notNull(),
+});
+
 export const collectionVersions = sqliteTable("collection_versions", {
   collection: text("collection").primaryKey(),
   at: integer("at", { mode: "timestamp_ms" }).notNull(),

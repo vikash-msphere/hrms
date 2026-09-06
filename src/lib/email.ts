@@ -1,8 +1,15 @@
 import type { EmailSender, EmailAttachment } from "../ports";
+import { upstreamFailed } from "./errors";
 
 // Transactional email providers. Each entry maps the common (from, to, subject, html, attachments) shape onto
 // the provider's own HTTP contract. Add a provider by dropping another entry here - nothing else changes.
-export type EmailProvider = "resend" | "brevo" | "sendgrid" | "postmark" | "mailgun";
+//
+// `console` is the exception: it sends nothing and writes a line to the log instead. It exists because every
+// other entry here reaches a real vendor with a real key and mails a real person, which is wrong for a
+// preview deployment and wrong for the browser suite - `e2e/e2e.vars` selects it so a test run that walks the
+// invite/announcement/automation paths end to end still puts no mail on the wire. It is refused for a
+// production deploy (`scripts/preflight.ts`); anywhere else it is the safe default to develop against.
+export type EmailProvider = "resend" | "brevo" | "sendgrid" | "postmark" | "mailgun" | "console";
 
 type ProviderRequest = { url: string; headers: Record<string, string>; body: unknown };
 type ProviderConfig = {
@@ -22,7 +29,7 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-const providers: Record<EmailProvider, ProviderConfig> = {
+const providers: Record<Exclude<EmailProvider, "console">, ProviderConfig> = {
   resend: {
     request(apiKey, from, _region, to, subject, html, atts) {
       const body: Record<string, unknown> = { from, to, subject, html };
@@ -111,6 +118,15 @@ export function makeEmailSender(
   from: string,
   region?: string,
 ): EmailSender {
+  // The sink. Nothing leaves the Worker, so nothing needs a key or a verified sender.
+  if (provider === "console") {
+    return {
+      async send(to, subject, _html, attachments) {
+        const atts = attachments?.length ? ` +${attachments.length} attachment(s)` : "";
+        console.log(`[email:console] would send to ${to}: ${subject}${atts}`);
+      },
+    };
+  }
   const cfg = providers[provider];
   if (!cfg) throw new Error(`unknown email provider: ${provider}`);
   return {
@@ -118,10 +134,19 @@ export function makeEmailSender(
       const req = cfg.request(apiKey, from, region, to, subject, html, attachments ?? []);
       // URLSearchParams / FormData ride as-is (fetch sets the right Content-Type); everything else is JSON.
       const body = req.body instanceof URLSearchParams || req.body instanceof FormData ? req.body : JSON.stringify(req.body);
-      const res = await fetch(req.url, { method: "POST", headers: req.headers, body });
-      if (!res.ok) throw new Error(`email send failed (${provider}): ${res.status} ${await res.text().catch(() => "")}`);
+      // A vendor that is down, rate-limiting us, or holding a rotated key is not this app malfunctioning, and
+      // reporting it as one costs an "unhandled error" with a stack in the log and a 500 the caller cannot act
+      // on. `upstreamFailed` says which hop failed and carries the vendor's own words, so the operator reads
+      // "the mail vendor rejected the key" rather than going looking for a bug here.
+      let res: Response;
+      try {
+        res = await fetch(req.url, { method: "POST", headers: req.headers, body });
+      } catch (e) {
+        throw upstreamFailed(`the email provider (${provider}) could not be reached: ${(e as Error).message}`);
+      }
+      if (!res.ok) throw upstreamFailed(`the email provider (${provider}) refused the message: ${res.status} ${await res.text().catch(() => "")}`);
     },
   };
 }
 
-export const EMAIL_PROVIDERS = Object.keys(providers) as EmailProvider[];
+export const EMAIL_PROVIDERS = [...Object.keys(providers), "console"] as EmailProvider[];

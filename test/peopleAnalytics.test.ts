@@ -305,6 +305,37 @@ describe("people analytics", () => {
     expect(out.people).toHaveLength(1);
     expect(out.truncated).toBe(true);
   });
+
+  // Every aggregate binds one parameter per person and D1 refuses a statement with more than 100 of them, so
+  // a roster larger than the cap used to take the whole report down with `too many SQL variables` - the
+  // report worked in testing and failed at the first real org. The ids are chunked; this is the size that
+  // proves it, and that each chunk's rows survive the merge rather than the last one replacing the first.
+  it("reports on a roster larger than D1's parameter cap", async () => {
+    await seed();
+    const extra = Array.from({ length: 120 }, (_, i) => ({
+      uuid: genId(),
+      code: `04-001-${String(i + 100).padStart(3, "0")}`,
+      firstName: `Zed${String(i).padStart(3, "0")}`,
+      lastName: "Bulk",
+      workEmail: `bulk${i}@x.test`,
+      status: "active" as const,
+      startDate: day("2024-01-01"),
+    }));
+    // Inserted a few at a time for the same reason the report chunks its reads: one statement, 100 parameters.
+    for (let i = 0; i < extra.length; i += 3) await deps.db.insert(schema.employees).values(extra.slice(i, i + 3));
+    // One punch for the last person of the roster: their numbers come from a later chunk than A's, and both
+    // have to be in the answer.
+    await deps.db.insert(schema.attendanceSessions).values({
+      uuid: genId(), code: `${extra[119]!.code}-s1`, employeeId: extra[119]!.uuid,
+      clockIn: at("2026-06-01T03:35:00Z"), clockOut: at("2026-06-01T12:45:00Z"),
+    });
+
+    const out = await peopleAnalytics(deps, allScopes(), { ...WINDOW, maxPeople: 500 });
+    expect(out.people).toHaveLength(122);
+    expect(out.truncated).toBe(false);
+    expect(rowFor(out, A.uuid).values.days_present).toBe(2);
+    expect(rowFor(out, extra[119]!.uuid).values.days_present).toBe(1);
+  });
 });
 
 describe("punctuality rules (pure)", () => {

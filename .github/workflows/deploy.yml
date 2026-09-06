@@ -1,7 +1,7 @@
 name: deploy
 on:
   push:
-    branches: [main]
+    branches: [prod]
   workflow_dispatch: {}
 
 # Never let two deploys race the same D1 / Worker.

@@ -1,4 +1,5 @@
 import type { FullConfig } from "@playwright/test";
+import { lane } from "./lane";
 
 // Prove the stack is the one the specs assume, before a single browser opens.
 //
@@ -20,7 +21,7 @@ export default async function globalSetup(config: FullConfig) {
   const baseURL = config.projects[0]?.use.baseURL;
   if (!baseURL) throw new Error("e2e: no baseURL configured");
 
-  const prismPort = process.env.E2E_PRISM_PORT ?? "4011";
+  const prismPort = lane.prismPort;
   const prism = await fetch(`http://127.0.0.1:${prismPort}/v1/users/me`).catch(() => null);
   if (!prism) {
     throw new Error(

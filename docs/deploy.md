@@ -215,8 +215,13 @@ From there, the super admin provisions departments, employees, and role assignme
 ## Automating deploys (CI/CD)
 
 Steps 0-4, 7, and 9 are **one-time setup** — run them once by hand. Everything per-commit (build → migrate →
-deploy, steps 5, 6, 8) is automated by `.github/workflows/deploy.yml`, which runs on every push to `main`
+deploy, steps 5, 6, 8) is automated by `.github/workflows/deploy.yml`, which runs on every push to **`prod`**
 (and via manual **Run workflow**).
+
+`prod` is the release branch; `dev` is the trunk. Work merges to `dev` continuously, and a deploy happens
+only when `dev` is merged into `prod`. Keeping them apart is what lets production be frozen through a
+monthly payroll cutover while development carries on - retargeting the workflow at `dev` would make every
+merge a production deploy. `verify.yml` gates every push and pull request on both branches either way.
 
 The workflow runs, in order: `npm run preflight`, `npm run verify` (spectral + tsc + vitest),
 `npm run build:web`, `npm run db:migrate:remote`, then `npx wrangler deploy`. That is the same chain as

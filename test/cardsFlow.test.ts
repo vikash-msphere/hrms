@@ -369,4 +369,22 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     await moveCard(deps, actor, card.uuid, "review");
     expect((await cardRow(card.uuid)).sprintId).toBeNull();
   });
+
+  // A stand-up is four people filing tasks on one board at once. Both of a card's allocated numbers are
+  // read-then-write max+1 - its `code` and the per-board `seq` behind the human key - so simultaneous creates
+  // compose the same pair. Unique indexes fail the loser and services/cards.ts re-numbers it; what must never
+  // happen is two tasks answering to MS-4, which is the number people say out loud.
+  it("numbers cards filed at the same moment apart", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Stand-up board" });
+
+    const cards = await Promise.all(
+      ["One", "Two", "Three", "Four"].map((title) => createCard(deps, actor, { board: `boards/${board.uuid}`, title })),
+    );
+
+    expect(new Set(cards.map((c) => c.seq)).size).toBe(4);
+    expect(new Set(cards.map((c) => c.code)).size).toBe(4);
+    // The numbers are the run 1..4, not four arbitrary distinct values: the key is read as a sequence.
+    expect(cards.map((c) => c.seq).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([1, 2, 3, 4]);
+  });
 });

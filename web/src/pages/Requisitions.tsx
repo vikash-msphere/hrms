@@ -41,7 +41,8 @@ const AGING_DAYS = 30;
 
 /** A pay grade as a one-line budget: the name plus the band it spans. */
 const bandLabel = (g: PayGrade) => {
-  const money = (n?: number) => (n != null ? formatMoney(n, g.currency_code ?? "INR") : null);
+  // A band end is nullable on the wire (an open-ended band has no floor or no ceiling).
+  const money = (n?: number | null) => (n != null ? formatMoney(n, g.currency_code ?? "INR") : null);
   const span = [money(g.band_min), money(g.band_max)].filter(Boolean).join(" - ");
   return span ? `${g.display_name} (${span})` : g.display_name;
 };

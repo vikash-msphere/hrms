@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { eq, and, isNull, inArray } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -57,7 +57,8 @@ export async function createReferral(deps: Deps, actor: AppUser, input: Referral
   const referrerId = idFromPath(input.referrer) ?? actor.employeeId;
   if (!referrerId) throw invalidArgument("referrer is required");
   const departmentId = input.department ? idFromPath(input.department)! : null;
-  const row = (await deps.db
+  // Allocated inside the retry (codeAlloc.ts): a referral drive is a burst of these.
+  const row = (await withFreshCode(async () => deps.db
     .insert(schema.referrals)
     .values({
       code: await allocOwnedCode(deps, schema.referrals, schema.referrals.referrerId, referrerId),
@@ -71,7 +72,7 @@ export async function createReferral(deps: Deps, actor: AppUser, input: Referral
       notes: input.notes?.trim() || null,
       status: "submitted",
     })
-    .returning())[0]!;
+    .returning()))[0]!;
   await audit(deps, actor, "referral.create", "referrals", row.uuid, createdMeta(row, "referrals"), row);
   return row;
 }

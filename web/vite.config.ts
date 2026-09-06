@@ -461,6 +461,11 @@ export default defineConfig(({ mode }) => ({
             // in buffer mode (see instrument.ts), so it has to be recording BEFORE the error it explains, and
             // a dynamic import of @sentry/react would be merged back into this chunk anyway - Rollup inlines a
             // module that is also statically imported.
+            // The session-replay recorder, split OUT of the eager `sentry` chunk. Without this line the
+            // `@sentry` rule below sweeps it back in and the dynamic import in web/src/sentryReplay.ts buys
+            // nothing - the chunk is named, so it is fetched eagerly with the rest of the SDK. Measured:
+            // naming it here and importing it dynamically takes 39.9 kB gz off the critical path.
+            if (id.includes("@sentry/replay")) return "sentry-replay";
             if (id.includes("@sentry")) return "sentry";
             // pdf.js and the module that exports its worker's URL (`pdf.worker.min.mjs?url`, all of 120 bytes)
             // load at the same moment - the stub is only read to point pdf.js at its worker. One chunk, not two.

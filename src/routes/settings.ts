@@ -143,6 +143,8 @@ export const settings = new Hono<AppEnv>()
   .patch("/:setting_id", zValidator("json", writeSchema), async (c) => {
     if (MANAGED_KEYS.has(c.req.param("setting_id"))) throw notFound("setting not found");
     validateSettingValue(c.req.param("setting_id"), c.req.valid("json").value);
-    const row = await upsertSetting(c.get("deps"), c.get("user"), c.req.param("setting_id"), c.req.valid("json").value);
+    // Optional, like every other patch in the API: send the ETag the edited value was read at and a save that
+    // would overwrite somebody else's is refused with 409 instead of silently winning (services/settings.ts).
+    const row = await upsertSetting(c.get("deps"), c.get("user"), c.req.param("setting_id"), c.req.valid("json").value, c.req.header("If-Match"));
     return c.json(toSettingResource(row));
   });

@@ -63,3 +63,42 @@ describe("a soft-deletable collection specifies its :restore", () => {
     expect(orphans, ":restore in openapi.yaml with no soft-delete to undo").toEqual([]);
   });
 });
+
+// The same 405 trap, one level down: `:restore` is only the verb the FACTORY mounts. A route file may declare
+// any number of custom methods in its `verbs: {}` block, and each one is a POST Prism has to find in the
+// contract - `cards:addTodos`, `:toggleTodo` and `:removeTodo` were mounted, used by the board's checklist,
+// and specified nowhere, so every tick and every added item died with "Route resolved, but no method matched"
+// for anyone running through the proxy. Reading the verb names out of the route files makes that impossible
+// to repeat without editing this list.
+const routeSrc = import.meta.glob("../src/routes/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+
+/** Every `<collection>:<verb>` a route file declares in its `verbs: {}` block. */
+function declaredVerbs(): { collection: string; verb: string; file: string }[] {
+  const out: { collection: string; verb: string; file: string }[] = [];
+  for (const [file, src] of Object.entries(routeSrc)) {
+    const collection = (src.match(/collection:\s*"([a-z-]+)"/) ?? src.match(/plural:\s*"([a-z-]+)"/) ?? [])[1];
+    const at = src.indexOf("verbs: {");
+    if (!collection || at < 0) continue;
+    for (const m of src.slice(at + "verbs: {".length).matchAll(/\n {4}([a-zA-Z][a-zA-Z0-9]*):\s*\{/g)) {
+      const verb = m[1]!;
+      if (["schema", "run", "raw"].includes(verb)) continue;
+      out.push({ collection, verb, file: file.split("/").pop()! });
+    }
+  }
+  return out;
+}
+
+describe("every custom method a route mounts is in the contract", () => {
+  const verbs = declaredVerbs();
+
+  it("found the verb blocks (sanity: the route shape still parses)", () => {
+    expect(verbs.length).toBeGreaterThan(50);
+  });
+
+  it("specifies a path for each one", () => {
+    const missing = verbs
+      .filter(({ collection, verb }) => !specPaths.some((p) => p.includes(`/v1/${collection}`) && p.endsWith(`:${verb}`)))
+      .map(({ collection, verb, file }) => `${collection}:${verb} (${file})`);
+    expect([...new Set(missing)], "mounted but unspecified - Prism answers 405 and the feature is dead through the proxy").toEqual([]);
+  });
+});

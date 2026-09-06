@@ -86,6 +86,11 @@ const LABELERS: Record<string, Labeler> = {
   "review-feedback": (r) => u(txt(get(r, "state"))),
   "reviews": (r) => u(txt(get(r, "state"))),
   "users": (r) => u(txt(get(r, "email"))),
+  // A rule has no name, and `subject` (which nameColumn would otherwise pick up) is a role name at best and a
+  // users uuid at worst. The label names the two facts that tell one rule from another - who it is for and
+  // which collection it reaches - with the subject dropped for a user rule, where the uuid says nothing and
+  // `meta.subject_label` carries the person.
+  "access-rules": (r) => u([txt(get(r, "subject_kind")) === "user" ? "" : txt(get(r, "subject")), txt(get(r, "namespace")) || txt(get(r, "collection"))].filter(Boolean).join(" → ")),
   // A request/balance/run is about a thing the row only holds an id for. The STATE is the honest on-row fact,
   // and it is also the one that changes - which is what a trail is read for.
   "asset-requests": (r) => u(txt(get(r, "state"))),

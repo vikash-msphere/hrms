@@ -691,12 +691,23 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     ...chunk(paidArrearIds, 90).map((ids) => ({ stmt: markCompArrearsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.compensation.uuid }), expect: ids.length, label: "salary arrears" })),
     ...chunk(paidReimbIds, 90).map((ids) => ({ stmt: markReimbursementsPaidByRun(deps, ids, runId, now).returning({ uuid: schema.reimbursements.uuid }), expect: ids.length, label: "reimbursements" })),
   ];
+  // The build stamp is taken HERE, once every statement above has been CONSTRUCTED - not from the `now` the
+  // build opened with, which is a whole pricing pass earlier.
+  //
+  // Each of those markers is an update, and an update carries its own `updated_at` stamped by the schema's
+  // `$onUpdate` at construction time. Staleness asks "was any income-affecting input touched after the run
+  // was built" (see runStaleness), and bonuses, encashments, overtime, arrears, claims and the loan ledger
+  // are all on that list - so stamped with the earlier `now`, a run's OWN payment markers post-dated its own
+  // build stamp. Every run that paid any of them therefore reported itself stale the moment it finished
+  // building, and rebuilding produced the same warning again: a permanent false alarm on the one banner that
+  // exists to be believed.
+  const builtAt = new Date();
   const stmts: (BatchStmt | CheckedStmt)[] = [
     ...marks,
     ...loanWrites.stmts,
     ...insertBatches(itemRows, (rows) => deps.db.insert(schema.payrollRunItems).values(rows)),
     // Stamp the build time: any income-affecting input touched after this makes the run stale (see runStaleness).
-    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: now, updatedAt: now }).where(eq(schema.payrollRuns.uuid, runId)),
+    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: builtAt, updatedAt: builtAt }).where(eq(schema.payrollRuns.uuid, runId)),
   ];
   const drifted = await runBatchChecked(deps.db, stmts);
   if (drifted.length) {

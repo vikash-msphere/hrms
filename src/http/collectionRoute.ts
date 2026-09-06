@@ -19,6 +19,7 @@ import { customMethod } from "./customMethod";
 import { lifecycleVerb } from "./lifecycleVerb";
 import { accessHint, withAccess } from "./accessHint";
 import { clampPageSize } from "./pagination";
+import { lastWriteAt, listEtag, etagMatches } from "./listEtag";
 import { jsonBody } from "./jsonRequest";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
 
@@ -161,20 +162,42 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
       deletedOnly: c.req.query("deleted_only") === "true",
     };
     const user = c.get("user");
-    const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = spec.list
+    // Conditional GET (src/http/listEtag.ts). The client caches this page and revalidates when its freshness
+    // window lapses, which is usually to be told nothing has changed - so answer that in one indexed row
+    // instead of a hundred.
+    //
+    // The stamp is read BEFORE the list query, always. Reading the two concurrently looked free and was not:
+    // two D1 statements issued together have no ordering between them, so a write landing in the middle can be
+    // seen by the stamp read and missed by the list query - rows from before the write, stamped with the
+    // validator from after it. The client would then store those rows, revalidate, match, and be told to keep
+    // them. Ordering it this way can only be wrong the harmless way round: a write after the stamp makes the
+    // next revalidation miss and re-read. The cost is one indexed row of latency, and only on a miss - the
+    // path that is about to read a whole page anyway.
+    const ifNoneMatch = c.req.header("If-None-Match");
+    const now = Date.now(); // one clock for both etags below, so the window can't flip between them
+    const lastWrite = await lastWriteAt(c.get("deps"), now);
+    const etag = listEtag(lastWrite, user, c.req.url, now);
+    // A match means the list query never runs, which is the whole saving.
+    if (ifNoneMatch && etagMatches(ifNoneMatch, etag)) return c.body(null, 304, { ETag: etag });
+    const listed = spec.list
       ? await spec.list(c, page)
       : await svc.list(c.get("deps"), user, c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, page.deletedOnly);
+    const { items, nextPageToken, extra }: { items: any[]; nextPageToken?: string; extra?: Record<string, unknown> } = listed;
     const rows = await decorate(c, items);
     // `extra` is for an aggregate the page itself cannot carry - notifications ships `snoozed_count` so the
     // bell can say "3 snoozed" without a second request.
-    return c.json({
-      results: rows.map((r) => {
-        const hint = accessHint(user, collection, r.code, user.grant, hintVerbs);
-        return withAccess(serialize(r, user, hint.can) as object, user, collection, r.code, user.grant, hintVerbs, hint);
-      }),
-      next_page_token: nextPageToken,
-      ...(extra ?? {}),
-    });
+    return c.json(
+      {
+        results: rows.map((r) => {
+          const hint = accessHint(user, collection, r.code, user.grant, hintVerbs);
+          return withAccess(serialize(r, user, hint.can) as object, user, collection, r.code, user.grant, hintVerbs, hint);
+        }),
+        next_page_token: nextPageToken,
+        ...(extra ?? {}),
+      },
+      200,
+      { ETag: etag },
+    );
   });
 
   app.get(`/:${param}`, async (c) => item(c, await svc.get(c.get("deps"), c.get("user"), itemId(c))));

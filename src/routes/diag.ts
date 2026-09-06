@@ -79,13 +79,23 @@ diag.post("/", async (c) => {
     return c.text("unknown destination", 403);
   }
 
-  const upstream = await fetch(`${configured.origin}/api/${configured.projectId}/envelope/`, {
-    method: "POST",
-    // Byte-for-byte what arrived. Its header line already carries the DSN and the SDK's auth, which is why no
-    // key of ours is involved and nothing here needs a secret - and why re-encoding it could only corrupt it.
-    body,
-    headers: { "Content-Type": "application/x-sentry-envelope" },
-  });
+  // The one call here that reaches outside, and the one that can fail for reasons that are nobody's fault: the
+  // tracker is down, or the Worker's outbound connection dies mid-flight ("Network connection lost"). An
+  // unhandled rejection makes THAT a 500 out of the error relay - the page's error reporter erroring, which
+  // the SDK reports, which comes back here. A gateway status says what happened and stops the loop; the SDK
+  // backs off and keeps the envelope.
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${configured.origin}/api/${configured.projectId}/envelope/`, {
+      method: "POST",
+      // Byte-for-byte what arrived. Its header line already carries the DSN and the SDK's auth, which is why no
+      // key of ours is involved and nothing here needs a secret - and why re-encoding it could only corrupt it.
+      body,
+      headers: { "Content-Type": "application/x-sentry-envelope" },
+    });
+  } catch {
+    return c.text("tracker unreachable", 502);
+  }
 
   // Rate-limit headers are the one thing the SDK reads back: without them it cannot honour a 429 and will
   // keep sending into a closed door. Everything else upstream returns is dropped.

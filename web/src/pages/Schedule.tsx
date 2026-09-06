@@ -238,6 +238,10 @@ export default function Schedule({ me }: { me: Me }) {
                             disabled={!canManage}
                             onClick={() => openCell(e.path, d)}
                             title={a ? [s?.name, s && `${s.start}-${s.end}`, a.note].filter(Boolean).join(" · ") : undefined}
+                            // Who and when, said out loud: an empty cell draws nothing, so without this the
+                            // roster is a grid of buttons called "button" - unusable by anything that reads
+                            // the page rather than looks at it. Same shape as the timesheet grid's cells.
+                            aria-label={`${e.first_name} ${e.last_name}, ${d}${s ? `, ${s.name}` : ", no shift"}`}
                             className={cn(
                               "group flex h-12 w-full flex-col items-center justify-center rounded-md px-1 text-xs transition-colors",
                               a ? "font-medium" : "text-muted-foreground",

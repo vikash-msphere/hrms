@@ -38,7 +38,9 @@ export async function uploadPhoto(deps: Deps, actor: AppUser, employeeId: string
   if (bytes.byteLength > MAX_BYTES) throw invalidArgument("photo too large (max 3 MB)");
   const key = `photos/${emp.uuid}`;
   await deps.docs.put(key, bytes, "image/jpeg");
-  const [updated] = await deps.db.update(schema.employees).set({ photoKey: key, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
+  // `photoAt` is what every browser's face cache keys on (see serialize.ts), so it moves on every upload - the
+  // R2 key does not, because it is derived from the employee id.
+  const [updated] = await deps.db.update(schema.employees).set({ photoKey: key, photoAt: new Date(), updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
   // Whether there IS one and how big, never the image. Replacing a photo and setting a first one are
   // different acts and the trail should be able to tell them apart.
   await audit(deps, actor, "employee.photo.update", "employees", emp.uuid, { diff: { photo: { from: emp.photoKey ? "an image" : null, to: `${bytes.byteLength} bytes` } } }, updated);
@@ -48,7 +50,7 @@ export async function uploadPhoto(deps: Deps, actor: AppUser, employeeId: string
 export async function clearPhoto(deps: Deps, actor: AppUser, employeeId: string) {
   const emp = await loadEmployee(deps, employeeId);
   if (emp.photoKey) await deps.docs.delete(emp.photoKey);
-  const [updated] = await deps.db.update(schema.employees).set({ photoKey: null, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
+  const [updated] = await deps.db.update(schema.employees).set({ photoKey: null, photoAt: new Date(), updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid)).returning();
   await audit(deps, actor, "employee.photo.clear", "employees", emp.uuid, { diff: { photo: { from: emp.photoKey ? "an image" : null, to: null } } }, updated);
   return updated!;
 }
