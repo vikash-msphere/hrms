@@ -24,6 +24,12 @@ export type TimeEntryInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
+async function assertActiveProject(deps: Deps, projectId: string) {
+  const project = (await deps.db.select().from(schema.projects).where(eq(schema.projects.uuid, projectId)).limit(1))[0];
+  if (!project || project.deleteTime) throw invalidArgument("project not found");
+  if (project.status === "archived") throw failedPrecondition("can't log time against an archived project");
+}
+
 export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, from?: string, to?: string, status?: string, showDeleted = false) {
   const conds = [applyScope(scope, schema.timeEntries.code, schema.timeEntries.employeeId)];
   const empId = idFromPath(employee);
@@ -47,6 +53,7 @@ export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEnt
   if (!employeeId) throw invalidArgument("employee is required");
   const projectId = idFromPath(input.project);
   if (!projectId) throw invalidArgument("project is required");
+  await assertActiveProject(deps, projectId);
   const ms = dayMs(input.date);
   if (Number.isNaN(ms)) throw invalidArgument("date is required");
   if (input.hours != null && (typeof input.hours !== "number" || input.hours < 0 || input.hours > 24)) throw invalidArgument("hours must be between 0 and 24");
@@ -72,7 +79,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   const set: SetOf<typeof schema.timeEntries> = { updatedAt: new Date() };
   const has = (k: keyof TimeEntryInput) => Object.prototype.hasOwnProperty.call(patch, k);
-  if (has("project")) { const p = idFromPath(patch.project); if (!p) throw invalidArgument("project is required"); set.projectId = p; }
+  if (has("project")) { const p = idFromPath(patch.project); if (!p) throw invalidArgument("project is required"); await assertActiveProject(deps, p); set.projectId = p; }
   if (has("date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }
   if (has("hours")) { if (patch.hours == null || patch.hours < 0 || patch.hours > 24) throw invalidArgument("hours must be between 0 and 24"); set.hours = patch.hours; }
   if (has("description")) set.description = patch.description?.trim() || null;
