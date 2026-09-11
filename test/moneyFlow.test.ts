@@ -1545,6 +1545,15 @@ describe("tax: a VERIFIED declaration reduces withholding (money-audit C2)", () 
     expect(await declare("80CCD(2)", 50000, "DECLARED")).toBe(before);
     // Verified 80CCD(2) (the employer's NPS contribution) survives the new regime and cuts the tax.
     expect(await declare("80CCD(2)", 100000, "VERIFIED")).toBeLessThan(before);
+
+    // WITHDRAWING it puts the withholding back. `tax-declarations` is a soft-delete collection whose delete
+    // carries no state guard, so a VERIFIED row can be removed - and `status` alone does not say so. The
+    // delete mark is the second, independent reason a row does not count (sumBySection); pinned here because
+    // the alternative is a declaration HR had deleted going on cutting the taxable base for the rest of the
+    // year, which is invisible from the list that same HR reads.
+    await deps.db.update(schema.taxDeclarations).set({ deleteTime: new Date() }).where(eq(schema.taxDeclarations.section, "80CCD(2)"));
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await listRunItems(deps, run.uuid))[0]!.tax).toBe(before);
   });
 });
 

@@ -976,7 +976,10 @@ export async function nudgeMissingScorecards(deps: Deps): Promise<number> {
     if (!SCORECARD_NUDGE_DAYS.includes(age)) continue;
     const panel = parseIdList(iv.interviewerIds);
     if (!panel.length) continue;
-    const filed = await deps.db.select({ authorId: schema.interviewFeedback.authorId }).from(schema.interviewFeedback).where(eq(schema.interviewFeedback.interviewId, iv.uuid));
+    // A WITHDRAWN scorecard is not a filed one: `interview_feedback` is soft-deletable, and without the
+    // delete filter a panelist who deleted theirs counted as done and was never nudged again - the silence
+    // this sweep exists to break.
+    const filed = await deps.db.select({ authorId: schema.interviewFeedback.authorId }).from(schema.interviewFeedback).where(and(eq(schema.interviewFeedback.interviewId, iv.uuid), isNull(schema.interviewFeedback.deleteTime)));
     const done = new Set(filed.map((f) => f.authorId));
     const owed = panel.filter((id) => !done.has(id));
     if (!owed.length) continue;

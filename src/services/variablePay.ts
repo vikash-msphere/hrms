@@ -120,6 +120,13 @@ function safeParse(json: string): GoalSnapshot[] {
  *
  * The window is bound in SQL and the newest-wins pick is made in memory, because SQLite has no per-group
  * limit: `ORDER BY effective_from DESC LIMIT 1` answers for the whole result set, not for each employee.
+ *
+ * SOFT-DELETED REVISIONS ARE NOT IN FORCE. The compensation timeline is editable by design - a revision
+ * entered wrong is corrected by deleting it - so `delete_time` is part of "which row applies", exactly as it
+ * is for every other reader of this table (payroll's build, timelineOf, the letter annexure, the tax
+ * projection, the custom grid). Without it the deleted row still won the newest-effective_from pick and set
+ * the variable-pay TARGET, so the recommendation a human then awards as a real bonus was priced off a
+ * revision payroll itself does not use - the two disagreeing about the same person's salary.
  */
 async function effectiveCompensationFor(deps: Deps, employeeIds: string[], on: Date | number) {
   const day = new Date(on);
@@ -132,6 +139,7 @@ async function effectiveCompensationFor(deps: Deps, employeeIds: string[], on: D
       .from(schema.compensation)
       .where(and(
         inArray(schema.compensation.employeeId, group),
+        isNull(schema.compensation.deleteTime),
         lte(schema.compensation.effectiveFrom, day),
         or(isNull(schema.compensation.effectiveTo), gte(schema.compensation.effectiveTo, day)),
       )),

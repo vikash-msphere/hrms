@@ -87,6 +87,24 @@ describe("the variable-pay run", () => {
     expect(lines[0]!.blocked).toBeUndefined(); // payable: nothing in its way
   });
 
+  // The timeline is editable, so a revision entered wrong is corrected by DELETING it. A deleted row is not
+  // in force, and it must not price the payout either - the newest effective_from wins the pick, so a
+  // withdrawn correction is exactly the row that would have won it.
+  it("ignores a soft-deleted revision, however recent", async () => {
+    const manager = await seedActor();
+    const employee = await seedActor(manager.employeeId);
+    await seedComp(employee.employeeId, 200_000);
+    await deps.db.insert(schema.compensation).values({
+      uuid: genId(), code: `c-${genId().slice(0, 4)}`, employeeId: employee.employeeId,
+      ctcAnnual: 5_000_000, basePay: 200_000, specialAllowance: 0, currency: "INR",
+      variablePayTarget: 900_000, effectiveFrom: new Date(Date.now() - 30 * DAY), deleteTime: new Date(),
+    });
+    const cycle = await cycleWith(manager, employee, 70);
+
+    const { lines } = await variablePayRun(deps, ALL, cycle.uuid);
+    expect(lines[0]).toMatchObject({ target: 200_000, recommended: 140_000 });
+  });
+
   it("says why a line cannot be paid instead of showing a blank", async () => {
     const manager = await seedActor();
     const noTarget = await seedActor(manager.employeeId);

@@ -320,15 +320,36 @@ describe("automation dispatch budget: one allowance per originating action, and 
 });
 
 describe("approval delegation lookup", () => {
-  it("returns only delegates whose window covers the given date", async () => {
+  const day = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d));
+
+  // One delegate covering the whole of 2026, one whose window closed in 2025.
+  async function seedWindows() {
     const mgr = await seedEmployee({ code: "04-300" });
     const dActive = await seedEmployee({ code: "04-301" });
     const dPast = await seedEmployee({ code: "04-302" });
-    const day = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d));
     await deps.db.insert(schema.approvalDelegations).values({ uuid: genId(), code: "ad-1", delegatorId: mgr, delegateId: dActive, fromDate: day(2026, 0, 1), toDate: day(2026, 11, 31) });
     await deps.db.insert(schema.approvalDelegations).values({ uuid: genId(), code: "ad-2", delegatorId: mgr, delegateId: dPast, fromDate: day(2025, 0, 1), toDate: day(2025, 0, 10) });
+    return { mgr, dActive, dPast };
+  }
 
-    const covering = await activeDelegatesFor(deps, mgr, day(2026, 5, 15));
-    expect(covering).toEqual([dActive]);
+  it("returns only delegates whose window covers today", async () => {
+    const { mgr, dActive } = await seedWindows();
+    deps.clock = { now: () => new Date("2026-06-15T12:00:00.000Z") };
+    expect(await activeDelegatesFor(deps, mgr)).toEqual([dActive]);
+  });
+
+  // The org day, not UTC's. With the default Asia/Kolkata timezone the two disagree for the 5h30m before
+  // midnight UTC, at both ends of the window: derived from UTC parts, the cover started 5h30m late on its
+  // first day and lingered 5h30m past its last.
+  it("covers the first org-local day from its first minute", async () => {
+    const { mgr, dActive } = await seedWindows();
+    deps.clock = { now: () => new Date("2025-12-31T19:00:00.000Z") }; // 2026-01-01 00:30 IST
+    expect(await activeDelegatesFor(deps, mgr)).toEqual([dActive]);
+  });
+
+  it("stops covering once the last org-local day is over", async () => {
+    const { mgr } = await seedWindows();
+    deps.clock = { now: () => new Date("2026-12-31T19:00:00.000Z") }; // 2027-01-01 00:30 IST
+    expect(await activeDelegatesFor(deps, mgr)).toEqual([]);
   });
 });

@@ -277,7 +277,7 @@ export async function notifyManager(deps: Deps, employeeId: string, opts: { type
   // Out-of-office cover: while the manager has an active approval delegation, copy the delegate so nothing
   // stalls in the manager's absence. Best-effort - a delegation lookup must never block the manager's nudge.
   try {
-    for (const delegateId of await activeDelegatesFor(deps, managerId, deps.clock.now())) {
+    for (const delegateId of await activeDelegatesFor(deps, managerId)) {
       if (delegateId === employeeId) continue; // never ask the requester to approve their own request
       await notify(deps, { recipient: delegateId, type: opts.type, title: `New ${opts.noun} to review (delegated)`, body: `${name} submitted a ${opts.noun}. You're covering approvals for their manager.`, link: "approvals", actorId: employeeId });
     }

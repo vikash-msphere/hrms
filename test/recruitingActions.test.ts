@@ -114,6 +114,22 @@ describe("scorecard chase-up", () => {
     expect(n!.title).toContain("Scorecard still owed");
   });
 
+  // A withdrawn scorecard is not a filed one. `interview_feedback` is soft-deletable, so reading the filed
+  // set without the delete filter let a panelist who deleted theirs count as done - and this sweep exists
+  // precisely to break that silence.
+  it("resumes chasing a panelist who withdrew their scorecard", async () => {
+    const withdrawn = await seedEmployee();
+    const { appId } = await seedApplication();
+    const interviewId = await seedHeldInterview(appId, [withdrawn], 3);
+    await deps.db.insert(schema.interviewFeedback).values({
+      uuid: genId(), code: `44-${genId().slice(0, 4)}`, interviewId, authorId: withdrawn, recommendation: "yes",
+      deleteTime: new Date(),
+    });
+    expect(await nudgeMissingScorecards(deps)).toBe(1);
+    const [n] = await deps.db.select().from(schema.notifications);
+    expect(n!.recipientId).toBe(withdrawn);
+  });
+
   it("leaves an escalation event at the end of the ladder, and none before it", async () => {
     const panel = [await seedEmployee()];
     const { appId } = await seedApplication();

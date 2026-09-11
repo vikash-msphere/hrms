@@ -10,6 +10,7 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { has, type CrudSpec, type SetOf } from "./crud";
+import { orgToday, dayStartMs } from "./orgDay";
 
 export type ApprovalDelegationInput = {
   delegator?: string | null;
@@ -21,10 +22,19 @@ export type ApprovalDelegationInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
-// The delegates covering an employee's approvals on `at` (their active delegations). Used by the notification
-// layer to copy the delegate while the delegator is away. Cheap indexed read; safe to call per-notification.
-export async function activeDelegatesFor(deps: Deps, delegatorId: string, at: Date): Promise<string[]> {
-  const t = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
+// The delegates covering an employee's approvals TODAY (their active delegations). Used by the notification
+// layer to copy the delegate while the delegator is away. Cheap indexed read; safe to call per-notification
+// (the org-day read is memoized per request by lib/refData, so it costs nothing after the first).
+//
+// "Today" is the ORG's day, never UTC's. This used to take an instant and derive the day from its UTC parts,
+// which is the shape services/orgDay.ts exists to remove: `from_date`/`to_date` name calendar days somebody
+// picked in the org's timezone, and in IST the UTC day rolls over five and a half hours late. The delegate
+// was therefore not copied for the first ~5.5h of the first covered day, nor for the last ~5.5h of the last -
+// a cover gap at exactly the edges the person set the delegation for, and invisible in any test run at noon.
+// The columns themselves are date-only, anchored at UTC midnight, so the org day is compared through
+// `dayStartMs` (its documented inverse) rather than by building a Date out of local parts.
+export async function activeDelegatesFor(deps: Deps, delegatorId: string): Promise<string[]> {
+  const t = new Date(dayStartMs(await orgToday(deps)));
   const rows = await deps.db
     .select({ delegateId: schema.approvalDelegations.delegateId })
     .from(schema.approvalDelegations)
