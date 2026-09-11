@@ -89,7 +89,9 @@ describe("generated change-stamp DDL matches the migration", () => {
 
   it("emits one statement per trigger, none of them comment-only", () => {
     const statements = renderChangeDdl().split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
-    expect(statements).toHaveLength((Object.keys(TABLES).length + EXTRA_STAMPS.length + SIDE_STAMPS.length) * 3);
+    // + 1 for `attachments`, whose three triggers read the parent collection off the row instead of being
+    // generated per mapped collection (see the polymorphic block in db/changeDdl.ts).
+    expect(statements).toHaveLength((Object.keys(TABLES).length + EXTRA_STAMPS.length + SIDE_STAMPS.length + 1) * 3);
     // A piece holding only comments is rejected by D1 ("SQL code did not contain a statement"), which is why
     // the header rides on the first trigger rather than standing alone.
     const commentOnly = statements.filter((s) => s.split("\n").every((l) => l.trim() === "" || l.trim().startsWith("--")));

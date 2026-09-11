@@ -1,14 +1,15 @@
 import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 import { addTicketCategory, dropTicketCategories } from "./ticketCategories";
 
-// The dispatch budget (src/services/automationEngine.ts's MAX_TOTAL_DISPATCHES = 50) - a runaway chain of
+// The dispatch budget (src/services/automationEngine.ts's MAX_TOTAL_DISPATCHES) - a runaway chain of
 // rules re-triggering each other is capped per originating action, and once it trips a `dropped`
 // automation_runs row is written (automation_id null - no rule caused it, none is to blame) so the org sees
 // it in the Workflows UI instead of only in Workers Logs. Never exercised before this: every other workflow
 // spec fires at most one or two rules. A single rule that emits its OWN trigger type three times over
 // (self-referencing, still gated on this run's own stamped category) branches 3^depth per level and blows
-// past 50 well inside the engine's own depth cap of 5 - entirely inside the one POST that raises the ticket,
-// and entirely scoped to it: the budget is per-request, so this can't touch any other spec's rules or data.
+// past the budget well inside the engine's own depth cap of 5 (3+9+27+81+243 = 363 emissions) - entirely inside
+// the one POST that raises the ticket, and entirely scoped to it: the budget is per-request, so this can't
+// touch any other spec's rules or data.
 test("a rule that re-triggers itself trips the dispatch budget and records a dropped run", async ({ as }) => {
   test.setTimeout(300_000);
   const page = await as("super");
@@ -68,7 +69,9 @@ test("a rule that re-triggers itself trips the dispatch budget and records a dro
     }, { timeout: 60_000 })
     .toBe(true);
   expect(dropped!.automation, "a dropped run should name no rule - none caused it, none is to blame").toBeUndefined();
-  expect(dropped!.result?.[0]?.detail).toMatch(/Dispatch budget of 50 exhausted/);
+  // The NUMBER is not pinned here - it is sized against the largest bounded bulk act and test/dispatchBudget.test.ts
+  // holds that relationship. What this asserts is that the budget is what refused the chain.
+  expect(dropped!.result?.[0]?.detail).toMatch(/Dispatch budget of \d+ exhausted/);
 
   // And the Workflows UI itself, which is the whole point of writing the row: an admin looking at Runs sees
   // it, not just Workers Logs.

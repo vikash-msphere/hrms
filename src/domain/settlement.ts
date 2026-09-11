@@ -122,9 +122,33 @@ export const DEFAULT_GRATUITY_CONFIG: GratuityConfig = {
 
 // Elapsed service in years, unrounded. This - not the rounded count below - is what QUALIFYING service is
 // tested against: s.4(1) requires five years actually served, while the s.4(2) rounding only sizes the payout.
+//
+// COUNTED IN CALENDAR ANNIVERSARIES, not by dividing elapsed days by an average year. `(end - start) / 365.25`
+// is a fraction of a day short of the truth for any span whose leap-day count is below the 0.25/year average,
+// and the five-year mark is exactly where that is decided: a five-calendar-year span is 1826 or 1827 days, and
+// 1826 / 365.25 is 4.99932. So an employee who served precisely five years measured 4.99932, `servedYears <
+// cfg.min_years` was true, and gratuity - a statutory entitlement, and the commonest exit there is - came out
+// at zero. It depended on the joining year: three start years in five produce a 1826-day span and were denied,
+// the other two produced 1827 and were paid, which is the kind of difference nobody finds by reading the code.
+//
+// Whole years come off the calendar (an anniversary that has passed is a year served, whatever the leap days
+// did), and only the trailing part-year is a ratio - measured against ITS OWN length, so the fraction means
+// "this far through the current year of service" on both sides of a 29 February.
 export function yearsOfService(startMs: number, endMs: number): number {
   if (!(endMs > startMs)) return 0;
-  return (endMs - startMs) / (365.25 * 86_400_000);
+  const s = new Date(startMs);
+  const anniversary = (n: number) => Date.UTC(s.getUTCFullYear() + n, s.getUTCMonth(), s.getUTCDate());
+  const e = new Date(endMs);
+  // Calendar years elapsed, then walked back one if this year's anniversary has not arrived yet. A 29 February
+  // anchor normalises forward to 1 March in a common year, which is where `addMonthsUtc`'s clamp would put the
+  // anniversary a day earlier - a day either way at the boundary of a whole year, not the systematic shortfall
+  // the division produced.
+  let whole = e.getUTCFullYear() - s.getUTCFullYear();
+  if (endMs < anniversary(whole)) whole -= 1;
+  if (whole < 0) return 0;
+  const from = anniversary(whole);
+  const to = anniversary(whole + 1);
+  return to > from ? whole + (endMs - from) / (to - from) : whole;
 }
 
 // Completed years of service for gratuity: whole years, and a trailing part-year of MORE than six months counts

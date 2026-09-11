@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { todayStr, addDaysYmd } from "@/lib/orgDay";
 
 // A month grid for picking a date RANGE, built for leave: the thing that decides a request is not the two
 // dates, it's what sits between them - which days are already off, which are holidays, and who else on the
@@ -22,7 +23,7 @@ export type DayInfo = {
 const MS_DAY = 86_400_000;
 const parse = (ymd: string) => Date.parse(ymd + "T00:00:00Z");
 const toYmd = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-const addDays = (ymd: string, n: number) => toYmd(parse(ymd) + n * MS_DAY);
+const addDays = addDaysYmd;
 const startOfMonth = (ymd: string) => ymd.slice(0, 8) + "01";
 const addMonths = (ymd: string, n: number) => {
   const d = new Date(parse(startOfMonth(ymd)));
@@ -56,7 +57,9 @@ export function DateRangeCalendar({
   weekStart?: number;
   className?: string;
 }) {
-  const today = new Date().toLocaleDateString("en-CA");
+  // The org's day: this drives the "today" ring and, through the pickers that host it, what counts as
+  // back-dating. Reading the browser's day instead let the calendar offer a date the server then refused.
+  const today = todayStr();
   const [view, setView] = useState(() => startOfMonth(start || today));
   // Following the selection is right when it comes from outside (a quick pick, a bridge suggestion); it must
   // not fight the user's own paging, so it only re-aims when the chosen start leaves the months on screen.

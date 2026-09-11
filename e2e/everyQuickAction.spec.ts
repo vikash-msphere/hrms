@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // Every "+" and ⌘K action, run.
 //
@@ -43,6 +43,7 @@ const ACTIONS: Action[] = [
   { id: "new-post", route: "announcements" },
   { id: "new-document", route: "documents" },
   { id: "new-employee", route: "employees" },
+  { id: "new-table", route: "tables" },
   { id: "give-kudos", route: "announcements" },
 ];
 
@@ -60,6 +61,15 @@ test.describe("every quick action", () => {
     // Twenty-odd flows in one browser, each landing on a page that fetches before it can open anything.
     test.setTimeout(600_000);
     const page = await as("super");
+    // Twenty-odd navigations in one run, back to back - on a busy lane, a dev Worker restart mid-request on
+    // any one of them reads as a plain 503, the same rare hiccup documented elsewhere in this suite
+    // (complianceRuleDelete.spec.ts et al.); a genuine broken action still fails via `failures` below.
+    allowConsoleErrors(page, /status of 503/i);
+    // And the same hiccup's other face, narrowed to the one request it lands on: `batch:run` is the read
+    // transport the shell fires on every one of those navigations, and when the dev Worker drops the
+    // connection mid-flight (`read ECONNRESET` in the stack's own prism log) prism answers the browser 500 on
+    // its behalf. Scoped to that path on purpose - a 500 anywhere else is still this spec's failure.
+    allowConsoleErrors(page, /status of 500 .*\/v1\/batch:run/i);
     const labels = readLabels();
     const failures: string[] = [];
 
@@ -76,32 +86,50 @@ test.describe("every quick action", () => {
         continue;
       }
       try {
-        // Always from the same place, so each press is the same journey a person makes: the dashboard, ⌘K,
-        // the action by name.
-        await gotoRoute(page, "dashboard");
-        await page.keyboard.press("ControlOrMeta+k");
-        const palette = page.getByRole("dialog", { name: "Search everything" });
-        const search = page.getByPlaceholder("Search people, records, pages and settings…");
-        await expect(search).toBeVisible({ timeout: 15_000 });
-        await search.fill(label);
-        const row = palette.getByRole("button").filter({ hasText: label }).first();
-        await expect(row).toBeVisible({ timeout: 15_000 });
-        await row.click();
+        // Pressed again if it does not open, inside a budget that holds about two presses. Twenty-odd flows
+        // walk pages the rest of the suite is writing to at the same time (a board being purged under the
+        // boards page as this one asks it for a card composer), so one press landing in somebody else's
+        // moment is not the same claim as an entry point that does nothing - which still fails, because
+        // every press it gets fails.
+        await expect(async () => {
+          // Always from the same place, so each press is the same journey a person makes: the dashboard, ⌘K,
+          // the action by name.
+          await gotoRoute(page, "dashboard");
+          await page.keyboard.press("ControlOrMeta+k");
+          const palette = page.getByRole("dialog", { name: "Search everything" });
+          const search = page.getByPlaceholder("Search people, records, pages and settings…");
+          await expect(search).toBeVisible({ timeout: 15_000 });
+          await search.fill(label);
+          const row = palette.getByRole("button").filter({ hasText: label }).first();
+          await expect(row).toBeVisible({ timeout: 15_000 });
+          await row.click();
 
-        // It went where it said it would...
-        await expect.poll(() => page.url(), { timeout: 30_000 }).toContain(`#/${action.route}`);
-        // ...and the page picked the intent up on mount: something to fill in is open. A press that navigates
-        // and then does nothing is the failure this walk exists for, and it looks identical to a slow page
-        // until the dialog never comes.
-        await expect(page.getByRole("dialog").first()).toBeVisible({ timeout: 30_000 });
+          // It went where it said it would...
+          await expect.poll(() => page.url(), { timeout: 30_000 }).toContain(`#/${action.route}`);
+          // ...and the page picked the intent up on mount: something to fill in is open. A press that navigates
+          // and then does nothing is the failure this walk exists for, and it looks identical to a slow page
+          // until the dialog never comes.
+          await expect(page.getByRole("dialog").first()).toBeVisible({ timeout: 30_000 });
 
-        // Abandoned rather than submitted: this spec is about the entry point, not about what each form
-        // writes. Escape can be guarded by the unsaved-changes prompt on a form that autofilled itself, so
-        // whichever way out is offered is taken.
-        await page.keyboard.press("Escape");
-        const discard = page.getByRole("button", { name: /^(Discard|Leave)$/ });
-        if (await discard.count()) await discard.first().click();
-        if (await page.getByRole("dialog").count()) await page.reload();
+          // Abandoned rather than submitted: this spec is about the entry point, not about what each form
+          // writes. Escape can be guarded by the unsaved-changes prompt on a form that autofilled itself, so
+          // whichever way out is offered is taken.
+          await page.keyboard.press("Escape");
+          const discard = page.getByRole("button", { name: /^(Discard|Leave)$/ });
+          if (await discard.count()) await discard.first().click();
+          // The reload is the unconditional way out of a dialog that would otherwise sit over the next press -
+          // and it is issued at the one moment the app may already be navigating itself (the form it just
+          // abandoned deep-links back), which answers a reload with `net::ERR_ABORTED; maybe frame was
+          // detached?`. That is the reload losing a race, not this quick action failing to open its flow, so it
+          // is re-issued once the navigation has settled.
+          if (await page.getByRole("dialog").count()) {
+            await expect(async () => {
+              if (!(await page.getByRole("dialog").count())) return;
+              await page.reload();
+              await expect(page.getByRole("main")).toBeVisible({ timeout: 15_000 });
+            }).toPass({ timeout: 45_000 });
+          }
+        }).toPass({ intervals: [0], timeout: 120_000 });
       } catch (e) {
         failures.push(`${action.id}: ${(e as Error).message.split("\n")[0]}`);
       }

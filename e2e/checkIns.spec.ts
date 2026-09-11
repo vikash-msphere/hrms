@@ -31,8 +31,16 @@ test("a recurring 1:1 previews its dates, and the other side can read it", async
   await employee.getByRole("option", { name: "Weekly", exact: true }).click();
   await expect(form.getByText(/^Then /)).toBeVisible();
 
-  // Dated in the future, so the dialog offers to SCHEDULE it rather than log it as already held.
-  await form.getByRole("button", { name: "Schedule 1:1" }).click();
+  // Dated in the future, so the dialog offers to SCHEDULE it rather than log it as already held. Its own
+  // path is read off THIS response, not guessed as "whatever check-in is newest org-wide" once the dialog
+  // closes - `checkInDelete.spec.ts` creates one for the SAME two people (employee/manager) at the same time,
+  // and a global "newest" pick can grab its row and hard-purge it out from under that spec's own soft-delete
+  // assertion instead of this spec's own.
+  const [response] = await Promise.all([
+    employee.waitForResponse((r) => r.url().includes("/v1/check-ins") && r.request().method() === "POST"),
+    form.getByRole("button", { name: "Schedule 1:1" }).click(),
+  ]);
+  const created = ((await response.json()) as { path: string }).path;
   await expect(employee.getByRole("dialog")).toHaveCount(0);
   await expect(employee.getByText("Mara Manager").first()).toBeVisible(); // their own page names who it is with
 
@@ -40,15 +48,5 @@ test("a recurring 1:1 previews its dates, and the other side can read it", async
   await gotoRoute(manager, "check-ins", "1:1s");
   await expect(manager.getByText("Eve Employee").first()).toBeVisible();
 
-  await purge(employee, await latestCheckIn(employee));
+  await purge(employee, created);
 });
-
-/** The most recent check-in, which is the one this spec just scheduled. */
-async function latestCheckIn(page: import("@playwright/test").Page): Promise<string> {
-  const res = await page.request.get("/v1/check-ins?page_size=100");
-  expect(res.status(), await res.text()).toBe(200);
-  const { results = [] } = (await res.json()) as { results?: { path: string; create_time?: string }[] };
-  const newest = [...results].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""))[0];
-  if (!newest) throw new Error("e2e: no check-ins to clean up");
-  return newest.path;
-}

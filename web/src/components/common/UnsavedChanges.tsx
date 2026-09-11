@@ -14,19 +14,28 @@ const ScopeCtx = React.createContext<{ report: (id: string, entry: Entry | null)
 
 // Register a form whose dirtiness the caller already computes (e.g. an explicit `dirty` flag).
 // `save` is what the scope banner's Save button invokes for this form.
-export function useUnsavedTracker(dirty: boolean, save: () => void | Promise<unknown>) {
+//
+// `saving` - a write already on the wire - counts as NOT unsaved, and that is the point of it being here
+// rather than in each form. A form clears its own `dirty` when the save RESOLVES, so between pressing Save
+// and the response landing the guard still held the form as dirty: leaving in that window (clicking a nav
+// item the moment you press Save, which is what people do) was answered with "You have unsaved changes.
+// Leave without saving?" about changes that were at that moment being written. Worse, the navigation is
+// cancelled if the reader says no - or, in a browser that auto-dismisses the confirm, cancelled silently.
+// A failed save leaves `dirty` true and `saving` false, so the guard closes again on the way out.
+export function useUnsavedTracker(dirty: boolean, save: () => void | Promise<unknown>, saving = false) {
   const id = React.useId();
   const scope = React.useContext(ScopeCtx);
   const saveRef = React.useRef(save);
   saveRef.current = save;
+  const unsaved = dirty && !saving;
   React.useEffect(() => {
-    reportUnsaved(id, dirty);
-    scope?.report(id, { dirty, save: () => saveRef.current() });
+    reportUnsaved(id, unsaved);
+    scope?.report(id, { dirty: unsaved, save: () => saveRef.current() });
     return () => {
       reportUnsaved(id, false);
       scope?.report(id, null);
     };
-  }, [id, dirty, scope]);
+  }, [id, unsaved, scope]);
 }
 
 // Dirty tracking by snapshot: the baseline is captured from the first render where `ready` is true (i.e. the

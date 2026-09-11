@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ScanLine, X, Camera, CameraOff, CheckCircle2, CircleDashed, Keyboard, ImageUp, BadgeCheck, PackageSearch, History, Play, PauseCircle, Flag, AlertTriangle } from "lucide-react";
 import { create, invoke } from "@/api";
 import { cn, idOf, formatDate } from "@/lib/utils";
+import { todayStr as today } from "@/lib/orgDay";
 import { navigate } from "@/router";
 import type { Asset, AssetCategory, Employee, Stocktake as Count } from "@/types";
 import { useCollection } from "@/hooks/useCollection";
@@ -36,7 +37,6 @@ const CONDITIONS = [
   { value: "missing_parts", label: "Missing parts" },
 ] as const;
 
-const today = () => new Date().toISOString().slice(0, 10);
 
 export function Stocktake({ onClose, initialCountId }: { onClose: () => void; initialCountId?: string }) {
   const { toast } = useToast();
@@ -61,7 +61,7 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   const fileRef = useRef<HTMLInputElement | null>(null);
   const foundRef = useRef(new Set<string>()); // unexpected payloads already logged, so a sticker in frame is one find
 
-  const catName = (p?: string) => (p ? (assetCategories.find((c) => c.path === p)?.display_name ?? "") : "");
+  const catName = (p?: string | null) => (p ? (assetCategories.find((c) => c.path === p)?.display_name ?? "") : "");
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (p?: string) => (p ? (m.get(idOf(p)) ?? "someone") : "someone");
@@ -70,16 +70,22 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   const open = useMemo(() => counts.filter((c) => c.status === "open" && !c.delete_time), [counts]);
   const session = useMemo(() => counts.find((c) => c.path === openPath) ?? null, [counts, openPath]);
 
-  // Walk straight into the count the caller asked for (the Stocktakes page links here to scan into one), or
-  // into the only open one: the common case is one person resuming their own walk, and making them pick it off
-  // a list first would be a click that answers nothing.
+  // Walk straight into the count the caller asked for (the Stocktakes page links here to scan into one) -
+  // an explicit ask is always honoured, however many times it changes.
   useEffect(() => {
-    if (openPath) return;
-    const asked = initialCountId ? open.find((c) => idOf(c.path) === initialCountId) : undefined;
+    if (!initialCountId) return;
+    const asked = open.find((c) => idOf(c.path) === initialCountId);
     if (asked) setOpenPath(asked.path);
-    else if (!initialCountId && open.length === 1) setOpenPath(open[0]!.path);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open.length, initialCountId]);
+  }, [open, initialCountId]);
+
+  // Absent an explicit ask, this never guesses which open count is "probably" the reader's own - `open` is
+  // the SHARED, org-wide list, and a floor with more than one person scanning is exactly the ordinary case
+  // ("Anyone scanning into the same count adds to it" below), not an edge case worth a silent jump over. The
+  // "Counts already open" panel a few lines down already offers every one of them a one-click Resume, which
+  // covers the single-open-count case too - so there is nothing this would save that costs less than what a
+  // guess risks: somebody else's count opening while THIS reader is still filling in their own new count's
+  // label (openPath stays null, on purpose, until Start is pressed) would otherwise swap them into it
+  // mid-keystroke.
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

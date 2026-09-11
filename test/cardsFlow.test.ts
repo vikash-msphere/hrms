@@ -10,7 +10,7 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { createBoard, configureBoard, boardMetrics } from "../src/services/boards";
-import { createCard, updateCard, moveCard, deleteCard, setCardBlocked, commentCard, getCardWithComments, addCardTodos, toggleCardTodo, removeCardTodo, listCards } from "../src/services/cards";
+import { createCard, updateCard, moveCard, deleteCard, setCardBlocked, commentCard, getCardWithComments, addCardTodos, toggleCardTodo, removeCardTodo, promoteCardTodo, listCards } from "../src/services/cards";
 import { createGoal } from "../src/services/goals";
 import { createSprint, activateSprint, completeSprint } from "../src/services/sprints";
 import { listActivity, listAllActivity } from "../src/services/activity";
@@ -31,7 +31,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.cardTodos, schema.cardComments, schema.cardMovements, schema.cards, schema.sprints, schema.boards, schema.goals, schema.eventLog, schema.notifications, schema.settings, schema.users, schema.employees, schema.roles];
+const TABLES = [schema.cardTodos, schema.cardComments, schema.cardMovements, schema.cards, schema.sprints, schema.boards, schema.goals, schema.eventLog, schema.notifications, schema.settings, schema.users, schema.employees, schema.departments, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
 });
@@ -138,7 +138,7 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect((await goalNow()).progress).toBe(40);
 
     await moveCard(deps, actor, big.uuid, "done"); // deliver all 5 pts
-    let gr = await goalNow();
+    const gr = await goalNow();
     expect(gr.progress).toBe(100);
     expect(gr.status).toBe("completed");
 
@@ -200,6 +200,41 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const seeded = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Seeded", initial_todos: ["  x  ", "y", ""] });
     const withTodos = await getCardWithComments(deps, actor, seeded.uuid);
     expect(withTodos._todos.map((t) => t.text)).toEqual(["x", "y"]); // trimmed, blanks dropped
+  });
+
+  it("promotes a checklist item into a card that inherits the parent's context, and ticks the item", async () => {
+    const actor = await seedActor();
+    const doer = genId();
+    await deps.db.insert(schema.employees).values({ uuid: doer, code: `04-${genId().slice(0, 3)}`, firstName: "Dee", lastName: "Oer", workEmail: `${doer}@test.example`, status: "active" });
+    const board = await createBoard(deps, actor, { name: "Promote board", task_prefix: "PB" });
+    const dept = genId();
+    await deps.db.insert(schema.departments).values({ uuid: dept, code: `03-${genId().slice(0, 3)}`, name: "Delivery" });
+    const goal = await createGoal(deps, actor, { title: "Ship the thing" });
+    const parent = await createCard(deps, actor, {
+      board: `boards/${board.uuid}`, title: "Importer", assignee: `employees/${doer}`,
+      department: `departments/${dept}`, goal: `goals/${goal.uuid}`,
+    });
+    const added = await addCardTodos(deps, actor, parent.uuid, ["write the mapping"]);
+    const todoId = added._todos[0]!.uuid;
+
+    const after = await promoteCardTodo(deps, actor, parent.uuid, todoId);
+    const child = (await listCards(deps, { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true }, 50, undefined, board.uuid))
+      .items.find((c) => c.title === "write the mapping")!;
+
+    // Same board, first column, and the context the item was sitting in - so it lands where that work lives.
+    expect(child.boardId).toBe(board.uuid);
+    expect(child.assigneeId).toBe(doer);
+    expect(child.departmentId).toBe(dept);
+    // NOT the goal: the parent is still linked, and copying it would count one piece of work twice in the
+    // goal's delivered share.
+    expect(child.goalId).toBeNull();
+    expect(child.description).toContain("Importer");
+
+    // The item is ticked and points at where the work went, so the checklist and the board cannot both claim
+    // it as outstanding.
+    const item = after._todos.find((t) => t.uuid === todoId)!;
+    expect(item.done).toBe(true);
+    expect(item.text).toBe(`write the mapping → PB-${child.seq}`);
   });
 
   it("round-trips labels (board catalog + card keys, deduped)", async () => {
@@ -386,5 +421,47 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect(new Set(cards.map((c) => c.code)).size).toBe(4);
     // The numbers are the run 1..4, not four arbitrary distinct values: the key is read as a sequence.
     expect(cards.map((c) => c.seq).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([1, 2, 3, 4]);
+  });
+});
+
+// Who filed a task. The card already had an owner (`employee`, the authz-scoped accountable person) and an
+// assignee; when a manager files one FOR somebody both of those become that person, and "who asked for this"
+// was left in the audit trail where the board cannot show it and a filter cannot reach it.
+describe("the reporter", () => {
+  it("is stamped from the CALLER even when the task is filed for somebody else", async () => {
+    const actor = await seedActor();
+    const other = genId();
+    await deps.db.insert(schema.employees).values({ uuid: other, code: `04-${genId().slice(0, 3)}`, firstName: "Oth", lastName: "Er", workEmail: `${other}@test.example`, status: "active" });
+    const board = await createBoard(deps, actor, { name: "Board" });
+
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Fix the importer", employee: `employees/${other}`, assignee: `employees/${other}` });
+    // Owner and assignee are the other person; the reporter is the one who actually filed it.
+    expect(card.employeeId).toBe(other);
+    expect(card.assigneeId).toBe(other);
+    expect(card.reporterId).toBe(actor.employeeId);
+  });
+
+  it("ignores a reporter named by the caller, and survives an edit untouched", async () => {
+    const actor = await seedActor();
+    const impostor = genId();
+    await deps.db.insert(schema.employees).values({ uuid: impostor, code: `04-${genId().slice(0, 3)}`, firstName: "Imp", lastName: "Ostor", workEmail: `${impostor}@test.example`, status: "active" });
+    const board = await createBoard(deps, actor, { name: "Board" });
+
+    // The service reads the reporter off the ACTOR and has no branch for an incoming one, so a body that
+    // names somebody else changes nothing. (The route's write schemas are `.strict()`, so over HTTP such a
+    // body is refused outright - that layer is covered by the openapi/route drift tests.)
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Task", ...({ reporter: `employees/${impostor}` } as object) });
+    expect(card.reporterId).toBe(actor.employeeId);
+
+    const patched = await updateCard(deps, actor, card.uuid, { title: "Task, renamed", ...({ reporter: `employees/${impostor}` } as object) });
+    expect(patched.reporterId).toBe(actor.employeeId);
+  });
+
+  it("follows the task it filed, so the person who asked hears how it is going", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Board" });
+    const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Task" });
+    const watchers = await deps.db.select().from(schema.cardWatchers).where(eq(schema.cardWatchers.cardId, card.uuid));
+    expect(watchers.map((w) => w.employeeId)).toEqual([actor.employeeId]);
   });
 });

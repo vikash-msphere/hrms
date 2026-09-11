@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Tag, Plus, TriangleAlert } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -46,6 +46,7 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
   const [err, setErr] = useState<string | null>(null);
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "category" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   // Two categories with the same name split a budget's spend in two and read identically on every picker.
   // Worth saying before it happens - a deliberate near-duplicate ("Travel" / "Travel (intl)") still saves.
@@ -85,6 +86,9 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
         const next = { name: "", requiresReceipt: form.requiresReceipt, glCode: "" };
         setForm(next);
         guard.markSaved(next);
+        // The just-cleared Name loses focus the instant its own Create button disables with it - see
+        // ReimbursementCategories' identical fix.
+        nameRef.current?.focus();
       } else {
         guard.markSaved();
         setOpen(false);
@@ -159,7 +163,7 @@ export default function ExpenseCategories({ embedded, openId }: { me?: Me; embed
           <DialogBody>
           <FormError error={err} />
           <Field label="Name">
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Software & Subscriptions" autoFocus />
+            <Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Software & Subscriptions" autoFocus />
           </Field>
           {editing && <CategoryUsage category={editing.path} open={open} />}
           {nameClash && (

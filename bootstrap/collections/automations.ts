@@ -1231,6 +1231,107 @@ export const AUTOMATIONS: AutomationSeed[] = [
     ],
   },
 
+  // Performance: a completed goal currently produces one notification to one manager and then disappears into
+  // a status change. These two let the org SEE delivery - disabled by default, because a goal title is the
+  // person's own words and publishing it org-wide is a decision somebody has to make on purpose.
+  {
+    name: "Goal completed: post it to the board",
+    description: "When someone completes a goal, post it to the company board so the org sees what is being delivered. Disabled by default - a goal title is the owner's own words, so publishing it is an opt-in.",
+    trigger: "goal.completed",
+    enabled: false,
+    actions: [{ kind: "apiCall", method: "POST", path: "/v1/announcements", body: { kind: "post", title: "A goal just landed", body: "A colleague completed one of their goals. Nice work!" } }],
+  },
+  {
+    name: "Goal completed: nudge the manager to say well done",
+    description: "When someone completes a goal, prompt their manager to send them kudos while it is still fresh.",
+    trigger: "goal.completed",
+    actions: [{ kind: "notifyManager", noun: "report just completed a goal - worth a kudos?" }],
+  },
+
+  // Performance: the two signals that arrive BEFORE a date is missed. A goal behind its own pace has weeks of
+  // warning in it; a goal nobody has mentioned in three weeks usually has more. Both chase the owner rather
+  // than the manager - the point is to get the goal moved or re-dated while there is still time to do either.
+  {
+    name: "Monday: flag goals that have fallen behind pace",
+    description: "Every Monday, tell each employee whose open goals are a quarter of the way behind where they should be by now (or which they have flagged themselves) to move them, re-scope them, or say what is blocking.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "goalsAtRisk", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Goals behind pace", body: "{{goalsAtRisk}} of your goals are behind where they should be by now. Update progress, re-scope, or flag what is blocking.", link: "goals" }],
+  },
+  {
+    name: "Monday: chase goals that have gone quiet",
+    description: "Every Monday, remind each employee about open goals nobody has touched in three weeks. Silence is the earliest sign a goal has been abandoned - long before its due date says so.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "goalsStale", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Goals with no update", body: "{{goalsStale}} of your goals have had no update in three weeks. A quick progress note keeps them honest.", link: "goals" }],
+  },
+
+  // Performance: board work, chased the same way as goals. A card's due date was stored, drawn on the card,
+  // and read by nothing that told anybody - so a task went past its date in silence unless somebody happened
+  // to be looking at the board. Aimed at the ASSIGNEE, whose queue it is sitting in.
+  {
+    name: "Monday: nudge assignees of tasks due soon",
+    description: "Every Monday, tell each person what board tasks assigned to them fall due within the next 7 days. Delivered cards never count.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "tasksDueSoon", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Tasks due this week", body: "You have {{tasksDueSoon}} task(s) due within a week. Move them along, or change the date.", link: "boards" }],
+  },
+  {
+    name: "Monday: chase overdue tasks",
+    description: "Every Monday, remind each person of the board tasks assigned to them that are past their due date, and let their manager know so it can come up in a 1:1.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "tasksOverdue", op: "gte", value: 1 },
+    actions: [
+      { kind: "notify", recipient: { of: "subject" }, title: "Overdue tasks", body: "You have {{tasksOverdue}} task(s) past their due date. Deliver them, re-date them, or say what is blocking.", link: "boards" },
+      { kind: "notifyManager", noun: "report has overdue tasks" },
+    ],
+  },
+  {
+    // The manager rather than the assignee on purpose: the person holding a blocked card is, by definition,
+    // the one who cannot move it.
+    name: "Monday: surface blocked tasks to the manager",
+    description: "Every Monday, tell each manager how many of their reports' tasks are sitting blocked. A block is somebody else's move, so chasing the person who is stuck achieves nothing.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "tasksBlocked", op: "gte", value: 1 },
+    actions: [{ kind: "notifyManager", noun: "report has blocked tasks" }],
+  },
+
+  // Performance: review season. A cycle's self / manager / goal-setting deadlines were stored and rendered and
+  // read by nothing that chases anybody, so the whole thing ran on whoever remembered to nag. Each of these
+  // fires only inside an ACTIVE cycle, and stops the moment the person does the thing.
+  {
+    name: "Monday: chase self-assessments",
+    description: "Every Monday during an active review cycle, remind each person whose review is still waiting on their self-assessment to write it.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "selfReviewsDue", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Your self-assessment is waiting", body: "You have {{selfReviewsDue}} review(s) waiting on your self-assessment. Your manager cannot write theirs until it is in.", link: "reviews", action: "respond" }],
+  },
+  {
+    name: "Monday: chase managers for review write-ups",
+    description: "Every Monday during an active review cycle, tell each manager how many of their reports' reviews are waiting on their write-up.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "teamReviewsDue", op: "gte", value: 1 },
+    actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Reviews waiting on you", body: "{{teamReviewsDue}} of your reports' reviews are waiting for your write-up.", link: "reviews", action: "respond" }],
+  },
+  {
+    name: "Monday: chase goal-setting for the cycle",
+    description: "Every Monday, remind anyone who has set no goals against an active cycle that asked for them by a date - and tell their manager how many of their reports are in that position. Goal-setting season was the half of a review cycle with a deadline nobody chased.",
+    trigger: SCHEDULE_TRIGGER,
+    schedule: { freq: "weekly", day: 1, scope: "perEmployee" },
+    condition: { field: "goalSettingMissing", op: "gte", value: 1 },
+    actions: [
+      { kind: "notify", recipient: { of: "subject" }, title: "No goals set for this cycle", body: "The current review cycle asks for goals and you have not set any yet. A review with no goals scores nothing.", link: "goals", action: "respond" },
+      { kind: "notifyManager", noun: "report has set no goals for the cycle" },
+    ],
+  },
+
   // Month start: open the payroll-prep checklist for the finance team (broadcast, no per-employee fan-out).
   {
     name: "Month start: payroll prep reminder",

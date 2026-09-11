@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Contact } from "lucide-react";
 import { get, patch } from "@/api";
 import type { PersonalDetails } from "@/types";
@@ -25,16 +25,17 @@ export function EmployeePersonalDetails({ employeeId, canEdit, onSaved }: { empl
   // Empty passes: the inline error should fire on a malformed entry, never on a field nobody has touched.
   const emailOk = !form.personal_email?.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.personal_email.trim());
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       setData(await get<PersonalDetails>(`employees/${employeeId}/personal-info`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
-  }
-  useEffect(() => {
-    load();
   }, [employeeId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   function openEdit() {
     setForm(data ?? {});

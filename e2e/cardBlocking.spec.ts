@@ -1,4 +1,4 @@
-import { SPA_HEADERS, purge, test, expect } from "./fixtures";
+import { apiPost, purge, test, expect } from "./fixtures";
 
 // A card blocked by another one - never touched by `cardWork.spec.ts` (checklist/comments) or
 // `boardsAdvanced.spec.ts` (WIP/swimlanes/CFD). The dependency is a real edge between two cards: the
@@ -13,13 +13,16 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
   const titleB = `E2E blocked task ${stamp}`;
   const reason = `waiting on ${stamp % 100000}`;
 
-  const boardRes = await page.request.post("/v1/boards", { headers: SPA_HEADERS, data: { name: `E2E block board ${stamp}` } });
+  // `apiPost` for the board and its two cards: this is the scaffolding, and the runtime recycling the Worker
+  // mid-request refuses a write outright (a 503 that says so - see fixtures.ts), which killed this test on a
+  // board it had not even started blocking yet. The blocking itself is driven through the page.
+  const boardRes = await apiPost(page, "boards", { name: `E2E block board ${stamp}` });
   expect(boardRes.status(), await boardRes.text()).toBe(200);
   const board = (await boardRes.json()) as { path: string };
   const boardId = board.path.split("/")[1]!;
-  const madeA = await page.request.post("/v1/cards", { headers: SPA_HEADERS, data: { board: board.path, title: titleA, column_key: "backlog" } });
+  const madeA = await apiPost(page, "cards", { board: board.path, title: titleA, column_key: "backlog" });
   expect(madeA.status(), await madeA.text()).toBe(200);
-  const madeB = await page.request.post("/v1/cards", { headers: SPA_HEADERS, data: { board: board.path, title: titleB, column_key: "backlog" } });
+  const madeB = await apiPost(page, "cards", { board: board.path, title: titleB, column_key: "backlog" });
   expect(madeB.status(), await madeB.text()).toBe(200);
 
   try {
@@ -30,12 +33,18 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     await page.getByText(titleB).first().click();
     const cardB = page.getByRole("dialog");
     await expect(cardB.getByLabel("Title")).toHaveValue(titleB, { timeout: 30_000 });
-    await cardB.getByPlaceholder("Blocked by a task…").click();
+    // The shared picker's trigger is a BUTTON whose text is the placeholder (ui/combobox.tsx) - there is no
+    // `placeholder` attribute on it to match, so it is reached by its name.
+    await cardB.getByRole("button", { name: "Blocked by a task…" }).click();
     await page.getByPlaceholder(/Search/).last().fill(titleA);
     await page.getByRole("button", { name: new RegExp(titleA) }).click();
     await cardB.getByPlaceholder("Note (optional)…").fill(reason);
     await cardB.getByRole("button", { name: "Block", exact: true }).click();
-    await expect(cardB.getByText("Blocked", { exact: false })).toBeVisible({ timeout: 15_000 });
+    // "Unblock" is the unambiguous proof it took: that button exists only while the card is blocked, where
+    // the word "Blocked" also sits in the picker's own placeholder ("Blocked by a task…") before anything
+    // has happened. The banner is asserted beside it because it is what a person actually reads.
+    await expect(cardB.getByRole("button", { name: "Unblock" })).toBeVisible({ timeout: 15_000 });
+    await expect(cardB.getByText("Blocked", { exact: false }).first()).toBeVisible();
     await expect(cardB.getByText(reason, { exact: false })).toBeVisible();
     const blockerLink = cardB.getByRole("button", { name: new RegExp(titleA) });
     await expect(blockerLink).toBeVisible();
@@ -44,7 +53,10 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     await blockerLink.click();
     const cardA = page.getByRole("dialog");
     await expect(cardA.getByLabel("Title")).toHaveValue(titleA, { timeout: 15_000 });
-    await expect(cardA.getByText("Blocks", { exact: false })).toBeVisible();
+    // The "Blocks" line itself, told apart from the watcher note beside it ("… moves, comments and blocks",
+    // which a bare substring match also finds) by two things at once: it is the paragraph, and the regex is
+    // case-sensitive where the note's own "blocks" is lower-case.
+    await expect(cardA.locator("p").filter({ hasText: /Blocks/ }).first()).toBeVisible();
     await expect(cardA.getByRole("button", { name: new RegExp(titleB) })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
@@ -54,7 +66,8 @@ test("blocking a card names the blocker, links to it, and shows the reverse edge
     const cardB2 = page.getByRole("dialog");
     await expect(cardB2.getByLabel("Title")).toHaveValue(titleB, { timeout: 15_000 });
     await cardB2.getByRole("button", { name: "Unblock", exact: true }).click();
-    await expect(cardB2.getByPlaceholder("Blocked by a task…")).toBeVisible({ timeout: 15_000 });
+    // Same trigger as line 35: a Combobox is a button, not an input, so it has no `placeholder` attribute.
+    await expect(cardB2.getByRole("button", { name: "Blocked by a task…" })).toBeVisible({ timeout: 15_000 });
     await expect(cardB2.getByRole("button", { name: "Unblock", exact: true })).toHaveCount(0);
   } finally {
     const cards = await page.request.get(`/v1/cards?page_size=200&board=boards/${boardId}`);

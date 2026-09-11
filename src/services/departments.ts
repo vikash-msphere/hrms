@@ -29,7 +29,7 @@ const managerIdsJson = (managers?: string[] | null) =>
 export async function listDepartments(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const where = applyScope(scope, schema.departments.code, schema.departments.code);
   const all = visibleByDelete(await deps.db.select().from(schema.departments).where(where), showDeleted);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "departments" });
 }
 
 // A department is a node in the hierarchy, so its code IS its position in the tree: the create allocates one
@@ -63,7 +63,8 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
     const next = idFromPath(patch.parent) ?? null;
     // Re-parent: recompute this dept's code + cascade the whole subtree (sub-depts, employees, owned rows) +
     // any access-rule codes. moveDepartment sets parentId itself, so it's not in `set`.
-    if (next !== row.parentId) { await moveDepartment(deps, id, row.code!, next); await audit(deps, actor, "department.reparent", "departments", id, { from: row.parentId, to: next }); }
+    // Refs, not the bare ids the column holds - same rule as every other FK in an audit meta (lib/audit).
+    if (next !== row.parentId) { await moveDepartment(deps, id, row.code!, next); await audit(deps, actor, "department.reparent", "departments", id, { from: row.parentId ? `departments/${row.parentId}` : null, to: next ? `departments/${next}` : null }); }
   }
   const [updated] = await deps.db.update(schema.departments).set(set).where(eq(schema.departments.uuid, id)).returning();
   await audit(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set, "departments"), updated);

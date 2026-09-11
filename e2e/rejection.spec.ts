@@ -1,4 +1,4 @@
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, inDays, nextWeekday, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, fileLeave, gotoRoute, inDays, nextWeekday, purge, test, expect } from "./fixtures";
 
 // Saying no, on every kind of request that can be said no to.
 //
@@ -11,7 +11,26 @@ import { SPA_HEADERS, allowConsoleErrors, gotoRoute, inDays, nextWeekday, purge,
 //
 // One spec across several collections on purpose: the failure this protects against is in the shared row, so
 // covering one collection and trusting the rest is how the other eleven break quietly.
-const KINDS: { collection: string; label: string; tab: string; note: boolean; make: (page: import("@playwright/test").Page, mark: string) => Promise<string> }[] = [
+const KINDS: {
+  collection: string; label: string; tab: string; note: boolean;
+  // Who actually holds approve/reject on this collection - a manager for everything dept-owned (the default),
+  // but reimbursements are HR's call and loans/advances are payroll's (grants.ts: "HR decides reimbursement
+  // claims (no manager involvement)"; loans only ever reach payroll's `loans.**` allow).
+  decider?: "hr" | "payroll";
+  // Every workflow collection names its own decision field `state` except these two, which (openapi.yaml)
+  // call it `status` instead - loans and time-entries, both otherwise identical PENDING/…/REJECTED workflows.
+  stateField?: "status";
+  make: (page: import("@playwright/test").Page, mark: string) => Promise<string>;
+}[] = [
+  {
+    collection: "leave-requests",
+    label: "leave",
+    tab: "Leave",
+    note: false,
+    // `fileLeave` already picks a day nobody else's spec is using and retries past overlap/collision errors -
+    // exactly the risk that kept this one out of the table for a while.
+    make: (page, mark) => fileLeave(page, `E2E leave to reject ${mark}`),
+  },
   {
     collection: "overtime-requests",
     label: "overtime",
@@ -42,21 +61,175 @@ const KINDS: { collection: string; label: string; tab: string; note: boolean; ma
       return ((await res.json()) as { path: string }).path;
     },
   },
+  {
+    collection: "attendance-regularizations",
+    label: "attendance correction",
+    tab: "Attendance",
+    note: false,
+    make: async (page, mark) => {
+      // Far enough back that no other spec's own day-picking scheme (`pendingCorrections.spec.ts`,
+      // `regularizationReject.spec.ts`, the fixed `inDays(-40)` in `regularizationCancel.spec.ts`) ever lands
+      // here - a second request for a day that already has one is refused, not merged.
+      const spread = 900 + ((Date.now() / 1000 / 60) % 40 | 0) + test.info().parallelIndex * 41;
+      let day = "";
+      for (let back = spread; back < spread + 7; back++) {
+        const d = new Date(Date.now() - back * 86_400_000);
+        if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) { day = d.toISOString().slice(0, 10); break; }
+      }
+      const res = await page.request.post("/v1/attendance-regularizations", {
+        headers: SPA_HEADERS,
+        data: { date: day, sessions: [{ clock_in: `${day}T09:00:00.000Z`, clock_out: `${day}T18:00:00.000Z` }], reason: `E2E correction to reject ${mark}` },
+      });
+      expect(res.status(), await res.text()).toBe(200);
+      return ((await res.json()) as { path: string }).path;
+    },
+  },
+  {
+    collection: "asset-requests",
+    label: "asset request",
+    tab: "Asset requests",
+    note: true,
+    make: async (page, mark) => {
+      // No categories are seeded at all (every other asset spec takes one out on the same get-or-create,
+      // `assetRequests.spec.ts`'s own `assetCategory()` helper) - the test body ensures one exists (as an
+      // admin; an employee has no write on the collection) before this ever runs, so this only has to find it.
+      const cats = await page.request.get("/v1/asset-categories?page_size=50");
+      const { results = [] } = (await cats.json()) as { results?: { path: string }[] };
+      if (!results.length) throw new Error("e2e: no asset category to file the request against");
+      const res = await page.request.post("/v1/asset-requests", {
+        headers: SPA_HEADERS,
+        data: { category: results[0]!.path, justification: `E2E asset request to reject ${mark}` },
+      });
+      expect(res.status(), await res.text()).toBe(200);
+      return ((await res.json()) as { path: string }).path;
+    },
+  },
+  {
+    collection: "expenses",
+    label: "expense",
+    tab: "Company expenses",
+    note: true,
+    make: async (page, mark) => {
+      // Office Supplies: seeded with no receipt required, so this is about the reject path, not the create
+      // form's own (client-side only) receipt gate - `expenseDecisionsAndInvoice.spec.ts` owns that one.
+      const cats = await page.request.get("/v1/expense-categories?page_size=200");
+      const { results = [] } = (await cats.json()) as { results?: { path: string; display_name?: string }[] };
+      const office = results.find((c) => /office supplies/i.test(c.display_name ?? ""));
+      if (!office) throw new Error("e2e: seeded 'Office Supplies' expense category not found");
+      const made = await page.request.post("/v1/expenses", {
+        headers: SPA_HEADERS,
+        data: { category: office.path, amount: 777, description: `E2E expense to reject ${mark}` },
+      });
+      expect(made.status(), await made.text()).toBe(200);
+      const row = (await made.json()) as { path: string };
+      const submitted = await page.request.post(`/v1/${row.path}:submit`, { headers: SPA_HEADERS });
+      expect(submitted.status(), await submitted.text()).toBeLessThan(300);
+      return row.path;
+    },
+  },
+  {
+    collection: "reimbursements",
+    label: "reimbursement",
+    tab: "Reimbursements",
+    note: false,
+    decider: "hr",
+    make: async (page, mark) => {
+      // Created straight into PENDING - unlike expenses, reimbursements have no draft state to submit out of.
+      const res = await page.request.post("/v1/reimbursements", {
+        headers: SPA_HEADERS,
+        data: { amount: 350, description: `E2E reimbursement to reject ${mark}` },
+      });
+      expect(res.status(), await res.text()).toBe(200);
+      return ((await res.json()) as { path: string }).path;
+    },
+  },
+  {
+    collection: "loans",
+    label: "advance",
+    tab: "Loans & advances",
+    note: false,
+    decider: "payroll",
+    stateField: "status",
+    make: async (page, mark) => {
+      const res = await page.request.post("/v1/loans", {
+        headers: SPA_HEADERS,
+        data: { kind: "advance", principal: 5000, installments: 1, reason: `E2E advance to reject ${mark}` },
+      });
+      expect(res.status(), await res.text()).toBe(200);
+      return ((await res.json()) as { path: string }).path;
+    },
+  },
+  {
+    collection: "time-entries",
+    label: "timesheet entry",
+    tab: "Timesheets",
+    note: false,
+    stateField: "status",
+    make: async (page, mark) => {
+      const projects = await page.request.get("/v1/projects?page_size=50");
+      const { results = [] } = (await projects.json()) as { results?: { path: string; name?: string; status?: string }[] };
+      // A SEEDED project, never another spec's fixture. "The first active project" was taking whichever
+      // `E2E ...` project a concurrent spec had just created for itself - and an entry logged against it then
+      // shows up in THAT spec's own "awaiting your approval" band, which reads its rows by project name: it
+      // waits for a row it cannot clear (this one is not its to decide) and re-presses Approve on an entry
+      // already decided, which is where the 409s came from. A seeded project belongs to nobody in particular.
+      const usable = results.filter((p) => p.status !== "archived");
+      const active = usable.find((p) => !(p.name ?? "").startsWith("E2E ")) ?? usable[0] ?? results[0];
+      if (!active) throw new Error("e2e: no projects seeded");
+      const made = await page.request.post("/v1/time-entries", {
+        headers: SPA_HEADERS,
+        data: { project: active.path, date: inDays(-2), hours: 2, description: `E2E time entry to reject ${mark}` },
+      });
+      expect(made.status(), await made.text()).toBe(200);
+      const row = (await made.json()) as { path: string };
+      const submitted = await page.request.post(`/v1/${row.path}:submit`, { headers: SPA_HEADERS });
+      expect(submitted.status(), await submitted.text()).toBeLessThan(300);
+      return row.path;
+    },
+  },
 ];
 
 test("a request of each kind is rejected from the inbox, with the reason it takes", async ({ as }) => {
   test.setTimeout(240_000);
   const employee = await as("employee");
-  const manager = await as("manager");
+  const decidingManager = await as("manager");
+  const hr = await as("hr");
+  const payroll = await as("payroll");
   // The inbox is shared: another browser deciding in the same instant makes the server answer this one with
   // a conflict, which the loop below simply files again.
-  allowConsoleErrors(manager, /status of 409/);
+  for (const decider of [decidingManager, hr, payroll]) allowConsoleErrors(decider, /status of 409/);
+
+  // Nothing is seeded in asset-categories at all, and the employee this spec files everything else as has no
+  // write on the collection - an admin tops it up once, up front, so the asset-requests kind below always
+  // finds one waiting.
+  const existingCats = await employee.request.get("/v1/asset-categories?page_size=1");
+  if (!((await existingCats.json()) as { results?: unknown[] }).results?.length) {
+    const admin = await as("super");
+    const madeCat = await admin.request.post("/v1/asset-categories", {
+      headers: SPA_HEADERS,
+      data: { display_name: `E2E rejection category ${Date.now()}` },
+    });
+    expect(madeCat.status(), await madeCat.text()).toBe(200);
+  }
+
+  // Same story for projects: nothing seeded, and the employee has no write on the catalog - the time-entries
+  // kind needs one to log against.
+  const existingProjects = await employee.request.get("/v1/projects?page_size=1");
+  if (!((await existingProjects.json()) as { results?: unknown[] }).results?.length) {
+    const admin = await as("super");
+    const madeProject = await admin.request.post("/v1/projects", {
+      headers: SPA_HEADERS,
+      data: { name: `E2E rejection project ${Date.now()}` },
+    });
+    expect(madeProject.status(), await madeProject.text()).toBe(200);
+  }
 
   for (const kind of KINDS) {
     // A mark of its own on every request, so the row this spec rejects is unmistakably the one it filed -
     // the inbox is shared with every other spec that files something for this person.
     const mark = `${Date.now()}`;
     const path = await kind.make(employee, mark);
+    const manager = kind.decider === "hr" ? hr : kind.decider === "payroll" ? payroll : decidingManager;
 
     await gotoRoute(manager, "approvals", "Approvals");
     // Reloaded, not just navigated: the shared read cache serves the inbox it fetched a moment ago, and the
@@ -87,8 +260,20 @@ test("a request of each kind is rejected from the inbox, with the reason it take
       await expect(note, `${kind.collection}: takes a note but offers no field`).toHaveCount(1);
       await note.fill(`E2E: not this ${kind.label}, sorry.`);
     }
-    await dialog.getByRole("button", { name: "Reject request" }).click();
-    await expect(manager.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+    // Re-pressed on a miss: a press that did not land (the request never completing) leaves this same dialog
+    // open, same as it started, under load. Bounded short: this dialog carries the etag it opened WITH, and a
+    // background refresh of this same row between opening it and the first press (or a genuine collision with
+    // the other browser the inbox is shared with) leaves every retry here 409-ing against that same stale
+    // snapshot forever - so this gives up quickly rather than spending the whole budget on a write that can
+    // never land, and escapes the dialog so the poll below reopens the row fresh, with a fresh etag.
+    await expect(async () => {
+      if (!(await manager.getByRole("dialog").count())) return;
+      const submit = manager.getByRole("dialog").getByRole("button", { name: "Reject request" });
+      if (await submit.count()) await submit.click();
+      await expect(manager.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
+    }).toPass({ timeout: 10_000 }).catch(async () => {
+      if (await manager.getByRole("dialog").count()) await manager.keyboard.press("Escape");
+    });
 
 
     // The decision is the row's own: it leaves the inbox, and the request itself says rejected from cold.
@@ -98,7 +283,8 @@ test("a request of each kind is rejected from the inbox, with the reason it take
       .poll(async () => {
         const after = await manager.request.get(`/v1/${path}`);
         if (!after.ok()) return "unreadable";
-        const state = ((await after.json()) as { state?: string }).state;
+        const body = (await after.json()) as { state?: string; status?: string };
+        const state = kind.stateField === "status" ? body.status : body.state;
         if (state !== "REJECTED" && (await manager.getByRole("button", { name: "Reject" }).count())) {
           // Still pending: press again on the same row, which is what the conflict message asks for.
           const again = manager.locator("div").filter({ hasText: mark }).filter({ has: manager.getByRole("button", { name: "Reject" }) }).last();

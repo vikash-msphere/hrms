@@ -68,12 +68,30 @@ function ymFromIndex(idx: number): string {
   return `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, "0")}`;
 }
 
-// Fraction of the joining calendar month actually worked (start day .. month end, inclusive).
-function joiningMonthFraction(startMs: number): number {
-  const d = new Date(startMs);
-  const daysInMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
-  const worked = daysInMonth - d.getUTCDate() + 1;
-  return worked / daysInMonth;
+/**
+ * Fraction of one calendar month the employee is actually employed for, both ends clamped.
+ *
+ * BOTH ends, which is the fix: only the JOINING month used to be prorated, so a leaver was credited a whole
+ * month's entitlement for a month they worked two days of. That is not a rounding difference - accrued leave is
+ * encashable, so the FnF pays cash for it (services/settlements.ts prices `encashableBalances`), and the
+ * asymmetry meant the same two days were worth a full month on the way out and a fifteenth of one on the way
+ * in. A month the employee is present for throughout returns exactly 1, so nothing about the ordinary case
+ * moves.
+ *
+ * `monthIdx` is the monotonic index the accrual walk iterates (year * 12 + month), so the month's own bounds
+ * come from the index rather than from either date - which is what lets one helper answer for the joining
+ * month, the leaving month, and the month that is both.
+ */
+function monthFraction(monthIdx: number, startMs: number, endMs: number | null): number {
+  const year = Math.floor(monthIdx / 12);
+  const month = monthIdx % 12;
+  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const monthStart = Date.UTC(year, month, 1);
+  const monthEnd = Date.UTC(year, month, daysInMonth);
+  const from = Math.max(startMs, monthStart);
+  const to = endMs == null ? monthEnd : Math.min(endMs, monthEnd);
+  if (to < from) return 0;
+  return Math.min(1, (Math.round((to - from) / 86_400_000) + 1) / daysInMonth);
 }
 
 export type AccrualFrequency = "monthly" | "semi_monthly";
@@ -117,7 +135,9 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
     credited = ymFromIndex(idx); // month is processed even if it accrues nothing
     const inProbation = probationEndIdx !== null && idx < probationEndIdx;
     const rate = inProbation ? monthlyProbation : monthly;
-    add += idx === startIdx ? rate * joiningMonthFraction(i.startMs!) : rate;
+    // Prorated at BOTH ends of employment, not just the joining month - see monthFraction. A full month in the
+    // middle is 1, so this is the same arithmetic as before everywhere except the first and last months.
+    add += rate * monthFraction(idx, i.startMs!, i.endMs);
   }
   return { add: round2(add), newLastYm: credited };
 }
@@ -133,15 +153,22 @@ function halfMarkerToIndex(marker: string): number {
   if (m) return ymIndex(marker) * 2 + (Number(m[1]) - 1); // ymIndex ignores the trailing -Hx segment
   return ymIndex(marker) * 2 + 1; // a monthly-format marker (frequency was switched) = whole month covered
 }
-// Fraction of the half-period worked when the employee joins partway through it.
-function joiningHalfFraction(startMs: number, hIdx: number): number {
-  const d = new Date(startMs);
-  const daysInMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+// Fraction of one half-period the employee is employed for - the semi-monthly twin of `monthFraction`, and
+// clamped at BOTH ends for the same reason (a leaver must not be credited a whole half-period for a day of it).
+function halfFraction(hIdx: number, startMs: number, endMs: number | null): number {
+  const monthIdx = Math.floor(hIdx / 2);
+  const year = Math.floor(monthIdx / 12);
+  const month = monthIdx % 12;
+  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
   const firstHalf = hIdx % 2 === 0;
-  const periodStart = firstHalf ? 1 : 16;
-  const periodEnd = firstHalf ? 15 : daysInMonth;
-  const worked = periodEnd - Math.max(d.getUTCDate(), periodStart) + 1;
-  return Math.max(0, Math.min(1, worked / (periodEnd - periodStart + 1)));
+  const periodStartDay = firstHalf ? 1 : 16;
+  const periodEndDay = firstHalf ? 15 : daysInMonth;
+  const total = periodEndDay - periodStartDay + 1;
+  if (total <= 0) return 0;
+  const from = Math.max(startMs, Date.UTC(year, month, periodStartDay));
+  const to = endMs == null ? Date.UTC(year, month, periodEndDay) : Math.min(endMs, Date.UTC(year, month, periodEndDay));
+  if (to < from) return 0;
+  return Math.min(1, (Math.round((to - from) / 86_400_000) + 1) / total);
 }
 
 function computeSemiMonthly(i: AccrualInputs): AccrualResult {
@@ -162,7 +189,7 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
     credited = halfMarker(idx);
     const inProbation = probationEndIdx !== null && idx < probationEndIdx;
     const rate = inProbation ? halfProbation : half;
-    add += idx === startIdx ? rate * joiningHalfFraction(i.startMs!, idx) : rate;
+    add += rate * halfFraction(idx, i.startMs!, i.endMs);
   }
   return { add: round2(add), newLastYm: credited };
 }

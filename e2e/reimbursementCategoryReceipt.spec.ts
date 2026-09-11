@@ -26,7 +26,10 @@ test("a reimbursement category is created with Require a receipt on, and the set
   await expect(form.getByLabel("Require a receipt")).toBeChecked();
   await form.getByLabel("Name").fill(nameB);
   await form.getByRole("button", { name: "Create & add another", exact: true }).click();
-  await page.keyboard.press("Escape");
+  // Wait for the write to land before closing: "add another" empties the form on the way back, and the
+  // dialog is not done until it has.
+  await expect(form.getByLabel("Name")).toHaveValue("", { timeout: 30_000 });
+  await form.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
 
   try {

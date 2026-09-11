@@ -79,6 +79,7 @@ export const SETTINGS_REGISTRY: SettingsEntry[] = [
   { key: "recruiting", title: "Recruiting pipeline", desc: "Hiring board stages, candidate sources, rejection reasons and scorecard criteria.", group: "Hiring & growth", icon: UserSearch, keywords: ["ats", "stages", "sources", "scorecard", "hiring"], target: { collection: "settings", objectPath: "settings/ats", label: "Recruiting settings" } },
   { key: "referrals", title: "Referral bonuses", desc: "When referral bonuses are awarded and how much, with join-speed tiers.", group: "Hiring & growth", icon: UserPlus, keywords: ["bonus", "refer", "milestone"], target: { collection: "settings", objectPath: "settings/referrals", label: "Referral settings" } },
   { key: "performance", title: "Performance framework", desc: "Rating scale, review criteria and review cycles.", group: "Hiring & growth", icon: Target, perm: "review-cycles.write", keywords: ["review cycle", "ratings", "360"], target: { collection: "review-cycles", label: "Performance" } },
+  { key: "goal-templates", title: "Goal templates", desc: "Reusable goal blueprints, applied to a person or a whole team in one press.", group: "Hiring & growth", icon: Target, perm: "goal-templates.write", keywords: ["goal", "okr", "template", "blueprint", "ramp"], target: { collection: "goal-templates", label: "Goal templates" } },
   { key: "onboarding-templates", title: "Onboarding & offboarding", desc: "Task checklists applied when someone joins or leaves.", group: "Hiring & growth", icon: ClipboardList, perm: "transitions.write", keywords: ["joining", "exit", "checklist", "transition"], target: { collection: "transitions", label: "Onboarding templates" } },
   { key: "benefit-plans", title: "Benefit plans", desc: "Health, dental and other plans employees can enrol in.", group: "Hiring & growth", icon: HeartPulse, perm: "benefit-plans.write", keywords: ["insurance", "health", "enrolment"], target: { collection: "benefit-plans", label: "Benefit plans" } },
 
@@ -153,7 +154,7 @@ export const HOST_SETTINGS: Record<string, string[]> = {
   candidates: ["recruiting"],
   referrals: ["referrals"],
   reviews: ["performance"],
-  goals: ["performance"],
+  goals: ["performance", "goal-templates"],
   transitions: ["onboarding-templates"],
   // Comms & support
   documents: ["letters", "letter-defaults", "esign"],

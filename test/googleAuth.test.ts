@@ -55,6 +55,23 @@ describe("session codec", () => {
     expect(await openSession("not-a-token", KEY, now)).toBeNull();
     expect(await openSession("", KEY, now)).toBeNull();
   });
+
+  // `iat` decides REVOCATION - the auth middleware compares it against the user's `sessions_valid_from` stamp,
+  // which is what "sign out everywhere" and "I lost my phone" mean. A payload without one used to open fine,
+  // leaving `sessionIat` undefined: the middleware's `!== null` guard passed it, `undefined < stamp` compared
+  // false, and the revoked cookie was honoured. It is validated as strictly as `exp` for that reason.
+  it("rejects a session whose iat is missing or not a number", async () => {
+    const now = Date.now();
+    // Signed with the REAL key, so only the field check can reject these - not the MAC.
+    const sign = (payload: object) => sealSession(payload as never, KEY);
+    expect(await openSession(await sign({ email: "ada@example.com", exp: now + 60_000 }), KEY, now)).toBeNull();
+    expect(await openSession(await sign({ email: "ada@example.com", iat: null, exp: now + 60_000 }), KEY, now)).toBeNull();
+    expect(await openSession(await sign({ email: "ada@example.com", iat: "yesterday", exp: now + 60_000 }), KEY, now)).toBeNull();
+    // ...and one without a usable `exp` likewise, which was already true and stays true.
+    expect(await openSession(await sign({ email: "ada@example.com", iat: now }), KEY, now)).toBeNull();
+    // The well-formed one still opens.
+    expect((await openSession(await sign({ email: "ada@example.com", iat: now, exp: now + 60_000 }), KEY, now))?.iat).toBe(now);
+  });
 });
 
 describe("/auth routes (Google mode)", () => {

@@ -509,7 +509,7 @@ export async function verifyAsset(deps: Deps, actor: AppUser, id: string, input:
   }
   if (input.condition) set.custodyState = input.condition;
   const [updated] = await deps.db.update(schema.assets).set(set).where(eq(schema.assets.uuid, id)).returning();
-  await audit(deps, actor, "asset.verify", "assets", id, { scanned, checkedIn, condition: input.condition ?? null, note: input.note?.trim() || null, stocktake: stocktakeId }, updated);
+  await audit(deps, actor, "asset.verify", "assets", id, { scanned, checkedIn, condition: input.condition ?? null, note: input.note?.trim() || null, stocktake: stocktakeId ? `stocktakes/${stocktakeId}` : null }, updated);
   await emitEvent(deps, actor, "asset.verified", {
     subject: `assets/${id}`,
     employeeId: updated!.assignedTo,

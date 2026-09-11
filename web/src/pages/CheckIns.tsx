@@ -3,6 +3,7 @@ import { MessagesSquare, Plus, Trash2, Check, X, CalendarDays, CalendarPlus, Cal
 import { create, patch, remove, list } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr, addDaysYmd } from "@/lib/orgDay";
 import type { Board, CheckIn, CheckInActionItem, Employee, Goal, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
@@ -27,20 +28,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
+import { addMonthsUtc } from "../../../src/domain/calendar";
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
-const plusDays = (iso: string, n: number) => {
-  const d = new Date(`${iso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-};
+const plusDays = addDaysYmd;
 // One step along a cadence, mirroring the cron that creates the next 1:1: weeks in days, monthly by calendar
 // month, both stepping from the previous date so the weekday or day-of-month sticks.
 const stepCadence = (iso: string, cadence: string) => {
   if (cadence !== "monthly") return plusDays(iso, cadence === "weekly" ? 7 : 14);
-  const d = new Date(`${iso}T00:00:00Z`);
-  d.setUTCMonth(d.getUTCMonth() + 1);
-  return d.toISOString().slice(0, 10);
+  // Clamped, like the cron's own step (domain/calendar.ts): a monthly 1:1 on the 31st shows 28 February, not
+  // 3 March - which is what a bare `setUTCMonth` answers, and it skips the month the meeting belonged to.
+  return addMonthsUtc(new Date(`${iso}T00:00:00Z`), 1).toISOString().slice(0, 10);
 };
 // "Today" / "Tomorrow" / "In n days" for the near future, where a calendar date makes you do the math yourself.
 const relativeDay = (iso: string): string | null => {

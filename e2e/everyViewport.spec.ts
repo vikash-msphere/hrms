@@ -50,7 +50,10 @@ test("no page scrolls sideways at any supported width", async ({ as }) => {
         // scroll of the whole document.
         const overflow = await settledOverflow(page);
         if (overflow > 1) {
-          failures.push(`${route} at ${label} (${width}px): the page is ${overflow}px too wide`);
+          // Named, not just counted: "167px too wide" sends somebody hunting through a page of nested
+          // flexbox, and the element that actually sticks out is one DOM walk away.
+          const culprits = await offenders(page, width);
+          failures.push(`${route} at ${label} (${width}px): the page is ${overflow}px too wide${culprits.length ? ` - widest: ${culprits.join(" | ")}` : ""}`);
         }
       } catch (e) {
         failures.push(`${route} at ${label}: ${(e as Error).message.split("\n")[0]}`);
@@ -73,6 +76,27 @@ async function settledOverflow(page: import("@playwright/test").Page): Promise<n
     await page.waitForTimeout(500);
   }
   return last;
+}
+
+/**
+ * The elements sticking out past the viewport, widest first.
+ *
+ * Only the ones whose own PARENT stays inside: an element pushed out by its container drags every ancestor
+ * out with it, and a list of forty nested divs says nothing. The innermost offender is the one to look at.
+ */
+async function offenders(page: import("@playwright/test").Page, width: number): Promise<string[]> {
+  return page.evaluate((vw) => {
+    const out: { label: string; right: number }[] = [];
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.right <= vw + 1) continue;
+      const parent = el.parentElement;
+      if (parent && parent !== document.body && parent.getBoundingClientRect().right > vw + 1) continue;
+      const cls = (typeof el.className === "string" ? el.className : "").split(/\s+/).filter(Boolean).slice(0, 4).join(".");
+      out.push({ label: `<${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}> right=${Math.round(r.right)}`, right: r.right });
+    }
+    return out.sort((a, b) => b.right - a.right).slice(0, 3).map((o) => o.label);
+  }, width);
 }
 
 /** The routes `everyPage` walks - its table is the one that is gated against `renderPage()`. */

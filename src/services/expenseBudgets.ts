@@ -332,12 +332,14 @@ export async function listExpenseBudgets(
   summary.spent = round2(summary.spent);
   summary.pending = round2(summary.pending);
 
-  const { items, nextPageToken } = paginate(
+  const { items, nextPageToken } = await paginate(
     matched,
     maxPageSize,
     pageToken,
     (b) => b.createdAt?.getTime() ?? 0,
     (b) => b.uuid,
+    "desc",
+    { codec: deps.idCodec, collection: "expense-budgets" },
   );
   return { items, nextPageToken, extra: { summary, phase_counts } };
 }

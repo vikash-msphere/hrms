@@ -9,9 +9,11 @@ import { useCollection } from "@/hooks/useCollection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { useRefetchOnFocus } from "@/hooks/useRefetchOnFocus";
 import { useRoute, setQueryParam, setRouteRecord, recordUrl } from "@/router";
-import { DataTable, type Column } from "@/components/common/DataTable";
+import { DataTable, type BulkAction, type Column } from "@/components/common/DataTable";
+import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent } from "@/components/ui/dropdown-menu";
 import { idOf, cn, initials } from "@/lib/utils";
+import { todayStr, addDaysYmd, weekdayOf, daysBetweenYmd } from "@/lib/orgDay";
 import { useCanSeeActivity } from "@/lib/perm";
 import type { Me, Board, BoardMode, Card as CardT, CardComment, CardTodo, TicketChecklist, BoardColumn, WipScope, SwimlaneMode, Employee, Goal, Department, BoardMetrics, Sprint } from "@/types";
 import type { Wire } from "@/wire";
@@ -46,9 +48,9 @@ import { RichText } from "@/lib/richText";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { ActivitySection } from "@/components/common/ActivitySection";
-import { MakeTaskDialog } from "@/components/common/MakeTaskDialog";
 import { isConflict } from "@/lib/formError";
 import { timeAgo } from "@/lib/activity";
+import { readLocal, writeLocal, readLocalJson, writeLocalJson } from "@/lib/localPref";
 import { useMentions } from "@/components/common/MentionPicker";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
@@ -96,20 +98,28 @@ const PRIORITY_LANES = [ // fixed swimlanes for swimlane_mode = "priority", seve
   { key: "urgent", label: "Urgent" }, { key: "high", label: "High" }, { key: "medium", label: "Medium" }, { key: "low", label: "Low" },
 ];
 const NO_DEPT = "__nodept"; // CardDialog: explicit "no department" (distinct from "" = use the org default)
+// Repeating work. A Select cannot carry "" as a value, so the one-off case gets a sentinel like the above.
+const NO_CADENCE = "__once";
+const CADENCES: { value: string; label: string }[] = [
+  { value: "weekly", label: "Every week" },
+  { value: "biweekly", label: "Every 2 weeks" },
+  { value: "monthly", label: "Every month" },
+  { value: "quarterly", label: "Every quarter" },
+];
 
 // One-tap answers for the two slowest controls in the task dialog. Fibonacci-ish points because that is what
 // the estimate scale is for ("bigger than a 3, smaller than an 8"), and the dates people actually pick.
 const POINT_PRESETS = [1, 2, 3, 5, 8, 13];
-const shiftDay = (n: number) => {
-  const d = new Date();
-  d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
-};
+// Off the ORG's day, via lib/orgDay. This used to step a local `new Date()` and then serialize it with
+// `toISOString()`, which is UTC: for the first five and a half hours of every IST day the "Today" chip wrote
+// YESTERDAY's date, so the card it created was overdue the moment it was saved.
+const shiftDay = (n: number) => addDaysYmd(todayStr(), n);
 const DUE_PRESETS: { label: string; value: () => string }[] = [
   { label: "Today", value: () => shiftDay(0) },
   { label: "Tomorrow", value: () => shiftDay(1) },
-  // Next Monday, which is where "later this week" work really lands.
-  { label: "Next Mon", value: () => shiftDay(((8 - new Date().getDay()) % 7) || 7) },
+  // Next Monday, which is where "later this week" work really lands. The weekday comes off the org day too,
+  // for the same reason - the browser's own weekday can already be tomorrow's.
+  { label: "Next Mon", value: () => shiftDay(((8 - weekdayOf(todayStr())) % 7) || 7) },
   { label: "+1 week", value: () => shiftDay(7) },
 ];
 
@@ -184,32 +194,30 @@ const rankAt = (items: CardT[], idx: number) => {
 // With a `storageKey` the chip filters (not the search text) persist per board in localStorage, so a curated
 // view survives navigation. Initialized once per mount - the views are keyed by board, so switching boards
 // remounts and picks up that board's saved filter.
-type SavedFilter = { assignees?: string[]; priorities?: string[]; labels?: string[]; departments?: string[]; mine?: boolean };
+type SavedFilter = { assignees?: string[]; priorities?: string[]; labels?: string[]; departments?: string[]; mine?: boolean; reported?: boolean };
 function useCardFilter(meId?: string | null, storageKey?: string) {
-  const [saved] = useState((): SavedFilter => {
-    if (!storageKey) return {};
-    try { return JSON.parse(localStorage.getItem(storageKey) ?? "{}") as SavedFilter; } catch { return {}; }
-  });
+  const [saved] = useState((): SavedFilter => (storageKey ? readLocalJson<SavedFilter>(storageKey, {}) : {}));
   const [q, setQ] = useState("");
   const [assignees, setAssignees] = useState<Set<string>>(new Set(saved.assignees));
   const [priorities, setPriorities] = useState<Set<string>>(new Set(saved.priorities));
   const [labels, setLabels] = useState<Set<string>>(new Set(saved.labels));
   const [departments, setDepartments] = useState<Set<string>>(new Set(saved.departments));
   const [mine, setMine] = useState(!!saved.mine);
-  const active = !!q || assignees.size > 0 || priorities.size > 0 || labels.size > 0 || departments.size > 0 || mine;
-  const clear = () => { setQ(""); setAssignees(new Set()); setPriorities(new Set()); setLabels(new Set()); setDepartments(new Set()); setMine(false); };
+  // Tasks the caller FILED, which is a different question from the ones they are working on: "what did I ask
+  // for, and where has it got to" had no answer on the board at all.
+  const [reported, setReported] = useState(!!saved.reported);
+  const active = !!q || assignees.size > 0 || priorities.size > 0 || labels.size > 0 || departments.size > 0 || mine || reported;
+  const clear = () => { setQ(""); setAssignees(new Set()); setPriorities(new Set()); setLabels(new Set()); setDepartments(new Set()); setMine(false); setReported(false); };
   useEffect(() => {
     if (!storageKey) return;
-    if (assignees.size || priorities.size || labels.size || departments.size || mine) {
-      localStorage.setItem(storageKey, JSON.stringify({ assignees: [...assignees], priorities: [...priorities], labels: [...labels], departments: [...departments], mine } satisfies SavedFilter));
-    } else {
-      localStorage.removeItem(storageKey);
-    }
-  }, [assignees, priorities, labels, departments, mine, storageKey]);
+    const any = assignees.size || priorities.size || labels.size || departments.size || mine || reported;
+    writeLocalJson(storageKey, any ? ({ assignees: [...assignees], priorities: [...priorities], labels: [...labels], departments: [...departments], mine, reported } satisfies SavedFilter) : null);
+  }, [assignees, priorities, labels, departments, mine, reported, storageKey]);
   const effDept = (c: CardT) => (c.department ? idOf(c.department) : NONE);
   const match = (c: CardT) => {
     if (q && !`${c.title} ${c.description ?? ""}`.toLowerCase().includes(q.toLowerCase())) return false;
     if (mine && (!c.assignee || idOf(c.assignee) !== meId)) return false;
+    if (reported && (!c.reporter || idOf(c.reporter) !== meId)) return false;
     if (assignees.size && !assignees.has(c.assignee ? idOf(c.assignee) : NONE)) return false;
     if (priorities.size && !priorities.has(c.priority)) return false;
     if (labels.size && !(c.labels ?? []).some((k) => labels.has(k))) return false;
@@ -217,7 +225,7 @@ function useCardFilter(meId?: string | null, storageKey?: string) {
     return true;
   };
   return {
-    q, setQ, mine, setMine, assignees, priorities, labels, departments, active, clear, match, effDept,
+    q, setQ, mine, setMine, reported, setReported, assignees, priorities, labels, departments, active, clear, match, effDept,
     toggleAssignee: (k: string) => setAssignees((s) => toggleSet(s, k)),
     togglePriority: (k: string) => setPriorities((s) => toggleSet(s, k)),
     toggleLabel: (k: string) => setLabels((s) => toggleSet(s, k)),
@@ -326,6 +334,7 @@ function BoardToolbar({ filter, board, cards, empName, deptName }: { filter: Car
         </FilterPopover>
       )}
       <Button variant={filter.mine ? "secondary" : "outline"} size="sm" className="h-8" onClick={() => filter.setMine(!filter.mine)}>My tasks</Button>
+      <Button variant={filter.reported ? "secondary" : "outline"} size="sm" className="h-8" title="Tasks you filed, whoever is doing them" onClick={() => filter.setReported(!filter.reported)}>I reported</Button>
       {filter.active && (
         <>
           <Button variant="ghost" size="sm" className="h-8 text-muted-foreground" onClick={filter.clear}><X className="h-3.5 w-3.5" /> Clear</Button>
@@ -363,14 +372,14 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
     const fromUrl = valid(route.query.board);
     if (fromUrl && fromUrl !== selectedId) { setSelectedId(fromUrl); return; }
     if (valid(selectedId)) return;
-    setSelectedId(fromUrl ?? valid(localStorage.getItem(LAST_BOARD_KEY)) ?? idOf(boards[0]!.path));
+    setSelectedId(fromUrl ?? valid(readLocal(LAST_BOARD_KEY)) ?? idOf(boards[0]!.path));
   }, [boards, selectedId, route.query.board]);
 
   // Remember the selection and keep the URL shareable. Query-only hash writes don't add history entries here
   // (setQueryParam preserves the path), and the unsaved-changes guard ignores them.
   function selectBoard(id: string) {
     setSelectedId(id);
-    localStorage.setItem(LAST_BOARD_KEY, id);
+    writeLocal(LAST_BOARD_KEY, id);
     setQueryParam("board", id);
   }
 
@@ -463,11 +472,11 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   useRefetchOnFocus(reload);
   // Folded-away columns (per board, sticky). A collapsed column stays a drop target (drop = append).
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem(`boards:collapsed:${boardId}`) ?? "[]") as string[]); } catch { return new Set(); }
+    return new Set(readLocalJson<string[]>(`boards:collapsed:${boardId}`, []));
   });
   const toggleCollapse = (k: string) => setCollapsed((s) => {
     const n = toggleSet(s, k);
-    localStorage.setItem(`boards:collapsed:${boardId}`, JSON.stringify([...n]));
+    writeLocalJson(`boards:collapsed:${boardId}`, [...n]);
     return n;
   });
 
@@ -504,8 +513,9 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     return m;
   }, [cards]);
 
-  // Swimlanes: derive the lane set + a card's lane key from the board's mode.
-  const laneKeyOf = (c: CardT): string => {
+  // Swimlanes: derive the lane set + a card's lane key from the board's mode. `useCallback` because the lane
+  // memo below calls it - its identity moves with the board's swimlane mode, which is the only thing it reads.
+  const laneKeyOf = useCallback((c: CardT): string => {
     switch (board.swimlane_mode) {
       case "assignee": return c.assignee ? idOf(c.assignee) : NONE;
       case "goal": return c.goal ? idOf(c.goal) : NONE;
@@ -514,7 +524,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
       case "custom": return c.swimlane_key || NONE;
       default: return "";
     }
-  };
+  }, [board.swimlane_mode]);
   const noneLabel = board.swimlane_mode === "assignee" ? "Unassigned" : board.swimlane_mode === "goal" ? "No goal" : board.swimlane_mode === "department" ? "No department" : board.swimlane_mode === "custom" ? (board.no_lane_label || "Ungrouped") : "None";
   const lanes = useMemo((): { key: string; label: string }[] => {
     if (board.swimlane_mode === "none") return [{ key: "", label: "" }];
@@ -531,7 +541,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
     }
     if (!seen.has(NONE)) seen.set(NONE, noneLabel);
     return [...seen.entries()].map(([key, label]) => ({ key, label }));
-  }, [board, cards, empName, goalTitle, deptName, noneLabel]);
+  }, [board, cards, empName, goalTitle, deptName, noneLabel, laneKeyOf]);
 
   const filter = useCardFilter(me.employee_id, `boards:filter:${boardId}`);
   const visible = cards.filter(filter.match);
@@ -951,6 +961,12 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   const { toast } = useToast();
   const confirm = useConfirm();
   const editing = !!card;
+  // Named off the employee list the dialog already holds for its pickers - no read for one line of text.
+  const reporterName = useMemo(() => {
+    const id = card?.reporter ? idOf(card.reporter) : "";
+    const e = id ? employees.find((x) => idOf(x.path) === id) : undefined;
+    return e ? `${e.first_name} ${e.last_name}` : "Someone";
+  }, [card?.reporter, employees]);
   const [title, setTitle] = useState(card?.title ?? "");
   const [description, setDescription] = useState(card?.description ?? "");
   const [priority, setPriority] = useState<CardT["priority"]>(card?.priority ?? "medium");
@@ -961,8 +977,18 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   const [swimlane, setSwimlane] = useState(card?.swimlane_key ?? "");
   const [size, setSize] = useState(card?.size != null ? String(card.size) : "");
   const [due, setDue] = useState(card?.due_date ?? "");
+  // Repeating work. "" is a one-off, which is what a card is unless somebody says otherwise.
+  const [cadence, setCadence] = useState<string>(card?.cadence ?? "");
+  // Both arrive on the item Get, so they start unknown rather than at zero: "nobody is watching" and "this
+  // answer did not carry it" are different statements.
+  const [follow, setFollow] = useState<{ watching: boolean; count: number }>({ watching: false, count: 0 });
+  const [hours, setHours] = useState<number | null>(null);
   const [blockReason, setBlockReason] = useState("");
   const [blockedBy, setBlockedBy] = useState(card?.blocked_by ? idOf(card.blocked_by) : "");
+  // The block/unblock verbs' own view of the card: `card` is the snapshot `useOpenCard` took when the dialog
+  // opened and never resyncs, so - same reason `curColumn` exists for `move` below - acting on it has to
+  // update the picture here, not read the stale prop back.
+  const [blockedView, setBlockedView] = useState({ blocked: card?.blocked ?? false, blockedBy: card?.blocked_by, reason: card?.block_reason });
   const [busy, setBusy] = useState(false);
   // Concurrency token, kept fresh: checklist/comment verbs touch the card's update_time, bumping its etag, so the
   // held prop etag goes stale mid-dialog. Refresh from every response that returns the full card, or save 409s.
@@ -987,7 +1013,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   // The server's version of this card after a lost save race, so the reader can see what they are about to
   // overwrite instead of guessing.
   const [conflict, setConflict] = useState<CardT | null>(null);
-  const [promote, setPromote] = useState<string | null>(null); // checklist item being turned into its own task
+  const [promoting, setPromoting] = useState<string | null>(null); // id of the checklist item being turned into its own task
   const canEdit = !editing || (card!.access?.can ?? []).includes("update");
   const descRef = useRef<HTMLTextAreaElement>(null); // the formatting bar edits this textarea's source
   // A task's description is read far more often than it is rewritten, so an editor opens it RENDERED and steps
@@ -1110,12 +1136,37 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
   useEffect(() => {
     if (!editing) return;
     let live = true;
-    get<CardT>(`cards/${idOf(card!.path)}`).then((c) => { if (live) { setComments(c.comments ?? []); setTodos(c.todos ?? []); setEtag(c.etag); } }).catch(() => { /* keep what we have */ });
+    get<CardT>(`cards/${idOf(card!.path)}`)
+      .then((c) => {
+        if (!live) return;
+        setComments(c.comments ?? []);
+        setTodos(c.todos ?? []);
+        // Watchers and booked hours ride the item Get for the same reason the comments do: neither belongs on
+        // a board tile, and neither is worth a read per card on a list.
+        setFollow({ watching: !!c.watching, count: c.watcher_count ?? 0 });
+        setHours(c.logged_hours ?? null);
+        setEtag(c.etag);
+      })
+      .catch(() => { /* keep what we have */ });
     return () => { live = false; };
   }, [editing, card]);
 
+  // Follow this task without being the one doing it: column moves, comments and blocks in both directions.
+  async function toggleWatch() {
+    setBusy(true);
+    try {
+      const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, follow.watching ? "unwatch" : "watch");
+      setFollow({ watching: !!res.watching, count: res.watcher_count ?? 0 });
+      setEtag(res.etag);
+    } catch (e) {
+      toast({ title: "Couldn't change that", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Checklist mutation: invoke a todo verb, refresh the list from the response.
-  async function todoAct(verb: "addTodos" | "toggleTodo" | "removeTodo", body: Record<string, unknown>) {
+  async function todoAct(verb: "addTodos" | "toggleTodo" | "removeTodo" | "promoteTodo", body: Record<string, unknown>) {
     setBusy(true);
     try {
       const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, verb, undefined, body);
@@ -1128,6 +1179,28 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     }
   }
   const todoDone = todos.filter((t) => t.done).length;
+
+  // The checklist item that turned out to be real work. One server call does the whole swap - files the card
+  // on THIS board with this task's assignee, department and sprint, and ticks the item - so the board and the
+  // checklist can never end up both claiming the same outstanding work.
+  async function promoteTodo(todo: { id: string; text: string }) {
+    const ok = await confirm({
+      title: "Make this its own task?",
+      description: `“${todo.text}” is filed on ${board.name}, in ${board.columns[0]?.label ?? "the first column"}, keeping this task's assignee. The checklist item is ticked and points at the new task.`,
+      confirmLabel: "Make it a task",
+    });
+    if (!ok) return;
+    setPromoting(todo.id);
+    try {
+      // No `onSaved`: promoting is something you do while looking at the task, and its close+reload would kick
+      // the editor out from under whoever just pressed it (the note on `act` below). `invoke` invalidates the
+      // cards cache, so the board behind the dialog already shows the new task.
+      await todoAct("promoteTodo", { todo: todo.id });
+      toast({ title: "Made it its own task", description: `Filed on ${board.name}. The checklist item now points at it.`, variant: "success" });
+    } finally {
+      setPromoting(null);
+    }
+  }
 
   const commenterName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
@@ -1165,6 +1238,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       labels,
       documents: docs.map((id) => `org-documents/${id}`),
       size: size ? Number(size) : null,
+      cadence: cadence || null,
       // `format: date`, and "" is not a date - an undated card leaves it out.
       ...(due ? { due_date: due } : {}),
       ...(board.swimlane_mode === "custom" ? { swimlane_key: swimlane } : {}),
@@ -1197,7 +1271,13 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
     toast({ title: editing ? "Task saved" : "Task added", variant: "success" });
   }
 
-  async function act(verb: string, body?: Record<string, unknown>) {
+  // Only block/unblock reach here. Neither closes the dialog: blocking a task is something you do WHILE
+  // looking at it, same as checking off a todo, and `onSaved`'s close+reload silently kicked the editor out
+  // from under whoever just clicked Block - reproduced as `cardBlocking.spec.ts` losing the dialog before it
+  // could read "Blocked" back. `invoke` already invalidates the cards cache (see `moveStatus` below) so the
+  // board and every OTHER open card see the change; this one updates `blockedView` directly since its own
+  // `card` prop is the snapshot `useOpenCard` took on open and never refreshes.
+  async function act(verb: "block" | "unblock", body?: Record<string, unknown>) {
     setBusy(true);
     try {
       // Take the etag the write just produced. Every verb here bumps the card's updated_at, which IS the etag,
@@ -1206,8 +1286,13 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
       // already did this; act and submit did not.
       const res = await invoke<CardT>(`cards/${idOf(card!.path)}`, verb, etag, body);
       setEtag(res.etag);
+      setBlockedView({ blocked: res.blocked, blockedBy: res.blocked_by, reason: res.block_reason });
+      // Either verb clears the staged picker: after Block it has been applied and there is nothing left to
+      // stage; after Unblock the OLD selection would otherwise sit behind the reopened picker, so the trigger
+      // reads back the last task blocked-by rather than its "Blocked by a task…" placeholder.
+      setBlockedBy("");
+      setBlockReason("");
       toast({ title: "Done", variant: "success" });
-      onSaved();
     } catch (e) {
       toast({ title: "Couldn't update", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -1362,6 +1447,37 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             <p className="text-sm text-muted-foreground">No description.</p>
           )}
         </Field>
+        {/* Following, and what the task has cost so far. Both are about a saved task, so neither appears while
+            one is being written. */}
+        {editing && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-1.5">
+            <AccessAction verb={follow.watching ? "unwatch" : "watch"} can={can} label="Follow this task">
+              <Button variant={follow.watching ? "secondary" : "outline"} size="sm" className="h-7 text-xs" disabled={busy} onClick={toggleWatch}>
+                <Eye className="h-3.5 w-3.5" /> {follow.watching ? "Watching" : "Watch"}
+              </Button>
+            </AccessAction>
+            <span className="text-xs text-muted-foreground">
+              {follow.count > 0
+                ? `${follow.count} ${follow.count === 1 ? "person is" : "people are"} following moves, comments and blocks`
+                : "Nobody is following this yet"}
+            </span>
+            {/* Approved timesheet hours booked against this task. Absent when none are - which is not zero. */}
+            {hours != null && (
+              <span className="ml-auto inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground" title="Approved timesheet hours booked against this task">
+                <History className="h-3.5 w-3.5" /> {hours}h logged
+              </span>
+            )}
+          </div>
+        )}
+        {/* Who filed it, and when. A sentence rather than a field: it is not editable, and putting it in the
+            grid among the pickers would suggest it is. Only shown where it says something the other people on
+            the card do not - filing your own task is the assignee line already. */}
+        {editing && card!.reporter && idOf(card!.reporter) !== idOf(card!.assignee ?? "") && (
+          <p className="text-xs text-muted-foreground">
+            Reported by <span className="font-medium text-foreground">{reporterName}</span>
+            {card!.create_time ? ` · ${new Date(card!.create_time).toLocaleDateString()}` : ""}
+          </p>
+        )}
         {/* Two-column field grid from `sm` up, one column on a phone - a pair of comboboxes side by side on a
             390px screen leaves neither readable. When an odd number of fields is visible (Status is edit-only;
             Labels/Swimlane are board-conditional), the lone trailing field spans both columns so no half-width
@@ -1418,6 +1534,17 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 </div>
               )}
             </div>
+          </Field>
+          {/* Repeating work: the chore that comes back. Files the NEXT one when this is delivered, so a task
+              running late is chased rather than duplicated on top of itself. */}
+          <Field label="Repeats" info="Delivering this task files the next one, due a cadence later, with the same checklist. The linked goal and sprint are not carried over.">
+            <Select value={cadence || NO_CADENCE} onValueChange={(v) => setCadence(v === NO_CADENCE ? "" : v)} disabled={!canEdit}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_CADENCE}>Doesn't repeat</SelectItem>
+                {CADENCES.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </Field>
           {/* Estimate + tags */}
           <Field label="Points" info={board.mode === "scrum" ? "Story points. What the sprint burndown and the velocity chart are measured in." : "Rough size, for the analytics tab. Not a schedule."}>
@@ -1534,8 +1661,8 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                     <Checkbox checked={t.done} disabled={busy || !canTickTodos} onCheckedChange={(v) => todoAct("toggleTodo", { todo: t.id, done: !!v })} />
                     <span className={cn("flex-1", t.done && "text-muted-foreground line-through")}>{t.text}</span>
                     {!t.done && (
-                      <AccessAction collection="cards" create label="Create a task">
-                        <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" onClick={() => setPromote(t.text)} aria-label="Make this its own task" title="Too big for a tick-box: make it its own task">
+                      <AccessAction verb="promoteTodo" can={can} label="Make this its own task">
+                        <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 coarse:h-9 coarse:w-9" loading={promoting === t.id} disabled={busy} onClick={() => promoteTodo(t)} aria-label="Make this its own task" title="Too big for a tick-box: make it its own task">
                           <SquareKanban className="h-3.5 w-3.5" />
                         </Button>
                       </AccessAction>
@@ -1643,17 +1770,17 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
 
         {editing && (
           <div className="space-y-2 border-t pt-3">
-            {card!.blocked ? (
+            {blockedView.blocked ? (
               <div className="flex flex-wrap items-center gap-2">
                 {(() => {
-                  const blocker = card!.blocked_by ? boardCards.find((x) => idOf(x.path) === idOf(card!.blocked_by!)) : undefined;
+                  const blocker = blockedView.blockedBy ? boardCards.find((x) => idOf(x.path) === idOf(blockedView.blockedBy!)) : undefined;
                   return (
                     <span className="inline-flex items-center gap-1.5 text-sm text-destructive">
                       <Ban className="h-4 w-4" /> Blocked
                       {blocker && onOpenCard && (
                         <>by <button type="button" className="font-medium underline hover:no-underline" onClick={() => onOpenCard(blocker)}>{taskKey(blocker)} {blocker.title}</button></>
                       )}
-                      {card!.block_reason && <span className="text-muted-foreground">— {card!.block_reason}</span>}
+                      {blockedView.reason && <span className="text-muted-foreground">— {blockedView.reason}</span>}
                     </span>
                   );
                 })()}
@@ -1688,16 +1815,6 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
             a SECOND dialog on top of this one. Still lazy: the audit query runs on the first click, not on open. */}
         {editing && <ActivitySection resource={card!.path} className="border-t pt-3" />}
     </WriteDialog>
-    {/* Checklist item that turned out to be real work: files it as its own task on this board. */}
-    {promote !== null && (
-      <MakeTaskDialog
-        text={promote}
-        source={editing ? `From ${taskKey(card!)}: ${card!.title}` : undefined}
-        defaultBoard={board.path}
-        onClose={() => setPromote(null)}
-        onCreated={(c) => toast({ title: `${c.key ?? "Task"} created`, description: "It's on the board's first column.", variant: "success" })}
-      />
-    )}
     </>
   );
 }
@@ -1890,6 +2007,7 @@ function CfdChart({ metrics }: { metrics: BoardMetrics }) {
 
 function BoardListTab({ board, me }: { board: Board; me: Me }) {
   const { rows: allCards, reload, hasMore, loadMore } = useCollection<CardT>("cards");
+  const { toast } = useToast();
   const boardId = idOf(board.path);
   const cards = useMemo(() => allCards.filter((c) => c.board && idOf(c.board) === boardId && !c.delete_time), [allCards, boardId]);
   const { editing, openCard, closeCard } = useOpenCard(undefined, cards);
@@ -1909,6 +2027,9 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
     { id: "title", header: "Title", accessor: (c) => c.title, mobilePriority: 1 },
     { id: "status", header: "Status", accessor: (c) => colLabel.get(c.column_key) ?? c.column_key, filter: "select", mobilePriority: 3 },
     { id: "assignee", header: "Assignee", accessor: (c) => (c.assignee ? empName(c.assignee) : "Unassigned"), filter: "select", mobilePriority: 4 },
+    // Hidden by default: it is the column you go looking for ("what did I file", "everything Ops raised"),
+    // not one the table needs to be wider for by default.
+    { id: "reporter", header: "Reporter", accessor: (c) => (c.reporter ? empName(c.reporter) : ""), filter: "select", defaultHidden: true },
     { id: "priority", header: "Priority", accessor: (c) => c.priority, filter: "select", cell: (c) => <span className="flex items-center gap-1 capitalize"><PriorityIcon p={c.priority} /> {c.priority}</span> },
     { id: "points", header: "Points", accessor: (c) => c.size ?? null, align: "right", filter: "none" },
     { id: "due", header: "Due", accessor: (c) => c.due_date ?? null, filter: "none" },
@@ -1916,6 +2037,92 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
     { id: "blocked", header: "Blocked", accessor: (c) => (c.blocked ? "Blocked" : ""), filter: "select", cell: (c) => (c.blocked ? <span className="inline-flex items-center gap-1 text-destructive"><Ban className="h-3.5 w-3.5" /> Blocked</span> : null), defaultHidden: true },
     { id: "updated", header: "Updated", accessor: (c) => c.update_time ?? "", cell: (c) => (c.update_time ? new Date(c.update_time).toLocaleDateString() : ""), defaultHidden: true },
   ], [colLabel, empName, board.labels]);
+
+  // Bulk actions on the list, because the board is a drag surface and re-assigning a departing person's
+  // twelve tasks there is twelve drags. Every one of these is an existing per-card verb applied across the
+  // selection, so nothing here can do something a single task could not.
+  const bulkActions: BulkAction<CardT>[] = useMemo(() => {
+    const needs = (verb: string, why: string) => (sel: CardT[]) => (sel.every((c) => (c.access?.can ?? []).includes(verb)) ? null : why);
+    const firstColumn = board.columns[0];
+    const lastColumn = board.columns[board.columns.length - 1];
+    return [
+      // Two ends of the workflow rather than every column: a bulk bar with eight destinations on it is a menu,
+      // and the two moves people actually make in bulk are "pull this batch in" and "these are done".
+      ...(firstColumn && lastColumn && firstColumn.key !== lastColumn.key
+        ? [
+          {
+            label: `Move to ${lastColumn.label}`,
+            icon: <ChevronsUp className="h-4 w-4" />,
+            confirm: { title: `Move the selected tasks to ${lastColumn.label}?`, description: "WIP limits still apply, so a task the column has no room for is left where it is and reported." },
+            disabled: needs("move", "Only tasks you may move"),
+            run: async (sel: CardT[]) => {
+              const r = await bulkInvoke("cards", "move", sel, { to_column: lastColumn.key });
+              toast(bulkSummary("Moved", r));
+              reload();
+              if (r.failed > 0) throw new Error("partial"); // keep the failures selected for a retry
+            },
+          },
+          {
+            label: `Move to ${firstColumn.label}`,
+            icon: <ChevronDown className="h-4 w-4" />,
+            confirm: { title: `Move the selected tasks back to ${firstColumn.label}?` },
+            disabled: needs("move", "Only tasks you may move"),
+            run: async (sel: CardT[]) => {
+              const r = await bulkInvoke("cards", "move", sel, { to_column: firstColumn.key });
+              toast(bulkSummary("Moved", r));
+              reload();
+              if (r.failed > 0) throw new Error("partial");
+            },
+          },
+        ]
+        : []),
+      {
+        label: "Assign to me",
+        icon: <UserRound className="h-4 w-4" />,
+        disabled: (sel: CardT[]) => (!me.employee_id ? "Your login has no employee record" : needs("assign", "Only tasks you may assign")(sel)),
+        run: async (sel: CardT[]) => {
+          const r = await bulkInvoke("cards", "assign", sel, { assignee: `employees/${me.employee_id}` });
+          toast(bulkSummary("Assigned", r));
+          reload();
+          if (r.failed > 0) throw new Error("partial");
+        },
+      },
+      {
+        label: "Unassign",
+        icon: <X className="h-4 w-4" />,
+        confirm: { title: "Take the selected tasks off their assignees?" },
+        disabled: needs("assign", "Only tasks you may assign"),
+        run: async (sel: CardT[]) => {
+          // "" rather than null: a cleared reference goes over the wire as an empty string (api.ts).
+          const r = await bulkInvoke("cards", "assign", sel, { assignee: "" });
+          toast(bulkSummary("Unassigned", r));
+          reload();
+          if (r.failed > 0) throw new Error("partial");
+        },
+      },
+      {
+        label: "Mark urgent",
+        icon: <Flag className="h-4 w-4" />,
+        disabled: needs("prioritize", "Only tasks you may prioritize"),
+        run: async (sel: CardT[]) => {
+          const r = await bulkInvoke("cards", "prioritize", sel, { priority: "urgent" });
+          toast(bulkSummary("Prioritized", r));
+          reload();
+          if (r.failed > 0) throw new Error("partial");
+        },
+      },
+      {
+        label: "Watch",
+        icon: <Eye className="h-4 w-4" />,
+        disabled: needs("watch", "Only tasks you may follow"),
+        run: async (sel: CardT[]) => {
+          const r = await bulkInvoke("cards", "watch", sel);
+          toast(bulkSummary("Now following", r));
+          if (r.failed > 0) throw new Error("partial");
+        },
+      },
+    ];
+  }, [board.columns, me.employee_id, reload, toast]);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -1929,6 +2136,7 @@ function BoardListTab({ board, me }: { board: Board; me: Me }) {
         accessTargetOf={(c) => ({ objectPath: c.path, can: c.access?.can, label: "Manage task access" })}
         hasMore={hasMore}
         onLoadMore={loadMore}
+        bulkActions={bulkActions}
         emptyTitle="No tasks on this board"
         emptyDescription="Tasks you add on the Board tab show up here as a sortable, exportable list."
       />
@@ -2276,15 +2484,17 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   );
 }
 
-const isoDay = (d: Date) => d.toISOString().slice(0, 10);
-const addDays = (iso: string, n: number) => isoDay(new Date(new Date(`${iso}T00:00:00`).getTime() + n * 86400e3));
 // Working days inclusive of both ends, Mon-Fri. Holidays are a separate collection and deliberately not
 // consulted here: this is the length of the box, not a capacity promise.
+//
+// Walks DAY STRINGS (lib/orgDay), not Date objects stepped by 86400e3. The old loop parsed local midnight and
+// added a fixed day in milliseconds, which is only a calendar day until a DST boundary falls inside the span -
+// and then the hour it shifts by either repeats a date or skips one, silently changing the count.
 function workingDays(start: string, end: string): number {
   let n = 0;
-  for (let t = new Date(`${start}T00:00:00`); t <= new Date(`${end}T00:00:00`); t = new Date(t.getTime() + 86400e3)) {
-    const d = t.getDay();
-    if (d !== 0 && d !== 6) n++;
+  for (let d = start; d <= end; d = addDaysYmd(d, 1)) {
+    const wd = weekdayOf(d);
+    if (wd !== 0 && wd !== 6) n++;
   }
   return n;
 }
@@ -2303,14 +2513,16 @@ function NewSprintDialog({ board, sprints, cards, onClose, onSaved }: { board: B
   // Pre-filled with the obvious sprint: the next number, starting today, two weeks long. The discard guard
   // snapshots this as the baseline, so a dialog opened and closed untouched still closes silently.
   const [form, setForm] = useState(() => {
-    const start = isoDay(new Date());
-    return { name: nextSprintName(sprints), goal: "", start, end: addDays(start, 13) };
+    // Two weeks means fourteen days. It used to mean thirteen: `addDays` parsed local midnight and serialized
+    // UTC, so in IST the end date came back one short of what the +13 asked for.
+    const start = todayStr();
+    return { name: nextSprintName(sprints), goal: "", start, end: addDaysYmd(start, 13) };
   });
   const set = (patch: Partial<typeof form>) => setForm((f) => ({ ...f, ...patch }));
 
   const badRange = !!form.start && !!form.end && form.end < form.start;
   const span = !badRange && form.start && form.end
-    ? { days: Math.round((new Date(`${form.end}T00:00:00`).getTime() - new Date(`${form.start}T00:00:00`).getTime()) / 86400e3) + 1, working: workingDays(form.start, form.end) }
+    ? { days: daysBetweenYmd(form.start, form.end) + 1, working: workingDays(form.start, form.end) }
     : null;
 
   // What this board has actually delivered, so the box is planned against evidence rather than optimism. Same

@@ -22,19 +22,57 @@ jobs:
         with:
           node-version: "20"
       - run: npm ci
+      # ONE release string for the whole deploy, resolved once. Both halves of a distributed trace have to
+      # claim the SAME release or the SPA's span and the Worker's span land on two, and only one of them has
+      # source maps - which is the state every deploy was in, because nothing set either value. The short SHA
+      # is what `resolveAppVersion` (web/vite.config.ts) and `gitRelease` (scripts/preflight.ts) already fall
+      # back to, so using it here makes all three agree by construction rather than by coincidence.
+      - name: Resolve the release
+        run: echo "RELEASE=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
       # Config gate FIRST: preflight catches a REPLACE_WITH_* placeholder, a [limits]/CF_PLAN mismatch and a
       # malformed VAPID key - mistakes no build or test can see, and which otherwise only surface in
       # production. `npm run deploy` chains it locally; this is the same gate for the CI path.
       # CF_PLAN must match the Cloudflare plan this account is actually on ("paid" = Workers Standard).
+      #
+      # The two _CONFIRMED values are dated acknowledgements of edge controls configured in the Cloudflare
+      # DASHBOARD, which a preflight cannot read for itself (no binding for the zone, no token to ask with) -
+      # see the note in scripts/preflight.ts. They are plumbed from repository VARIABLES so that confirming
+      # them is a one-line change in GitHub rather than an edit to this workflow, and so an expired
+      # acknowledgement fails the deploy here instead of being silently carried. Set them, once the rules in
+      # docs/deploy-security.md §1 and zone HSTS are actually in place, to the ISO date you verified them.
       - run: npm run preflight
         env:
           CF_PLAN: ${{ vars.CF_PLAN || 'paid' }}
+          WAF_RATE_LIMIT_CONFIRMED: ${{ vars.WAF_RATE_LIMIT_CONFIRMED }}
+          HSTS_CONFIRMED: ${{ vars.HSTS_CONFIRMED }}
+          SENTRY_RELEASE: ${{ env.RELEASE }}
+          VITE_APP_VERSION: ${{ env.RELEASE }}
       # Gate the deploy on the same checks as CI (spectral + tsc + vitest).
       - run: npm run verify
       # Build the SPA BEFORE any wrangler command: wrangler validates `[assets].directory` on every
       # subcommand (including `d1 migrations apply`), so a missing web/dist fails the migration step.
+      #
+      # SENTRY_AUTH_TOKEN is what turns source maps on at all: web/vite.config.ts ties `sourcemap` and the
+      # upload plugin to its presence deliberately (so maps are never left in web/dist to be served as public
+      # assets). Without it every production stack trace arrives as `index-a1b2c3.js:1:48213`. Absent secret =
+      # no upload and no maps, exactly as before - so this is safe to wire before the secret exists.
       - run: npm run build:web
+        env:
+          VITE_APP_VERSION: ${{ env.RELEASE }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
       # Idempotent: wrangler skips migrations already recorded in the remote D1.
       - run: npm run db:migrate:remote
       # Uploads Worker + web/dist assets, registers crons.
-      - run: npx wrangler deploy
+      #
+      # `--env=""` names the top-level (production) environment EXPLICITLY. It is what a bare `wrangler deploy`
+      # already targets, but wrangler warns when a config declares named environments and the command names
+      # none - and the day that warning becomes an error, or the default changes, a bare deploy is the wrong
+      # environment rather than a failed one.
+      #
+      # `--var` MERGES with the `[vars]` block rather than replacing it (verified against
+      # `wrangler deploy --dry-run`: every configured var survives alongside this one), which is what makes
+      # this the right place for the release. wrangler.toml deliberately does NOT carry SENTRY_RELEASE - a
+      # literal there is the same string for every deploy, which is how every release ended up tagged "0.1.0".
+      - run: npx wrangler deploy --env="" --var SENTRY_RELEASE:"$RELEASE"

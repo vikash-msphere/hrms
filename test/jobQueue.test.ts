@@ -155,13 +155,12 @@ describe("job queue: at most one runner per job", () => {
   // exactly one drain owns the job.
 
   // Only a `queued` row is claimable, and that predicate is the whole mechanism: the losing drain's UPDATE
-  // matches nothing, so it declines instead of running work the winner already owns. `runJob` re-reads the row
-  // and hands it to the same claim, so it exercises exactly the write the drain performs.
-  it("declines a job that is no longer queued, whatever state it moved to", async () => {
+  // matches nothing, so it declines instead of running work the winner already owns.
+  it("declines a job the drain finds in any state but queued", async () => {
     for (const status of ["running", "done", "error"] as const) {
       const id = await seedJob({ status });
 
-      await runJob(deps, id);
+      await runScheduled("*/5 * * * *", deps); // a whole drain, which selects only `queued` rows
 
       const job = await jobRow(id);
       // The seeded payload is unparseable, so ANY claim would have spent an attempt and left an error behind.
@@ -169,6 +168,58 @@ describe("job queue: at most one runner per job", () => {
       expect(job.lastError, status).toBeNull();
       expect(job.status, status).toBe(status);
     }
+  });
+
+  // ...but a HUMAN pressing Retry is the exception the terminal state exists for. `runJob` therefore re-queues
+  // the row (guarded on the state it read, so it still cannot race a drain) and then claims it. Handing an
+  // `error` row straight to the claim matched nothing and the button did nothing at all - it returned the
+  // unchanged row, so the page re-rendered the same failure as though it had just run and failed again.
+  it("revives a dead letter when a human asks it to run", async () => {
+    const id = await seedJob({ status: "error", attempts: 5, lastError: "the old failure" });
+
+    await runJob(deps, id);
+
+    const job = await jobRow(id);
+    // It really ran: the unparseable payload failed it again, spending the attempt a human bought it. Back to
+    // terminal rather than quietly earning itself another five automatic rounds.
+    expect(job.attempts).toBe(6);
+    expect(job.status).toBe("error");
+    expect(job.lastError).toContain("JSON");
+  });
+
+  it("revives an orphan a human asks for, but never one still in flight", async () => {
+    const now = new Date("2026-08-14T02:00:00.000Z");
+    deps.clock = { now: () => now };
+
+    const orphaned = await seedJob({ status: "running" });
+    const inFlight = await seedJob({ status: "running" });
+    await deps.db.update(schema.jobs).set({ updatedAt: new Date(+now - 30 * 60_000) }).where(eq(schema.jobs.uuid, orphaned));
+    await deps.db.update(schema.jobs).set({ updatedAt: new Date(+now - 60_000) }).where(eq(schema.jobs.uuid, inFlight));
+
+    await runJob(deps, orphaned);
+    await runJob(deps, inFlight);
+
+    // Past the orphan cutoff its runner is gone, so this is the manual version of the reclaim. Before it, the
+    // row is somebody's live work and re-queueing it would put two runners on one job.
+    expect((await jobRow(orphaned)).attempts).toBe(1);
+    expect((await jobRow(inFlight)).status).toBe("running");
+    expect((await jobRow(inFlight)).attempts).toBe(0);
+  });
+
+  // The other half of the same cap: `processOneJob` decides "terminal" from a THROWN error, which a job whose
+  // invocation was KILLED (the CPU ceiling) never produces. Without the cap here it was reclaimed forever.
+  it("dead-letters an orphan that has no attempts left instead of reclaiming it again", async () => {
+    const now = new Date("2026-08-14T02:00:00.000Z");
+    deps.clock = { now: () => now };
+    const id = await seedJob({ status: "running", attempts: 4 }); // one short of the cap
+    await deps.db.update(schema.jobs).set({ updatedAt: new Date(+now - 30 * 60_000) }).where(eq(schema.jobs.uuid, id));
+
+    await runScheduled("*/5 * * * *", deps);
+
+    const job = await jobRow(id);
+    expect(job.status).toBe("error"); // terminal, not back in the queue for another five-minute loop
+    expect(job.attempts).toBe(5);
+    expect(job.lastError).toContain("orphaned");
   });
 
   it("spends exactly one attempt when the drain reaches the same job twice", async () => {

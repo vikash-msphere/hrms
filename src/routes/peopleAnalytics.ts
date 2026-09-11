@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
 import { peopleAnalytics } from "../services/peopleAnalytics";
+import { orgToday } from "../services/orgDay";
 
 // Virtual collection: `GET /v1/people-analytics?from=&to=&department=&max_people=` returns one row per person
 // with their measures over the window - attendance and punctuality, leave, tasks, goals, performance, time.
@@ -11,7 +12,11 @@ import { peopleAnalytics } from "../services/peopleAnalytics";
 // grouped aggregates. A measure whose collection the caller may not list is absent from the answer, and the
 // people in it are exactly the employees their own directory list would have returned.
 export const peopleAnalyticsRoute = new Hono<AppEnv>().get("/", async (c) => {
-  const today = new Date(c.get("deps").clock.now().getTime()).toISOString().slice(0, 10);
+  // The default window is the month SO FAR, so both ends are "today" questions and both come from the org's
+  // timezone (services/orgDay), never from UTC. The SPA always sends `from`/`to`, so a UTC-derived default
+  // only ever bit the callers with no page behind them - an API key, a script - and bit them silently: asked
+  // on the 1st before the org day and UTC agree, it answered for the whole of the PREVIOUS month.
+  const today = await orgToday(c.get("deps"));
   const monthStart = `${today.slice(0, 7)}-01`;
   const maxPeople = Number(c.req.query("max_people"));
   const result = await peopleAnalytics(c.get("deps"), c.get("analyticsScopes") ?? new Map(), {

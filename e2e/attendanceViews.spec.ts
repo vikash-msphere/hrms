@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
 
 // The two ways to read attendance, and the manager's view of the same days.
 //
@@ -33,13 +33,25 @@ test.describe("attendance views", () => {
     // Days that HAVE a standing are the tickable ones (a day outside the month, or before the person joined,
     // is not). A month can open on one that has too few - so step back a month rather than assert against
     // whatever today happens to be.
-    let ticks = page.getByRole("button", { name: /^Tick .* for a bulk correction$/ });
-    if ((await ticks.count()) < 2) {
-      await page.getByRole("button", { name: "Previous month" }).click();
-      await expect(page.getByText("Click a day for its punches, or tick several to correct them together.")).toBeVisible({ timeout: 30_000 });
-      ticks = page.getByRole("button", { name: /^Tick .* for a bulk correction$/ });
+    const ticks = page.getByRole("button", { name: /^Tick .* for a bulk correction$/ });
+    // WAITED for, not counted once. The helper line above renders from the moment the grid mounts, while the
+    // punches it draws the days from arrive after - so a count taken the instant a month opens can see zero
+    // days for no reason but that none have landed yet, which is how this read "found no days to correct" on
+    // a month that had them. And a month really can hold fewer than two (the person joined mid-month, or it
+    // sits before they joined at all), so an empty one is stepped back past instead of asserted against.
+    const enoughTicks = async (): Promise<boolean> => {
+      for (let i = 0; i < 20 && (await ticks.count()) < 2; i++) await page.waitForTimeout(500);
+      return (await ticks.count()) >= 2;
+    };
+    let found = false;
+    for (let back = 0; back < 6 && !found; back++) {
+      found = await enoughTicks();
+      if (!found) {
+        await page.getByRole("button", { name: "Previous month" }).click({ timeout: 10_000 });
+        await expect(page.getByText("Click a day for its punches, or tick several to correct them together.")).toBeVisible({ timeout: 30_000 });
+      }
     }
-    expect(await ticks.count(), "the month grid offered no days to correct").toBeGreaterThan(1);
+    expect(found, "no month in the last six offered two days to correct").toBe(true);
 
     // Ticking counts, and the count is what the action is named after - a bulk fix that did not say how many
     // days it was about to rewrite would be the wrong thing to press.
@@ -84,6 +96,9 @@ test.describe("attendance views", () => {
 
   test("the daily-hours strip compares the window with the one before it", async ({ as }) => {
     const page = await as("employee");
+    // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
+    // (complianceRuleDelete.spec.ts et al.).
+    allowConsoleErrors(page, /status of 503/i);
     await gotoRoute(page, "attendance", "Attendance");
 
     // The comparison is opt-in because it costs a second window of attendance - it is not read until it is

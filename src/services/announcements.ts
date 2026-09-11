@@ -10,11 +10,12 @@ import { etagOf } from "../http/serialize";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import { searchFilter } from "./searchFilter";
-import { runBatch, insertBatches } from "../lib/dbBatch";
+import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
 import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
 import { notify, notifyAudience, audienceEmployeeIds, type Audience } from "./notifications";
-import { renderEmail, loadEmailBrand } from "../lib/emailLayout";
+import { renderEmail, loadEmailBrand, textParagraphs } from "../lib/emailLayout";
+import { fanOutEmail } from "./emailFanOut";
 import { emitEvent } from "./eventBus";
 import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../domain/kudos";
 import { normalizeIllustration, normalizeIllustrationLayout, normalizeRecipientLayout, type RecipientLayout, type IllustrationLayout } from "../domain/illustration";
@@ -190,7 +191,11 @@ export async function createAnnouncement(deps: Deps, actor: AppUser, input: Anno
     .values({ code, ...(id ? { uuid: id } : {}), kind, published, title: isKudos ? "" : input.title!, body: isKudos ? message : (input.body ?? ""), bodyText: richToPlain(isKudos ? message : input.body), titleAlign: input.title_align ?? null, bodyValign: input.body_valign ?? null, authorEmployeeId: authorId, publishTime, pollMultiple: kind === "poll" ? !!input.multiple : false, pollClosesAt, recipientEmployeeId: recipientId ?? null, recipientDepartmentId: recipientDeptId ?? null, ...(isKudos ? {} : resolveAudience(input)), value: isKudos ? (input.value?.trim() || null) : null, category: isKudos ? (input.category?.trim() || null) : null, level, points, illustration: normalizeIllustration(input.illustration), illustrationLayout: normalizeIllustrationLayout(input.illustration_layout), recipientLayout: isKudos ? normalizeRecipientLayout(input.recipient_layout) : null })
     .returning())[0]!;
   if (kind === "poll") {
-    await deps.db.insert(schema.announcementPollOptions).values(options.map((label, i) => ({ announcementId: row.uuid, label, position: i })));
+    // `insertBatches`, not one statement: a poll option row binds six parameters (uuid, announcement_id, label,
+    // position, created_at, updated_at), so a single multi-row insert runs out of D1's hundred somewhere past
+    // sixteen options. The schema caps the list well below that; this keeps the two from having to agree.
+    await runBatch(deps.db, insertBatches(options.map((label, i) => ({ announcementId: row.uuid, label, position: i })), (group) =>
+      deps.db.insert(schema.announcementPollOptions).values(group)));
   }
   await audit(deps, actor, `${kind}.create`, "announcements", row.uuid, createdMeta(row, "announcements"), row);
   // Tell the recognized party (the kudos post itself is the link target): one recipient, or every member of
@@ -245,20 +250,22 @@ export async function emailAnnouncement(deps: Deps, row: typeof schema.announcem
   if (!claimed.length) return 0; // somebody else's publish already sent it
   const ids = await audienceEmployeeIds(deps, audienceOf(row)!);
   if (!ids.length) return 0;
+  // A post's body is markdown-lite (domain/richText.ts), and `bodyHtml` is raw HTML by contract - so handing
+  // the body over as it stands mailed the MARKUP to the whole audience: `**important**` with its asterisks,
+  // `[the policy](…)` as literal text, and every newline collapsed into one run-on block. It also put whatever
+  // an author had typed in angle brackets into a company-branded email unescaped. The prose goes out as
+  // escaped paragraphs instead - the same stripper the search index and every excerpt already read it through,
+  // rather than a second markdown parser here that could drift from the one that renders the board.
   const html = renderEmail(
-    { heading: row.title, preheader: richExcerpt(row.body, 140), bodyHtml: row.body },
+    { heading: row.title, preheader: richExcerpt(row.body, 140), bodyHtml: textParagraphs(richToPlain(row.body)) },
     await loadEmailBrand(deps),
   );
-  let sent = 0;
-  const CHUNK = 90; // D1 binds ~100 params per statement
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const emps = await deps.db.select({ workEmail: schema.employees.workEmail }).from(schema.employees).where(inArray(schema.employees.uuid, ids.slice(i, i + CHUNK)));
-    for (const e of emps) {
-      if (!e.workEmail) continue;
-      try { await deps.email.send(e.workEmail, row.title, html); sent++; } catch (err) { console.error("[announcements] email send failed (non-fatal)", err); }
-    }
-  }
-  return sent;
+  // BOUNDED, and the remainder is owned by the queue. Every send is an outbound fetch off the same
+  // per-invocation subrequest budget as the D1 calls around it, and this runs inside the five-minute tick
+  // alongside every other subtask - so an org-wide blast used to run out of budget part way down the roster.
+  // The `emailed_at` claim above had already been taken, so the post read as mailed while most of the company
+  // had heard nothing, and the per-recipient catch meant nothing anywhere said so. See services/emailFanOut.ts.
+  return fanOutEmail(deps, { recipients: ids, subject: row.title, html, label: `announcement ${row.uuid}` });
 }
 
 // The other half of scheduling: a draft whose `publish_time` has arrived goes live on the next 5-minute tick.
@@ -277,6 +284,7 @@ export async function publishDueAnnouncements(deps: Deps): Promise<number> {
     .from(schema.announcements)
     .where(and(eq(schema.announcements.published, false), isNull(schema.announcements.deleteTime), lte(schema.announcements.publishTime, now)));
   let published = 0;
+  let failed = 0;
   for (const row of due) {
     if (row.disabled) continue;
     const claimed = await deps.db
@@ -285,23 +293,39 @@ export async function publishDueAnnouncements(deps: Deps): Promise<number> {
       .where(and(eq(schema.announcements.uuid, row.uuid), eq(schema.announcements.published, false)))
       .returning();
     if (!claimed.length) continue;
-    await audit(deps, "system", `${row.kind}.publish`, "announcements", row.uuid, { scheduled: true }, claimed[0]!);
-    const audience = audienceOf(row);
-    if (audience)
-      await notifyAudience(
-        deps,
-        audience,
-        { type: "announcement.posted", title: postedTitle(row.kind), body: row.title, link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}` },
-        row.authorEmployeeId,
-      );
-    // A scheduled post emails when it goes live, not when it was written.
-    await emailAnnouncement(deps, claimed[0]!);
-    await emitEvent(deps, null, "announcement.published", { subject: `announcements/${row.uuid}`, payload: { title: row.title } });
-    // A scheduled post's mentions land when it does. The "actor" is the post's own author, not the tick: it
-    // is their words that named someone, and naming yourself still notifies nobody.
-    await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { ...announcementMention(row.uuid), body: row.body, title: row.title });
     published++;
+    // The BROADCAST is isolated, the flip is not - and that asymmetry is the point. Unlike the recurring
+    // claims elsewhere (services/expenses.ts, services/cards.ts) this claim is the outcome the org asked for:
+    // the post is live and the feed is already showing it, so releasing it would un-publish a post people can
+    // see, which is not a recovery. What must not happen is one post's fan-out taking the whole tick with it:
+    // a single unreachable notification write used to abort the loop, and every LATER scheduled post - a
+    // holiday notice, a policy update - simply never went live at all, on a tick that then reported an error
+    // about something else entirely. Each post's telling is therefore its own failure.
+    try {
+      await audit(deps, "system", `${row.kind}.publish`, "announcements", row.uuid, { scheduled: true }, claimed[0]!);
+      const audience = audienceOf(row);
+      if (audience)
+        await notifyAudience(
+          deps,
+          audience,
+          { type: "announcement.posted", title: postedTitle(row.kind), body: row.title, link: boardPostLink(row.uuid), subject: `announcements/${row.uuid}` },
+          row.authorEmployeeId,
+        );
+      // A scheduled post emails when it goes live, not when it was written.
+      await emailAnnouncement(deps, claimed[0]!);
+      await emitEvent(deps, null, "announcement.published", { subject: `announcements/${row.uuid}`, payload: { title: row.title } });
+      // A scheduled post's mentions land when it does. The "actor" is the post's own author, not the tick: it
+      // is their words that named someone, and naming yourself still notifies nobody.
+      await notifyMentions(deps, { employeeId: row.authorEmployeeId } as AppUser, { ...announcementMention(row.uuid), body: row.body, title: row.title });
+    } catch (err) {
+      failed++;
+      console.error(`[announcements] published ${row.uuid} but could not broadcast it`, err);
+    }
   }
+  // A post that went live with nobody told is exactly the state somebody has to know about - it looks
+  // announced and reached no one - so it goes on the `cron_runs` row rather than only into Workers Logs.
+  // Thrown after the loop: the remaining posts still publish.
+  if (failed) throw new Error(`${failed} of ${published} scheduled post(s) published but could not be broadcast; they are live and unannounced`);
   return published;
 }
 
@@ -503,13 +527,19 @@ function groupReactions(rows: { key: string; e: string; emoji: string }[], viewe
 }
 
 // Post-level reactions (reply_id IS NULL) for a set of announcements, grouped per post.
+//
+// Chunked, like every other id-keyed read on this page. A full page is `clampPageSize` = 100 ids, which is the
+// D1 bound-parameter cap exactly - no room for the predicate beside it, and none for a caller whose scope binds
+// any of its own. See lib/dbBatch.ts ID_CHUNK for why the margin is the point.
 export async function reactionsFor(deps: Deps, announcementIds: string[], viewerEmployeeId: string | null) {
   if (!announcementIds.length) return new Map<string, ReactionGroup[]>();
   const rx = schema.announcementReactions;
-  const rows = await deps.db
-    .select({ key: rx.announcementId, e: rx.employeeId, emoji: rx.emoji })
-    .from(rx)
-    .where(and(inArray(rx.announcementId, announcementIds), isNull(rx.replyId)));
+  const rows = await byIdChunks(announcementIds, (group) =>
+    deps.db
+      .select({ key: rx.announcementId, e: rx.employeeId, emoji: rx.emoji })
+      .from(rx)
+      .where(and(inArray(rx.announcementId, group), isNull(rx.replyId))),
+  );
   return groupReactions(rows, viewerEmployeeId);
 }
 
@@ -531,19 +561,29 @@ export async function addReply(deps: Deps, actor: AppUser, id: string, body?: st
 
 // Replies for a set of announcements, grouped oldest-first by announcement id (one query for a whole page),
 // each with its own grouped reactions attached (`_reactions`) for the reply-level reaction bars.
+//
+// The reply-reaction read is the one id list on this page that is not bounded by the page size: it binds one
+// parameter per REPLY across every post on the page, so a page of twenty posts holding six replies each was
+// already past the D1 cap and answered `D1_ERROR: too many SQL variables` - the whole board, not one post.
+// Both reads are chunked; the reply rows are re-sorted after the fact because the ordering guarantee is over
+// the whole set, not over one chunk.
 export async function repliesFor(deps: Deps, announcementIds: string[], viewerEmployeeId: string | null) {
   const map = new Map<string, (typeof schema.announcementReplies.$inferSelect)[]>();
   if (!announcementIds.length) return map;
-  const rows = await deps.db
-    .select()
-    .from(schema.announcementReplies)
-    .where(inArray(schema.announcementReplies.announcementId, announcementIds))
-    .orderBy(schema.announcementReplies.createdAt);
+  const rows = (
+    await byIdChunks(announcementIds, (group) =>
+      deps.db
+        .select()
+        .from(schema.announcementReplies)
+        .where(inArray(schema.announcementReplies.announcementId, group))
+        .orderBy(schema.announcementReplies.createdAt),
+    )
+  ).sort((a, b) => +a.createdAt - +b.createdAt);
   const replyIds = rows.map((r) => r.uuid);
   const rx = schema.announcementReactions;
-  const reactRows = replyIds.length
-    ? await deps.db.select({ key: rx.replyId, e: rx.employeeId, emoji: rx.emoji }).from(rx).where(inArray(rx.replyId, replyIds))
-    : [];
+  const reactRows = await byIdChunks(replyIds, (group) =>
+    deps.db.select({ key: rx.replyId, e: rx.employeeId, emoji: rx.emoji }).from(rx).where(inArray(rx.replyId, group)),
+  );
   const byReply = groupReactions(reactRows.map((r) => ({ key: r.key as string, e: r.e, emoji: r.emoji })), viewerEmployeeId);
   for (const r of rows) {
     (r as any)._reactions = byReply.get(r.uuid) ?? [];
@@ -555,8 +595,12 @@ export async function repliesFor(deps: Deps, announcementIds: string[], viewerEm
 }
 
 // A poll is closed (no more voting) when its post is locked or its deadline has passed.
-export function pollClosed(row: { locked?: boolean | null; pollClosesAt?: Date | null }): boolean {
-  return !!row.locked || (!!row.pollClosesAt && Date.now() > +new Date(row.pollClosesAt));
+//
+// `nowMs` is passed in rather than read from `Date.now()`: this is the predicate that decides whether a vote
+// is accepted, and a decision the app makes about time has to be made against the SAME clock everything else
+// runs on (`deps.clock`), or it cannot be pinned to an instant in a test and cannot be moved by one either.
+export function pollClosed(row: { locked?: boolean | null; pollClosesAt?: Date | null }, nowMs: number): boolean {
+  return !!row.locked || (!!row.pollClosesAt && nowMs > +new Date(row.pollClosesAt));
 }
 
 // Cast / change / clear the caller's vote on a poll. Single-choice: selecting an option replaces any prior
@@ -565,7 +609,7 @@ export function pollClosed(row: { locked?: boolean | null; pollClosesAt?: Date |
 export async function castVote(deps: Deps, actor: AppUser, id: string, optionId: string) {
   const row = await getAnnouncement(deps, id);
   if (row.kind !== "poll") throw invalidArgument("not a poll");
-  if (pollClosed(row)) throw aborted("poll is closed");
+  if (pollClosed(row, +deps.clock.now())) throw aborted("poll is closed");
   if (!actor.employeeId) throw invalidArgument("a vote needs an employee identity");
   const opt = (await deps.db
     .select({ uuid: schema.announcementPollOptions.uuid })
@@ -599,16 +643,22 @@ export type PollData = {
 export async function pollDataFor(deps: Deps, announcementIds: string[], viewerEmployeeId: string | null) {
   const map = new Map<string, PollData>();
   if (!announcementIds.length) return map;
-  const opts = await deps.db
-    .select()
-    .from(schema.announcementPollOptions)
-    .where(inArray(schema.announcementPollOptions.announcementId, announcementIds))
-    .orderBy(schema.announcementPollOptions.position);
+  const opts = (
+    await byIdChunks(announcementIds, (group) =>
+      deps.db
+        .select()
+        .from(schema.announcementPollOptions)
+        .where(inArray(schema.announcementPollOptions.announcementId, group))
+        .orderBy(schema.announcementPollOptions.position),
+    )
+  ).sort((a, b) => a.position - b.position);
   if (!opts.length) return map;
-  const votes = await deps.db
-    .select({ a: schema.announcementPollVotes.announcementId, o: schema.announcementPollVotes.optionId, e: schema.announcementPollVotes.employeeId })
-    .from(schema.announcementPollVotes)
-    .where(inArray(schema.announcementPollVotes.announcementId, announcementIds));
+  const votes = await byIdChunks(announcementIds, (group) =>
+    deps.db
+      .select({ a: schema.announcementPollVotes.announcementId, o: schema.announcementPollVotes.optionId, e: schema.announcementPollVotes.employeeId })
+      .from(schema.announcementPollVotes)
+      .where(inArray(schema.announcementPollVotes.announcementId, group)),
+  );
   const countByOption = new Map<string, number>();
   const myOptions = new Set<string>();
   const votersByAnn = new Map<string, Set<string>>();
@@ -632,10 +682,12 @@ export async function pollDataFor(deps: Deps, announcementIds: string[], viewerE
 export async function readsFor(deps: Deps, announcementIds: string[]) {
   const map = new Map<string, string[]>();
   if (!announcementIds.length) return map;
-  const rows = await deps.db
-    .select({ a: schema.announcementReads.announcementId, e: schema.announcementReads.employeeId })
-    .from(schema.announcementReads)
-    .where(inArray(schema.announcementReads.announcementId, announcementIds));
+  const rows = await byIdChunks(announcementIds, (group) =>
+    deps.db
+      .select({ a: schema.announcementReads.announcementId, e: schema.announcementReads.employeeId })
+      .from(schema.announcementReads)
+      .where(inArray(schema.announcementReads.announcementId, group)),
+  );
   for (const r of rows) {
     const list = map.get(r.a) ?? [];
     list.push(r.e);

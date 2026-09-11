@@ -75,7 +75,9 @@ export default function TeamAnalytics({ me }: { me: Me }) {
     return () => { live = false; };
   }, [from, to, dept, reloadKey]);
 
-  const metrics = data?.metrics ?? [];
+  // Memoized because the two memos below depend on it: `?? []` is a fresh array whenever the report has not
+  // arrived, so as a bare const it churned their dependencies on every render.
+  const metrics = useMemo(() => data?.metrics ?? [], [data]);
   const groups = useMemo(() => {
     const present = new Set(metrics.map((m) => m.group));
     return [{ key: "overview", label: "Overview" }, ...(data?.groups ?? []).filter((g) => present.has(g.key))];

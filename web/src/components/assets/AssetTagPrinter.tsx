@@ -276,7 +276,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettin
   const { rows: assetCategories } = useCollection<AssetCategory>("asset-categories");
   const catName = useMemo(() => {
     const m = new Map(assetCategories.map((c) => [idOf(c.path), c.display_name ?? ""]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? "" : "");
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? "" : "");
   }, [assetCategories]);
   const [state, setState] = useState<StoredState>(() => loadStored(tagSettings));
   // Session-scoped display choices, defaulted from org config (change them for one run without
@@ -362,10 +362,9 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettin
     for (const id of queueCounts.keys()) {
       const a = byId.get(id);
       if (!a) continue;
-      m.set(id, { tag: tagOf(a), name: a.name, serial: a.serial_number, codeDataUrl: codeUrls.get(id) });
+      m.set(id, { tag: tagOf(a), name: a.name, serial: a.serial_number ?? undefined, codeDataUrl: codeUrls.get(id) });
     }
     return m;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueCounts, byId, codeUrls]);
 
   // Generate code images for queued assets: QR (qrcode lib) or Code128 (jsbarcode), both lazy-loaded.
@@ -405,7 +404,6 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettin
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueCounts, byId, codeUrls, qrMode, codeType]);
 
   // Changing what the code encodes (or its symbology) invalidates every generated image.

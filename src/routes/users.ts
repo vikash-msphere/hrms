@@ -55,10 +55,28 @@ export const users = new Hono<AppEnv>()
       if (!cfg.feed_enabled) return undefined;
       return deps.idCodec.encode("holiday-feed", u.employeeId);
     };
+    // The caller's SITTING, so the SPA can scope its on-disk caches to it.
+    //
+    // The record store and the photo/settings caches are namespaced by EMAIL (web/src/App.tsx `cacheUser`),
+    // which is what keeps two people sharing a browser apart - and which also means a cache written under one
+    // session is adopted by the next. Closing the tab is the ordinary way a person leaves, and it clears
+    // nothing: only an explicit sign-out purges (web/src/lib/clientStore.ts `purgeAll`). So employee records
+    // and salary figures sat unencrypted on a shared machine until somebody signed in again.
+    //
+    // Folding this in makes the cache live exactly as long as the session that filled it: a reload or a return
+    // to the same session still hydrates from disk (which is the whole point of the cache), and a new sign-in
+    // is a new namespace whose predecessor's records are deleted rather than read. It is deliberately OPAQUE -
+    // the underlying value is `<user id>:<issue instant>`, and only its equality matters to the client.
+    //
+    // Absent on the lanes that carry no session (API key, Access JWT, dev bypass): a principal with no session
+    // has nothing for a cache to outlive, and inventing a value would make the namespace change on every
+    // request. `simulatedBy` carries the real admin's sitting, so a simulation is scoped to it too.
+    const sessionId = u.simulatedBy?.sessionId ?? u.sessionId;
     const withCallerAccess = async <T extends object>(res: T) =>
       c.json({
         ...res,
         holiday_feed_token: await feedToken(),
+        ...(sessionId ? { session_id: sessionId } : {}),
         caller_access: { capabilities: capabilitiesOf(u.grant), scopes: u.policy.supported_scopes ?? {} },
       });
     // A "view as" subject can be someone who has never signed in: lib/viewAs.ts grades them as the account they

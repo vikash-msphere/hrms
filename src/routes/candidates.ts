@@ -3,6 +3,7 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listCandidates, getCandidate, createCandidate, updateCandidate, type CandidateInput } from "../services/ats";
 import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { requireCappedBody } from "../services/documentsCommon";
 import { toCandidateResource } from "../http/serialize";
 
 const COL = "candidates";
@@ -45,7 +46,7 @@ export const candidates = collectionRoutes<CandidateInput, typeof schema.candida
   verbs: {
     upload: {
       run: async (deps, user, id, _body, c) => {
-        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        const bytes = new Uint8Array(await requireCappedBody(c.req.raw));
         await putAttachment(deps, user, { collection: COL, objectId: id, slot: RESUME, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
         return getCandidate(deps, id);
       },

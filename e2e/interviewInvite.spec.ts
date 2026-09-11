@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, inDays, purge, expect, test, toast } from "./fixtures";
+import { apiPost, gotoRoute, inDays, purge, expect, test, toast } from "./fixtures";
 
 // Emailing the candidate their own slot - `interviews.spec.ts` and `interviewIcs.spec.ts` both stop once the
 // interview is scheduled and never touch this button. Scheduling has always notified the panel and left the
@@ -54,7 +54,10 @@ async function create(
   collection: string,
   data: Record<string, unknown>,
 ): Promise<string> {
-  const res = await page.request.post(`/v1/${collection}`, { headers: SPA_HEADERS, data });
+  // `apiPost`, not a bare post: this is the spec's scaffolding (a requisition, a candidate, an interview to
+  // invite somebody to), and the runtime recycling the Worker mid-request kills the whole test on a row it
+  // was only setting up. The invite itself - what this test is about - is driven through the page.
+  const res = await apiPost(page, collection, data);
   expect(res.status(), await res.text()).toBe(200);
   return ((await res.json()) as { path: string }).path;
 }

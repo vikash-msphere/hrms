@@ -13,7 +13,11 @@ test("spreading a shift across the working week from the roster dialog assigns e
 
   const shiftName = `E2E Spread Shift ${Date.now() % 100000}`;
 
-  const cell = page.getByRole("button", { name: /, no shift$/ }).first();
+  // `.last()`, not `.first()`: `schedule.spec.ts` picks its own empty cell the same way, off the same roster
+  // grid, and "first empty cell" resolves to the identical cell for both when they run at once - whichever
+  // saves second silently overwrites the other's assignment on it. Opposite ends of the same list is enough
+  // to keep the two apart without either one needing to know about the other by name.
+  const cell = page.getByRole("button", { name: /, no shift$/ }).last();
   await expect(cell).toBeVisible();
   const cellName = (await cell.getAttribute("aria-label")) ?? "";
   const person = cellName.split(",")[0]!;

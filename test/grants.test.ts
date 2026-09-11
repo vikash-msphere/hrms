@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { GRANTS, grantFor } from "../src/domain/grants";
+import { ACCESS_VERBS } from "../src/http/accessHint";
 import { ROLES } from "../src/db/schema";
 import { resolveRequest, decide, capabilitiesOf } from "../src/domain/permissions";
 import type { Role } from "../src/env";
@@ -107,6 +108,38 @@ describe("GRANTS - super_admin", () => {
   });
 });
 
+describe("GRANTS - the goal-setting handshake (owner proposes, dept manager agrees)", () => {
+  // A LEVEL grant carries no custom methods (decide() consults `allow` patterns only for a verb key), so
+  // `goals.me.**: write` and `goals.my-dept.**: write` say nothing about propose/approve/requestChanges.
+  // All three shipped ungranted: the verbs, their notifications, events and audit actions existed and only
+  // super_admin's `**` could reach them, so the drawer hid every button and the handshake was dead. These
+  // assertions are what stops the next stage verb arriving the same way.
+  const OWN = "/v1/goals/04-1c-0a9-0"; // a goal under SELF's own employee code
+  const REPORT = "/v1/goals/04-1c-0b2-0"; // a goal owned by someone in SELF's dept subtree
+  const OTHER = "/v1/goals/07-2a-0b1-0"; // another department's
+
+  it("lets the owner submit their own draft, and nobody submit somebody else's", () => {
+    for (const role of ["employee", "manager", "super_admin"] as const) {
+      expect(ok(role, "POST", `${OWN}:propose`)).toBe(true);
+    }
+    expect(ok("employee", "POST", `${OTHER}:propose`)).toBe(false);
+    expect(ok("manager", "POST", `${OTHER}:propose`)).toBe(false);
+  });
+
+  it("lets a manager agree or send back a report's goal, scoped to their own dept", () => {
+    for (const verb of [":approve", ":requestChanges"]) {
+      expect(ok("manager", "POST", `${REPORT}${verb}`)).toBe(true);
+      expect(ok("super_admin", "POST", `${REPORT}${verb}`)).toBe(true);
+      // `my-dept`, not `*`: agreeing another department's goals is somebody else's call.
+      expect(ok("manager", "POST", `${OTHER}${verb}`)).toBe(false);
+      // The owner does not agree their own goal - that is the whole point of the handshake.
+      expect(ok("employee", "POST", `${OWN}${verb}`)).toBe(false);
+      // HR administers cycles; agreeing a goal is the manager's, and HR holds `goals.**` at READ.
+      expect(ok("hr_admin", "POST", `${REPORT}${verb}`)).toBe(false);
+    }
+  });
+});
+
 describe("GRANTS - personal-documents:generateLetter (HR + super only)", () => {
   // The letter-generation custom method resolves to the verb key personal-documents.generateLetter; only
   // hr_admin (broad personal-documents.** allow) and super_admin (**) may invoke it.
@@ -197,5 +230,105 @@ describe("capabilitiesOf (scope-stripped tier-1 set)", () => {
     const caps = capabilitiesOf(GRANTS.super_admin);
     expect(caps).toContain("**.admin");
     expect(caps).toContain("**.**");
+  });
+});
+
+
+// Every verb the UI can offer is reachable by somebody - or is on the list of ones deliberately withheld.
+//
+// A level grant carries NO custom methods, so a verb has to be named in `allow` even for a caller who already
+// writes the row. That is easy to forget, and forgetting it is silent in both directions: the server answers
+// 403, and the UI's `<AccessAction>` hides the affordance, so the feature is simply not there. Five verbs had
+// shipped that way - `goals` watch/unwatch/setContributors and `reviews` suggestFeedback/assignReviewer:
+// built, wired, documented DONE, and reachable by nobody but super_admin.
+//
+// This is an EXACT match against the withheld list rather than "nothing is unreachable", so it fails both
+// ways: a new verb that nobody was granted fails, and a verb that gains a grant without leaving the list
+// fails too (the list stops describing the policy). Two reasons a verb belongs on it:
+//   - ACL-ONLY collections, which seed nothing for any role by design (see [[no-access-control-via-code]]):
+//     access arrives as per-object rules the user writes in the ACL UI, where a `<col>.**` rule is a wildcard
+//     verb allow and therefore already covers verbs added later.
+//   - SUPER-ONLY verbs, withheld on purpose and documented where they are withheld - the bank file and the
+//     statutory report expose the employer debit account and every account number, and payroll approval is
+//     deliberately not the payroll operator's own.
+describe("ACCESS_VERBS - every offered verb is reachable, or is withheld on purpose", () => {
+  const WITHHELD = [
+    // ACL-only collections: kanban, the ops console, keys, and the access system itself.
+    "access-rules:approve", "access-rules:clone", "access-rules:preview", "access-rules:reject",
+    "access-rules:requestAccess", "api-keys:revoke",
+    "boards:configure", "boards:metrics",
+    "cards:addTodos", "cards:assign", "cards:block", "cards:comment", "cards:move", "cards:prioritize",
+    "cards:promoteTodo", "cards:removeTodo", "cards:toggleTodo", "cards:unblock", "cards:unwatch",
+    "cards:watch",
+    "cron-runs:run", "operations:run", "sprints:activate", "sprints:complete",
+    "letterheads:deleteImage", "letterheads:duplicate", "letterheads:image", "letterheads:preview",
+    "letterheads:uploadImage",
+    "referrals:award", "suggestions:downvote", "suggestions:merge", "suggestions:upvote",
+    // Company/department-wide group award (one bonus row per in-scope employee). HR's `bonuses.**` LEVEL
+    // covers recording a single award; this collection-level verb is left to the ACL for now, deliberately,
+    // because it writes money for a whole population at once.
+    "bonuses:award",
+    // Super-only on purpose, each documented at the point it is withheld (src/domain/grants.ts): the bank
+    // file and the statutory report expose the employer debit account and every account number, payroll
+    // approval is deliberately not the run operator's own act, and previewPayslip renders another employee's
+    // full pay breakdown before the run is published.
+    "payroll-runs:approve", "payroll-runs:bankFile", "payroll-runs:previewPayslip",
+    "payroll-runs:statutoryReport",
+  ];
+  const NON_SUPER = ["employee", "manager", "hr_admin", "payroll_admin"] as const;
+  // Three object codes: own, a dept member's, and a flat-coded row - so a `me` / `my-dept` / `*` rule all get
+  // a chance to match. A verb reachable under any of them is reachable.
+  const CODES = ["04-1c-0a9", "04-1c-0b2", "0a"];
+
+  it("matches the withheld list exactly", () => {
+    const unreachable: string[] = [];
+    for (const [collection, verbs] of Object.entries(ACCESS_VERBS)) {
+      for (const verb of verbs) {
+        // Standard levels ride the level ladder, not `allow`; only custom methods need naming.
+        if (["update", "delete", "upload", "download"].includes(verb)) continue;
+        const reachable = NON_SUPER.some((role) => CODES.some((code) => ok(role, "POST", `/v1/${collection}/${code}:${verb}`)));
+        if (!reachable) unreachable.push(`${collection}:${verb}`);
+      }
+    }
+    expect(unreachable.sort()).toEqual([...WITHHELD].sort());
+  });
+
+  it("reaches the goal and review verbs that had been granted to nobody", () => {
+    expect(ok("employee", "POST", "/v1/goals/04-1c-0a9-0:watch")).toBe(true);
+    expect(ok("employee", "POST", "/v1/goals/04-1c-0a9-0:unwatch")).toBe(true);
+    expect(ok("employee", "POST", "/v1/reviews/04-1c-0a9-0:suggestFeedback")).toBe(true);
+    expect(ok("manager", "POST", "/v1/goals/04-1c-0b2-0:setContributors")).toBe(true);
+    expect(ok("manager", "POST", "/v1/goals/04-1c-0b2-0:watch")).toBe(true);
+    expect(ok("hr_admin", "POST", "/v1/reviews/07-2a-0b1-0:assignReviewer")).toBe(true);
+    // Crediting a share of a goal scores in the CONTRIBUTOR's review, so it stays a manager's act: the
+    // owner cannot hand out credit on their own goal, and HR reads goals rather than re-crediting them.
+    expect(ok("employee", "POST", "/v1/goals/04-1c-0a9-0:setContributors")).toBe(false);
+    expect(ok("employee", "POST", "/v1/reviews/04-1c-0a9-0:assignReviewer")).toBe(false);
+    // Following somebody else's goal is a per-object ACL grant, not a role baseline: the notifications carry
+    // that goal's title to whoever follows it.
+    expect(ok("employee", "POST", "/v1/goals/07-2a-0b1-0:watch")).toBe(false);
+  });
+
+  it("lets a payslip be VIEWED by whoever may already download it", () => {
+    // The weaker act must not be the denied one. Both halves, for the employee on their own slip and for the
+    // run operator on the slips the run produced.
+    for (const verb of ["preview", "download"]) {
+      expect(ok("employee", "POST", `/v1/payslips/04-1c-0a9-0:${verb}`)).toBe(true);
+      expect(ok("payroll_admin", "POST", `/v1/payslips/07-2a-0b1-0:${verb}`)).toBe(true);
+      // Still nobody else's, for an employee.
+      expect(ok("employee", "POST", `/v1/payslips/07-2a-0b1-0:${verb}`)).toBe(false);
+    }
+  });
+
+  it("gives the asset administrator the stocktakes that walk their own register", () => {
+    // The collection was seeded at no level at all, so this is the page being reachable, not just its verbs.
+    expect(ok("hr_admin", "GET", "/v1/stocktakes")).toBe(true);
+    expect(ok("hr_admin", "POST", "/v1/stocktakes")).toBe(true);
+    for (const verb of ["recordFound", "close", "restore"]) {
+      expect(ok("hr_admin", "POST", `/v1/stocktakes/0a:${verb}`)).toBe(true);
+    }
+    // Counting the inventory is not self-service.
+    expect(ok("employee", "GET", "/v1/stocktakes")).toBe(false);
+    expect(ok("employee", "POST", "/v1/stocktakes/0a:recordFound")).toBe(false);
   });
 });

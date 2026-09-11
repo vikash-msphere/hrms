@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Ban, Paperclip, Download, Wallet, Check, X, Send, Repeat, Zap, Pencil, ClipboardCheck, Banknote, CalendarClock, ChevronDown, ChevronUp, Eye, Pause, Play, TriangleAlert, BarChart3, Camera } from "lucide-react";
 import { create, patch, invoke, upload, download, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -8,6 +8,7 @@ import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useRoute } from "@/router";
 import { formatDate, formatMoney, idOf, cn } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { bulkInvoke, bulkSummary } from "@/lib/bulk";
 import { useTabActivity, markTabSeen } from "@/lib/tabActivity";
@@ -53,10 +54,13 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision, type Decision } from "@/lib/confirmDecision";
 import { getSetting } from "@/lib/settingsStore";
+import { advanceRecurrence, type RecurrenceRule } from "../../../src/domain/expenses";
 
 const EMPTY = { employee: "", vendor: "", category: "", department: "", amount: "", tax_amount: "", incurred_on: "", invoice_number: "", description: "", reimbursable: false, recurring: false, recurrence_rule: "monthly", next_occurrence_on: "" };
 const up = (s?: string) => (s ?? "").toUpperCase();
-const todayStr = () => { const d = new Date(); const p = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 const sum = (rs: Expense[]) => rs.reduce((n, r) => n + (r.amount || 0), 0);
 const PAY_METHODS = ["bank", "card", "cash", "upi", "cheque"] as const;
 const RULE_LABEL: Record<string, string> = { monthly: "Monthly", quarterly: "Quarterly", yearly: "Yearly" };
@@ -87,14 +91,13 @@ function periodKeyOf(dateStr: string, type?: string): string {
 function nextOccurrences(from: string | undefined, rule: string | null | undefined, count: number): string[] {
   if (!from || !rule) return [];
   const out: string[] = [];
+  // Through the SERVER'S own step (domain/expenses.ts#advanceRecurrence), not a second copy of it. The copy
+  // rolled end-of-month overflow forward where the server clamps it, so "monthly from the 31st" previewed
+  // 3 March and then generated 28 February - a schedule that disagreed with itself before it had run once.
   let d = new Date(`${from}T00:00:00Z`);
   for (let i = 0; i < count; i++) {
     out.push(d.toISOString().slice(0, 10));
-    const next = new Date(d);
-    if (rule === "monthly") next.setUTCMonth(next.getUTCMonth() + 1);
-    else if (rule === "quarterly") next.setUTCMonth(next.getUTCMonth() + 3);
-    else next.setUTCFullYear(next.getUTCFullYear() + 1);
-    d = next;
+    d = advanceRecurrence(d, rule as RecurrenceRule);
   }
   return out;
 }
@@ -260,7 +263,10 @@ export default function Expenses({ me }: { me: Me }) {
   // ---- buckets -------------------------------------------------------------------------------------------
   // A recurring row is a TEMPLATE, not money spent: it lives on its own tab so the ledger and its totals only
   // ever count real expenses (the cron clones a concrete expense from it, carrying `template`).
-  const isOwn = (r: Expense) => !!(r.employee && me.employee_id && idOf(r.employee) === me.employee_id);
+  // `useCallback` so the memo below can name the predicate it actually calls, instead of restating the one
+  // field the predicate happens to read today. Identity moves with that field, so nothing recomputes more
+  // often than it did - but a change to the predicate can no longer leave a stale dependency behind it.
+  const isOwn = useCallback((r: Expense) => !!(r.employee && me.employee_id && idOf(r.employee) === me.employee_id), [me.employee_id]);
   const ledgerAll = useMemo(() => rows.filter((r) => !r.recurring), [rows]);
   const ledger = useMemo(
     () => (deptFilter && deptQ.state === "ready" ? deptQ.rows.filter((r) => !r.recurring) : ledgerAll),
@@ -272,7 +278,7 @@ export default function Expenses({ me }: { me: Me }) {
   const toReview = reviewQ.state === "ready" && tab === "review" ? reviewQ.rows.filter((r) => !r.recurring) : toReviewLocal;
   const toPay = payQ.state === "ready" && tab === "pay" ? payQ.rows.filter((r) => !r.recurring && !r.reimbursable) : toPayLocal;
   const viaPayroll = useMemo(() => ledgerAll.filter((r) => up(r.state) === "APPROVED" && r.reimbursable), [ledgerAll]);
-  const mine = useMemo(() => ledgerAll.filter(isOwn), [ledgerAll, me.employee_id]);
+  const mine = useMemo(() => ledgerAll.filter(isOwn), [ledgerAll, isOwn]);
   const monthStart = useMemo(() => { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), 1).getTime(); }, []);
   const paidThisMonth = useMemo(
     () => ledgerAll.filter((r) => up(r.state) === "PAID" && r.paid_time && new Date(r.paid_time).getTime() >= monthStart),
@@ -864,10 +870,12 @@ export default function Expenses({ me }: { me: Me }) {
   // by category. Reads the rows the page already has; no extra query, no chart library.
   const insight = useMemo(() => {
     const counted = ledger.filter((r) => ["APPROVED", "PAID"].includes(up(r.state)));
-    const now = new Date();
+    // Stepped back from the ORG's month, in UTC. Off the reader's local parts, the six buckets a report
+    // covered depended on who opened it on the first or last day of a month.
+    const thisMonth = todayStr().slice(0, 7);
     const months = Array.from({ length: 6 }, (_, i) => {
-      const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
-      return { key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, label: MONTHS[d.getMonth()]!, year: d.getFullYear(), total: 0 };
+      const d = new Date(Date.UTC(Number(thisMonth.slice(0, 4)), Number(thisMonth.slice(5, 7)) - 1 - (5 - i), 1));
+      return { key: `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`, label: MONTHS[d.getUTCMonth()]!, year: d.getUTCFullYear(), total: 0 };
     });
     const byMonth = new Map(months.map((m) => [m.key, m]));
     const byCat = new Map<string, number>();

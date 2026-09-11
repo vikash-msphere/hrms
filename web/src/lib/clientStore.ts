@@ -489,6 +489,56 @@ export async function purgeAll(): Promise<void> {
   });
 }
 
+/** The classes `purgeCachedData` removes: everything that is a COPY of a server answer. `draft` is absent. */
+const SERVER_DATA_CLASSES: StoreClass[] = ["rows", "faces", "snapshot"];
+
+/**
+ * Drop the cached copies of server data, keeping the person's own unsaved writing.
+ *
+ * Called when the SESSION LAPSES (api.ts `handle401`), which is the ordinary way this app is left - a 12-hour
+ * TTL and a browser that gets closed. `purgeAll` above only ran from the sign-out MENU ITEM, so every other
+ * exit left the whole cache on disk: up to 4 MB of collection rows and 8 MB of colleagues' faces, for the seven
+ * days `MAX_AGE_MS` allows, on what may well be a shared computer. That is precisely the case the sign-out
+ * purge was written for, reached by the door most people actually use.
+ *
+ * WHY NOT JUST CALL `purgeAll`. A 401 is not a decision the person made - it arrives mid-sentence. `purgeAll`
+ * deletes the `draft` class too (the announcement composer's post, a review write-up: real writing, minutes or
+ * days of it), and destroying that because a cookie expired would be a worse bug than the one being fixed. So
+ * the split is by WHAT THE RECORD IS: a copy of something the server will hand back on the next sign-in goes,
+ * and anything that exists only here stays. localStorage and sessionStorage are untouched for the same reason -
+ * they hold UI preferences and the session-scoped dialog drafts (components/common/dialogGuard.ts), not records.
+ *
+ * Deletes across EVERY identity, not just the current one: with no live session there is no authoritative
+ * identity, and a stale namespace is exactly what should not survive here. Never rejects - an expired session
+ * must not be held up by storage.
+ */
+export async function purgeCachedData(): Promise<void> {
+  const doomedClass = new Set<StoreClass>(SERVER_DATA_CLASSES);
+  // Drop anything queued for these classes first, or the next idle flush writes back what is about to be
+  // deleted. `index` follows, so the class budgets stop counting bytes that are no longer on disk.
+  for (const [k, p] of [...queued.entries()]) if (p && doomedClass.has(p.cls)) queued.delete(k);
+  for (const m of [...index.values()]) if (doomedClass.has(m.cls)) untrack(m.k);
+  // NOT `onReset`. This is about what is left ON DISK, and the hydrators hold the copies the mounted page is
+  // rendering from: api.ts shows a "sign in again" overlay IN PLACE where it can, precisely so the screen and
+  // any half-typed form survive the lapse. Resetting them here would blank the app behind that overlay and buy
+  // nothing - the bytes on screen are already on screen. The redirect path unloads the page anyway.
+
+  const d = await openDb();
+  if (!d) return;
+  try {
+    const t = tx("readwrite");
+    if (!t) return;
+    const metas = (await wrap(t.meta.getAll())) as Meta[];
+    for (const m of metas) {
+      if (!doomedClass.has(m.cls)) continue;
+      t.meta.delete(m.k);
+      t.data.delete(m.k);
+    }
+  } catch {
+    /* storage unavailable or the transaction broke: nothing more to do, and the caller is on their way out */
+  }
+}
+
 // ---- Collection ---------------------------------------------------------------------------------------------
 // Records are already bounded by class budget and dropped by age at hydration, so what is left for `gc()` is the
 // localStorage side: keys nothing reads any more. Each entry says how to decide, and an unbounded family (one

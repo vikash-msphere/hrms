@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
+import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { notFound, aborted, failedPrecondition, isForeignKeyViolation } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lockGuard";
@@ -29,8 +30,17 @@ type Row = { uuid: string; updatedAt: Date | number; deleteTime?: Date | number 
  *
  * Anything NOT declared here still blocks the purge, which is the point: an employee with payslips is a row
  * the org may not quietly erase, and that now answers 409 with a reason instead of the 500 it used to.
+ *
+ * `first` is the escape hatch for a GRANDCHILD, which the (table, column) shape cannot express because every
+ * entry above matches `column = <the purged id>`: a review's feedback hangs off the REVIEW, not off the cycle
+ * being purged, and a card's comments hang off the CARD, not off the board. Those used to be swept by the
+ * caller with its own awaited statements before calling in here, which put them outside the transaction and
+ * reintroduced the very failure this batch exists to prevent - the sweep committed, the purge then refused,
+ * and a 409 had already destroyed every review of the cycle. Pass them here instead, as UNEXECUTED drizzle
+ * builders (the caller may read first to find the ids), and they run at the head of the same batch.
  */
 export type PurgeCascade = {
+  first?: BatchStmt[];
   remove?: { table: Table; column: Table }[];
   detach?: { table: Table; column: Table }[];
 };
@@ -150,30 +160,59 @@ export async function purgeRow(
   if (!row) throw notFound(`${singular} not found`);
   checkEtag(row, ifMatch);
   assertNotLocked(row);
-  // Side effects BEFORE the guarded delete, so an R2 object is never orphaned by a row that then refused to
-  // go. The cost of the reverse order on a lost race is a deleted blob whose row is still live - unrecoverable
-  // - against an orphaned blob, which is reclaimable.
-  if (onPurge) await onPurge(row);
-  // Then the declared teardown, in the same bottom-up order the hand-written purges use: clear the pointers
+  // The declared teardown, in the same bottom-up order the hand-written purges use: clear the pointers
   // that are only pointers, delete the rows that are part of this one, and only then the row itself.
+  //
+  // ALL OF IT IN ONE BATCH, which D1 runs as a single implicit transaction (lib/dbBatch.ts), because the
+  // teardown can legitimately FAIL AT THE LAST STATEMENT. Run one statement at a time, the children were
+  // already committed by then and nothing puts them back: something UNDECLARED still referencing the row
+  // makes the final DELETE a foreign-key violation, and the caller was answered 409 "still referenced" -
+  // which reads as "nothing happened" - over a goal whose comments, watchers and contributors had just been
+  // destroyed for good. That is not a rare race; an incomplete `purgeCascade` reproduces it every time (the
+  // goals declaration was missing two of its seven foreign keys). Batched, the violation aborts the group and
+  // the children are still there.
+  //
+  // The one case the batch cannot undo is the guarded delete matching ZERO rows - a concurrent write between
+  // the read above and this write. SQL does not treat that as an error, so the group commits without the row
+  // going. It stays guarded anyway (see atVersion): losing that race is a 409 the caller retries, and the
+  // window is the microseconds between two statements of one request against a super-admin hard purge.
+  const stmts: (BatchStmt | CheckedStmt)[] = [...(cascade?.first ?? [])];
   for (const { table: t, column } of cascade?.detach ?? []) {
     // `updated_at` moves with the clearing, because it IS a change to that record: its etag has to stop
     // matching, or a client holding the pre-detach read would go on offering an If-Match that still passes.
     const set: Record<string, unknown> = { [columnKey(t, column)]: null };
     if (t.updatedAt) set.updatedAt = new Date();
-    await deps.db.update(t).set(set).where(eq(column, id));
+    stmts.push(deps.db.update(t).set(set).where(eq(column, id)));
   }
-  for (const { table: t, column } of cascade?.remove ?? []) await deps.db.delete(t).where(eq(column, id));
-  let purged: { uuid: string }[];
+  for (const { table: t, column } of cascade?.remove ?? []) stmts.push(deps.db.delete(t).where(eq(column, id)));
+  stmts.push({ stmt: deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid }), expect: 1, label: "purge" });
+  let short: string[];
   try {
-    purged = await deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid });
+    short = await runBatchChecked(deps.db, stmts);
   } catch (e) {
     // Something the row does not own still references it. That is a precondition the caller can act on, so it
     // answers 409 with the reason rather than surfacing as an unhandled 500 with a SQL string in the log.
     if (isForeignKeyViolation(e)) throw failedPrecondition(`this ${singular} is still referenced by other records and cannot be permanently deleted`);
     throw e;
   }
-  if (!purged.length) await versionConflict(deps, table, singular, id);
+  if (short.length) await versionConflict(deps, table, singular, id);
+  // The irreversible side effect (deleting the document's R2 object) runs only once the row is actually gone.
+  //
+  // It used to run FIRST, on the reasoning that a blob must never be orphaned by a row that then refused to
+  // go - but that trades the recoverable failure for the unrecoverable one, and the comment saying so sat
+  // directly above the code doing the opposite. A purge CAN be refused at the last statement (an undeclared
+  // foreign key, a lost version race), and with the blob already deleted the caller was left holding a live
+  // document row, listed and downloadable in the UI, whose file no longer existed - and no way back. In this
+  // order the same failure leaves an object in R2 that nothing points at, which costs storage and can be
+  // swept. Not awaited into the audit either way: the row is gone, and a failed blob delete must not turn a
+  // completed purge into an error.
+  if (onPurge) {
+    try {
+      await onPurge(row);
+    } catch (e) {
+      console.error(`[purge] ${collection}/${id}: the row is gone but its stored object was not deleted (orphaned, reclaimable)`, e);
+    }
+  }
   // The row is gone for good after this, so its values survive only here.
   await audit(deps, actor, `${singular}.purge`, collection, id, removedMeta(row, collection), row);
 }

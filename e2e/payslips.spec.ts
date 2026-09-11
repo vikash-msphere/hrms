@@ -30,10 +30,16 @@ test("a published run reaches the employee as a payslip they can read and downlo
   await expect(employee.getByText("Latest net pay")).toBeVisible({ timeout: 60_000 });
   await expect(employee.locator("tbody tr").first()).toBeVisible();
 
-  // In-browser preview is NOT offered here, and that is the policy rather than a gap: the seeded grants give
-  // an employee `payslips.me.download` and no `preview`, and an affordance the caller cannot use is not
-  // rendered at all (hide, never disable). So the button is absent rather than present-and-failing.
-  await expect(employee.getByRole("button", { name: "View latest" })).toHaveCount(0);
+  // Reading it in the app, which is the weaker of the two halves and the one an employee holds outright
+  // (`payslips.me.preview` beside `payslips.me.download`): the offered button opens the payslip in a viewer,
+  // with nothing saved to disk. The verb has its own scope, so the button is only rendered where the caller
+  // holds it - hide, never disable.
+  await employee.getByRole("button", { name: "View latest" }).click();
+  const viewer = employee.getByRole("dialog");
+  await expect(viewer.getByRole("heading", { name: "Payslip" })).toBeVisible({ timeout: 60_000 });
+  await expect(viewer.locator("iframe[title='Payslip']")).toBeVisible({ timeout: 60_000 });
+  await employee.keyboard.press("Escape");
+  await expect(viewer).toHaveCount(0);
 
   // And downloaded: the chain from a blob to a named file is entirely the browser's, so a broken content type
   // or a revoked object URL loses the payslip with the server none the wiser.

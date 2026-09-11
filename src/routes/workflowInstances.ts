@@ -1,10 +1,14 @@
-import { desc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
+import { keysetPage } from "../services/keysetPage";
 import { toWorkflowInstanceResource } from "../http/serialize";
 
 // Suspended / finished durable workflows (see services/automationEngine.ts waitFor). Read-only; admin-only
 // (private by default). Newest first; optional `?status=` filter (e.g. waiting).
+//
+// Paged on the row's own `created_at` - keysetPage's default key - through the shared cursor, for the reason
+// given in routes/eventLog.ts: a stuck workflow older than the first page was unreachable through the API.
 export const workflowInstances = collectionRoutes({
   table: schema.workflowInstances,
   collection: "workflow-instances",
@@ -14,10 +18,12 @@ export const workflowInstances = collectionRoutes({
   serialize: toWorkflowInstanceResource,
   list: async (c, page) => {
     const status = c.req.query("status");
-    const q = c.get("deps").db.select().from(schema.workflowInstances);
-    const items = status
-      ? await q.where(eq(schema.workflowInstances.status, status as "waiting" | "done" | "expired" | "error")).orderBy(desc(schema.workflowInstances.createdAt)).limit(page.maxPageSize)
-      : await q.orderBy(desc(schema.workflowInstances.createdAt)).limit(page.maxPageSize);
-    return { items, nextPageToken: undefined };
+    return keysetPage<typeof schema.workflowInstances.$inferSelect>(
+      c.get("deps"),
+      schema.workflowInstances,
+      "workflow-instances",
+      status ? eq(schema.workflowInstances.status, status as "waiting" | "done" | "expired" | "error") : undefined,
+      { max: page.maxPageSize, pageToken: page.pageToken },
+    );
   },
 });

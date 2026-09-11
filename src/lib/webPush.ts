@@ -24,7 +24,14 @@ export function makePushSender(publicKey: string, privateKey: string, subject: s
           sub,
           vapid
         );
-        const res = await fetch(sub.endpoint, init as RequestInit);
+        // `redirect: "manual"`, because the endpoint is CALLER-SUPPLIED: it arrives from the browser at
+        // subscription time, and any signed-in employee can register one (services/webPush.ts, which is why
+        // it runs the endpoint through assertPublicHttpsUrl first). That guard judges ONE url and says so -
+        // it cannot see where a 302 leads, so following redirects automatically would let a registered
+        // endpoint point the Worker at a host the guard would have refused. A real push service answers
+        // 201/404/410 and never redirects, so nothing legitimate is lost; an unexpected 3xx now falls through
+        // to the misconfiguration branch below and is logged rather than followed.
+        const res = await fetch(sub.endpoint, { ...(init as RequestInit), redirect: "manual" });
         if (res.status === 404 || res.status === 410) return "gone"; // dead subscription: expected, pruned by the caller
         if (res.ok) return "ok";
         // Anything else is a MISCONFIGURATION, not a fact about this device, and it is otherwise invisible:

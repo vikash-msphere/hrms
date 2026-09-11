@@ -104,6 +104,24 @@ function validateOrganization(value: unknown) {
       if (typeof ref !== "string" || ref.length > 80) throw invalidArgument(`organization.document_logos.${kind} must be a letterhead ref of at most 80 characters`);
     }
   }
+  // `banks` is the org's bank ENUM: it is what an employee's `bank_name` is checked against
+  // (services/bankDetails.ts) and what a bank format is keyed by, and services/bankFile.ts decides a payment
+  // line's intra/inter transaction type by matching the two. That match is case-insensitive, so two entries
+  // differing only in case would make "which bank is this" ambiguous for every payment - hence the uniqueness
+  // check alongside the shape one. Placed above the `currency_decimals` early return, or it never runs for an
+  // org that has not set that key.
+  if (value.banks != null) {
+    const banks = value.banks;
+    if (!Array.isArray(banks)) throw invalidArgument("organization.banks must be an array of bank names");
+    const seen = new Set<string>();
+    for (const b of banks) {
+      if (typeof b !== "string" || !b.trim()) throw invalidArgument("organization.banks entries must be non-empty strings");
+      if (b.length > 80) throw invalidArgument(`organization.banks entry "${b.slice(0, 20)}…" is longer than 80 characters`);
+      const key = b.trim().toLowerCase();
+      if (seen.has(key)) throw invalidArgument(`organization.banks lists "${b.trim()}" twice (names are compared case-insensitively)`);
+      seen.add(key);
+    }
+  }
   if (value.currency_decimals == null) return;
   const cd = value.currency_decimals;
   if (!isObj(cd)) throw invalidArgument("organization.currency_decimals must be an object mapping currency code to decimal places");

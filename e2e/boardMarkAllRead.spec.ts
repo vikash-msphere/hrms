@@ -49,8 +49,13 @@ test("a reader clears the board's unread state in one press", async ({ as }) => 
     await expect(dot).toHaveAttribute("aria-hidden", "true", { timeout: 30_000 });
 
     // And true from cold: the receipts are the server's, so the post comes back with no "new" mark at all.
-    await reader.reload();
-    await expect(reader.getByRole("main")).toBeVisible();
+    // Retried: the press above leaves the page writing its receipts, and a reload issued into that lands on
+    // a frame going away - `net::ERR_ABORTED; maybe frame was detached?` - which is the reload failing to
+    // start, not the page failing to come back. Asking again gets a clean one.
+    await expect(async () => {
+      await reader.reload();
+      await expect(reader.getByRole("main")).toBeVisible({ timeout: 15_000 });
+    }).toPass({ timeout: 60_000 });
     const afterReload = reader.locator('div[id^="post-"]').filter({ hasText: titles[0]! }).first();
     await expect(afterReload).toBeVisible({ timeout: 30_000 });
     await expect(afterReload.locator('[aria-label="New"]')).toHaveCount(0);

@@ -4,6 +4,7 @@ import {
   letterheadSpec, uploadLetterheadImage, getLetterheadImage, deleteLetterheadImage, purgeLetterhead,
   renderLetterheadSample, duplicateLetterhead, type LetterheadInput,
 } from "../services/letterheads";
+import { requireCappedBody } from "../services/documentsCommon";
 import { LETTERHEAD_SLOTS, LETTERHEAD_VARIANTS, type LetterheadDesign, type LetterheadSlot, type LetterheadVariant } from "../domain/letterhead";
 import { invalidArgument } from "../lib/errors";
 
@@ -50,7 +51,7 @@ export const letterheads = collectionRoutes<LetterheadInput, typeof letterheadSp
     uploadImage: {
       run: async (deps, user, id, _b, c) =>
         uploadLetterheadImage(
-          deps, user, id, await c.req.arrayBuffer(), c.req.query("content_type") || undefined,
+          deps, user, id, await requireCappedBody(c.req.raw), c.req.query("content_type") || undefined,
           slotOf(c.req.query("slot")), variantOf(c.req.query("variant"))
         ),
     },

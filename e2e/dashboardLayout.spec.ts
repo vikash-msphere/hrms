@@ -39,10 +39,18 @@ test("sections reorder and hide, survive a reload, and reset", async ({ as }) =>
     .poll(
       async () => {
         if ((await topOf(board)) < (await topOf(holidays))) return true;
-        await page.getByRole("button", { name: "Customize dashboard layout" }).click();
-        const up = page.getByRole("button", { name: "Move Board & announcements up" });
-        if (await up.isEnabled()) await up.click();
-        await page.keyboard.press("Escape");
+        // The dashboard's own live-polling widgets can re-render the page while this popover is open, and
+        // once in a while that detaches the very button being clicked mid-actionability-wait (the same class
+        // of transient churn `accessModeGating.spec.ts` already hits on this same page). Caught rather than
+        // retried in its own inner loop: the outer poll already retries this whole measure-and-click up to
+        // 30s across several intervals, so a swallowed miss here just costs it one of those, tried again
+        // fresh on the next - stacking a second retry loop on top only fragments that same budget.
+        try {
+          const up = page.getByRole("button", { name: "Move Board & announcements up" });
+          if (!(await up.isVisible())) await page.getByRole("button", { name: "Customize dashboard layout" }).click();
+          if (await up.isEnabled()) await up.click();
+          await page.keyboard.press("Escape");
+        } catch { /* a detached button here just means this interval's click missed - the next one retries it */ }
         return (await topOf(board)) < (await topOf(holidays));
       },
       { intervals: [300, 600, 1000, 2000], timeout: 30_000 },

@@ -44,6 +44,10 @@ export const notFound = (d?: string) => new AppError(404, "/errors/not-found", "
 export const alreadyExists = (d?: string) => new AppError(409, "/errors/already-exists", "Already Exists", d);
 export const failedPrecondition = (d?: string) => new AppError(409, "/errors/failed-precondition", "Failed Precondition", d);
 export const aborted = (d?: string) => new AppError(409, "/errors/aborted", "Aborted", d);
+// Too many requests. The caller is who they say they are and may do what they asked - there is just a budget
+// on how often, and the honest answer names it (middleware/rateLimit.ts). 429 rather than 403 because a
+// client should RETRY this one, and the `Retry-After` the middleware attaches tells it when.
+export const resourceExhausted = (d?: string) => new AppError(429, "/errors/resource-exhausted", "Too Many Requests", d);
 export const unimplemented = (d?: string) => new AppError(501, "/errors/unimplemented", "Not Implemented", d);
 // A third party we call out to failed - the mail vendor, an e-sign provider. NOT a 500: nothing here
 // malfunctioned, the hop did, and the two want different reactions (retry the send vs. read a stack trace).
@@ -87,9 +91,30 @@ export function isAssetTagCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bassets\.asset_tag\b/i.test(errorChainText(err));
 }
 
+/** Two first requests of the same person's first login both reached the auto-provision insert.
+ *
+ *  Unlike the allocation races above this is not a composed value losing a draw - it is the SAME user being
+ *  minted twice, and `users.email` being UNIQUE is what stops the second row existing. The loser does not
+ *  need a fresh anything; it needs the row the winner just wrote (middleware/auth.ts). Distinct from
+ *  `isCodeCollision`, which the same insert can also raise on its allocated `code` and which is retried by
+ *  re-allocating instead. */
+export function isUserEmailCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\busers\.email\b/i.test(errorChainText(err));
+}
+
 /** And on a person's human ID (EMP-0042), allocated max+1 from the org's format and unique. */
 export function isEmployeeNumberCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bemployees\.employee_number\b/i.test(errorChainText(err));
+}
+
+/** Two overlapping `:awardVariablePay` runs both read "this cycle has paid nobody yet" and both tried to write
+ *  the same person's payout; `bonus_cycle_emp_idx` rejected the loser.
+ *
+ *  Unlike the races above, the loser here must NOT retry: the row that now exists IS this award, written by
+ *  the other run. services/variablePay.ts counts it as skipped, which is the same answer the pre-read gives
+ *  when a payout already exists. */
+export function isVariablePayCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bbonuses\.(cycle_id|employee_id)\b/i.test(errorChainText(err));
 }
 
 /** Two callers both found no `settings` row for a key and both tried to create it; the primary key on
@@ -100,6 +125,17 @@ export function isEmployeeNumberCollision(err: unknown): boolean {
  *  retryable 409 rather than the 500 an unhandled constraint failure would be. */
 export function isSettingKeyCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bsettings\.key\b/i.test(errorChainText(err));
+}
+
+/** The comp-off credit for one employee on one worked day already exists (`compoff_emp_date_idx`).
+ *
+ *  This one is the EXPECTED answer, not a race to retry: the credit row is what makes the nightly tick
+ *  idempotent, so a second run over the same holiday is supposed to collide and skip. It has a matcher of its
+ *  own because the alternative - catching everything the insert can throw - also swallowed the code race
+ *  (which must retry, since the tick only ever credits yesterday and there is no third chance) and any
+ *  transient D1 failure, silently, with no log. */
+export function isCompOffDuplicate(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bcomp_off_credits\.(employee_id|worked_date)\b/i.test(errorChainText(err));
 }
 
 /** A DELETE that SQLite refused because another table still points at the row.

@@ -474,11 +474,13 @@ CREATE TABLE `bonuses` (
 	`scope` text,
 	`scope_ref` text,
 	`batch_id` text,
+	`cycle_id` text,
 	`paid_run_id` text,
 	`paid_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`cycle_id`) REFERENCES `review_cycles`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`paid_run_id`) REFERENCES `payroll_runs`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
@@ -486,6 +488,7 @@ CREATE UNIQUE INDEX `bonuses_code_unique` ON `bonuses` (`code`);--> statement-br
 CREATE INDEX `bonus_emp_idx` ON `bonuses` (`employee_id`);--> statement-breakpoint
 CREATE INDEX `bonus_batch_idx` ON `bonuses` (`batch_id`);--> statement-breakpoint
 CREATE INDEX `bonus_paid_idx` ON `bonuses` (`paid_run_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `bonus_cycle_emp_idx` ON `bonuses` (`cycle_id`,`employee_id`) WHERE "bonuses"."cycle_id" is not null;--> statement-breakpoint
 CREATE TABLE `candidates` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -543,6 +546,18 @@ CREATE TABLE `card_todos` (
 );
 --> statement-breakpoint
 CREATE INDEX `ct_card_idx` ON `card_todos` (`card_id`);--> statement-breakpoint
+CREATE TABLE `card_watchers` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`card_id` text NOT NULL,
+	`employee_id` text NOT NULL,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`card_id`) REFERENCES `cards`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `cw_card_idx` ON `card_watchers` (`card_id`);--> statement-breakpoint
+CREATE INDEX `cw_emp_idx` ON `card_watchers` (`employee_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `cw_once_idx` ON `card_watchers` (`card_id`,`employee_id`);--> statement-breakpoint
 CREATE TABLE `cards` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -558,6 +573,7 @@ CREATE TABLE `cards` (
 	`title` text NOT NULL,
 	`description` text,
 	`assignee_id` text,
+	`reporter_id` text,
 	`priority` text DEFAULT 'medium' NOT NULL,
 	`labels_json` text DEFAULT '[]' NOT NULL,
 	`documents_json` text DEFAULT '[]' NOT NULL,
@@ -567,6 +583,7 @@ CREATE TABLE `cards` (
 	`block_reason` text,
 	`blocked_by_id` text,
 	`goal_id` text,
+	`cadence` text,
 	`committed_at` integer,
 	`started_at` integer,
 	`delivered_at` integer,
@@ -578,6 +595,7 @@ CREATE TABLE `cards` (
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`department_id`) REFERENCES `departments`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`assignee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`reporter_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`blocked_by_id`) REFERENCES `cards`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`goal_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action
 );
@@ -587,6 +605,7 @@ CREATE INDEX `card_board_idx` ON `cards` (`board_id`);--> statement-breakpoint
 CREATE INDEX `card_emp_idx` ON `cards` (`employee_id`);--> statement-breakpoint
 CREATE INDEX `card_dept_idx` ON `cards` (`department_id`);--> statement-breakpoint
 CREATE INDEX `card_assignee_idx` ON `cards` (`assignee_id`);--> statement-breakpoint
+CREATE INDEX `card_reporter_idx` ON `cards` (`reporter_id`);--> statement-breakpoint
 CREATE INDEX `card_goal_idx` ON `cards` (`goal_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `card_board_seq_idx` ON `cards` (`board_id`,`seq`);--> statement-breakpoint
 CREATE TABLE `check_ins` (
@@ -643,6 +662,7 @@ CREATE TABLE `compensation` (
 	`base_pay` real NOT NULL,
 	`special_allowance` real DEFAULT 0 NOT NULL,
 	`currency` text DEFAULT 'INR' NOT NULL,
+	`variable_pay_target` real,
 	`pay_grade_id` text,
 	`structure_id` text,
 	`effective_from` integer NOT NULL,
@@ -963,17 +983,74 @@ CREATE TABLE `goal_comments` (
 );
 --> statement-breakpoint
 CREATE INDEX `goalcomment_goal_idx` ON `goal_comments` (`goal_id`);--> statement-breakpoint
+CREATE TABLE `goal_contributors` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`goal_id` text NOT NULL,
+	`employee_id` text NOT NULL,
+	`share` integer DEFAULT 0 NOT NULL,
+	`note` text,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`goal_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `goalcontrib_goal_idx` ON `goal_contributors` (`goal_id`);--> statement-breakpoint
+CREATE INDEX `goalcontrib_emp_idx` ON `goal_contributors` (`employee_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `goalcontrib_once_idx` ON `goal_contributors` (`goal_id`,`employee_id`);--> statement-breakpoint
+CREATE TABLE `goal_templates` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`code` text,
+	`title` text NOT NULL,
+	`description` text,
+	`weight` integer DEFAULT 0 NOT NULL,
+	`due_in_days` integer,
+	`unit` text,
+	`baseline_value` real,
+	`target_value` real,
+	`department_id` text,
+	`group_name` text,
+	`disabled` integer DEFAULT false NOT NULL,
+	`delete_time` integer,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`department_id`) REFERENCES `departments`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `goal_templates_code_unique` ON `goal_templates` (`code`);--> statement-breakpoint
+CREATE INDEX `goaltpl_group_idx` ON `goal_templates` (`group_name`);--> statement-breakpoint
+CREATE TABLE `goal_watchers` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`goal_id` text NOT NULL,
+	`employee_id` text NOT NULL,
+	`created_at` integer NOT NULL,
+	FOREIGN KEY (`goal_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `goalwatch_goal_idx` ON `goal_watchers` (`goal_id`);--> statement-breakpoint
+CREATE INDEX `goalwatch_emp_idx` ON `goal_watchers` (`employee_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `goalwatch_once_idx` ON `goal_watchers` (`goal_id`,`employee_id`);--> statement-breakpoint
 CREATE TABLE `goals` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
 	`employee_id` text NOT NULL,
 	`parent_id` text,
+	`cycle_id` text,
+	`kind` text DEFAULT 'objective' NOT NULL,
 	`title` text NOT NULL,
 	`description` text,
 	`weight` integer DEFAULT 0 NOT NULL,
 	`progress` integer DEFAULT 0 NOT NULL,
 	`status` text DEFAULT 'not_started' NOT NULL,
+	`stage` text DEFAULT 'AGREED' NOT NULL,
+	`agreed_at` integer,
+	`agreed_by_id` text,
 	`due_date` integer,
+	`confidence` text,
+	`confidence_note` text,
+	`blocked_by_id` text,
+	`retro` text,
+	`department_id` text,
 	`unit` text,
 	`baseline_value` real,
 	`target_value` real,
@@ -982,12 +1059,18 @@ CREATE TABLE `goals` (
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`parent_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`parent_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`cycle_id`) REFERENCES `review_cycles`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`agreed_by_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`blocked_by_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`department_id`) REFERENCES `departments`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `goals_code_unique` ON `goals` (`code`);--> statement-breakpoint
 CREATE INDEX `goal_emp_idx` ON `goals` (`employee_id`);--> statement-breakpoint
 CREATE INDEX `goal_parent_idx` ON `goals` (`parent_id`);--> statement-breakpoint
+CREATE INDEX `goal_cycle_idx` ON `goals` (`cycle_id`);--> statement-breakpoint
+CREATE INDEX `goal_blocked_idx` ON `goals` (`blocked_by_id`);--> statement-breakpoint
 CREATE TABLE `holiday_selections` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1583,10 +1666,12 @@ CREATE TABLE `projects` (
 	`client` text,
 	`project_code` text,
 	`billable` integer DEFAULT true NOT NULL,
+	`goal_id` text,
 	`status` text DEFAULT 'active' NOT NULL,
 	`delete_time` integer,
 	`created_at` integer NOT NULL,
-	`updated_at` integer NOT NULL
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`goal_id`) REFERENCES `goals`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `projects_code_unique` ON `projects` (`code`);--> statement-breakpoint
@@ -1684,8 +1769,10 @@ CREATE TABLE `review_cycles` (
 	`name` text NOT NULL,
 	`period_start` integer,
 	`period_end` integer,
+	`goal_setting_due_date` integer,
 	`self_due_date` integer,
 	`manager_due_date` integer,
+	`competency_keys_json` text,
 	`state` text DEFAULT 'DRAFT' NOT NULL,
 	`delete_time` integer,
 	`created_at` integer NOT NULL,
@@ -1702,6 +1789,7 @@ CREATE TABLE `review_feedback` (
 	`comment` text,
 	`overall_rating` integer,
 	`state` text DEFAULT 'REQUESTED' NOT NULL,
+	`decline_reason` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`review_id`) REFERENCES `reviews`(`uuid`) ON UPDATE no action ON DELETE no action,
@@ -1712,11 +1800,13 @@ CREATE TABLE `review_feedback` (
 CREATE UNIQUE INDEX `review_feedback_code_unique` ON `review_feedback` (`code`);--> statement-breakpoint
 CREATE INDEX `rf_review_idx` ON `review_feedback` (`review_id`);--> statement-breakpoint
 CREATE INDEX `rf_author_idx` ON `review_feedback` (`author_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `rf_once_idx` ON `review_feedback` (`review_id`,`author_id`);--> statement-breakpoint
 CREATE TABLE `reviews` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
 	`cycle_id` text NOT NULL,
 	`employee_id` text NOT NULL,
+	`reviewer_id` text,
 	`state` text DEFAULT 'SELF' NOT NULL,
 	`self_comment` text,
 	`self_ratings_json` text,
@@ -1724,10 +1814,13 @@ CREATE TABLE `reviews` (
 	`manager_comment` text,
 	`overall_rating` integer,
 	`ratings_json` text,
+	`goal_ratings_json` text,
+	`goals_json` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`cycle_id`) REFERENCES `review_cycles`(`uuid`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`reviewer_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `reviews_code_unique` ON `reviews` (`code`);--> statement-breakpoint
@@ -1901,6 +1994,25 @@ CREATE TABLE `suggestions` (
 CREATE UNIQUE INDEX `suggestions_code_unique` ON `suggestions` (`code`);--> statement-breakpoint
 CREATE INDEX `sugg_submitter_idx` ON `suggestions` (`submitter_id`);--> statement-breakpoint
 CREATE INDEX `sugg_status_idx` ON `suggestions` (`status`);--> statement-breakpoint
+CREATE TABLE `table_views` (
+	`uuid` text PRIMARY KEY NOT NULL,
+	`code` text,
+	`owner_id` text NOT NULL,
+	`name` text NOT NULL,
+	`description` text,
+	`base` text NOT NULL,
+	`spec_json` text NOT NULL,
+	`delete_time` integer,
+	`disabled` integer DEFAULT false NOT NULL,
+	`locked` integer DEFAULT false NOT NULL,
+	`locked_by` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`owner_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `table_views_code_unique` ON `table_views` (`code`);--> statement-breakpoint
+CREATE INDEX `table_view_owner_idx` ON `table_views` (`owner_id`);--> statement-breakpoint
 CREATE TABLE `tax_declarations` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1989,6 +2101,7 @@ CREATE TABLE `time_entries` (
 	`code` text,
 	`employee_id` text NOT NULL,
 	`project_id` text NOT NULL,
+	`card_id` text,
 	`date` integer NOT NULL,
 	`hours` real DEFAULT 0 NOT NULL,
 	`description` text,
@@ -2000,12 +2113,14 @@ CREATE TABLE `time_entries` (
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`uuid`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`card_id`) REFERENCES `cards`(`uuid`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`decided_by`) REFERENCES `users`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `time_entries_code_unique` ON `time_entries` (`code`);--> statement-breakpoint
 CREATE INDEX `te_emp_idx` ON `time_entries` (`employee_id`);--> statement-breakpoint
 CREATE INDEX `te_proj_idx` ON `time_entries` (`project_id`);--> statement-breakpoint
+CREATE INDEX `te_card_idx` ON `time_entries` (`card_id`);--> statement-breakpoint
 CREATE INDEX `te_date_idx` ON `time_entries` (`date`);--> statement-breakpoint
 CREATE TABLE `transition_tasks` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -3121,6 +3236,21 @@ CREATE TRIGGER "search_ad_automations" AFTER DELETE ON "automations" BEGIN
   DELETE FROM "search_docs" WHERE "collection" = 'automations' AND "record_id" = old."uuid";
 END;
 --> statement-breakpoint
+CREATE TRIGGER "search_ai_table_views" AFTER INSERT ON "table_views" BEGIN
+  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('table-views', new."uuid", new."code", new."owner_id", nullif(trim(new."name"), ''), coalesce(nullif(trim(new."description"), ''), nullif(trim(new."base"), '')), (new."delete_time" IS NOT NULL), 0, new."created_at");
+  INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), coalesce(new."name", '') || ' ' || coalesce(new."description", '') || ' ' || coalesce(new."base", ''));
+END;
+--> statement-breakpoint
+CREATE TRIGGER "search_au_table_views" AFTER UPDATE ON "table_views" BEGIN
+  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."owner_id", "title" = nullif(trim(new."name"), ''), "subtitle" = coalesce(nullif(trim(new."description"), ''), nullif(trim(new."base"), '')), "deleted" = (new."delete_time" IS NOT NULL), "restricted" = 0 WHERE "collection" = 'table-views' AND "record_id" = new."uuid";
+  UPDATE "search_fts" SET "text" = coalesce(new."name", '') || ' ' || coalesce(new."description", '') || ' ' || coalesce(new."base", '') WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'table-views' AND "record_id" = new."uuid");
+END;
+--> statement-breakpoint
+CREATE TRIGGER "search_ad_table_views" AFTER DELETE ON "table_views" BEGIN
+  DELETE FROM "search_fts" WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'table-views' AND "record_id" = old."uuid");
+  DELETE FROM "search_docs" WHERE "collection" = 'table-views' AND "record_id" = old."uuid";
+END;
+--> statement-breakpoint
 INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'employees', t."uuid", t."code", t."uuid", nullif(trim(coalesce(t."first_name", '') || ' ' || coalesce(t."last_name", '')), ''), coalesce(nullif(trim(t."job_title"), ''), nullif(trim(t."work_email"), '')), (t."delete_time" IS NOT NULL), 0, t."created_at" FROM "employees" t;
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."first_name", '') || ' ' || coalesce(t."last_name", '') || ' ' || coalesce(t."legal_name", '') || ' ' || coalesce(t."work_email", '') || ' ' || coalesce(t."job_title", '') || ' ' || coalesce(t."employee_number", '') FROM "search_docs" d JOIN "employees" t ON t."uuid" = d."record_id" WHERE d."collection" = 'employees' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
@@ -3388,6 +3518,10 @@ INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."title",
 INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'automations', t."uuid", t."code", NULL, nullif(trim(t."name"), ''), nullif(trim(t."description"), ''), 0, 0, t."created_at" FROM "automations" t;
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."name", '') || ' ' || coalesce(t."description", '') || ' ' || coalesce(t."trigger_type", '') FROM "search_docs" d JOIN "automations" t ON t."uuid" = d."record_id" WHERE d."collection" = 'automations' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
+--> statement-breakpoint
+INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'table-views', t."uuid", t."code", t."owner_id", nullif(trim(t."name"), ''), coalesce(nullif(trim(t."description"), ''), nullif(trim(t."base"), '')), (t."delete_time" IS NOT NULL), 0, t."created_at" FROM "table_views" t;
+--> statement-breakpoint
+INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."name", '') || ' ' || coalesce(t."description", '') || ' ' || coalesce(t."base", '') FROM "search_docs" d JOIN "table_views" t ON t."uuid" = d."record_id" WHERE d."collection" = 'table-views' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
 -- Collection change stamps. GENERATED from the authz collection->table registry by scripts/genChangeDdl.ts
 -- - do not edit by hand; run `npm run db:generate`. One row per collection, bumped by the triggers below, so
@@ -3786,6 +3920,18 @@ END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_d_expenses" AFTER DELETE ON "expenses" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('expenses', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_goal_templates" AFTER INSERT ON "goal_templates" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goal-templates', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_goal_templates" AFTER UPDATE ON "goal_templates" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goal-templates', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_goal_templates" AFTER DELETE ON "goal_templates" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goal-templates', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_i_goals" AFTER INSERT ON "goals" BEGIN
@@ -4316,6 +4462,18 @@ CREATE TRIGGER "chg_d_suggestions" AFTER DELETE ON "suggestions" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('suggestions', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
+CREATE TRIGGER "chg_i_table_views" AFTER INSERT ON "table_views" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('table-views', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_table_views" AFTER UPDATE ON "table_views" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('table-views', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_table_views" AFTER DELETE ON "table_views" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('table-views', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
 CREATE TRIGGER "chg_i_tax_declarations" AFTER INSERT ON "tax_declarations" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('tax-declarations', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
@@ -4614,4 +4772,16 @@ END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_d_ticket_todos" AFTER DELETE ON "ticket_todos" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('tickets', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_attachments" AFTER INSERT ON "attachments" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES (NEW."collection", CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_attachments" AFTER UPDATE ON "attachments" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES (NEW."collection", CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_attachments" AFTER DELETE ON "attachments" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES (OLD."collection", CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;

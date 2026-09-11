@@ -44,7 +44,11 @@ export default function Profile({ me }: { me: Me }) {
   // The kit I hold. The assets list is scoped server-side (assignedTo = me), so the tab appears only once
   // someone has granted the employee assets.read - otherwise it would show an empty, 403-ing panel. Being able
   // to ASK for kit is reason enough for the tab too, even in an org that hides the inventory from employees.
-  const canAssets = usePermission("assets.read") || usePermission("asset-requests.write");
+  // Read both, then combine: `||` short-circuits, which would make the second hook conditional on the first
+  // (see the note in Documents.tsx).
+  const canReadAssets = usePermission("assets.read");
+  const canRequestAssets = usePermission("asset-requests.write");
+  const canAssets = canReadAssets || canRequestAssets;
   // Whether an employee may see their own salary is org policy, not a given (plenty of orgs keep pay off
   // self-service and let the payslip speak). So the tab follows the grant: absent compensation.read it never
   // appears, and an admin opens it from the tab's own access affordance. The rows are scoped to the caller

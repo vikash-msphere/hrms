@@ -61,9 +61,9 @@ export const bonuses = collectionRoutes<BonusInput, typeof schema.bonuses>({
     // inserted again) and notifies the employee, so it stays the service's own.
     create: (deps, actor, input) => recordBonus(deps, actor, input),
   },
-  list: (c) => {
+  list: (c, page) => {
     // The inbound edge (decodeWireIds) already decoded the query ref to its internal id; just take the id.
     const emp = c.req.query("employee");
-    return listBonuses(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined).then((items) => ({ items, nextPageToken: undefined }));
+    return listBonuses(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, emp ? emp.split("/").pop()! : undefined);
   },
 });

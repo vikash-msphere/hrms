@@ -1,7 +1,8 @@
 import * as XLSX from "xlsx";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import { byIdChunks } from "../lib/dbBatch";
 import { notFound, failedPrecondition } from "../lib/errors";
 import { esiEmployerContribution } from "../domain/statutory";
 import { round2 } from "../domain/money";
@@ -42,7 +43,16 @@ async function collect(deps: Deps, runId: string) {
   const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
   if (!items.length) throw failedPrecondition("build the run first");
 
-  const employees = new Map((await deps.db.select().from(schema.employees)).map((e) => [e.uuid, e]));
+  // BY ID. The register covers ONE run's items, so reading the whole `employees` table to label them made the
+  // cost of a remittance report grow with the org instead of with the run - the same scan services/payroll.ts
+  // replaced everywhere with `byIdChunks`. Whole rows on purpose here (not a column list): `readIdentityValues`
+  // below decrypts the identity fields off the row, so narrowing the select would couple this query to that
+  // function's field set.
+  const employees = new Map(
+    (await byIdChunks([...new Set(items.map((it) => it.employeeId))], (group) =>
+      deps.db.select().from(schema.employees).where(inArray(schema.employees.uuid, group)),
+    )).map((e) => [e.uuid, e]),
+  );
   const components = await refPayComponents(deps);
   const epfRate = components.find((c) => c.method === "epf" && c.kind === "deduction")?.rate ?? 12;
   const esiRate = components.find((c) => c.method === "esi" && c.kind === "deduction")?.rate ?? 0.75;

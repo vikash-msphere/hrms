@@ -50,6 +50,26 @@ describe("webhook SSRF guard: an address is judged as an address, not as a strin
     allowed("https://172.32.0.1/hook");
   });
 
+  // The metadata endpoints that are NOT on the link-local alias. Alibaba's is inside 100.64/10 (which runs to
+  // 100.127.255.255) and so was already refused; Oracle Cloud Classic answers on 192.0.0.192, which is not
+  // link-local, not RFC1918 and not in that /10 - it read as an ordinary public address until 192.0.0.0/24
+  // (IETF protocol assignments, never a webhook target) was blocked as a whole.
+  it("blocks cloud metadata addresses that sit outside the link-local alias", () => {
+    blocked("https://192.0.0.192/opc/v1/instance/");
+    blocked("https://192.0.0.1/hook");
+    blocked("https://100.100.100.200/latest/meta-data/"); // Alibaba, via 100.64/10
+    // Every alternate spelling of 192.0.0.192, judged as an address like the loopback cases above.
+    blocked("https://[::ffff:192.0.0.192]/hook");
+    blocked("https://[2002:c000:c0::1]/hook"); // 6to4
+    blocked("https://0xc0.0.0.0xc0/hook");
+    blocked("https://3221225664/hook");
+    // The neighbouring /24s are ordinary public space and must not be caught.
+    allowed("https://192.0.1.1/hook");
+    allowed("https://191.255.255.255/hook");
+    allowed("https://193.0.0.1/hook");
+    allowed("https://100.128.0.1/hook"); // just past the end of 100.64/10
+  });
+
   it("blocks internal-only names and bare hostnames", () => {
     for (const h of ["localhost", "metadata", "metadata.google.internal", "vault.internal", "printer.local", "db.home.arpa", "intranet"]) {
       blocked(`https://${h}/hook`);

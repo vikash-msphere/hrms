@@ -53,12 +53,17 @@ export function initials(name: string): string {
 // the same options, but the method builds a formatter per call. This is the most-called formatter in the app
 // (207 call sites), and a table re-renders all of them on every keystroke in a column filter.
 const DATE_OPTS: Intl.DateTimeFormatOptions = { year: "numeric", month: "short", day: "numeric" };
+// Pinned, not the viewer's locale. The SERVER renders the same dates day-first ("4 Aug 2026" - see
+// domain/activityLabel.ts and the PDF engines), and those strings arrive already formatted: with the browser
+// left to its own locale, a US-configured reader saw "Aug 4, 2026" in the table and "4 Aug 2026" in the
+// letter, activity line and payslip beside it. One organization reads one date format.
+const DATE_LOCALE = "en-GB";
 
 export function formatDate(value?: string | null): string {
   if (!value) return "-";
   const d = new Date(value);
   if (isNaN(d.getTime())) return value;
-  return dateFormat(undefined, DATE_OPTS).format(d);
+  return dateFormat(DATE_LOCALE, DATE_OPTS).format(d);
 }
 
 /** A file size a person can read: "812 B", "44 KB", "2.1 MB". Null for nothing/zero, so callers can skip it. */

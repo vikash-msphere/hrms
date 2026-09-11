@@ -4,6 +4,7 @@ import { invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
+import { todayStr as todayYmd } from "@/lib/orgDay";
 import { useMoney } from "@/lib/org";
 import type { Bonus, Department, Employee } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -26,7 +27,6 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 
 const KINDS = ["Performance Bonus", "Joining Bonus", "Retention Bonus", "Festival Bonus", "Incentive", "Spot Award"];
-const todayYmd = () => new Date().toISOString().slice(0, 10);
 
 // Every bonus (individual + company/department awards) and an "Award bonus" action. Group awards are
 // materialized one row per employee (so they show on each profile); here they're collapsed back into a single

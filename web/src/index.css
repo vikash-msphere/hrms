@@ -886,6 +886,11 @@
   color: hsl(var(--background));
   border-radius: var(--radius);
   box-shadow: var(--shadow-pop);
+  /* The one SHAPE property here, and it earns the exception: the library parks this tip in the layout at
+     `z-index: 99999` and hides it with `opacity: 0`, and a transparent element still takes the press. It is
+     a label that follows the cursor - it has nothing to be clicked FOR - so whatever is under it should get
+     the click, in a dialog where the chart shares the panel with a table of buttons as much as anywhere. */
+  pointer-events: none;
 }
 .graph-svg-tip.graph-svg-tip strong {
   color: hsl(var(--background));

@@ -8,7 +8,8 @@ const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationMo
 import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
-import { runScheduledAutomations, invalidateAutomationCache, withDispatchBudget, dispatchAutomations } from "../src/services/automationEngine";
+import { runScheduledAutomations, invalidateAutomationCache, withDispatchBudget, dispatchAutomations, MAX_TOTAL_DISPATCHES } from "../src/services/automationEngine";
+import { computeEmployeeMetrics } from "../src/services/scheduledMetrics";
 import { queueForDigest, flushDigests } from "../src/services/notificationDigest";
 import { activeDelegatesFor } from "../src/services/approvalDelegations";
 import { SCHEDULE_TRIGGER, type Schedule, type Condition, type Action } from "../src/domain/automations";
@@ -30,7 +31,8 @@ beforeAll(async () => {
 
 const TABLES = [
   schema.notificationDigestQueue, schema.notifications, schema.overtimeRequests, schema.approvalDelegations,
-  schema.automationRuns, schema.automations, schema.goals, schema.employees,
+  schema.automationRuns, schema.automations, schema.cards, schema.boards, schema.reviews, schema.reviewCycles,
+  schema.goals, schema.employees,
 ];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
@@ -127,6 +129,120 @@ describe("scheduled automations", () => {
     await seedScheduledRule({ schedule: { freq: "weekly", day: notToday, scope: "once" }, actions: [{ kind: "notifyAudience", audience: { kind: "everyone" }, title: "x" }] });
     expect(await runScheduledAutomations(deps)).toBe(0);
   });
+
+  it("perEmployee task metrics fire for the ASSIGNEE, not the card's owner", async () => {
+    const owner = await seedEmployee({ code: "04-120" });
+    const doer = await seedEmployee({ code: "04-121" });
+    const board = genId();
+    await deps.db.insert(schema.boards).values({ uuid: board, code: `01-${genId().slice(0, 3)}`, name: "Board" });
+    const day = 86_400_000;
+    const now = +deps.clock.now();
+    await deps.db.insert(schema.cards).values({
+      uuid: genId(), code: `c-${genId().slice(0, 4)}`, boardId: board, employeeId: owner, assigneeId: doer,
+      columnKey: "doing", rank: 1, title: "late", dueDate: new Date(now - 3 * day),
+    });
+
+    await seedScheduledRule({
+      schedule: { freq: "daily", scope: "perEmployee" },
+      condition: { field: "tasksOverdue", op: "gte", value: 1 },
+      actions: [{ kind: "notify", recipient: { of: "subject" }, title: "Overdue tasks" }],
+    });
+
+    expect(await runScheduledAutomations(deps)).toBe(1);
+    expect((await notifsFor(doer)).length).toBe(1);
+    // The card is the owner's row, but it is not in the owner's queue - chasing them would be chasing the
+    // wrong person, and it is the reason these count off `assignee_id`.
+    expect((await notifsFor(owner)).length).toBe(0);
+  });
+});
+
+// The metric arithmetic itself, asserted directly: a rule firing proves the wiring, and these prove the
+// numbers the rules compare against.
+describe("scheduled metrics", () => {
+  const day = 86_400_000;
+  const boardWith = async () => {
+    const board = genId();
+    await deps.db.insert(schema.boards).values({ uuid: board, code: `01-${genId().slice(0, 3)}`, name: "Board" });
+    return board;
+  };
+  const card = (board: string, assigneeId: string | null, over: Partial<typeof schema.cards.$inferInsert> = {}) =>
+    deps.db.insert(schema.cards).values({
+      uuid: genId(), code: `c-${genId().slice(0, 4)}`, boardId: board, employeeId: over.employeeId ?? assigneeId ?? genId(),
+      assigneeId, columnKey: "doing", rank: 1, title: "card", ...over,
+    });
+
+  it("counts a person's open tasks by lateness and by block, and drops the ones that are finished or gone", async () => {
+    const me = await seedEmployee({ code: "04-130" });
+    const board = await boardWith();
+    const now = +deps.clock.now();
+    await card(board, me, { dueDate: new Date(now - 2 * day) }); // overdue
+    await card(board, me, { dueDate: new Date(now + 3 * day) }); // due soon
+    await card(board, me, { dueDate: new Date(now + 30 * day) }); // comfortably out
+    await card(board, me, { blocked: true }); // blocked, undated
+    await card(board, me, { dueDate: new Date(now - 5 * day), deliveredAt: new Date(now - day) }); // delivered late: finished work
+    await card(board, me, { dueDate: new Date(now - 5 * day), deleteTime: new Date(now) }); // binned
+    await card(board, null, { dueDate: new Date(now - 5 * day), employeeId: me }); // unassigned: nobody's queue
+
+    const m = (await computeEmployeeMetrics(deps, [{ uuid: me, managerId: null }])).get(me)!;
+    expect({ due: m.tasksDueSoon, over: m.tasksOverdue, blocked: m.tasksBlocked }).toEqual({ due: 1, over: 1, blocked: 1 });
+  });
+
+  it("puts a self-assessment on the employee and a write-up on their manager, inside an ACTIVE cycle only", async () => {
+    const mgr = await seedEmployee({ code: "04-140" });
+    const a = await seedEmployee({ code: "04-141", managerId: mgr });
+    const bEmp = await seedEmployee({ code: "04-142", managerId: mgr });
+    const c = await seedEmployee({ code: "04-143", managerId: mgr });
+    const cycle = async (state: "DRAFT" | "ACTIVE" | "CLOSED") => {
+      const uuid = genId();
+      await deps.db.insert(schema.reviewCycles).values({ uuid, code: `rc-${genId().slice(0, 4)}`, name: state, state });
+      return uuid;
+    };
+    const active = await cycle("ACTIVE");
+    const draft = await cycle("DRAFT");
+    const review = (employeeId: string, cycleId: string, state: "SELF" | "MANAGER" | "SHARED") =>
+      deps.db.insert(schema.reviews).values({ uuid: genId(), code: `rv-${genId().slice(0, 4)}`, cycleId, employeeId, state });
+    await review(a, active, "SELF"); // a owes their own
+    await review(bEmp, active, "MANAGER"); // the manager owes b's
+    await review(c, active, "SHARED"); // done: owes nobody
+    await review(c, draft, "SELF"); // a cycle HR is still building chases nobody
+
+    const roster = [mgr, a, bEmp, c].map((uuid) => ({ uuid, managerId: uuid === mgr ? null : mgr }));
+    const metrics = await computeEmployeeMetrics(deps, roster);
+    expect(metrics.get(a)!.selfReviewsDue).toBe(1);
+    expect(metrics.get(c)!.selfReviewsDue).toBe(0);
+    expect(metrics.get(mgr)!.teamReviewsDue).toBe(1);
+    expect(metrics.get(mgr)!.selfReviewsDue).toBe(0);
+  });
+
+  it("counts goal-setting as missing until a live goal exists in the cycle, and tells the manager how many", async () => {
+    const mgr = await seedEmployee({ code: "04-150" });
+    const filed = await seedEmployee({ code: "04-151", managerId: mgr });
+    const empty = await seedEmployee({ code: "04-152", managerId: mgr });
+    const cancelledOnly = await seedEmployee({ code: "04-153", managerId: mgr });
+    const cycle = genId();
+    const now = +deps.clock.now();
+    await deps.db.insert(schema.reviewCycles).values({
+      uuid: cycle, code: `rc-${genId().slice(0, 4)}`, name: "H1", state: "ACTIVE", goalSettingDueDate: new Date(now + 7 * day),
+    });
+    // A cycle with no goal-setting date asks for nothing, so it can never be missing.
+    const undated = genId();
+    await deps.db.insert(schema.reviewCycles).values({ uuid: undated, code: `rc-${genId().slice(0, 4)}`, name: "Undated", state: "ACTIVE" });
+    const goal = (employeeId: string, cycleId: string | null, status: "in_progress" | "cancelled" = "in_progress") =>
+      deps.db.insert(schema.goals).values({ uuid: genId(), code: `g-${genId().slice(0, 4)}`, employeeId, cycleId, title: "g", status });
+    await goal(filed, cycle);
+    await goal(cancelledOnly, cycle, "cancelled"); // a called-off goal is not a goal they set
+    await goal(empty, null); // a goal outside the cycle answers nothing for it
+
+    const roster = [mgr, filed, empty, cancelledOnly].map((uuid) => ({ uuid, managerId: uuid === mgr ? null : mgr }));
+    const metrics = await computeEmployeeMetrics(deps, roster);
+    expect(metrics.get(filed)!.goalSettingMissing).toBe(0);
+    expect(metrics.get(empty)!.goalSettingMissing).toBe(1);
+    expect(metrics.get(cancelledOnly)!.goalSettingMissing).toBe(1);
+    // The manager sits above two people who have filed nothing - and has filed nothing themselves, which is
+    // their own count, not their team's.
+    expect(metrics.get(mgr)!.teamGoalSettingMissing).toBe(2);
+    expect(metrics.get(mgr)!.goalSettingMissing).toBe(1);
+  });
 });
 
 describe("notification digest", () => {
@@ -180,8 +296,10 @@ describe("automation dispatch budget: one allowance per originating action, and 
 
   it("counts what the ceiling refused, and gives the next subtask a full allowance", async () => {
     // The budget is spent by EVENT dispatch, which is what the emitting cron subtasks (probation ending, work
-    // anniversary, document expiring, asset custody) do once per employee or per asset. Sixty events crosses
-    // the fifty ceiling, so the tail is refused.
+    // anniversary, document expiring, asset custody) do once per employee or per asset. Ten events past the
+    // ceiling, so the tail is refused. Counted OFF the constant rather than off a literal: the ceiling moved
+    // once already (50 -> 250, to clear the bounded bulk verbs) and a hardcoded 60 quietly stopped testing
+    // anything the moment it did.
     const emp = await seedEmployee({ code: "04-900" });
     const fire = async (n: number) => {
       for (let i = 0; i < n; i++) {
@@ -189,7 +307,7 @@ describe("automation dispatch budget: one allowance per originating action, and 
       }
     };
 
-    const first = await withDispatchBudget(deps, () => fire(60).then(() => 0));
+    const first = await withDispatchBudget(deps, () => fire(MAX_TOTAL_DISPATCHES + 10).then(() => 0));
     // Ten refused, and SAID so - the number that used to exist only in Workers Logs while the cron row stayed
     // green. subtasks() turns this into the `error` state on cron_runs.
     expect(first.dropped).toBe(10);

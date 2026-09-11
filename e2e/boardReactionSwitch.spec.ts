@@ -23,6 +23,14 @@ test("reacting with a second emoji clears the first, and toggling it off brings 
   const seeded = await author.request.post(`/v1/${post.path}:react`, { headers: SPA_HEADERS, data: { emoji: "❤️" } });
   expect(seeded.status(), await seeded.text()).toBe(200);
 
+  /** Whether the reader still holds a reaction of their own on this post - asked of the record. */
+  const reacted = async (): Promise<boolean> => {
+    const res = await reader.request.get(`/v1/${post.path}`);
+    if (!res.ok()) return true; // unknown is not "cleared"
+    const { reactions = [] } = (await res.json()) as { reactions?: { emoji: string; reacted?: boolean }[] };
+    return reactions.some((r) => r.reacted);
+  };
+
   try {
     await gotoRoute(reader, "announcements", "Feed");
     const card = reader.locator("div.shadow-card").filter({ hasText: title }).first();
@@ -47,9 +55,24 @@ test("reacting with a second emoji clears the first, and toggling it off brings 
 
     // Toggled off again: MY share of it clears, but the author's own ❤️ (seeded above) is still there -
     // one person clearing their reaction doesn't erase somebody else's.
-    await card.getByRole("button", { name: /❤️/ }).click();
-    await expect(card.getByRole("button", { name: "Add reaction" })).toBeVisible();
-    await expect(card.getByRole("button", { name: /❤️/ })).toContainText("1");
+    //
+    // Pressed against the RECORD rather than once and hoped for: the chip is one control that both adds and
+    // clears, and the feed re-renders on any board write, org-wide - a press that landed on a chip being
+    // replaced mid-render toggles nothing, and re-pressing blindly would put the reaction straight back on.
+    // `reacted` on the post says which side of the toggle the reader is actually on.
+    await expect(async () => {
+      if (!(await reacted())) return;
+      await card.getByRole("button", { name: /❤️/ }).first().click({ timeout: 5_000 });
+      await expect.poll(reacted, { timeout: 10_000 }).toBe(false);
+    }).toPass({ timeout: 30_000 });
+    // What the feed SHOWS, from the record it was told about: the same org-wide re-render that makes the
+    // press above unreliable can also leave this reader's own cleared chip on screen a moment longer than the
+    // post it came from. The server side of it is already settled by the loop above, so this waits on the
+    // page catching up, rather than on one particular render being the right one.
+    await expect(async () => {
+      await expect(card.getByRole("button", { name: "Add reaction" })).toBeVisible({ timeout: 5_000 });
+      await expect(card.getByRole("button", { name: /❤️/ })).toContainText("1", { timeout: 5_000 });
+    }).toPass({ timeout: 60_000 });
   } finally {
     await purge(author, post.path);
   }

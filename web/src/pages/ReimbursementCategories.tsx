@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Tag, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -45,6 +45,7 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
   const [err, setErr] = useState<string | null>(null);
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "category" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   function openCreate() {
     setEditing(null);
@@ -76,6 +77,11 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
         const next = { name: "", requiresReceipt: form.requiresReceipt };
         setForm(next);
         guard.markSaved(next);
+        // The just-submitted Name loses focus the instant it goes blank and its own Create button disables
+        // with it - so a rapid batch (Travel, Meals, Equipment...) drops the reader onto the dialog panel
+        // between fields, not back onto the one they are about to retype. Land the cursor where the next
+        // keystroke is going.
+        nameRef.current?.focus();
       } else {
         guard.markSaved();
         setOpen(false);
@@ -148,7 +154,7 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
           </DialogHeader>
           <FormError error={err} />
           <Field label="Name">
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Travel" autoFocus />
+            <Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Travel" autoFocus />
           </Field>
           <div className="flex items-center gap-2">
             <Checkbox id="requiresReceipt" checked={form.requiresReceipt} onCheckedChange={(v) => setForm({ ...form, requiresReceipt: v === true })} />

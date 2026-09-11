@@ -33,8 +33,13 @@ test("switching a benefit plan's billing period relabels both cost fields, and t
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
 
   try {
-    const row = page.locator("div").filter({ hasText: name }).filter({ hasText: "Dependents" }).first();
+    // The row is the innermost div that names this plan AND carries its Edit button - the whole card, costs
+    // included. Filtering on the name and "Dependents" alone straddles the two ends of the card: `.first()`
+    // is the page wrapper (so the "no /mo anywhere" assertion reads every OTHER plan too), and `.last()` is
+    // the little flex row holding the name and its badges, which has no cost line in it at all.
+    const row = page.locator("div").filter({ hasText: name }).filter({ has: page.getByRole("button", { name: "Edit" }) }).last();
     await expect(row).toBeVisible({ timeout: 30_000 });
+    await expect(row).toContainText("Dependents"); // the badge the checkbox above earned it
     // The employer/employee costs as saved, repeated with the SAME period suffix the form was left on.
     await expect(row).toContainText("E2E Insurer");
     await expect(row).toContainText("/yr");

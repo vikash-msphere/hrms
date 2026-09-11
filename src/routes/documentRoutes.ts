@@ -5,6 +5,7 @@ import { signLetter } from "../services/letterSign";
 import { printDocument } from "../services/letterPrint";
 import { remindAckPending } from "../services/documentAck";
 import { refreshEsign } from "../services/esign/callback";
+import { requireCappedBody } from "../services/documentsCommon";
 import type { makeDocumentService } from "../services/documentService";
 
 // The shared spec for a document resource - org-wide or personal. NO access checks: the middleware gates the
@@ -82,10 +83,11 @@ export function makeDocumentRoutes(lc: LcCfg, svc: Svc, serialize: (r: any) => a
       // Poll the e-sign vendor for a pending document's status and apply it (fallback to the webhook).
       refreshEsign: { run: (deps, user, id) => refreshEsign(deps, user, id) },
       upload: {
-        // An oversized body is already refused from its declared length by middleware/bodyLimit.ts, before this
-        // (or any other buffering route) reads it; the service's own byte assertion covers a chunked body.
+        // An oversized body is refused twice before a byte of it is kept: from its declared length by
+        // middleware/bodyLimit.ts, and - for a chunked body, which declares none - by `requireCappedBody`,
+        // which abandons the read at the cap instead of buffering to the end and measuring afterwards.
         run: async (deps, user, id, _body, c) =>
-          svc.upload(deps, user, id, await c.req.arrayBuffer(), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
+          svc.upload(deps, user, id, await requireCappedBody(c.req.raw), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
       },
       // The print copy of a generated letter: the SAME letter - same words, same date, same signature - re-
       // rendered on its letterhead's print page. Nothing is stored; the filed PDF stays the record of what was

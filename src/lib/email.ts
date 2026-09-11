@@ -117,6 +117,20 @@ export function makeEmailSender(
   apiKey: string,
   from: string,
   region?: string,
+  /**
+   * Divert EVERY message to this one address instead of its real recipient (EMAIL_REDIRECT_TO).
+   *
+   * For a staging or rehearsal deploy, where `console` is too blunt and a real provider is too sharp. Staging
+   * exists to rehearse a release, and the nightly cron is part of what gets rehearsed - so a staging stack
+   * pointed at a real vendor with a real verified sender mails real employees, from a real company address,
+   * about probation dates and expiring documents in a copy of the database. `console` would prove nothing
+   * about whether email works; this proves the whole path (vendor, key, sender, template, attachment) and
+   * lands all of it in one inbox.
+   *
+   * Never set in production: preflight makes that a blocking error, because silently diverting every offer
+   * letter and payslip notification to one mailbox is the same failure as `console` wearing a working vendor.
+   */
+  redirectTo?: string,
 ): EmailSender {
   // The sink. Nothing leaves the Worker, so nothing needs a key or a verified sender.
   if (provider === "console") {
@@ -129,9 +143,15 @@ export function makeEmailSender(
   }
   const cfg = providers[provider];
   if (!cfg) throw new Error(`unknown email provider: ${provider}`);
+  const divert = redirectTo?.trim();
   return {
     async send(to, subject, html, attachments) {
-      const req = cfg.request(apiKey, from, region, to, subject, html, attachments ?? []);
+      // The intended recipient rides in the subject rather than being dropped: the whole value of a rehearsal
+      // is being able to tell WHO each message would have gone to, and a mailbox of forty identical subjects
+      // answers that for nobody.
+      const recipient = divert || to;
+      const line = divert ? `[to: ${to}] ${subject}` : subject;
+      const req = cfg.request(apiKey, from, region, recipient, line, html, attachments ?? []);
       // URLSearchParams / FormData ride as-is (fetch sets the right Content-Type); everything else is JSON.
       const body = req.body instanceof URLSearchParams || req.body instanceof FormData ? req.body : JSON.stringify(req.body);
       // A vendor that is down, rate-limiting us, or holding a rotated key is not this app malfunctioning, and

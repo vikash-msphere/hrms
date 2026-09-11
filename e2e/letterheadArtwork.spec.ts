@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // A letterhead's own artwork slots (web/src/components/settings/LetterheadDesigner.tsx's "Artwork" sub-tab:
 // header mark / stationery / watermark) - `uploadImage`/`deleteImage`, never exercised through the designer
@@ -8,6 +8,9 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
 test("uploading and removing a letterhead's artwork updates the slot immediately", async ({ as }) => {
   test.setTimeout(120_000);
   const page = await as("super");
+  // The removed artwork's own request already in flight comes back 404 - this spec's own housekeeping, not
+  // the app failing (same pattern as stocktakeAbandon.spec.ts's own comment on the same class of race).
+  allowConsoleErrors(page, /status of 404/i);
   const label = `E2E artwork letterhead ${Date.now() % 100000}`;
 
   const made = await page.request.post("/v1/letterheads", {
@@ -34,7 +37,9 @@ test("uploading and removing a letterhead's artwork updates the slot immediately
 
     // The slot is the innermost div that BOTH names this mark and carries its file input - `hasText` alone
     // resolves `.last()` to the bare caption, which holds neither the Add affordance nor the input.
-    const slot = designer.locator("div").filter({ hasText: "Header mark" }).filter({ has: designer.locator('input[type="file"]') }).last();
+    // Page-rooted `has:`: the inner locator is matched starting at each candidate div, so scoping it to the
+    // designer again would look for a nested dialog inside the slot.
+    const slot = designer.locator("div").filter({ hasText: "Header mark" }).filter({ has: page.locator('input[type="file"]') }).last();
     await expect(slot.getByText("Add", { exact: true })).toBeVisible({ timeout: 15_000 });
     await slot.locator('input[type="file"]').setInputFiles({
       name: "mark.png",

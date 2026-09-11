@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Gift, Plus } from "lucide-react";
 import { get, create } from "@/api";
 import { formatMoney } from "@/lib/utils";
+import { todayStr as todayYmd } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Bonus } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,7 +18,6 @@ import { AccessScope } from "@/components/access/AccessScope";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
-const todayYmd = () => new Date().toISOString().slice(0, 10);
 const KINDS = ["Performance Bonus", "Joining Bonus", "Retention Bonus", "Festival Bonus", "Incentive", "Spot Award"];
 
 // One-off awards (bonus/incentive) + a "Record bonus" action. The bonus letter cites the most recent award.
@@ -36,7 +36,10 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
   // Same person, same amount, same day: nearly always a re-submit rather than two genuine awards.
   const duplicate = rows.find((r) => Number(form.amount) > 0 && Math.abs(r.amount - Number(form.amount)) < 0.01 && (r.award_date ?? "").slice(0, 10) === form.award_date);
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails): its identity moves with
+  // `employeeId`, so the fetch follows the person being viewed instead of the one this mounted with. `toast`
+  // is a module-level function, so naming it costs nothing.
+  const load = useCallback(async () => {
     try {
       const r = await get<{ results: Bonus[] }>(`bonuses?employee=${encodeURIComponent("employees/" + employeeId)}`);
       setRows(r.results ?? []);
@@ -45,10 +48,10 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
     } finally {
       setLoaded(true);
     }
-  }
+  }, [employeeId, toast]);
   useEffect(() => {
     void load();
-  }, [employeeId]);
+  }, [load]);
 
   async function record() {
     setBusy(true);

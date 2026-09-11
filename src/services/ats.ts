@@ -24,7 +24,7 @@ import { createEmployee } from "./employees";
 import { reviseCompensation } from "./compensation";
 import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
-import { renderEmail, loadEmailBrand } from "../lib/emailLayout";
+import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
 import { buildTimedIcs } from "../lib/ics";
 
 const cfgOf = (deps: Deps) => getSettingValue<AtsConfig>(deps, "ats", DEFAULT_ATS_CONFIG);
@@ -124,8 +124,8 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
     if (!REQUISITION_STATUSES.includes(s)) throw invalidArgument("invalid status");
     set.status = s;
     // Stamp lifecycle dates on first open / on close, without clobbering an explicit patch value.
-    if (s === "open" && !row.openedDate && patch.opened_date === undefined) set.openedDate = new Date();
-    if ((s === "closed" || s === "filled") && !row.closedDate && patch.closed_date === undefined) set.closedDate = new Date();
+    if (s === "open" && !row.openedDate && patch.opened_date === undefined) set.openedDate = deps.clock.now();
+    if ((s === "closed" || s === "filled") && !row.closedDate && patch.closed_date === undefined) set.closedDate = deps.clock.now();
   }
   const updated = (await deps.db.update(schema.jobRequisitions).set(set).where(eq(schema.jobRequisitions.uuid, id)).returning())[0]!;
   await audit(deps, actor, "requisition.update", "job-requisitions", id, diffMeta(row, updated, set, "job-requisitions"), updated);
@@ -248,8 +248,8 @@ export async function createApplication(deps: Deps, actor: AppUser, input: Appli
       status: statusForStage(cfg, stage),
       source: input.source?.trim() || cand?.source || null,
       referralId: input.referral ? idFromPath(input.referral) : cand?.referralId ?? null,
-      appliedDate: input.applied_date ? parseDate(input.applied_date, "applied_date") : new Date(),
-      stageChangedDate: new Date(),
+      appliedDate: input.applied_date ? parseDate(input.applied_date, "applied_date") : deps.clock.now(),
+      stageChangedDate: deps.clock.now(),
     })
     .returning())[0]!;
   await audit(deps, actor, "application.create", "applications", row.uuid, createdMeta(row, "applications"), row);
@@ -339,7 +339,7 @@ async function setStage(deps: Deps, actor: AppUser, id: string, stage: string): 
   if (!isStage(cfg, stage)) throw invalidArgument("invalid stage");
   const [updated] = await deps.db
     .update(schema.applications)
-    .set({ stage, status: statusForStage(cfg, stage), rejectionReason: null, stageChangedDate: new Date(), updatedAt: new Date() })
+    .set({ stage, status: statusForStage(cfg, stage), rejectionReason: null, stageChangedDate: deps.clock.now(), updatedAt: new Date() })
     .where(eq(schema.applications.uuid, id))
     .returning();
   await audit(deps, actor, "application.stage", "applications", id, { diff: { stage: { from: row.stage, to: stage }, status: { from: row.status, to: updated!.status } } }, updated);
@@ -381,7 +381,7 @@ export async function rejectApplication(deps: Deps, actor: AppUser, id: string, 
   if (row.deleteTime) throw notFound("application not found");
   const [updated] = await deps.db
     .update(schema.applications)
-    .set({ status: "rejected", rejectionReason: reason?.trim() || null, stageChangedDate: new Date(), updatedAt: new Date() })
+    .set({ status: "rejected", rejectionReason: reason?.trim() || null, stageChangedDate: deps.clock.now(), updatedAt: new Date() })
     .where(eq(schema.applications.uuid, id))
     .returning();
   await audit(deps, actor, "application.reject", "applications", id, { reason, notified: !!notifyCandidate });
@@ -419,8 +419,6 @@ async function emailCandidateRejection(deps: Deps, app: typeof schema.applicatio
   );
   await deps.email.send(cand.email, `Your application at ${brand.orgName}`, html);
 }
-
-const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 
 // ---- Interviews ----------------------------------------------------------------------------------------------
@@ -831,7 +829,7 @@ async function convertCandidate(
   const hiredStage = cfg.stages.find((s) => s.kind === "hired")?.key ?? app.stage;
   await deps.db
     .update(schema.applications)
-    .set({ status: "hired", stage: hiredStage, hiredEmployeeId: employee.uuid, stageChangedDate: new Date(), updatedAt: new Date() })
+    .set({ status: "hired", stage: hiredStage, hiredEmployeeId: employee.uuid, stageChangedDate: deps.clock.now(), updatedAt: new Date() })
     .where(eq(schema.applications.uuid, app.uuid));
 
   // Referral seam: if this hire came from a referral, link the new employee as the referral's milestone anchor

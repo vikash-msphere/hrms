@@ -52,7 +52,10 @@ test("a mention is offered from the caret, posts as a chip, and reaches the pers
   // The token, written around the caret: the name the author picked plus the wire id the chip and the
   // notification both need. Not something a person types, and the only proof the pick rewrote the field.
   await expect(body).toHaveValue(`Handing this to [@Eve Employee](employees/${employeeId}) `);
-  await body.pressSequentially("- over to you.");
+  // The stamp rides in the BODY, not only the title: the notification this raises carries an excerpt of the
+  // body (services/mentions.ts), and that excerpt is how the person named finds this one among the many that
+  // dozens of other specs land on the same seeded bell.
+  await body.pressSequentially(`- over to you. ${stamp}`);
 
   await composer.getByRole("button", { name: "Post", exact: true }).click();
   await expect(author.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
@@ -66,15 +69,36 @@ test("a mention is offered from the caret, posts as a chip, and reaches the pers
   await expect(chip).toHaveAttribute("href", `#/employees/${employeeId}`);
   await expect(card.getByText("](employees/")).toHaveCount(0);
 
-  // And in the bell of the person who was named, in their own browser, from cold. The assertion is the
-  // notification itself, not the number beside the bell: several specs share this person, and one of them
-  // marking everything read mid-test would move that count in the other direction.
-  await named.reload();
-  await expect(named.getByRole("main")).toBeVisible();
-  await bell.click();
-  await expect(named.getByText("You were mentioned").first()).toBeVisible({ timeout: 30_000 });
+  // And it reaches the person who was named. Asked of THEIR OWN notifications, by the post it points at:
+  // this seeded person is shared by dozens of specs, each landing notifications on the same bell under
+  // 16-worker load, so "the newest one says You were mentioned" is a claim about a burst of other specs'
+  // timing. The record is not.
+  const postPathValue = await postPath(author, title);
+  await expect
+    .poll(async () => {
+      const res = await named.request.get("/v1/notifications?page_size=100");
+      if (!res.ok()) return false;
+      const { results = [] } = (await res.json()) as { results?: { type?: string; subject?: string }[] };
+      return results.some((n) => n.subject === postPathValue && n.type === "announcement.mention");
+    }, { timeout: 60_000, message: "the mention never reached the named person's notifications" })
+    .toBe(true);
 
-  await purge(author, await postPath(author, title));
+  // And it is READABLE there, in their own browser, from cold - on the notifications page rather than the
+  // bell's popover, which shows only the most recent handful and can have this one pushed off it. Found by
+  // the stamp the body carries, so it is this mention and not another spec's.
+  // RELOADED, not just navigated. This browser has been open since before the post existed, and its
+  // notifications came from the snapshot it fetched then - nothing in it knows a write somebody ELSE made, so
+  // the page renders yesterday's list however many times it is opened (caught with this same assertion: the
+  // page showed the previous attempt's stamp while the current one waited on it).
+  const row = named.locator("li, div").filter({ hasText: "You were mentioned" }).filter({ hasText: String(stamp) }).first();
+  await expect(async () => {
+    await gotoRoute(named, "notifications");
+    await named.reload();
+    await expect(named.getByRole("main")).toBeVisible({ timeout: 30_000 });
+    await expect(row).toBeVisible({ timeout: 10_000 });
+  }).toPass({ timeout: 90_000 });
+
+  await purge(author, postPathValue);
 });
 
 /** The wire path of the post this spec made, for taking it off the board again. */

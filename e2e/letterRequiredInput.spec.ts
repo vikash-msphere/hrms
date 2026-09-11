@@ -10,10 +10,28 @@ test("a required letter input blocks Generate until it's filled", async ({ as })
   const label = `E2E Required Letter ${Date.now() % 100000}`;
 
   await gotoRoute(page, "settings/letters");
-  const add = page.locator("#letter-type-list").getByRole("button").last();
-  await page.getByPlaceholder("New letter type…").fill(label);
-  await add.click();
-  await expect(page.getByLabel("Label")).toHaveValue(label, { timeout: 30_000 });
+  // Added and CONFIRMED as one retried unit, by the button's own name rather than by its position in the
+  // rail (the rail is a shared list, and other letter specs add to it while this runs). The editor opening
+  // on the new type is what proves the add landed: the rail renders from the shared `letter-templates`
+  // snapshot, and the panel's own selection reconciliation (LettersTab.tsx - `setSelId` falls back to the
+  // list's first row whenever the selected id is not in the latest fetch it has seen) can be handed a
+  // pre-add snapshot, leaving the editor on whichever type was selected before - somebody else's, on a busy
+  // lane. Reloading re-establishes the list and the selection together.
+  const inRail = () => page.getByRole("button", { name: label, exact: true });
+  await expect(async () => {
+    if ((await page.getByLabel("Label").inputValue().catch(() => "")) === label) return;
+    await page.reload();
+    await expect(page.getByPlaceholder("New letter type…")).toBeVisible({ timeout: 15_000 });
+    // If an earlier pass DID create it, pick it rather than adding a second one under the same name: the
+    // cleanup at the end finds this type by that name, and two of them would leave one behind for good.
+    if (await inRail().count()) {
+      await inRail().first().click({ timeout: 8_000 });
+    } else {
+      await page.getByPlaceholder("New letter type…").fill(label);
+      await page.getByRole("button", { name: "Add letter type" }).click({ timeout: 8_000 });
+    }
+    await expect(page.getByLabel("Label")).toHaveValue(label, { timeout: 15_000 });
+  }).toPass({ timeout: 90_000 });
 
   const blocks = page.getByRole("tabpanel");
   await addBlock(page, "Subject");
@@ -31,6 +49,9 @@ test("a required letter input blocks Generate until it's filled", async ({ as })
   const save = page.getByRole("button", { name: "Save", exact: true }).first();
   await expect(save).toBeEnabled();
   await save.click();
+  // The toast, not the button: Save disables the instant it starts (it is `loading` as well as `!dirty`), so
+  // `toBeDisabled` is satisfied while the PATCH is still in flight and the spec would leave the page mid-save.
+  await expect(toast(page, "Letter template saved")).toBeVisible({ timeout: 30_000 });
   await expect(save).toBeDisabled();
 
   try {

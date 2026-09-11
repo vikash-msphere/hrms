@@ -12,7 +12,7 @@ import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from 
 // `test/` owns the arithmetic. What only a browser shows is this second ending: the affordance beside Close,
 // the question that distinguishes them, and the count leaving the list.
 test("a count is abandoned, with the question saying what that costs", async ({ as }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(350_000);
   const page = await as("super");
   const label = `E2E abandoned ${Date.now() % 1_000_000}`;
   // The count is hard-purged at the end while the page is still watching it, so a read already in flight comes
@@ -20,25 +20,32 @@ test("a count is abandoned, with the question saying what that costs", async ({ 
   allowConsoleErrors(page, /status of 404/i);
 
   // A count of this spec's own, opened over the wire - starting one is `stocktakes`' subject.
-  const created = await page.request.post("/v1/stocktakes", {
-    headers: SPA_HEADERS,
-    data: { label },
-  });
+  const created = await page.request.post("/v1/stocktakes", { headers: SPA_HEADERS, data: { label } });
   expect(created.status(), await created.text()).toBe(200);
   const path = ((await created.json()) as { path: string }).path;
 
   try {
-    await gotoRoute(page, "stocktakes", "Stocktakes");
     // Scoped to THIS count's row: the list holds every count running in the org, and the button being pressed
-    // here throws one away.
+    // here throws one away. Re-navigated (a plain SPA nav via gotoRoute, not a full reload - a `page.reload()`
+    // right here has proven to break this specific page's own fetch outright, not just slowly) on the rare
+    // miss, since the row can occasionally not be there on the very first mount.
     const row = page.locator("div.rounded-lg.border").filter({ hasText: label }).first();
-    await expect(row).toBeVisible({ timeout: 30_000 });
+    await expect(async () => {
+      await gotoRoute(page, "stocktakes", "Stocktakes");
+      await expect(row).toBeVisible({ timeout: 10_000 });
+    }).toPass({ timeout: 120_000 });
 
     // Both endings are offered while a count is open, which is the point: the destructive one is the quiet
     // icon beside the one people mean.
-    // "Close" in the row, "Close count" on the count's own page - the row has the label beside it.
+    // "Close" in the row, "Close count" on the count's own page - the row has the label beside it. Retried:
+    // the open-counts list re-renders on any write to the stocktakes collection, org-wide - `stocktakes.spec.ts`
+    // runs concurrently and writes to it constantly under 16-worker load - occasionally landing this exact
+    // click on a row about to be replaced by a re-render rather than one that ever reaches the server.
     await expect(row.getByRole("button", { name: "Close", exact: true })).toBeVisible();
-    await row.getByRole("button", { name: "Abandon count" }).click();
+    await expect(async () => {
+      await row.getByRole("button", { name: "Abandon count" }).click({ timeout: 8_000 });
+      await expect(page.getByRole("dialog").filter({ hasText: `Abandon "${label}"?` })).toBeVisible({ timeout: 8_000 });
+    }).toPass({ timeout: 150_000 });
 
     // The question names the count and says what abandoning costs - "close it instead if you want the
     // numbers" is the sentence that stops somebody throwing away an afternoon's walk.

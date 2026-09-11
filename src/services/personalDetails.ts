@@ -7,7 +7,12 @@ import { notFound, invalidArgument } from "../lib/errors";
 
 // Personal contact + emergency info. Stored as an encrypted JSON blob; returned in full to the
 // employee, HR and super_admin (not masked - HR needs to read these). Health data lives here too.
-const FIELDS = [
+//
+// EXPORTED because http/fieldAccess.ts needs this list at RUNTIME to know which keys a per-field rule may
+// deny, and it used to keep a hand-written copy of it. A field added here and forgotten there can never be
+// denied - a configured field-level DENY on it silently does nothing, which is a field ACL failing open. One
+// list, imported; test/fieldAccessDrift.test.ts pins that it stays the one list.
+export const PERSONAL_FIELDS = [
   "personal_email",
   "personal_phone",
   "alternate_phone",
@@ -27,7 +32,7 @@ const FIELDS = [
   "medical_notes",
 ] as const;
 
-export type PersonalDetails = Partial<Record<(typeof FIELDS)[number], string>> & { same_as_communication?: boolean };
+export type PersonalDetails = Partial<Record<(typeof PERSONAL_FIELDS)[number], string>> & { same_as_communication?: boolean };
 
 async function loadEmployee(deps: Deps, employeeId: string) {
   const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
@@ -65,7 +70,7 @@ export async function setPersonalDetails(deps: Deps, actor: AppUser, employeeId:
   const emp = await loadEmployee(deps, employeeId);
   const next: PersonalDetails = { ...(await read(deps, emp.personalDetailsEnc)) };
   const MAX_LEN = 2000;
-  for (const k of FIELDS) {
+  for (const k of PERSONAL_FIELDS) {
     const raw = input[k];
     if (raw == null) continue;
     if (typeof raw !== "string") throw invalidArgument(`${k} must be a string`);

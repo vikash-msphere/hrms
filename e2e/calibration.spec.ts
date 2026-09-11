@@ -75,14 +75,16 @@ test("the calibration panel counts a cycle's shared ratings, and narrows to one 
   // Both reviews, both rated, neither acknowledged, and the average of 4 and 2 - with the scale's own word
   // for it, because a bare 3.0 means nothing without the org's ladder beside it.
   const panel = calibrationPanel(page);
-  await expect(panel.getByText("2 rated")).toBeVisible({ timeout: 30_000 });
-  await expect(panel.getByText("0 acknowledged")).toBeVisible();
+  // `exact`, because the panel's own footnote counts rated reviews too ("… (2 rated reviews have no goals
+  // attached to this cycle)") and a substring match would find both.
+  await expect(panel.getByText("2 rated", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(panel.getByText("0 acknowledged", { exact: true })).toBeVisible();
   await expect(panel.getByText(/^3\.0 average/)).toBeVisible();
 
   // One department: one review, one rating, and the average is that person's mark rather than the org's.
   await panel.getByRole("combobox").click();
   await page.getByRole("option", { name: a.department_name, exact: true }).click();
-  await expect(panel.getByText("1 rated")).toBeVisible({ timeout: 30_000 });
+  await expect(panel.getByText("1 rated", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(panel.getByText(/^4\.0 average/)).toBeVisible();
 
   // A live cycle nags everybody it touches, so it goes away with its reviews.

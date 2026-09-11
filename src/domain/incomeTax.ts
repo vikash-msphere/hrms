@@ -49,14 +49,25 @@ export function fyLabels(startYear: number): { financialYear: string; assessment
   return { financialYear: `${startYear}-${yy(startYear + 1)}`, assessmentYear: `${startYear + 1}-${yy(startYear + 2)}` };
 }
 
-// Which Budget's slab table is hardcoded below. Bump it in the SAME edit that changes the slabs, rebate,
-// standard deduction or surcharge bands - the stamp is only useful if it is true. `scripts/preflight.ts`
-// compares it against the financial year being deployed into and warns when the table is a year behind.
-export const DEFAULT_TAX_FY_START_YEAR = 2025; // Budget 2025 -> FY 2025-26 / AY 2026-27
+// Which financial year's charge the slab table below encodes. Bump it in the SAME edit that changes the
+// slabs, rebate, standard deduction or surcharge bands - the stamp is only useful if it is true.
+// `scripts/preflight.ts` compares it against the financial year being deployed into and REFUSES the deploy
+// when the table is a year behind, because withholding at a superseded table is silent (the FY window comes
+// from the payroll period's dates, so only the rates are wrong).
+//
+// A year in which the Budget leaves the new regime alone still moves this stamp, and moving it is the whole
+// work of that year's update: the stamp asserts "this table is the charge in force for that FY", not "these
+// numbers were legislated that year". Left behind on the theory that unchanged numbers need no edit, it
+// blocks every deploy from April onward for a table that is in fact correct - and the way past that block is
+// to bump the stamp, which is this line.
+export const DEFAULT_TAX_FY_START_YEAR = 2026; // FY 2026-27 / AY 2027-28
 
-// Seed / fail-closed fallback - the latest concrete new-regime slabs (FY 2025-26 / AY 2026-27). The DB
+// Seed / fail-closed fallback - the new-regime charge in force for FY 2026-27 / AY 2027-28. The DB
 // `tax-config` settings row is the runtime source of truth; identical values so a missing row never changes
 // behavior. Update this (and the row) each Budget; add an `old` regime here when it's implemented.
+//
+// The slabs, standard deduction, rebate and surcharge bands are the ones Budget 2025 set for FY 2025-26 and
+// Budget 2026 carried forward unchanged, so this table is a year older than its stamp by design.
 export const DEFAULT_TAX_CONFIG: TaxConfig = {
   ...fyLabels(DEFAULT_TAX_FY_START_YEAR),
   regimes: {

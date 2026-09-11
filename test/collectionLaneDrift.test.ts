@@ -147,9 +147,9 @@ describe("every collection is built by the factory", () => {
     const shadowed: string[] = [];
     for (const { name, src } of entries) {
       if (!usesFactory(src)) continue;
-      const block = src.match(/\n  verbs: \{\n([\s\S]*?)\n  \},?\n/);
+      const block = src.match(/\n {2}verbs: \{\n([\s\S]*?)\n {2}\},?\n/);
       if (!block) continue;
-      for (const m of block[1]!.matchAll(/^    (\w+): \{/gm)) if (SHARED.includes(m[1]!)) shadowed.push(`${name}:${m[1]}`);
+      for (const m of block[1]!.matchAll(/^ {4}(\w+): \{/gm)) if (SHARED.includes(m[1]!)) shadowed.push(`${name}:${m[1]}`);
     }
     // `payroll-runs:publish` is a long-running publish that answers 202 + an Operation to poll, not the run, so
     // it can never be the shared lane's column write. `automations:enable/disable` write the SAME `disabled`
@@ -169,7 +169,7 @@ describe("every collection is built by the factory", () => {
     // lane for a filtered list (period/status scoping plus a whole-set aggregate), and binds the scope through
     // the same `applyScope(code)` call the generic list uses.
     const GENERIC_LIST = [
-      "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "holidays", "leave-types",
+      "asset-categories", "benefit-plans", "compliance-rules", "expense-categories", "goal-templates", "holidays", "leave-types",
       "letter-templates", "letterheads", "pay-components", "pay-grades", "pay-periods", "projects", "reimbursement-categories",
       "access-rules", "salary-structures", "shifts", "vendors",
     ];

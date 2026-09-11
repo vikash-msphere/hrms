@@ -176,6 +176,9 @@ export const SEARCH_INDEX: SearchEntry[] = [
   // ---- Admin ----------------------------------------------------------------------------------------------------
   { collection: "automations", table: schema.automations, scoping: flat,
     match: ["name", "description", "triggerType"], title: ["name"], subtitle: ["description"] },
+  // A saved grid is a thing people go back to by NAME ("the salary sheet"), months later, from anywhere.
+  { collection: "table-views", table: schema.tableViews, scoping: scoped("ownerId"),
+    match: ["name", "description", "base"], title: ["name"], subtitle: ["description", "base"] },
 ];
 
 export const SEARCHABLE_COLLECTIONS = SEARCH_INDEX.map((e) => e.collection);

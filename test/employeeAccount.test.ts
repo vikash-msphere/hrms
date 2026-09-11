@@ -79,6 +79,22 @@ describe("employee sign-in accounts", () => {
     expect((await deps.db.select().from(schema.users)).length).toBe(1);
   });
 
+  // The account row IS the sign-in identity, and every lane resolves a caller by their lowercased address
+  // (middleware/auth.ts - the Access JWT's email, the session cookie's, the dev bypass). Stored as typed, an
+  // address HR entered with capitals was never found by that login: it minted a SECOND account at the default
+  // role, leaving the person with no access and their real role sitting on the row beside it.
+  it("stores the sign-in address lowercased, however HR typed it", async () => {
+    const row = await hire("Priya.Nair@Test.Example", "Priya");
+    expect((await accountFor(row.uuid))?.email).toBe("priya.nair@test.example");
+  });
+
+  it("keeps it lowercased when the work email is corrected", async () => {
+    const row = await hire("wrong@test.example");
+    await updateEmployee(deps, actor, row.uuid, { work_email: "Right.Name@Test.Example" });
+    expect((await accountFor(row.uuid))?.email).toBe("right.name@test.example");
+    expect((await deps.db.select().from(schema.users)).length).toBe(1);
+  });
+
   it("provisions on a work-email edit for an employee that has no account yet", async () => {
     const id = genId();
     await deps.db.insert(schema.employees).values({ uuid: id, code: "04-0011", firstName: "Divya", lastName: "Rao", workEmail: "old@test.example" });

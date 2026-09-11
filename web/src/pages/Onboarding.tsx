@@ -4,6 +4,7 @@ import { get, create, patch, invoke, remove, upload, download } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useIntent } from "@/lib/intent";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { DEFAULT_TRANSITION_TEMPLATES, type TransitionTemplate } from "@/lib/transitions";
 import type { Employee, Transition, TransitionKind, TransitionTask, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -24,7 +25,6 @@ import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
 // Name for an employee ref, for the places a subject is shown rather than picked.
 const employeeLabel = (employees: Employee[], ref: string) => {
   const e = employees.find((x) => idOf(x.path) === idOf(ref));
@@ -246,7 +246,7 @@ function TransitionCard({ transition: tr, focus, subjectName, empName, acting, o
   const overdueCount = tr.state === "ACTIVE" ? tasks.filter((t) => t.status !== "DONE" && !!t.due_date && t.due_date < todayStr()).length : 0;
 
   return (
-    <Card ref={cardRef} className={cn("overflow-hidden transition-shadow", focus && "ring-2 ring-primary")}>
+    <Card ref={cardRef} id={`transition-${idOf(tr.path)}`} className={cn("overflow-hidden transition-shadow", focus && "ring-2 ring-primary")}>
       {/* A real <button>, not a clickable div: this is the only way to open a transition's task list, and as
           a div it had no keyboard route in at all (no role, no tab stop, no Enter/Space) and announced
           nothing about being expandable. Nothing inside it is interactive, so a button is safe to wrap it. */}

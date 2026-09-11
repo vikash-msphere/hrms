@@ -128,7 +128,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
 
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [employees]);
 
   // The category the form currently names, for the serial-number hint (the server enforces it either way).
@@ -136,7 +136,7 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
 
   const catName = useMemo(() => {
     const m = new Map(categories.map((c) => [idOf(c.path), c.display_name ?? ""]));
-    return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
+    return (p?: string | null) => (p ? m.get(idOf(p)) ?? idOf(p) : "");
   }, [categories]);
 
   // Inventory summary across the assets the caller can see (server-scoped). "Awaiting scan" leads because it
@@ -372,10 +372,10 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
             </AccessAction>
           )}
           <AccessAction collection="assets" objectPath={r.path} can={r.access?.can} verb="update" label="Edit asset">
-            <Button size="sm" variant="ghost" onClick={() => openEdit(r)}><Pencil className="h-4 w-4" /></Button>
+            <Button size="sm" variant="ghost" title="Edit asset" onClick={() => openEdit(r)}><Pencil className="h-4 w-4" /></Button>
           </AccessAction>
           <AccessAction collection="assets" objectPath={r.path} can={r.access?.can} verb="delete" label="Remove asset">
-            <Button size="sm" variant="ghost" onClick={() => del(r)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+            <Button size="sm" variant="ghost" title="Remove asset" onClick={() => del(r)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
           </AccessAction>
         </div>
       ),
@@ -499,7 +499,8 @@ export default function Assets({ me, openId }: { me: Me; openId?: string }) {
           accessTargetOf={(r) => ({ collection: "assets", objectPath: r.path, label: r.name, can: r.access?.can })}
           emptyTitle={band ? `Nothing ${BANDS.find((b) => b.id === band)!.label.toLowerCase()}` : "No assets yet"}
           emptyDescription={band ? "Pick another number above, or Show all." : "Add laptops, phones and other company assets to track who holds what."}
-          emptyAction={band ? undefined : addBtn}
+          // No emptyAction: addBtn already sits in the page header above, always visible - repeating it here
+          // would put two "Add many"/"Add asset" buttons with the same name on screen at once.
         />
       </DataState>
 

@@ -464,7 +464,9 @@ export function DataTable<T>({
     }
     return out;
     // `columns` is read for `hideValueByDefault` but is not listed: it is usually a fresh array per render,
-    // and `colById` is derived from it, so it already changes whenever the columns really do.
+    // and `colById` is derived from it, so it already changes whenever the columns really do. Listing it would
+    // re-filter and re-sort every row on every render of every table in the app.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- columns is covered by colById; see above
   }, [rows, deferredFilters, sort, colById]);
 
   // --- bulk selection (only when the caller passes bulkActions) --------------------------------------------

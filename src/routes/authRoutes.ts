@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import type { AppEnv } from "../env";
 import { users } from "../db/schema";
 import { makeDeps } from "../deps";
 import { openSession, sealSession } from "../lib/session";
+import { counter } from "../lib/isolateRate";
 
 // Direct Google sign-in (OIDC authorization-code flow), the no-per-seat-cost alternative to fronting the
 // app with Cloudflare Access. Selected by configuration: GOOGLE_CLIENT_ID set = Google mode; absent =
@@ -43,7 +44,21 @@ const randomToken = (): string => Buffer.from(crypto.getRandomValues(new Uint8Ar
 // on the top-level redirect back from Google), scoped to /auth so they never ride ordinary API requests.
 const OAUTH_COOKIE = { httpOnly: true, secure: true, sameSite: "Lax" as const, path: "/auth", maxAge: 600 };
 
+// A FLOOR on the one unauthenticated lane a person actually walks (see lib/isolateRate.ts - the control is
+// the WAF rule, and `npm run preflight` names this route as having had nothing at all). `/callback` is the
+// expensive half: it exchanges a code with Google over a real outbound request and verifies an id token
+// against a fetched JWKS, neither of which requires a credential of ours to provoke. Sized so a whole
+// company arriving at nine in the morning never notices - sign-ins land on many isolates, and one isolate
+// serving 300 of them a minute is already an unusual morning.
+const signIns = counter(300);
+
 export const authRoutes = new Hono<AppEnv>()
+  .use("*", async (c, next) => {
+    if (signIns.throttled(Date.now())) {
+      return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(signIns.retryAfterSeconds) });
+    }
+    await next();
+  })
   .get("/login", (c) => {
     // Access mode: the edge already challenges every request - going home IS going to login.
     if (!c.env.GOOGLE_CLIENT_ID) return c.redirect("/");
@@ -157,10 +172,17 @@ export const authRoutes = new Hono<AppEnv>()
       try {
         const session = await openSession(token, c.env.AUTH_SESSION_KEY!, Date.now());
         if (session) {
+          // MATCHED THE WAY AUTH MATCHES: `lower(email)`, not `=`. The column is plain TEXT with no NOCASE
+          // collation, so `=` is case-sensitive - while middleware/auth.ts deliberately falls back to this same
+          // `lower()` lookup because a row stored with different case is a case it expects to meet. On such a
+          // row the exact match here found nothing, so the cut-off was never stamped: the cookie left this
+          // browser and a lifted copy stayed good for the rest of its twelve hours. That is precisely the
+          // outcome this stamp exists to prevent, failing silently, on the one action a person takes when they
+          // believe they have a reason to. The two lookups must agree, so they now use the same predicate.
           await makeDeps(c.env)
             .db.update(users)
             .set({ sessionsValidFrom: new Date(), updatedAt: new Date() })
-            .where(eq(users.email, session.email.toLowerCase()));
+            .where(sql`lower(${users.email}) = ${session.email.toLowerCase()}`);
         }
       } catch (e) {
         console.error("[auth] logout: session cut-off stamp failed (non-fatal)", e);

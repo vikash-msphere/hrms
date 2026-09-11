@@ -4,6 +4,7 @@ import { create, get, invoke, patch, download } from "@/api";
 import type { ListResponse } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { fireIntent } from "@/lib/intent";
 import { runSequential, batchSummary } from "@/lib/batchRun";
@@ -533,7 +534,6 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
   );
 }
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
 
 function ApplicationDialog({ candidates, apps, reqs, stages, sources, defaultReq, onClose, onSaved }: {
   candidates: Candidate[];

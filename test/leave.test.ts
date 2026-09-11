@@ -22,6 +22,66 @@ describe("computeAccrual", () => {
     expect(r.newLastYm).toBe("2026-03");
   });
 
+  // REGRESSION. Only the JOINING month was prorated; the leaving month was credited in full, so someone who
+  // left on the 2nd earned a whole month's entitlement for two days. Accrued leave is encashable, so the FnF
+  // pays cash for it - the same two days were worth a full month on the way out and a fifteenth of one on the
+  // way in.
+  it("prorates the leaving month, not just the joining month", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-03-02"), // last working day: 2 of March's 31 days
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-03-20"),
+    });
+    expect(r.add).toBeCloseTo(1 + 1 + 2 / 31, 2); // Jan + Feb full, March prorated
+    expect(r.newLastYm).toBe("2026-03");
+  });
+
+  it("prorates a month that is both the joining and the leaving month", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-06-10"),
+      endMs: ms("2026-06-20"), // 11 of June's 30 days
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-07-05"),
+    });
+    expect(r.add).toBeCloseTo(11 / 30, 2);
+    expect(r.newLastYm).toBe("2026-06");
+  });
+
+  it("still credits a whole month to someone who leaves on its last day", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-03-31"),
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-04-05"),
+    });
+    expect(r.add).toBeCloseTo(3, 5);
+  });
+
+  it("prorates the leaving half-period on a semi-monthly schedule", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: 24, // 1 day per half-period
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-01-20"), // H1 in full, then 5 of H2's 16 days
+      probationEndMs: null,
+      probationAccrualDaysPerYear: 24,
+      lastAccrualYm: null,
+      currentMs: ms("2026-02-10"),
+      frequency: "semi_monthly",
+    });
+    expect(r.add).toBeCloseTo(1 + 5 / 16, 2);
+    expect(r.newLastYm).toBe("2026-01-H2");
+  });
+
   it("is idempotent within a month (nothing new once caught up)", () => {
     const r = computeAccrual({
       accrualDaysPerYear: ANNUAL,
@@ -105,7 +165,10 @@ describe("computeAccrual", () => {
       lastAccrualYm: null,
       currentMs: ms("2026-06-01"),
     });
-    expect(r.add).toBeCloseTo(2, 5); // Jan + Feb only
+    // Jan in full and half of February - nothing for March onward, four months after the tick ran. This used
+    // to expect a flat 2: the walk stopped at the right MONTH but paid that month whole, which is the leaving
+    // -month proration the case above pins.
+    expect(r.add).toBeCloseTo(1 + 15 / 28, 2);
     expect(r.newLastYm).toBe("2026-02");
   });
 

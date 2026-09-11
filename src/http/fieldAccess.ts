@@ -5,6 +5,8 @@
 // denied set - access inherits by default. Lives in src/http (not scanned by the single-source gate) and uses
 // the engine exactly like accessHint.ts: the decision is still rendered by decide(), never re-implemented.
 import { decide, type Grant, type SelfContext } from "../domain/permissions";
+import { BANK_FIELDS } from "../services/bankDetails";
+import { PERSONAL_FIELDS } from "../services/personalDetails";
 import type { Wire } from "./wire";
 
 // The subset of `keys` the caller may NOT read among the fields of `<base>.<code>.<subresource>`. Each check
@@ -36,17 +38,20 @@ export function redactIdentity(view: IdentityView, grant: Grant, code: string, s
 // Bank/personal GET return a flat object keyed by field name. A denied key is OMITTED (the SPA renders a
 // missing value as "-"). Bank exposes the account number under `account_number_masked`, so a deny on the
 // canonical write key `account_number` must drop that output key - hence the read-key remap.
-const READ_KEY: Record<string, Record<string, string>> = {
+export const READ_KEY: Record<string, Record<string, string>> = {
   "bank-account": { account_number: "account_number_masked" },
 };
 // The canonical (write) field keys per flat sub-resource - the set a per-field rule can target.
-const FLAT_KEYS: Record<string, readonly string[]> = {
-  "bank-account": ["bank_name", "account_name", "account_number", "branch", "ifsc_code", "currency_code"],
-  "personal-info": [
-    "personal_email", "personal_phone", "alternate_phone", "date_of_birth", "gender", "marital_status",
-    "communication_address", "permanent_address", "emergency_name", "emergency_phone", "emergency_relation",
-    "emergency2_name", "emergency2_phone", "emergency2_relation", "blood_group", "allergies", "medical_notes",
-  ],
+//
+// IMPORTED FROM THE SERVICES THAT OWN THE FIELDS, never re-typed here. This list is what makes a per-field
+// DENY effective: `deniedFieldKeys` only ever asks about keys that appear in it, so a field the list does not
+// mention cannot be denied and a rule written against it does nothing at all - a field ACL failing OPEN, with
+// no error anywhere. The two copies had already drifted apart (this file listed a `branch` that bank details
+// did not store), which is the same mistake pointing the harmless way. test/fieldAccessDrift.test.ts holds
+// the pair together.
+export const FLAT_KEYS: Record<string, readonly string[]> = {
+  "bank-account": BANK_FIELDS,
+  "personal-info": PERSONAL_FIELDS,
 };
 
 export function redactFlat<T extends Record<string, unknown>>(view: T, subresource: string, grant: Grant, code: string, self: SelfContext): T {

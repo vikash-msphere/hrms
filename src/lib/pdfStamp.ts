@@ -3,6 +3,7 @@
 // in-place on the org policy PDF at the box HR positioned. Coordinates are PDF points, bottom-left origin,
 // 1-based page - the same anchor shape the letter renderer emits and Cashfree consumes.
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { enc } from "./pdfPrimitives";
 
 export type SignAnchor = { page: number; x1: number; y1: number; x2: number; y2: number };
 
@@ -44,7 +45,13 @@ export async function stampSignature(
   if (attest?.name) {
     const font = await doc.embedFont(StandardFonts.Helvetica);
     const size = 8;
-    const label = attest.date ? `${attest.name}  ·  ${attest.date}` : attest.name;
+    // THROUGH `enc`, like every other text this app draws. The base fonts are WinAnsi-encoded, and pdf-lib
+    // encodes to measure as well as to draw (StandardFontEmbedder.encodeTextAsGlyphs), so an unencodable
+    // character throws out of `widthOfTextAtSize` before `drawText` is even reached. The name here is the
+    // employee's `legal_name` off their row - arbitrary UTF-8, with no charset restriction anywhere on the way
+    // in - so a rupee sign or a name in any non-Latin script made `documents/{id}:acknowledge` a permanent 500
+    // for that one person: they could never sign a mandatory policy, and no retry would change it.
+    const label = enc(attest.date ? `${attest.name}  ·  ${attest.date}` : attest.name);
     const tw = font.widthOfTextAtSize(label, size);
     page.drawText(label, { x: bx + Math.max(0, (bw - tw) / 2), y: by + 1, size, font, color: rgb(0.25, 0.25, 0.25) });
   }

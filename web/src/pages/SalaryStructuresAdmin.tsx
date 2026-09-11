@@ -6,7 +6,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { usePermission } from "@/lib/perm";
-import { idOf } from "@/lib/utils";
+import { idOf, round2 } from "@/lib/utils";
 import { useMoney } from "@/lib/org";
 import { navigate } from "@/router";
 import type { Me, SalaryStructure, SalaryStructureLine, PayComponent } from "@/types";
@@ -250,7 +250,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
             <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Percentage lines claim</span>
-                <span className="font-medium tabular-nums">{Math.round(percentOfBasic * 100) / 100}% of basic</span>
+                <span className="font-medium tabular-nums">{round2(percentOfBasic)}% of basic</span>
               </div>
               {fixedFloor > 0 && (
                 <div className="flex justify-between">

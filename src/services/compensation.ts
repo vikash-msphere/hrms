@@ -12,6 +12,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, auditMany, diffMeta } from "../lib/audit";
+import { runBatch, byIdChunks, type BatchStmt } from "../lib/dbBatch";
 import { etagOf } from "../http/serialize";
 import { invalidArgument, notFound, failedPrecondition, aborted } from "../lib/errors";
 import { notify } from "./notifications";
@@ -59,7 +60,12 @@ async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs
   let months = 0;
   // Only the runs this employee actually has an item in: every other run is skipped below anyway, so reading
   // the whole table grew this query with the org's payroll history for nothing.
-  const runs = await deps.db.select().from(schema.payrollRuns).where(inArray(schema.payrollRuns.uuid, [...itemByRun.keys()]));
+  //
+  // Chunked, because the list is one id per run this person has ever been paid by - it grows a row a month for
+  // as long as they stay, so it crosses D1's hundred-parameter cap after eight years and then stays broken.
+  const runs = await byIdChunks([...itemByRun.keys()], (group) =>
+    deps.db.select().from(schema.payrollRuns).where(inArray(schema.payrollRuns.uuid, group)),
+  );
   for (const r of runs) {
     const it = itemByRun.get(r.uuid);
     if (r.state !== "PUBLISHED" || !it) continue;
@@ -96,6 +102,9 @@ async function publishedRegularMonthsPaid(deps: Deps, employeeId: string, fromMs
 export type CompensationInput = {
   employee?: string | null;
   annual_ctc?: number; // the authoritative figure; the server derives the monthly basic + Special Allowance
+  // Target variable pay for a full year at 100% attainment. Separate from CTC on purpose: CTC is committed
+  // pay, and a figure that has to be earned is not committed. Feeds review-cycles:variablePay.
+  variable_pay_target?: number | null;
   currency_code?: string;
   pay_grade?: string | null;
   salary_structure?: string | null;
@@ -285,7 +294,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
   if (timeline.some((r) => +new Date(r.effectiveFrom) === from))
     throw failedPrecondition(`a revision already takes effect on ${ymd(from)} - edit that one rather than adding a second`);
   const { prev, next } = slotAt(timeline, from);
-  const nowMs = +new Date();
+  const nowMs = +deps.clock.now();
   // The window this revision governs, which is also the window its arrears cover: up to the revision that
   // supersedes it, or to now for the latest one.
   const until = Math.min(nowMs, next ? +new Date(next.effectiveFrom) : nowMs);
@@ -326,6 +335,7 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
       currency: input.currency_code?.trim() || prev?.currency || next?.currency || await orgCurrency(deps),
       payGradeId,
       structureId,
+      variablePayTarget: input.variable_pay_target ?? prev?.variablePayTarget ?? null,
       effectiveFrom: new Date(from),
       // Open only when nothing supersedes it; a middle insert ends where the next revision starts.
       effectiveTo: next ? new Date(next.effectiveFrom) : null,
@@ -391,7 +401,7 @@ export async function updateCompensation(deps: Deps, actor: AppUser, id: string,
         `effective_from must fall between this employee's neighbouring revisions${lo !== undefined ? ` (after ${ymd(lo)})` : ""}${hi !== undefined ? ` (before ${ymd(hi)})` : ""}. To move it outside that window, remove this revision and add it at the new date.`,
       );
   }
-  const nowMs = +new Date();
+  const nowMs = +deps.clock.now();
   const priced = await priceRevision(deps, row.employeeId, emp.epfEnrolled, annualCtc, structureId, from, Math.min(nowMs, next ? +new Date(next.effectiveFrom) : nowMs), prev);
   // Already disbursed: the figures describe a payment that happened, so they are history, not a derivation.
   const settled = !!row.arrearsPaidRunId || !!row.arrearsPaidAt;
@@ -406,6 +416,8 @@ export async function updateCompensation(deps: Deps, actor: AppUser, id: string,
     currency: patch.currency_code?.trim() || row.currency,
     payGradeId,
     structureId,
+    // Absent = leave alone; explicit null = clear (this person no longer plays for a variable component).
+    ...(has(patch, "variable_pay_target") ? { variablePayTarget: patch.variable_pay_target ?? null } : {}),
     effectiveFrom: new Date(from),
     ...(settled ? {} : { arrearsAmount: priced.arrearsAmount, arrearsBaseAmount: priced.arrearsBaseAmount }),
     updatedAt: new Date(),
@@ -547,12 +559,17 @@ export async function reapplySplitCurrent(deps: Deps, actor: AppUser): Promise<{
   const plan = await splitPlan(deps);
   const touched: SplitPlanRow[] = [];
   let unchanged = 0, skipped = 0;
+  // Batched (one D1 round trip for the whole run, not one per employee): a company past ~50 employees blew
+  // the free-plan per-invocation subrequest budget partway through a whole-company re-apply, updating the
+  // first 50 rows and then failing the rest with no signal beyond a generic 500 - see dbBatch.ts.
+  const stmts: BatchStmt[] = [];
   for (const p of plan) {
     if (p.status === "skipped") { skipped++; continue; }
     if (p.status === "unchanged") { unchanged++; continue; }
-    await deps.db.update(schema.compensation).set({ basePay: p.basePay, specialAllowance: p.specialAllowance, updatedAt: new Date() }).where(eq(schema.compensation.uuid, p.uuid));
+    stmts.push(deps.db.update(schema.compensation).set({ basePay: p.basePay, specialAllowance: p.specialAllowance, updatedAt: new Date() }).where(eq(schema.compensation.uuid, p.uuid)));
     touched.push(p);
   }
+  await runBatch(deps.db, stmts);
   // ONE ENTRY PER EMPLOYEE, not just the org-wide tally. This re-solves what somebody is paid each month, and
   // a count on a collection-level entry is invisible from the place a person actually looks: their own
   // compensation record. Now that record's trail says "payroll re-applied the split; basic 30,000 -> 33,333".

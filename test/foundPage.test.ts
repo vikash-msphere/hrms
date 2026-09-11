@@ -3,6 +3,7 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
@@ -70,6 +71,17 @@ describe("public /found/<token> page", () => {
     await enableFoundPage();
     expect((await fetchFound("not-a-token")).status).toBe(404);
     expect((await fetchFound(uuid)).status).toBe(404); // the internal uuid is NOT a valid wire token
+  });
+
+  // Retiring is what the app records when hardware is sold, scrapped or handed on - and the printed sticker
+  // goes with it. Unfiltered, that sticker kept publishing the org's name and a return address, to anyone who
+  // scanned it, for a machine somebody else now owns.
+  it("404s for a RETIRED asset - the sticker outlives our claim to the hardware", async () => {
+    const { uuid, token } = await seedAsset();
+    await enableFoundPage();
+    expect((await fetchFound(token)).status).toBe(200); // still ours
+    await deps.db.update(schema.assets).set({ status: "retired" }).where(eq(schema.assets.uuid, uuid));
+    expect((await fetchFound(token)).status).toBe(404);
   });
 
   it("serves org name, tag and contact for a valid token - and only that", async () => {

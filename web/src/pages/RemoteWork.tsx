@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { cn, formatDate, idOf, personName } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { navigate, navigateTab } from "@/router";
 import { Card } from "@/components/ui/card";
 import type { ApprovalDelegation, RemoteWorkRequest, Employee, Me } from "@/types";
@@ -30,9 +31,10 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
-const pad = (n: number) => String(n).padStart(2, "0");
 // Local date, not UTC: the "today"/"this month" summaries should follow the viewer's clock.
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 const ymdIn = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toLocaleDateString("en-CA"); };
 // Friday of the current week (or today, if the week is already past it) - the "rest of the week" pick.
 const endOfWeek = () => { const d = new Date(); const add = Math.max(0, 5 - (d.getDay() || 7)); d.setDate(d.getDate() + add); return d.toLocaleDateString("en-CA"); };

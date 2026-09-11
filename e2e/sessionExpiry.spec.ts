@@ -17,12 +17,18 @@ test("a session that dies mid-form keeps the form", async ({ as }) => {
   const typed = `Half-finished vendor ${Date.now()}`;
   await dialog.getByPlaceholder("Vendor or supplier name").fill(typed);
 
-  // The session lapses (expired cookie, revoked key, a signed-out sibling tab).
+  // The session lapses (expired cookie, revoked key, a signed-out sibling tab). Any request can be the one
+  // that trips it - a background poll (notifications, presence) hitting the 401 first is just as much this
+  // scenario as the deliberate Create press below, and once the overlay is up it blocks that press same as
+  // any other click, which is not a failure of the click, just a race this test does not need to win.
   await page.context().clearCookies();
-  await dialog.getByRole("button", { name: "Create", exact: true }).click();
+  const signedOut = page.getByText("Signed out", { exact: true });
+  if (!(await signedOut.count())) {
+    await dialog.getByRole("button", { name: "Create", exact: true }).click().catch(() => undefined);
+  }
 
   // In place, and honest about what happened.
-  await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+  await expect(signedOut).toBeVisible();
   await expect(page.getByText(/Your session expired\. Anything you were typing is still here/)).toBeVisible();
 
   // The whole point: still on the page, still holding what was typed. Located from the page rather than

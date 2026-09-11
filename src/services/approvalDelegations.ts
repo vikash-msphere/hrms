@@ -37,7 +37,7 @@ export async function listApprovalDelegations(deps: Deps, scope: ListScope, maxP
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.approvalDelegations.delegatorId, empId));
   const all = await deps.db.select().from(schema.approvalDelegations).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "approval-delegations" });
 }
 
 // Reject overlapping delegations to the same delegate, so the window stays unambiguous.

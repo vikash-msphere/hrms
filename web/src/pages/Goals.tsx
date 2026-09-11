@@ -1,17 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
-import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, Users, Search, Link2, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Target, Plus, Pencil, Trash2, CheckCircle2, CalendarDays, ClipboardCheck, Clock3, Eye, Hourglass, MessageSquareDashed, Network, Sparkles, TrendingDown, Users, Search, Link2, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { create, patch, invoke, remove, get } from "@/api";
-import { setRouteRecord, recordUrl } from "@/router";
+import { navigate, setRouteRecord, recordUrl } from "@/router";
 import { describeError, isConflict } from "@/lib/formError";
-import { measuredPct, measureLabel, numOrNone } from "@/lib/goalMeasure";
+import { measuredPct, measureLabel, numOrNone, weightedProgress } from "@/lib/goalMeasure";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import type { Employee, Goal, GoalStatus, Me, Card as KanbanCard } from "@/types";
+import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
+import type { Department, Employee, Goal, GoalConfidence, GoalKind, GoalStage, GoalStatus, Me, ReviewCycle, Card as KanbanCard } from "@/types";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
-import { useIntent } from "@/lib/intent";
+import { fireIntent, useIntent } from "@/lib/intent";
+import { readLocal, writeLocal } from "@/lib/localPref";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
 import { DataState } from "@/components/common/DataState";
@@ -50,34 +52,61 @@ const statusBadge: Record<GoalStatus, { label: string; variant: "muted" | "secon
 // Active goals sort ahead of finished ones; within a bucket the due date decides.
 const STATUS_RANK: Record<GoalStatus, number> = { in_progress: 0, not_started: 1, completed: 2, cancelled: 3 };
 
-type Filter = "all" | "active" | "overdue" | "completed" | "cancelled";
-const FILTERS: Filter[] = ["all", "active", "overdue", "completed", "cancelled"];
+// How the goals are laid out. `tree` is the alignment cascade: alignment exists per goal (a parent and its
+// children in the drawer), and nothing rendered it from the top - which is the view that makes a
+// mis-parented goal, or a whole team hanging off nothing, obvious at a glance.
+type GoalView = "flat" | "quarter" | "tree";
+type Filter = "all" | "active" | "overdue" | "at_risk" | "quiet" | "unagreed" | "completed" | "cancelled";
+const FILTERS: Filter[] = ["all", "active", "overdue", "at_risk", "quiet", "unagreed", "completed", "cancelled"];
 const isOpen = (g: Goal) => g.status === "in_progress" || g.status === "not_started";
+// A goal the server says is behind its own pace, or whose owner has said so. Both halves matter: the
+// arithmetic catches the goal nobody has admitted to, the owner's call catches the one that looks fine on
+// paper because the deadline is still far away.
+const isAtRisk = (g: Goal) => isOpen(g) && (g.pace === "at_risk" || g.confidence === "at_risk" || g.confidence === "off_track");
+// Silence. The server counts the days (a write, a progress move or a comment resets it).
+const isQuiet = (g: Goal) => isOpen(g) && (g.stale_days ?? 0) >= STALE_DAYS;
+const STALE_DAYS = 21;
 const matchesFilter = (g: Goal, f: Filter) =>
   f === "all" ? true
   : f === "active" ? isOpen(g)
   : f === "overdue" ? isOpen(g) && !!g.due_date && g.due_date < todayStr()
+  : f === "at_risk" ? isAtRisk(g)
+  : f === "quiet" ? isQuiet(g)
+  // Everything still in the goal-setting handshake: the owner's own drafts and whatever is sitting with a
+  // manager. One filter for both halves, because "not agreed yet" is the state anyone is chasing.
+  : f === "unagreed" ? g.stage !== "AGREED"
   : g.status === f;
 const FILTER_KEY = "goals:filter";
 
 const EMPTY = {
-  title: "", description: "", weight: "", status: "not_started" as GoalStatus, due_date: "", employee: "me", parent: "none",
+  title: "", description: "", weight: "", status: "not_started" as GoalStatus, kind: "objective" as GoalKind, due_date: "", employee: "me", parent: "none", cycle: "none", blockedBy: "none", department: "none",
   // The measure. Strings because these are text inputs; "" means "not set", which is what makes a goal manual.
   unit: "", baseline: "", target: "", current: "",
 };
 const num = numOrNone;
-const todayStr = () => new Date().toISOString().slice(0, 10);
 // Relative due phrase: "5d left" / "due today" / "3d overdue". `soon` = within a week.
 const dueRel = (ymd: string): { text: string; overdue: boolean; soon: boolean } => {
-  const days = Math.round((Date.parse(ymd + "T00:00:00Z") - Date.parse(todayStr() + "T00:00:00Z")) / 86400000);
+  const days = daysBetweenYmd(todayStr(), ymd);
   if (days > 0) return { text: `${days}d left`, overdue: false, soon: days <= 7 };
   if (days === 0) return { text: "due today", overdue: false, soon: true };
   return { text: `${-days}d overdue`, overdue: true, soon: false };
 };
-const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// The month index (0-11) of a "YYYY-MM-DD", and the last calendar day of the month `ahead` months on. Day 0
+// of the following month is the last of this one, and it is stated in UTC so the answer is the date itself.
+// These used to be built from `new Date()`'s LOCAL parts and formatted with a local `ymd`, which made the
+// quarter a goal is filed under the READER's quarter - on the last day of March, two people looking at the
+// same board sorted the same goal into different buckets.
+const monthIdx = (ymd: string) => Number(ymd.slice(5, 7)) - 1;
+const monthEndFrom = (ymd: string, ahead: number) => new Date(Date.UTC(Number(ymd.slice(0, 4)), monthIdx(ymd) + ahead + 1, 0)).toISOString().slice(0, 10);
 // Quarter bucket for the grouped view. Sort key orders chronologically; undated goals sink to the end.
-const currentQuarterStartStr = () => { const n = new Date(); return ymd(new Date(n.getFullYear(), Math.floor(n.getMonth() / 3) * 3, 1)); };
-const nextQuarterEndStr = () => { const n = new Date(); return ymd(new Date(n.getFullYear(), Math.floor(n.getMonth() / 3) * 3 + 6, 0)); };
+const currentQuarterStartStr = () => {
+  const t = todayStr();
+  return `${t.slice(0, 4)}-${String(Math.floor(monthIdx(t) / 3) * 3 + 1).padStart(2, "0")}-01`;
+};
+const nextQuarterEndStr = () => {
+  const t = todayStr();
+  return monthEndFrom(t, Math.floor(monthIdx(t) / 3) * 3 + 5 - monthIdx(t)); // end of the quarter AFTER this one
+};
 const quarterOf = (g: Goal): { label: string; sort: number } => {
   if (!g.due_date) return { label: "No due date", sort: Infinity };
   const [y, m] = g.due_date.split("-").map(Number);
@@ -86,21 +115,28 @@ const quarterOf = (g: Goal): { label: string; sort: number } => {
 };
 // Quick-set chips for the due-date field.
 const quickDue = (): { label: string; value: string }[] => {
-  const now = new Date();
-  const inTwoWeeks = new Date(now); inTwoWeeks.setDate(now.getDate() + 14);
-  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  const endOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 + 3, 0);
+  const t = todayStr();
   return [
-    { label: "2 weeks", value: ymd(inTwoWeeks) },
-    { label: "End of month", value: ymd(endOfMonth) },
-    { label: "End of quarter", value: ymd(endOfQuarter) },
+    { label: "2 weeks", value: addDaysYmd(t, 14) },
+    { label: "End of month", value: monthEndFrom(t, 0) },
+    { label: "End of quarter", value: monthEndFrom(t, Math.floor(monthIdx(t) / 3) * 3 + 2 - monthIdx(t)) },
   ];
 };
 
 export default function Goals({ me, openId }: { me: Me; openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Goal>("goals");
+  // "all" reads every goal; a cycle path (or `none`) narrows the READ, so the answer covers goals past the
+  // first page rather than whichever ones this browser already had.
+  const [cycleFilter, setCycleFilter] = useState("all");
+  const { rows, state, error, reload } = useCollection<Goal>("goals", { params: cycleFilter === "all" ? undefined : { cycle: cycleFilter } });
   useDeepOpen(openId, rows, openDetail);
   const { rows: employees } = useCollection<Employee>("employees");
+  // Review cycles: a small, flat catalogue used to attach a goal to the cycle whose review will score it, and
+  // to name that cycle on the card. Empty for anyone who can't read them, which just hides the field.
+  const { rows: reviewCycles } = useCollection<ReviewCycle>("review-cycles");
+  // For the department-owned chip and its picker; empty for anybody who cannot read departments.
+  const { rows: departments } = useCollection<Department>("departments");
+  const deptName = (ref?: string | null) => departments.find((d) => idOf(d.path) === idOf(ref ?? ""))?.display_name;
+  const cycleName = (ref?: string | null) => reviewCycles.find((c) => idOf(c.path) === idOf(ref ?? ""))?.name;
   // Which goal's drawer is open. Declared up here because it also decides whether the board tasks are read.
   const [detailPath, setDetailPath] = useState<string | null>(null);
   // Board tasks: needed as ROWS only by the open goal's drawer, which lists the linked tasks and offers the
@@ -120,18 +156,21 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   const [etag, setEtag] = useState<string | undefined>(undefined);
   // The chip filter persists across visits (Boards does the same for its chip filters); search doesn't.
   const [filter, setFilterState] = useState<Filter>(() => {
-    const v = localStorage.getItem(FILTER_KEY) as Filter | null;
+    const v = readLocal(FILTER_KEY) as Filter | null;
     return v && FILTERS.includes(v) ? v : "all";
   });
   const setFilter = (f: Filter) => {
     setFilterState(f);
-    try { localStorage.setItem(FILTER_KEY, f); } catch { /* private mode */ }
+    writeLocal(FILTER_KEY, f);
   };
   const [q, setQ] = useState("");
-  const [view, setViewState] = useState<"flat" | "quarter">(() => (localStorage.getItem("goals:view") === "quarter" ? "quarter" : "flat"));
-  const setView = (v: "flat" | "quarter") => {
+  const [view, setViewState] = useState<GoalView>(() => {
+    const saved = readLocal("goals:view");
+    return saved === "quarter" || saved === "tree" ? saved : "flat";
+  });
+  const setView = (v: GoalView) => {
     setViewState(v);
-    try { localStorage.setItem("goals:view", v); } catch { /* private mode */ }
+    writeLocal("goals:view", v);
   };
 
   const empById = useMemo(() => new Map(employees.map((e) => [idOf(e.path), e])), [employees]);
@@ -149,7 +188,9 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     const e = ref ? empById.get(idOf(ref)) : undefined;
     return e ? `${e.first_name} ${e.last_name}` : ref ? "Employee" : "";
   };
-  const isMine = (g: Goal) => !!g.employee && idOf(g.employee) === me.employee_id;
+  // `useCallback` so the two memos below can name the predicate they filter with rather than restating the
+  // field it reads; the identity moves with that field, so neither recomputes more often than before.
+  const isMine = useCallback((g: Goal) => !!g.employee && idOf(g.employee) === me.employee_id, [me.employee_id]);
 
   const sortGoals = (list: Goal[]) =>
     [...list].sort((a, b) =>
@@ -157,8 +198,8 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
       (a.due_date ?? "9999").localeCompare(b.due_date ?? "9999") ||
       (b.create_time ?? "").localeCompare(a.create_time ?? ""),
     );
-  const myGoals = useMemo(() => sortGoals(rows.filter(isMine)), [rows, me.employee_id]);
-  const teamGoals = useMemo(() => sortGoals(rows.filter((g) => !isMine(g))), [rows, me.employee_id]);
+  const myGoals = useMemo(() => sortGoals(rows.filter(isMine)), [rows, isMine]);
+  const teamGoals = useMemo(() => sortGoals(rows.filter((g) => !isMine(g))), [rows, isMine]);
   const matchesQuery = (g: Goal) => {
     const s = q.trim().toLowerCase();
     if (!s) return true;
@@ -190,17 +231,16 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     return [...by.entries()]
       .map(([id, list]) => {
         const active = list.filter(isOpen);
-        const wsum = active.reduce((s, g) => s + (g.weight || 1), 0);
-        const avg = wsum > 0 ? Math.round(active.reduce((s, g) => s + (g.progress ?? 0) * (g.weight || 1), 0) / wsum) : 0;
+        const avg = weightedProgress(active);
         const overdue = active.filter((g) => g.due_date && g.due_date < todayStr()).length;
         return { id, active: active.length, avg, overdue };
       })
       .sort((a, b) => b.overdue - a.overdue || b.active - a.active);
   }, [teamGoals]);
-  const [rollupOpen, setRollupOpen] = useState(() => localStorage.getItem("goals:rollup") !== "0");
+  const [rollupOpen, setRollupOpen] = useState(() => readLocal("goals:rollup") !== "0");
   const toggleRollup = () => {
     setRollupOpen((o) => {
-      try { localStorage.setItem("goals:rollup", o ? "0" : "1"); } catch { /* private mode */ }
+      writeLocal("goals:rollup", o ? "0" : "1");
       return !o;
     });
   };
@@ -210,8 +250,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     const active = myGoals.filter((g) => g.status === "in_progress" || g.status === "not_started");
     const done = myGoals.filter((g) => g.status === "completed");
     const overdue = active.filter((g) => g.due_date && g.due_date < todayStr());
-    const wsum = active.reduce((s, g) => s + (g.weight || 1), 0);
-    const avg = wsum > 0 ? Math.round(active.reduce((s, g) => s + (g.progress ?? 0) * (g.weight || 1), 0) / wsum) : 0;
+    const avg = weightedProgress(active);
     return { active: active.length, avg, done: done.length, overdue: overdue.length };
   }, [myGoals]);
 
@@ -238,6 +277,9 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     all: countable.length,
     active: countable.filter((g) => matchesFilter(g, "active")).length,
     overdue: countable.filter((g) => matchesFilter(g, "overdue")).length,
+    at_risk: countable.filter(isAtRisk).length,
+    quiet: countable.filter(isQuiet).length,
+    unagreed: countable.filter((g) => g.stage !== "AGREED").length,
     completed: countable.filter((g) => g.status === "completed").length,
     cancelled: countable.filter((g) => g.status === "cancelled").length,
   }), [countable]);
@@ -288,21 +330,27 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
   // The drawer always renders the LIVE row (reload after an update swaps rows; a stale snapshot would revert the slider).
   const detailGoal = detailPath ? rows.find((g) => g.path === detailPath) ?? null : null;
 
-  // The comment thread comes from the item Get, not the list - one goal's conversation, read when the drawer
-  // opens and never on the way past. Kept as its own copy so a list reload doesn't drop the comments.
-  const [thread, setThread] = useState<{ path: string; comments: NonNullable<Goal["comments"]> } | null>(null);
+  // The comment thread and the progress history come from the item Get, not the list - one goal's
+  // conversation and one goal's climb, read when the drawer opens and never on the way past. Kept as their own
+  // copy so a list reload doesn't drop them: the drawer renders the live LIST row, which carries neither.
+  const [thread, setThread] = useState<{ path: string; comments: NonNullable<Goal["comments"]>; history: NonNullable<Goal["history"]> } | null>(null);
   useEffect(() => {
     if (!detailPath) { setThread(null); return; }
     let live = true;
     void get<Goal>(`goals/${idOf(detailPath)}`)
-      .then((full) => { if (live) setThread({ path: detailPath, comments: full.comments ?? [] }); })
-      .catch(() => { if (live) setThread({ path: detailPath, comments: [] }); });
+      .then((full) => { if (live) setThread({ path: detailPath, comments: full.comments ?? [], history: full.history ?? [] }); })
+      .catch(() => { if (live) setThread({ path: detailPath, comments: [], history: [] }); });
     return () => { live = false; };
-  }, [detailPath]);
+    // Re-read on the open goal's etag as well as its path: moving progress from inside the drawer changes the
+    // very series the sparkline draws, and a copy taken once at open would go on showing the climb without
+    // the step the person just made.
+  }, [detailPath, detailGoal?.etag]);
 
   async function postComment(g: Goal, body: string) {
     const updated = await invoke<Goal>(`goals/${idOf(g.path)}`, "comment", undefined, { body });
-    setThread({ path: g.path, comments: updated.comments ?? [] });
+    // The `:comment` answer is the same item read, history included, so the sparkline is kept rather than
+    // dropped by the very call that refreshed the thread.
+    setThread({ path: g.path, comments: updated.comments ?? [], history: updated.history ?? [] });
     reload(); // update_time moved, and the card's "recently active" ordering follows it
   }
 
@@ -328,7 +376,11 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
       status: g.status,
       due_date: g.due_date ?? "",
       employee: g.employee ? `employees/${idOf(g.employee)}` : "me",
+      kind: (g.kind ?? "objective") as GoalKind,
       parent: g.parent ? `goals/${idOf(g.parent)}` : "none",
+      cycle: g.cycle ? `review-cycles/${idOf(g.cycle)}` : "none",
+      blockedBy: g.blocked_by ? `goals/${idOf(g.blocked_by)}` : "none",
+      department: g.department ? `departments/${idOf(g.department)}` : "none",
       unit: g.unit ?? "",
       baseline: g.baseline_value != null ? String(g.baseline_value) : "",
       target: g.target_value != null ? String(g.target_value) : "",
@@ -347,6 +399,12 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
       // A date field is `format: date` in the contract, and "" is not a date - an empty one is left out.
       ...(form.due_date ? { due_date: form.due_date } : {}),
       parent: form.parent === "none" ? "" : form.parent,
+      kind: form.kind,
+      blocked_by: form.blockedBy === "none" ? "" : form.blockedBy,
+      department: form.department === "none" ? "" : form.department,
+      // The review cycle this goal answers to. Cleared the same way a parent is: "" detaches it, and the
+      // reviewee's review stops scoring it.
+      cycle: form.cycle === "none" ? "" : form.cycle,
       // The measure travels whole, so clearing the target really does hand the goal back to manual progress.
       unit: form.unit.trim(),
       baseline_value: num(form.baseline) ?? null,
@@ -397,10 +455,88 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     }
   }
 
+  // The `setConfidence` verb: the owner's forward-looking call, which anyone who may report progress may also
+  // make. Narrow on purpose - admitting a goal is slipping must not require rights to rewrite its definition.
+  async function setConfidence(g: Goal, confidence: GoalConfidence) {
+    try {
+      await invoke(`goals/${idOf(g.path)}`, "setConfidence", undefined, { confidence });
+      toast({ title: `Marked ${confidenceOf(confidence)!.label.toLowerCase()}`, variant: "success" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't set confidence", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  // The closing note. An ordinary field write, kept as its own press so writing it does not mean opening the
+  // whole edit form on a goal that is finished.
+  async function saveRetro(g: Goal, retro: string) {
+    try {
+      await patch(`goals/${idOf(g.path)}`, { retro: retro || null }, g.etag);
+      toast({ title: "Note saved", variant: "success" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't save the note", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  // The goal-setting handshake. Three one-press moves, so the whole exchange happens on the goal itself
+  // rather than in chat: the owner submits a draft, the manager agrees it, or sends it back saying why.
+  async function runStage(g: Goal, verb: "propose" | "approve" | "requestChanges", body?: Record<string, unknown>, okMsg?: string) {
+    try {
+      await invoke(`goals/${idOf(g.path)}`, verb, undefined, body);
+      toast({ title: okMsg ?? "Done", variant: "success" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't update the goal", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+  // Follow somebody else's goal. `reload()` rather than a local flip: the eye's state is a field on the goal
+  // resource, so the list the drawer reads from has to carry the new value or the button springs back.
+  async function toggleWatch(g: Goal) {
+    try {
+      await invoke(`goals/${idOf(g.path)}`, g.watching ? "unwatch" : "watch");
+      toast({ title: g.watching ? "Stopped following" : "Following this goal", variant: "success" });
+      reload();
+    } catch (e) {
+      toast({ title: "Couldn't change that", description: (e as Error).message, variant: "destructive" });
+    }
+  }
+
+  // Contributors: the whole split is edited at once, because the shares only mean anything together.
+  const [contribFor, setContribFor] = useState<Goal | null>(null);
+  const [contribRows, setContribRows] = useState<{ employee: string; share: string }[]>([]);
+  const contribTotal = contribRows.reduce((s2, r) => s2 + (Number(r.share) || 0), 0);
+  // The split the goal's linked tasks already imply, derived by the server from who delivered each task and
+  // how big it was. A first draft of the shares, never the credit: only a saved contributor scores.
+  const suggestedContribRows = (g: Goal) => (g.suggested_contributors ?? []).map((c) => ({ employee: c.employee, share: String(c.share) }));
+  // Open the editor on what is saved, falling back to the task split for a goal nobody has split yet - which
+  // is the case where a manager would otherwise be reading the board and doing the percentages by hand.
+  const openContributors = (g: Goal) => {
+    setContribFor(g);
+    const saved = (g.contributors ?? []).map((c) => ({ employee: c.employee, share: String(c.share ?? 0) }));
+    setContribRows(saved.length ? saved : suggestedContribRows(g));
+  };
+  const contribSuggested = contribFor ? suggestedContribRows(contribFor) : [];
+  const sameAsSuggested = contribSuggested.length === contribRows.length
+    && contribSuggested.every((s2) => contribRows.some((r) => r.employee === s2.employee && (Number(r.share) || 0) === Number(s2.share)));
+
+  // Sending a goal back needs a reason - a goal returned with no note is a goal returned twice - so it opens
+  // a form rather than firing on the press.
+  const [changesFor, setChangesFor] = useState<Goal | null>(null);
+  const [changesNote, setChangesNote] = useState("");
+
   // Carry-over: clone an open, past-quarter goal into next quarter (progress kept) and cancel the original.
   // Undo deletes the clones and restores the originals' status. Sequential writes; user-initiated and rare.
   const canCarry = (g: Goal) =>
     isOpen(g) && !!g.due_date && g.due_date < currentQuarterStartStr() && (g.access?.can ?? []).includes("update");
+  // The cycle the carried-over copy belongs to: the one whose review period contains its new due date. A goal
+  // that rolls into next quarter is next quarter's goal, and attaching it now means the next review scores it
+  // even if that cycle is already running (launching only claims goals that exist at launch).
+  const nextCycleRef = useMemo(() => {
+    const due = nextQuarterEndStr();
+    const hit = reviewCycles.find((c) => c.state !== "CLOSED" && c.period_start && c.period_end && c.period_start <= due && due <= c.period_end);
+    return hit ? `review-cycles/${idOf(hit.path)}` : undefined;
+  }, [reviewCycles]);
   async function carryOver(list: Goal[]) {
     const made: { copy: Goal; old: Goal; oldStatus: GoalStatus }[] = [];
     try {
@@ -414,6 +550,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
           due_date: nextQuarterEndStr(),
           ...(g.employee ? { employee: `employees/${idOf(g.employee)}` } : {}),
           ...(g.parent ? { parent: `goals/${idOf(g.parent)}` } : {}),
+          ...(nextCycleRef ? { cycle: nextCycleRef } : {}),
         });
         await patch(`goals/${idOf(g.path)}`, { status: "cancelled" }, g.etag);
         made.push({ copy, old: g, oldStatus: g.status });
@@ -470,7 +607,9 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
     (form.status === "not_started" || form.status === "in_progress" ? (form.weight === "" ? 0 : Number(form.weight) || 0) : 0);
 
   // Alignment targets for the dialog: any visible, non-cancelled goal that isn't the goal itself or below it.
-  const alignables = rows.filter((g) => g.status !== "cancelled" && (!editing || !descendantsOf(editing).has(idOf(g.path))));
+  // A key result never parents anything - the ladder is objective -> key result, one rung deep, or the
+  // "weighted average of my children" rule stops meaning anything.
+  const alignables = rows.filter((g) => g.status !== "cancelled" && g.kind !== "key_result" && (!editing || !descendantsOf(editing).has(idOf(g.path))));
 
   // The measure, read back live: the percentage the server will compute, and the two shapes worth naming (a
   // target that equals the baseline measures nothing; a target below it counts down).
@@ -527,6 +666,9 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
             goal={g}
             owner={team && g.employee ? empById.get(idOf(g.employee)) : undefined}
             parentTitle={parentOf(g)?.title}
+            cycleTitle={cycleName(g.cycle)}
+            blockedByTitle={g.blocked_by ? rows.find((x) => idOf(x.path) === idOf(g.blocked_by!))?.title : undefined}
+            deptTitle={deptName(g.department)}
             onOpen={() => openDetail(g)}
             onEdit={() => openEdit(g)}
             onDelete={() => sd.softDelete(g)}
@@ -635,18 +777,43 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
               {filterChip("all", "All")}
               {filterChip("active", "Active")}
               {(counts.overdue > 0 || filter === "overdue") && filterChip("overdue", "Overdue")}
+              {/* Behind pace, and gone quiet: both arrive weeks before a missed date, and both are hidden
+                  inside "Active" until you ask for them by name. Shown only when there are any. */}
+              {(counts.at_risk > 0 || filter === "at_risk") && filterChip("at_risk", "At risk")}
+              {(counts.quiet > 0 || filter === "quiet") && filterChip("quiet", "Gone quiet")}
+              {(counts.unagreed > 0 || filter === "unagreed") && filterChip("unagreed", "Not agreed")}
               {filterChip("completed", "Completed")}
               {filterChip("cancelled", "Cancelled")}
-              <div className="ml-auto flex items-center gap-1.5">
+              {/* Wraps, because the three controls in here are 550px of fixed widths (a 176px cycle select,
+                  the view toggle, a 176px search box) and a phone is 390: without it the row could not break
+                  and the whole PAGE scrolled sideways - and only once an org had a review cycle to pick from,
+                  which is why an empty database never showed it. */}
+              <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+                {/* Narrow to one cycle's goals, or to the ones no cycle will score. Filtered by the SERVER
+                    (`?cycle=`), because "which goals belong to H1" is a question about every goal, not about
+                    the page of them this browser happens to hold. */}
+                {reviewCycles.length > 0 && (
+                  <Select value={cycleFilter} onValueChange={setCycleFilter}>
+                    <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All cycles</SelectItem>
+                      <SelectItem value="none">No cycle</SelectItem>
+                      {reviewCycles.map((c) => (
+                        <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>{c.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
                 <div className="flex overflow-hidden rounded-md border text-xs font-medium">
-                  {(["flat", "quarter"] as const).map((v) => (
+                  {(["flat", "quarter", "tree"] as const).map((v) => (
                     <button
                       key={v}
                       type="button"
                       onClick={() => setView(v)}
+                      title={v === "tree" ? "The alignment cascade: what rolls up into what, from the top" : undefined}
                       className={cn("px-2.5 py-1 transition-colors", view === v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent")}
                     >
-                      {v === "flat" ? "All" : "By quarter"}
+                      {v === "flat" ? "All" : v === "quarter" ? "By quarter" : "Alignment"}
                     </button>
                   ))}
                 </div>
@@ -657,7 +824,20 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
               </div>
             </div>
 
-            {myShown.length > 0 && (
+            {/* The cascade replaces the two owner sections rather than sitting beside them: its whole point is
+                that it does NOT split the goals by whose they are - it splits them by what they roll up into,
+                which is a different question and the one alignment is for. */}
+            {view === "tree" && (
+              <AlignmentTree
+                goals={[...myShown, ...teamShown]}
+                all={rows}
+                empName={empName}
+                meId={me.employee_id}
+                onOpen={(g) => openDetail(g)}
+              />
+            )}
+
+            {view !== "tree" && myShown.length > 0 && (
               <section className="space-y-3">
                 {teamShown.length > 0 && (
                   <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -667,7 +847,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
                 {gridView(myShown)}
               </section>
             )}
-            {(teamShown.length > 0 || ownerFilter) && (
+            {view !== "tree" && (teamShown.length > 0 || ownerFilter) && (
               <section className="space-y-3">
                 <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   <Users className="h-3.5 w-3.5" /> Team goals <span className="font-normal tabular-nums text-muted-foreground/70">{teamShown.length}</span>
@@ -737,10 +917,11 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
         applyDraft={(d) => setForm(d)}
         onStartOver={editing ? undefined : () => setForm({ ...EMPTY })}
         submitLabel={editing ? "Save changes" : "Create goal"}
-        canSubmit={!!form.title.trim() && !weightInvalid && !targetEqualsBaseline}
+        canSubmit={!!form.title.trim() && !weightInvalid && !targetEqualsBaseline && !(form.kind === "key_result" && form.parent === "none")}
         whyNot={[
           !form.title.trim() && "Give the goal a title.",
           weightInvalid && "Weight has to be between 0 and 100.",
+          form.kind === "key_result" && form.parent === "none" && "Pick the objective this key result sits under.",
           targetEqualsBaseline && "The target and the baseline are the same number.",
         ]}
         onSubmit={submit}
@@ -843,8 +1024,72 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
               </SelectContent>
             </Select>
           </Field>
+          {/* The review cycle this goal answers to. A cycle's review scores exactly the goals attached to it,
+              so this is the field that decides whether the goal shows up in someone's review at all. */}
+          {reviewCycles.length > 0 && (
+            <Field label="Review cycle (optional)" hint="The cycle whose review scores this goal.">
+              <Select value={form.cycle} onValueChange={(v) => setForm({ ...form, cycle: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No cycle</SelectItem>
+                  {reviewCycles.map((c) => (
+                    <SelectItem key={c.path} value={`review-cycles/${idOf(c.path)}`}>
+                      {c.name}{c.state === "CLOSED" ? " (closed)" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          {/* Objective or key result. A KR is one of the numbers under an objective, so choosing it makes the
+              alignment below mandatory - and hands the objective's percentage to the arithmetic. */}
+          <Field label="Kind" hint={form.kind === "key_result" ? "A number under an objective. Its objective's progress is the weighted average of its key results." : "A goal in its own right. Add key results under it and its progress becomes theirs."}>
+            <Select value={form.kind} onValueChange={(v) => setForm({ ...form, kind: v as GoalKind })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="objective">Objective</SelectItem>
+                <SelectItem value="key_result">Key result</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {departments.length > 0 && (
+            <Field label="Owned by a team (optional)" hint="Set when a department owns this goal. The person above stays the accountable lead.">
+              <Select value={form.department} onValueChange={(v) => setForm({ ...form, department: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">One person owns it</SelectItem>
+                  {departments.filter((d) => !d.delete_time).map((d) => (
+                    <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          {/* Waiting on another goal. Distinct from alignment: that says what this rolls UP into, this says
+              what has to move first - and it is the answer to "why did this sit at 20% all quarter" far more
+              often than effort is. */}
           {alignables.length > 0 && (
-            <Field label="Aligns to" hint="Optional parent goal this one rolls up under.">
+            <Field label="Waiting on (optional)" hint="Another goal that has to move before this one can.">
+              <Combobox
+                value={form.blockedBy}
+                onValueChange={(v) => setForm({ ...form, blockedBy: v })}
+                searchPlaceholder="Search goals…"
+                options={[
+                  { value: "none", label: "Not blocked" },
+                  ...rows.filter((g) => g.status !== "cancelled" && (!editing || g.path !== editing.path)).map((g) => ({
+                    value: `goals/${idOf(g.path)}`,
+                    label: g.employee && idOf(g.employee) !== me.employee_id ? `${g.title} - ${empName(g.employee)}` : g.title,
+                  })),
+                ]}
+              />
+            </Field>
+          )}
+          {alignables.length > 0 && (
+            <Field
+              label={form.kind === "key_result" ? "Objective" : "Aligns to"}
+              hint={form.kind === "key_result" ? "The objective this key result proves. Required." : "Optional parent goal this one rolls up under."}
+              error={form.kind === "key_result" && form.parent === "none" ? "A key result needs an objective to sit under." : undefined}
+            >
               <Combobox
                 value={form.parent}
                 onValueChange={(v) => setForm({ ...form, parent: v })}
@@ -904,16 +1149,136 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
             onLink={(c) => linkCard(detailGoal, c)}
             onUnlink={(c) => linkCard(detailGoal, c, true)}
             comments={thread?.path === detailGoal.path ? thread.comments : undefined}
+            history={thread?.path === detailGoal.path ? thread.history : undefined}
             onComment={(body) => postComment(detailGoal, body)}
             onCurrentValue={(v) => setCurrentValue(detailGoal, v)}
             employees={employees}
             onEdit={() => { closeDetail(); openEdit(detailGoal); }}
             onDelete={() => { closeDetail(); sd.softDelete(detailGoal); }}
             onProgress={(p, note) => setProgress(detailGoal, p, note)}
+            onConfidence={(c) => setConfidence(detailGoal, c)}
+            onRetro={(retro) => saveRetro(detailGoal, retro)}
+            onContributors={() => openContributors(detailGoal)}
+            onWatch={() => toggleWatch(detailGoal)}
+            onPropose={() => runStage(detailGoal, "propose", undefined, "Submitted for approval")}
+            onApprove={() => runStage(detailGoal, "approve", undefined, "Goal agreed")}
+            onRequestChanges={() => setChangesFor(detailGoal)}
             onCarryOver={canCarry(detailGoal) ? () => carryOver([detailGoal]) : undefined}
           />
         )}
       </Sheet>
+
+      {/* Who else worked on this goal, and how much of it was theirs. Sent as a whole set. */}
+      <WriteDialog
+        open={!!contribFor}
+        onClose={() => setContribFor(null)}
+        title="Contributors"
+        description={contribFor ? `A share of “${contribFor.title}” counts in that person's own review, at this goal's weight scaled by it. The owner keeps whatever is left.` : undefined}
+        collection="goals"
+        objectPath={contribFor?.path}
+        guardLabel="contributors"
+        form={{ rows: contribRows }}
+        submitLabel="Save contributors"
+        canSubmit={contribTotal <= 100 && contribRows.every((r) => r.employee)}
+        whyNot={[contribTotal > 100 && `The shares add up to ${contribTotal}% - a goal cannot credit more than itself.`]}
+        onSubmit={async () => {
+          const g = contribFor!;
+          await invoke(`goals/${idOf(g.path)}`, "setContributors", undefined, {
+            contributors: contribRows.filter((r) => r.employee).map((r) => ({ employee: r.employee, share: Number(r.share) || 0 })),
+          });
+          toast({ title: "Contributors saved", variant: "success" });
+          setContribFor(null);
+          closeDetail();
+          reload();
+        }}
+      >
+        <div className="space-y-2">
+          {/* What the board already says: who delivered the linked tasks, and how big their share of the
+              delivered work was. The manager still decides - this only saves them doing the arithmetic. */}
+          {contribSuggested.length > 0 && (
+            <div className="rounded-md border border-dashed bg-muted/40 p-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-foreground">Split implied by the linked tasks</span>
+                {sameAsSuggested ? (
+                  <span className="text-muted-foreground">In use</span>
+                ) : (
+                  <Button variant="outline" size="sm" className="h-7" onClick={() => setContribRows(contribSuggested)}>Use this split</Button>
+                )}
+              </div>
+              <ul className="mt-1.5 space-y-0.5 text-muted-foreground">
+                {(contribFor?.suggested_contributors ?? []).map((c) => (
+                  <li key={c.employee} className="tabular-nums">
+                    {empName(c.employee)} - {c.share}% · {c.delivered_points} pt{c.delivered_points === 1 ? "" : "s"} across {c.delivered_tasks} delivered task{c.delivered_tasks === 1 ? "" : "s"}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1.5 text-muted-foreground">
+                Shares of the work delivered on the board. The owner keeps the rest, including anything unassigned or not yet delivered.
+              </p>
+            </div>
+          )}
+          {contribRows.map((r, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <Combobox
+                  value={r.employee}
+                  onValueChange={(v) => setContribRows((rows) => rows.map((x, j) => (j === i ? { ...x, employee: v } : x)))}
+                  searchPlaceholder="Search people…"
+                  options={employees
+                    .filter((e) => idOf(e.path) !== idOf(contribFor?.employee ?? ""))
+                    .map((e) => ({ value: `employees/${idOf(e.path)}`, label: `${e.first_name} ${e.last_name}` }))}
+                />
+              </div>
+              <Input
+                type="number" min={0} max={100} className="w-20"
+                value={r.share}
+                onChange={(e) => setContribRows((rows) => rows.map((x, j) => (j === i ? { ...x, share: e.target.value } : x)))}
+                aria-label="Share (%)"
+              />
+              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-destructive" aria-label="Remove contributor" onClick={() => setContribRows((rows) => rows.filter((_, j) => j !== i))}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+          <div className="flex items-center justify-between gap-2">
+            <Button variant="outline" size="sm" onClick={() => setContribRows((rows) => [...rows, { employee: "", share: "" }])}>
+              <Plus className="h-3.5 w-3.5" /> Add contributor
+            </Button>
+            <span className={cn("text-xs tabular-nums", contribTotal > 100 ? "font-medium text-destructive" : "text-muted-foreground")}>
+              {contribTotal}% shared · owner keeps {Math.max(0, 100 - contribTotal)}%
+            </span>
+          </div>
+        </div>
+      </WriteDialog>
+
+      {/* Send a proposed goal back. The note lands as a comment on the goal, so the owner's reply has
+          somewhere to go and the exchange stays on the record it is about. */}
+      <WriteDialog
+        open={!!changesFor}
+        onClose={() => { setChangesFor(null); setChangesNote(""); }}
+        title="Send this goal back"
+        description={changesFor ? `“${changesFor.title}” goes back to a draft, with your note on the goal.` : undefined}
+        collection="goals"
+        objectPath={changesFor?.path}
+        guardLabel="note"
+        form={{ note: changesNote }}
+        submitLabel="Send back"
+        canSubmit={!!changesNote.trim()}
+        whyNot={[!changesNote.trim() && "Say what needs changing."]}
+        onSubmit={async () => {
+          const g = changesFor!;
+          await invoke(`goals/${idOf(g.path)}`, "requestChanges", undefined, { note: changesNote.trim() });
+          toast({ title: "Sent back with your note", variant: "success" });
+          setChangesFor(null);
+          setChangesNote("");
+          closeDetail();
+          reload();
+        }}
+      >
+        <Field label="What needs changing?" field="note">
+          <Textarea rows={4} value={changesNote} onChange={(e) => setChangesNote(e.target.value)} placeholder="e.g. make this measurable - what number are we aiming at?" autoFocus />
+        </Field>
+      </WriteDialog>
     </div>
     </TooltipProvider>
   );
@@ -1058,7 +1423,7 @@ function RebalanceDialog({ ownerId, goals, ownerName, onClose, onSaved, onRefres
 
 // Right-docked detail drawer: the "see everything" surface for one goal - full description, progress with an
 // optional what-changed note, linked board tasks (link/unlink from the goal side), and the activity history.
-function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal, queue, onStep, onCopyLink, linked, linkable, onLink, onUnlink, onEdit, onDelete, onProgress, onCarryOver, comments, onComment, onCurrentValue, employees }: {
+function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal, queue, onStep, onCopyLink, linked, linkable, onLink, onUnlink, onEdit, onDelete, onProgress, onConfidence, onContributors, onWatch, onRetro, onPropose, onApprove, onRequestChanges, onCarryOver, comments, history, onComment, onCurrentValue, employees }: {
   goal: Goal;
   owner?: Employee;
   mine: boolean;
@@ -1077,9 +1442,23 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
   onEdit: () => void;
   onDelete: () => void;
   onProgress: (progress: number, note?: string) => void;
+  /** The owner's forward-looking call, through the narrow `:setConfidence` verb. */
+  onConfidence: (confidence: GoalConfidence) => void;
+  /** Open the contributor editor for this goal. */
+  onContributors: () => void;
+  /** Follow / unfollow this goal (a toggle - the current state is `goal.watching`). */
+  onWatch: () => void;
+  /** Save the closing "what happened" note. */
+  onRetro: (retro: string) => void;
+  /** The goal-setting handshake: submit, agree, or send back with a reason. */
+  onPropose: () => void;
+  onApprove: () => void;
+  onRequestChanges: () => void;
   onCarryOver?: () => void;
   /** The thread from the item Get. `undefined` while it is still loading, `[]` when there is nothing yet. */
   comments?: NonNullable<Goal["comments"]>;
+  /** The progress series, also item-Get only: a list row carries an empty one, so it cannot come off `goal`. */
+  history?: NonNullable<Goal["history"]>;
   onComment: (body: string) => Promise<void>;
   /** Move a measured goal's current value - the measure IS its progress. */
   onCurrentValue: (value: number) => void;
@@ -1091,7 +1470,7 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
   const canDelete = can.includes("delete");
   const hasLinked = linked.length > 0;
   const closed = goal.status === "completed" || goal.status === "cancelled";
-  const canProgress = !hasLinked && !closed && !goal.measured && (canEdit || can.includes("updateProgress"));
+  const canProgress = !hasLinked && !closed && !goal.measured && !goal.rolled_up && (canEdit || can.includes("updateProgress"));
   const badge = statusBadge[goal.status];
   const due = goal.due_date ? dueRel(goal.due_date) : null;
   const overdue = !!due?.overdue && !closed;
@@ -1143,10 +1522,21 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
   const deliveredPts = linked.reduce((s, c) => s + (c.deliver_time ? c.size ?? 0 : 0), 0);
   const totalPts = linked.reduce((s, c) => s + (c.size ?? 0), 0);
 
+  // Who agreed the goal, from the page's employee cache. Six months later "agreed by whom, and when" is the
+  // question an attainment figure has to be able to answer.
+  const agreedByName = (() => {
+    const e = employees.find((x) => idOf(x.path) === idOf(goal.agreed_by ?? ""));
+    return e ? `${e.first_name} ${e.last_name}` : undefined;
+  })();
+
   // Aligned progress: weight-weighted average of the children the viewer can see (display-only, never stored).
+  const rolledUp = !!goal.rolled_up;
+  const [retroDraft, setRetroDraft] = useState(goal.retro ?? "");
+  useEffect(() => setRetroDraft(goal.retro ?? ""), [goal.path, goal.retro]);
   const openKids = kids.filter((k) => k.status !== "cancelled");
-  const kidW = openKids.reduce((s, k) => s + (k.weight || 1), 0);
-  const alignedPct = kidW > 0 ? Math.round(openKids.reduce((s, k) => s + (k.progress ?? 0) * (k.weight || 1), 0) / kidW) : 0;
+  // Cancelled children dropped whole, then the shared rule - so this display figure and the objective's stored
+  // progress (services/goals.ts#recomputeObjectiveProgress) are the same arithmetic over the same rows.
+  const alignedPct = weightedProgress(openKids);
 
   return (
     <SheetContent className="flex flex-col sm:max-w-lg">
@@ -1161,7 +1551,21 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
               <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!canStep(1)} onClick={() => step(1)} aria-label="Next goal" title={dirty ? "Save your progress change first" : "Next goal (j)"}><ChevronRight className="h-4 w-4" /></Button>
             </>
           )}
-          <button type="button" onClick={onCopyLink} title="Copy a link to this goal" className="ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-foreground">
+          {/* Follow somebody else's goal your own plans turn on: progress moves, comments, and the confidence
+              call turning at-risk. Not offered on your own goal - you are already told everything. */}
+          {!mine && (
+            <AccessAction verb={goal.watching ? "unwatch" : "watch"} can={can} label="Follow this goal">
+              <button
+                type="button"
+                onClick={onWatch}
+                title={goal.watching ? "Stop following this goal" : "Hear about progress, comments and slippage on this goal"}
+                className={cn("ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-foreground", goal.watching && "font-medium text-foreground")}
+              >
+                <Eye className="h-3.5 w-3.5" /> {goal.watching ? "Watching" : "Watch"}
+              </button>
+            </AccessAction>
+          )}
+          <button type="button" onClick={onCopyLink} title="Copy a link to this goal" className={cn("inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-foreground", mine && "ml-auto")}>
             <Link2 className="h-3.5 w-3.5" /> Copy link
           </button>
         </div>
@@ -1188,6 +1592,41 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
         )}
       </SheetHeader>
       <SheetBody className="space-y-5">
+        {/* The goal-setting handshake, at the top because until it is done this goal is a proposal rather than
+            an objective - and the one press it needs should not be below the fold. Nothing renders once the
+            goal is agreed, which is every goal in an org that has not turned approval on. */}
+        {goal.stage !== "AGREED" && (
+          <div className="space-y-2 rounded-lg border border-dashed p-3">
+            <p className="text-sm font-medium">
+              {goal.stage === "DRAFT" ? "Draft - not agreed yet" : "Waiting for approval"}
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                {goal.stage === "DRAFT"
+                  ? "Submit it when it says what you mean; your manager agrees it or sends it back."
+                  : "Your manager has it. It counts once they agree it."}
+              </span>
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {goal.stage === "DRAFT" && can.includes("propose") && (
+                <AccessAction verb="propose" can={can} label="Submit goal for approval">
+                  <Button size="sm" onClick={onPropose}><CheckCircle2 className="h-3.5 w-3.5" /> Submit for approval</Button>
+                </AccessAction>
+              )}
+              {goal.stage === "PROPOSED" && can.includes("approve") && (
+                <AccessAction verb="approve" can={can} label="Approve goal">
+                  <Button size="sm" onClick={onApprove}><CheckCircle2 className="h-3.5 w-3.5" /> Agree this goal</Button>
+                </AccessAction>
+              )}
+              {goal.stage === "PROPOSED" && can.includes("requestChanges") && (
+                <AccessAction verb="requestChanges" can={can} label="Send goal back">
+                  <Button variant="outline" size="sm" onClick={onRequestChanges}>Send back…</Button>
+                </AccessAction>
+              )}
+            </div>
+          </div>
+        )}
+        {goal.stage === "AGREED" && goal.agreed_time && agreedByName && (
+          <p className="text-xs text-muted-foreground">Agreed by {agreedByName} on {formatDate(goal.agreed_time.slice(0, 10))}.</p>
+        )}
         {parent && (
           <p className="text-xs text-muted-foreground">
             Aligns to{" "}
@@ -1198,10 +1637,106 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
         )}
         {goal.description && <p className="whitespace-pre-wrap text-sm text-foreground/90">{goal.description}</p>}
 
+        {/* Where this stands, in the two senses that matter: the arithmetic (pace, silence, the shape of the
+            climb) and the owner's own call. Hidden on a finished goal - neither question applies any more. */}
+        {!closed && (
+          <div className="space-y-2 rounded-lg border p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Health</p>
+              {goal.expected_progress != null && (
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {goal.progress ?? 0}% against {goal.expected_progress}% expected
+                  {goal.drift != null && goal.drift !== 0 && (
+                    <span className={cn("ml-1 font-medium", goal.drift < 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400")}>
+                      ({goal.drift > 0 ? "+" : ""}{goal.drift})
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+            {(history?.length ?? 0) > 1 && <ProgressSparkline history={history!} />}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm">Owner's call</span>
+              <AccessAction verb="setConfidence" can={can} label="Set goal confidence">
+                <ConfidencePicker value={goal.confidence} onPick={(v) => onConfidence(v)} />
+              </AccessAction>
+            </div>
+            {goal.confidence_note && <p className="text-sm text-foreground/90">{goal.confidence_note}</p>}
+            {(goal.stale_days ?? 0) >= STALE_DAYS && (
+              <p className="text-xs text-muted-foreground">Nothing has happened on this goal in {goal.stale_days} days.</p>
+            )}
+          </div>
+        )}
+
+        {/* What actually happened, in the owner's words. Offered while the goal is closing or closed, and
+            carried into the review PDF - a percentage says how far it got and nothing about why. */}
+        {(closed || (goal.progress ?? 0) >= 80) && (canEdit || mine) && (
+          <div className="space-y-2 rounded-lg border p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">What happened</p>
+            <Textarea
+              rows={3}
+              value={retroDraft}
+              onChange={(e) => setRetroDraft(e.target.value)}
+              placeholder="What actually happened here? What would you do differently?"
+            />
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" disabled={retroDraft.trim() === (goal.retro ?? "").trim()} onClick={() => onRetro(retroDraft.trim())}>Save note</Button>
+              <span className="text-xs text-muted-foreground">Carried into the review for this cycle.</span>
+            </div>
+          </div>
+        )}
+
+        {/* Who else worked on this. Their share scores in THEIR review at this goal's weight scaled by it, so
+            the split is a statement about two reviews, not a label.
+
+            A COMPLETED goal still shows it, unlike the progress and retro editors above: the moment somebody
+            credits the people who delivered a goal is when it lands, and the server has never required the
+            goal to be open. Only a cancelled goal hides it - it scores for nobody, so there is no share to
+            argue about. */}
+        {(goal.contributors?.length || goal.suggested_contributors?.length || canEdit) && goal.status !== "cancelled" && (
+          <div className="space-y-2 rounded-lg border p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Contributors{goal.contributors?.length ? ` · ${goal.contributors.reduce((s2, c) => s2 + (c.share ?? 0), 0)}% shared` : ""}
+              </p>
+              {canEdit && (
+                <AccessAction verb="setContributors" can={can} label="Set contributors">
+                  <Button variant="ghost" size="sm" onClick={onContributors}>{goal.contributors?.length ? "Edit" : "Add"}</Button>
+                </AccessAction>
+              )}
+            </div>
+            {goal.contributors?.length ? (
+              <ul className="space-y-1">
+                {goal.contributors.map((c) => (
+                  <li key={c.employee} className="flex items-center justify-between gap-2 text-sm">
+                    <span className="min-w-0 truncate">{kidOwnerName(c.employee)}{c.note ? <span className="text-muted-foreground"> · {c.note}</span> : null}</span>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">{c.share}%</span>
+                  </li>
+                ))}
+              </ul>
+            ) : goal.suggested_contributors?.length ? (
+              // Nobody credited, but the board says other people delivered the work - the case where the
+              // credit silently lands entirely on the owner. Say the split the tasks imply, on the goal.
+              <p className="text-sm text-muted-foreground">
+                Nobody else is credited yet. The linked tasks were delivered by{" "}
+                {goal.suggested_contributors.map((c) => `${kidOwnerName(c.employee)} (${c.share}%)`).join(", ")}
+                {canEdit ? " - open the editor to credit them." : "."}
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">Nobody else is credited. A share here counts in that person's own review.</p>
+            )}
+          </div>
+        )}
+
         {kids.length > 0 && (
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Aligned goals · {alignedPct}% of what you can see
+              {rolledUp
+                // The objective's own percentage IS this set, computed by the server over every key result -
+                // including any this viewer cannot see. The old line ("% of what you can see") was honest
+                // about a client-side average that two people read differently; there is nothing to hedge now.
+                ? `Key results · ${goal.progress ?? 0}% weighted`
+                : `Aligned goals · ${alignedPct}% of what you can see`}
             </p>
             <ul className="space-y-1.5">
               {kids.map((k) => (
@@ -1383,6 +1918,15 @@ function GoalDrawer({ goal, owner, mine, parent, kids, kidOwnerName, onOpenGoal,
 
         <div className="flex flex-wrap items-center gap-2 border-t pt-3">
           {canEdit && <Button variant="outline" size="sm" onClick={onEdit}><Pencil className="h-3.5 w-3.5" /> Edit</Button>}
+          {/* A completed goal is the moment recognition is worth something, and it used to produce one
+              notification to one manager and nothing else. Opens the kudos composer with the owner filled in. */}
+          {goal.status === "completed" && !mine && goal.employee && (
+            <AccessAction collection="announcements" verb="giveKudos" label="Give kudos">
+              <Button variant="outline" size="sm" onClick={() => { navigate("announcements"); fireIntent("give-kudos", `employees/${idOf(goal.employee!)}`); }}>
+                <Sparkles className="h-3.5 w-3.5" /> Say well done
+              </Button>
+            </AccessAction>
+          )}
           {onCarryOver && (
             <AccessAction collection="goals" create label="Carry goal over">
               <Button variant="outline" size="sm" onClick={onCarryOver}><CalendarDays className="h-3.5 w-3.5" /> Carry to next quarter</Button>
@@ -1423,6 +1967,125 @@ function StatTile({ label, value, bar, alert, onClick, active }: {
   );
 }
 
+/**
+ * The alignment cascade: what rolls up into what, from the top down.
+ *
+ * Alignment already existed per goal - the drawer names a goal's parent and lists its children - and that is
+ * the wrong end to read it from. The questions this view answers cannot be answered one card at a time: is
+ * anything hanging off nothing, is a whole team's work parented under one person's objective, does the shape
+ * of the quarter match what was agreed.
+ *
+ * Rooted on the goals in view whose parent is NOT in view: a filtered set (one owner, one cycle, at-risk
+ * only) still has to render as a forest rather than vanish because its parents were filtered out. Children
+ * beyond the visible set are not invented - this shows the goals the caller can see, and says how many it
+ * could not where a parent has more.
+ */
+function AlignmentTree({ goals, all, empName, meId, onOpen }: {
+  goals: Goal[];
+  /** Every goal the page holds, for counting children that the current filter hides. */
+  all: Goal[];
+  empName: (ref?: string) => string;
+  meId?: string | null;
+  onOpen: (g: Goal) => void;
+}) {
+  const visible = useMemo(() => new Set(goals.map((g) => idOf(g.path))), [goals]);
+  const childrenOf = useMemo(() => {
+    const m = new Map<string, Goal[]>();
+    for (const g of goals) {
+      const p = g.parent ? idOf(g.parent) : "";
+      if (!p || !visible.has(p)) continue;
+      (m.get(p) ?? m.set(p, []).get(p)!).push(g);
+    }
+    // Heaviest first, then by title: the same order the review scores them in.
+    for (const list of m.values()) list.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0) || a.title.localeCompare(b.title));
+    return m;
+  }, [goals, visible]);
+  const hiddenChildCount = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of all) {
+      const p = g.parent ? idOf(g.parent) : "";
+      if (!p || g.delete_time || visible.has(idOf(g.path))) continue;
+      m.set(p, (m.get(p) ?? 0) + 1);
+    }
+    return m;
+  }, [all, visible]);
+  const roots = useMemo(
+    () => goals
+      .filter((g) => !g.parent || !visible.has(idOf(g.parent)))
+      .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0) || a.title.localeCompare(b.title)),
+    [goals, visible],
+  );
+
+  if (!roots.length) return <p className="text-sm text-muted-foreground">No goals match these filters.</p>;
+
+  const row = (g: Goal, depth: number): ReactNode => {
+    const kids = childrenOf.get(idOf(g.path)) ?? [];
+    const hidden = hiddenChildCount.get(idOf(g.path)) ?? 0;
+    const mine = !!g.employee && idOf(g.employee) === meId;
+    const badge = statusBadge[g.status];
+    return (
+      <li key={g.path} className="min-w-0">
+        {/* Indent with a real left border per level rather than padding alone: at three levels deep, padding
+            on its own stops reading as a hierarchy. */}
+        <div className={cn("min-w-0", depth > 0 && "border-l pl-3 sm:pl-4")}>
+          <button
+            type="button"
+            onClick={() => onOpen(g)}
+            className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent/60"
+          >
+            <span className="w-10 shrink-0 text-right text-xs font-semibold tabular-nums">{g.progress ?? 0}%</span>
+            {/* One bar per row, because a wall of donuts at four levels of indent is unreadable. */}
+            <span className="hidden h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-muted sm:block">
+              <span
+                className={cn("block h-full rounded-full", g.status === "completed" ? "bg-emerald-500" : g.status === "cancelled" ? "bg-muted-foreground/40" : "bg-primary")}
+                style={{ width: `${Math.min(100, Math.max(0, g.progress ?? 0))}%` }}
+              />
+            </span>
+            <span className={cn("min-w-0 flex-1 truncate text-sm", g.status === "cancelled" && "text-muted-foreground line-through")}>
+              {g.title}
+              {g.kind === "key_result" && <span className="ml-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">KR</span>}
+            </span>
+            {g.weight ? <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">wt {g.weight}</span> : null}
+            {isAtRisk(g) && <TrendingDown className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />}
+            {g.status !== "in_progress" && <Badge variant={badge.variant} className="shrink-0">{badge.label}</Badge>}
+            <span className={cn("hidden shrink-0 text-xs sm:inline", mine ? "font-medium text-foreground" : "text-muted-foreground")}>
+              {mine ? "You" : empName(g.employee)}
+            </span>
+          </button>
+          {(kids.length > 0 || hidden > 0) && (
+            <ul className="mt-0.5 space-y-0.5">
+              {kids.map((k) => row(k, depth + 1))}
+              {/* Honesty about what the filter or the caller's scope is hiding: a parent that silently shows
+                  three of its seven children misreports the shape of the quarter. */}
+              {hidden > 0 && (
+                <li className="border-l pl-3 sm:pl-4">
+                  <p className="px-2 py-1 text-xs text-muted-foreground">
+                    {hidden} more {hidden === 1 ? "goal" : "goals"} under this one {hidden === 1 ? "is" : "are"} outside these filters.
+                  </p>
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+      </li>
+    );
+  };
+
+  return (
+    <section className="space-y-2">
+      <h2 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <Network className="h-3.5 w-3.5" /> Alignment
+        <span className="font-normal tabular-nums text-muted-foreground/70">{goals.length}</span>
+      </h2>
+      {/* Deep nesting plus long titles overflow on a phone, so the cascade scrolls sideways inside its own
+          card - and says so, rather than cutting a title off at the edge with no hint there is more. */}
+      <Card className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto p-2">
+        <ul className="min-w-0 space-y-0.5">{roots.map((g) => row(g, 0))}</ul>
+      </Card>
+    </section>
+  );
+}
+
 // SVG progress donut: the goal's % at a glance, colored by state (emerald done / rose overdue / primary).
 function Ring({ pct, tone }: { pct: number; tone: "done" | "overdue" | "normal" | "muted" }) {
   const r = 18, c = 2 * Math.PI * r;
@@ -1438,12 +2101,116 @@ function Ring({ pct, tone }: { pct: number; tone: "done" | "overdue" | "normal" 
   );
 }
 
+// How the three confidence calls read and colour, in the order a picker offers them.
+const CONFIDENCE: { value: GoalConfidence; label: string; short: string; className: string }[] = [
+  { value: "on_track", label: "On track", short: "On track", className: "text-emerald-600 dark:text-emerald-400" },
+  { value: "at_risk", label: "At risk", short: "At risk", className: "text-amber-600 dark:text-amber-400" },
+  { value: "off_track", label: "Off track", short: "Off track", className: "text-rose-600 dark:text-rose-400" },
+];
+const confidenceOf = (v?: string | null) => CONFIDENCE.find((c) => c.value === v);
+
+// The goal-setting handshake, as the card says it. AGREED is the resting state and gets no badge: in an org
+// that has not turned approval on, every goal is agreed and a badge on all of them says nothing.
+const STAGE_BADGE: Record<string, { label: string; variant: "muted" | "secondary" }> = {
+  DRAFT: { label: "Draft", variant: "muted" },
+  PROPOSED: { label: "Awaiting approval", variant: "secondary" },
+};
+
+/**
+ * Where this goal should be by now, said in one chip.
+ *
+ * The owner's own call wins the chip when they have made one - a person who has said "at risk" has told you
+ * more than the arithmetic can - and the drift rides along beside it. On track and silent otherwise: a chip on
+ * every healthy goal is a chip nobody reads.
+ */
+function PaceChip({ goal }: { goal: Goal }) {
+  const conf = confidenceOf(goal.confidence);
+  const behind = goal.pace === "behind" || goal.pace === "at_risk";
+  if (!conf && !behind) return null;
+  const drift = goal.drift;
+  const driftText = drift != null && drift < 0 ? `${-drift} pts behind` : drift != null && drift > 0 ? `${drift} pts ahead` : null;
+  const tone = conf?.className ?? (goal.pace === "at_risk" ? "text-rose-600 dark:text-rose-400" : "text-amber-600 dark:text-amber-400");
+  return (
+    <span
+      className={cn("inline-flex items-center gap-1 font-medium", tone)}
+      title={[conf ? `Owner says: ${conf.label}` : null, goal.expected_progress != null ? `Should be about ${goal.expected_progress}% by now` : null, goal.confidence_note]
+        .filter(Boolean)
+        .join(" · ")}
+    >
+      <TrendingDown className="h-3 w-3" />
+      {conf ? conf.short : driftText ?? "Behind"}
+      {conf && driftText && <span className="font-normal text-muted-foreground">· {driftText}</span>}
+    </span>
+  );
+}
+
+/** The three-way confidence call, as a segmented control. Writes through `:setConfidence`. */
+function ConfidencePicker({ value, onPick, disabled }: { value?: string | null; onPick: (v: GoalConfidence) => void; disabled?: boolean }) {
+  return (
+    <div className="flex overflow-hidden rounded-md border text-xs font-medium">
+      {CONFIDENCE.map((c) => (
+        <button
+          key={c.value}
+          type="button"
+          disabled={disabled}
+          onClick={() => onPick(c.value)}
+          className={cn(
+            "px-2.5 py-1 transition-colors disabled:opacity-50",
+            value === c.value ? "bg-primary text-primary-foreground" : cn("hover:bg-accent", c.className),
+          )}
+        >
+          {c.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * How progress actually moved, drawn small.
+ *
+ * The series comes off the goal's own Get (rebuilt from the audit trail), so opening a goal answers "was this
+ * a steady climb or a week of back-filling?" - the question a manager cannot ask a single percentage.
+ * Deliberately axis-less and tiny: it is a shape, not a report.
+ */
+function ProgressSparkline({ history }: { history: NonNullable<Goal["history"]> }) {
+  if (history.length < 2) return null;
+  const w = 240, h = 40;
+  const t0 = Date.parse(history[0]!.at_time);
+  const t1 = Date.parse(history[history.length - 1]!.at_time);
+  const span = Math.max(1, t1 - t0);
+  const pt = (p: { at_time: string; progress: number }) => [
+    ((Date.parse(p.at_time) - t0) / span) * w,
+    h - (Math.max(0, Math.min(100, p.progress)) / 100) * h,
+  ] as const;
+  // Stepped, because progress does not drift between updates - it sits where it was left until somebody moves
+  // it, and a smooth line would invent a climb that never happened.
+  let d = "";
+  let prev: readonly [number, number] | null = null;
+  for (const p of history) {
+    const [x, y] = pt(p);
+    d += prev ? ` L ${x} ${prev[1]} L ${x} ${y}` : `M ${x} ${y}`;
+    prev = [x, y];
+  }
+  if (prev) d += ` L ${w} ${prev[1]}`;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-10 w-full" preserveAspectRatio="none" role="img" aria-label="Progress over time">
+      <path d={`${d} L ${w} ${h} L 0 ${h} Z`} className="fill-primary/10" />
+      <path d={d} className="fill-none stroke-primary" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 // One goal card: progress donut + title/chips, description, and a single slider as the progress control
 // (read-only viewers get no slider - the donut already shows the %). "Mark complete" is one click away.
-function GoalCard({ goal, owner, parentTitle, onOpen, onEdit, onDelete, onProgress }: {
+function GoalCard({ goal, owner, parentTitle, cycleTitle, blockedByTitle, deptTitle, onOpen, onEdit, onDelete, onProgress }: {
   goal: Goal;
   owner?: Employee;
   parentTitle?: string;
+  cycleTitle?: string;
+  blockedByTitle?: string;
+  /** Set when a department owns this goal rather than one person. */
+  deptTitle?: string;
   onOpen: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -1471,7 +2238,8 @@ function GoalCard({ goal, owner, parentTitle, onOpen, onEdit, onDelete, onProgre
   );
   // A measured goal's percentage is arithmetic on its numbers, so the card shows the numbers and no slider:
   // dragging one would be overwritten by the next measure update anyway.
-  const canProgress = !hasLinked && !goal.measured && (canEdit || can.includes("updateProgress"));
+  // Three things own a goal's percentage instead of the slider: linked tasks, a measure, and key results.
+  const canProgress = !hasLinked && !goal.measured && !goal.rolled_up && (canEdit || can.includes("updateProgress"));
   const badge = statusBadge[goal.status];
   const due = goal.due_date ? dueRel(goal.due_date) : null;
   const closed = goal.status === "completed" || goal.status === "cancelled";
@@ -1507,6 +2275,30 @@ function GoalCard({ goal, owner, parentTitle, onOpen, onEdit, onDelete, onProgre
           )}
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
             <Badge variant={badge.variant}>{badge.label}</Badge>
+            {goal.kind === "key_result" && <Badge variant="outline">Key result</Badge>}
+            {/* A goal a TEAM owns. The named employee is still the accountable lead - this says the work is
+                the department's, which is how cross-team objectives stop being one person's private problem. */}
+            {deptTitle && <Badge variant="secondary">{deptTitle}</Badge>}
+            {goal.rolled_up && <span className="text-muted-foreground">· from key results</span>}
+            {/* Effort against outcome: the pairing that catches hours going into something that is not
+                moving. Only shown when a project actually points here. */}
+            {goal.logged_hours != null && (
+              <span className="inline-flex items-center gap-1 tabular-nums text-muted-foreground" title="Approved hours booked against this goal">
+                <Clock3 className="h-3 w-3" /> {goal.logged_hours}h
+              </span>
+            )}
+            {STAGE_BADGE[goal.stage ?? "AGREED"] && (
+              <Badge variant={STAGE_BADGE[goal.stage!]!.variant}>{STAGE_BADGE[goal.stage!]!.label}</Badge>
+            )}
+            {/* Where this should be by now, and how long since anybody said anything. Both computed by the
+                server from dates the row already carried - and both invisible on this card until now, which
+                is how a goal reaches its due date at 30% with nobody surprised. */}
+            <PaceChip goal={goal} />
+            {isQuiet(goal) && (
+              <span className="inline-flex items-center gap-1 text-muted-foreground" title={`No progress, edit or comment for ${goal.stale_days} days`}>
+                <MessageSquareDashed className="h-3 w-3" /> quiet {goal.stale_days}d
+              </span>
+            )}
             {due && !closed && (
               <span title={formatDate(goal.due_date)} className={cn("inline-flex items-center gap-1 tabular-nums", overdue ? "font-medium text-rose-600 dark:text-rose-400" : due.soon ? "font-medium text-amber-600 dark:text-amber-400" : "text-muted-foreground")}>
                 <CalendarDays className="h-3 w-3" /> {due.text}
@@ -1517,6 +2309,18 @@ function GoalCard({ goal, owner, parentTitle, onOpen, onEdit, onDelete, onProgre
             {goal.measured && (
               <span className="inline-flex items-center gap-1 font-medium tabular-nums text-muted-foreground">
                 <Target className="h-3 w-3" /> {measureLabel(goal)}
+              </span>
+            )}
+            {/* Which review will score this goal - the difference between a goal that counts and one that is
+                just work, and invisible until it was said on the card. */}
+            {cycleTitle && (
+              <span className="inline-flex max-w-[11rem] items-center gap-1 text-muted-foreground" title={`Scored in ${cycleTitle}`}>
+                <ClipboardCheck className="h-3 w-3 shrink-0" /> <span className="truncate">{cycleTitle}</span>
+              </span>
+            )}
+            {blockedByTitle && (
+              <span className="inline-flex max-w-[11rem] items-center gap-1 font-medium text-amber-600 dark:text-amber-400" title={`Waiting on ${blockedByTitle}`}>
+                <Hourglass className="h-3 w-3 shrink-0" /> <span className="truncate">waiting on {blockedByTitle}</span>
               </span>
             )}
             {parentTitle && (

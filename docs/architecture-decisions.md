@@ -174,7 +174,37 @@ Suggested module/roadmap grouping:
    before publishing with `payroll-runs/{id}:previewPayslip`. A closed block vocabulary rather than HTML because
    generation happens in the Worker with no DOM to lay markup out; an edit affects future runs only, since a
    published payslip's PDF is already frozen in R2.
-8. **Performance (phase 2)** — reviews, goals/OKRs, feedback.
+8. **Performance (phase 2)** — reviews, goals/OKRs, feedback. A goal names the review cycle it was set for
+   (`goals.cycle_id`), and that link — not a date guess — decides which goals a review scores. Enrolling
+   someone in a cycle claims their unattached, open, in-window goals once, explicitly and audibly in the audit
+   trail, so the inference happens at a moment a person chose rather than on every render. The review then
+   carries the goals it scores (`review.goals`), the weighted attainment over them
+   (`sum(weight × progress) / sum(weight)`, cancelled goals excluded — `domain/performance.ts`), and the
+   manager's per-goal verdict keyed by goal code. Sharing a review **freezes** the goal list into
+   `reviews.goals_json`: a review is a record of a moment, and re-deriving last year's attainment from this
+   year's progress would rewrite history. The live (unshared) read is bound to the reader's own `goals` scope,
+   so seeing someone's review is not by itself entitlement to their objectives; the frozen snapshot is exempt,
+   being part of the review the reader is already allowed to read.
+   **Goal health is derived, never stored** (`domain/goals.ts`): `expected_progress` is a straight line from
+   the goal being set to its due date, `drift` is progress against it, `pace` bands that drift, and
+   `stale_days` counts the silence since the last write, progress move or comment. The serializer computes all
+   four so there is one implementation and the browser renders the answer. A goal with no honest answer emits
+   no fields at all - undated, completed, cancelled and back-dated goals report no pace, rather than a drift
+   of 0 that reads as healthy. `confidence` is the one stored half: the owner's forward-looking call, set
+   through the narrow `:setConfidence` verb (progress-only rights are enough - admitting a goal is slipping
+   must not require rights to rewrite it), and the disagreement between it and `drift` is the point. Progress
+   history and the cycle burn-up are read back out of `audit_log`, which has recorded every progress move
+   since the feature shipped; a progress-history table would be a second copy of the audit trail that could
+   disagree with it.
+   **Goals are agreed, not just typed** (`goals.stage`: DRAFT → PROPOSED → AGREED, moved by `:propose`,
+   `:approve`, `:requestChanges`). A review scores people against their goals, so the record has to be able to
+   say whether the scorer ever accepted them - `agreed_at`/`agreed_by` stamp that, and a goal that reaches a
+   review un-agreed is marked as such in the panel and the snapshot. The handshake is off by default
+   (`settings/performance` `goal_approval`), because in most orgs setting a goal is agreeing it; when it is on,
+   only a goal somebody writes for THEMSELVES needs submitting - a manager writing one for a report is already
+   the approver. A rejection's reason is posted as a comment on the goal rather than into a field of its own,
+   so the reply lands in the thread the goal already has. The cycle's own `goal_setting_due_date` turns the
+   coverage gap into a countdown.
 9. **Attendance / assets (optional)** — timesheets, laptop/equipment tracking.
 
 **Payroll scope — what's in, and what's deliberately out.** This build includes **compensation management and payslips** for a single jurisdiction: salary structures, pay components, comp history, the payroll-run workflow, payslip generation, and self-service access. It deliberately leaves out three risky slices, which stay outside the app (integrate or human-gate them instead):
@@ -324,6 +354,15 @@ Two scope lines moved from the original plan, deliberately:
 - **Search is FTS5, not a vector index.** The "optional policy search / HR assistant (Workers AI +
   Vectorize)" idea became a generated FTS5 index with per-collection scoping (`src/domain/searchIndex.ts`),
   which costs two D1 reads instead of an embedding pipeline. Semantic search remains an unstarted option.
+
+- **Custom tables are a catalogue, not a query language.** A user can build a grid that mixes fields from
+  several collections (a salary sheet carrying PAN, personal email and the CTC breakdown), save it, share it
+  and export it. The thing it is NOT is a query surface: no SELECT, no JOIN and no field list arrives from
+  the wire. A grid names fields from a catalogue derived from the schema (`src/domain/tableFields.ts` +
+  `src/services/tableCatalog.ts`), each field carrying the collection whose LIST decision gates it, and the
+  runner is handed the middleware's per-collection scopes exactly as `people-analytics` is. That is what
+  makes handing somebody a saved table safe: they run it under their own access, so they get the same grid
+  with fewer columns and fewer rows. See `table-builder-plan.md`.
 
 What is genuinely still open is release-path, not product: see `production-readiness.md`.
 

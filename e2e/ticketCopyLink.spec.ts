@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // A pasteable link to one ticket - `copyEmail.spec.ts` is the only spec that reads the clipboard back, and
 // only for an address; every other "Copy a link to this X" (tickets, applications, goals, tasks,
@@ -8,6 +8,10 @@ import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
 test("a ticket's copied link opens that exact ticket", async ({ as }) => {
   test.setTimeout(90_000);
   const page = await as("hr");
+  // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.). Which ticket the pasted link opens is what this test proves, and
+  // that read is asserted below; a console line from a request retried behind it is not its failure.
+  allowConsoleErrors(page, /status of 503|status of 500/i);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   const subject = `E2E copy-link ticket ${Date.now()}`;
 

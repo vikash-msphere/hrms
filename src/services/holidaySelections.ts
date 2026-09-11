@@ -16,7 +16,7 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 export async function listHolidaySelections(deps: Deps, actor: AppUser, maxPageSize = 50, pageToken?: string) {
   if (!actor.employeeId) return { items: [], nextPageToken: undefined };
   const rows = await deps.db.select().from(schema.holidaySelections).where(eq(schema.holidaySelections.employeeId, actor.employeeId));
-  return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "holiday-selections" });
 }
 
 export async function getHolidaySelection(deps: Deps, actor: AppUser, id: string) {

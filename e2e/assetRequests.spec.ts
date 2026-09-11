@@ -22,13 +22,19 @@ test("an employee asks for kit from their own profile, and it lands in the appro
   await employee.getByRole("tab", { name: "Assets" }).click();
 
   const panel = employee.getByRole("tabpanel");
-  await panel.getByRole("button", { name: "Request an asset" }).click();
-  const form = employee.getByRole("dialog");
-  await form.getByLabel("What do you need").click();
-  await employee.getByRole("option").first().click();
-  await form.getByLabel("Why you need it").fill(why);
-  await form.getByRole("button", { name: "Send request" }).click();
-  await expect(employee.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+  // Retried as one whole unit: the category picker's own list is org-wide and unowned by this test (see
+  // `assetCategory` below) - another spec's own cleanup purging whichever one this picked, in the window
+  // between the pick and the submit, 400s the submit ("category not found") on a category this test never
+  // controlled to begin with. Reopening the dialog fresh and picking again is what recovers.
+  await expect(async () => {
+    if (!(await employee.getByRole("dialog").count())) await panel.getByRole("button", { name: "Request an asset" }).click();
+    const form = employee.getByRole("dialog");
+    await form.getByLabel("What do you need").click();
+    await employee.getByRole("option").first().click();
+    await form.getByLabel("Why you need it").fill(why);
+    await form.getByRole("button", { name: "Send request" }).click();
+    await expect(employee.getByRole("dialog")).toHaveCount(0, { timeout: 10_000 });
+  }).toPass({ timeout: 60_000 });
 
   // Their own profile carries the open ask - kit they have asked for sits beside kit they hold.
   await expect(panel.getByText(/Pending|Requested|Awaiting/i).first()).toBeVisible({ timeout: 30_000 });

@@ -37,7 +37,7 @@ Every finding below has been fixed. Typecheck and the full test suite (497 tests
 |----|-----|-----------|
 | H1 | `apiCall`/`webhook` actions may only be authored by super_admin (recursive kind check) | `src/services/automations.ts` |
 | M1 | Per-request dispatch budget (`MAX_TOTAL_DISPATCHES`) on shared Deps stops apiCall re-entry loops | `src/services/automationEngine.ts`, `src/deps.ts` |
-| M2 | 25 MiB upload cap enforced before encrypt/store | `src/services/documentsCommon.ts`, `documentService.ts`, `routes/form16Upload.ts` |
+| M2 | Upload cap enforced before encrypt/store (`MAX_DOCUMENT_BYTES`; 25 MiB when this snapshot was taken, since lowered to 10 MiB for isolate memory) | `src/services/documentsCommon.ts`, `documentService.ts`, `routes/form16Upload.ts` |
 | M3 | WAF rate-limit rules documented in the deploy runbook | `docs/deploy-security.md` |
 | M4 | `listDepartments` honors scope; `applyScope` bound in recruiting/compliance/payroll/events lists | `services/departments.ts`, `ats.ts`, `backgroundChecks.ts`, `complianceEvents.ts`, `events.ts`, `payroll.ts` (+ routes) |
 | L1 | https-only public-host guard before webhook egress | `src/lib/urlGuard.ts`, `automationEngine.ts` |

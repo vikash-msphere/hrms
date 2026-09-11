@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ArrowRight, Clock, Moon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
@@ -10,10 +11,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 // mode toggle. Emits ISO start/end built from the viewer's LOCAL time (same convention as the Events form).
 
 const pad = (n: number) => String(n).padStart(2, "0");
-const todayLocal = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// The DAY defaults come from the org (lib/orgDay); the TIME halves below stay on the viewer's wall clock,
+// which is what a time input means. Only the day was ever the browser's to decide, and it was deciding it.
+const todayLocal = todayStr;
 const localParts = (iso: string) => { const d = new Date(iso); return { date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`, time: `${pad(d.getHours())}:${pad(d.getMinutes())}` }; };
 const localISO = (date: string, time: string) => new Date(`${date}T${time}:00`).toISOString();
-const nextDay = (date: string) => { const d = new Date(`${date}T00:00:00`); d.setDate(d.getDate() + 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const nextDay = (date: string) => addDaysYmd(date, 1);
 const parseMin = (t: string) => { const [h, m] = t.split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 const fmtMin = (mins: number) => { const m = ((mins % 1440) + 1440) % 1440; return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`; };
 const durMin = (start: string, end: string) => { let d = parseMin(end) - parseMin(start); if (d <= 0) d += 1440; return d; };
@@ -23,7 +26,9 @@ export const fmtDuration = (mins: number) => {
   const hm = h && m ? `${h}h ${m}m` : h ? `${h}h` : m ? `${m}m` : "";
   return d ? (hm ? `${d}d ${hm}` : `${d}d`) : hm || "0m";
 };
-const daysBetween = (a: string, b: string) => Math.round((+new Date(`${b}T00:00:00`) - +new Date(`${a}T00:00:00`)) / 86400000);
+// lib/orgDay, not two local-midnight Dates subtracted: that shape is a day short (or long) whenever a DST
+// boundary falls inside the span, and this figure is multiplied by 1440 to price a multi-day event.
+const daysBetween = daysBetweenYmd;
 const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fmtDateLabel = (ymd: string) => { const d = new Date(`${ymd}T00:00:00`); return `${WD[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]}`; };

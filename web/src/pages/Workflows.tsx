@@ -10,6 +10,7 @@ import { usePermission } from "@/lib/perm";
 import { describeError, isConflict } from "@/lib/formError";
 import { recordUrl, setRouteRecord } from "@/router";
 import { cn, humanize, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import type { Automation, AutomationRun, EventLogEntry, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -351,7 +352,7 @@ const EMPTY_DRAFT: AutomationDraft = { name: "", description: "", trigger_type: 
 function samplePayload(fields: { name: string; type: string }[]): string {
   const sample: Record<string, unknown> = {};
   for (const f of fields) {
-    sample[f.name] = f.type === "number" ? 0 : f.type === "boolean" ? false : f.type === "date" ? new Date().toISOString().slice(0, 10) : "";
+    sample[f.name] = f.type === "number" ? 0 : f.type === "boolean" ? false : f.type === "date" ? todayStr() : "";
   }
   return JSON.stringify(sample, null, 2);
 }

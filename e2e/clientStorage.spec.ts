@@ -41,10 +41,16 @@ test("caches what it reads, then takes it off the machine on sign-out", async ({
   await gotoRoute(page, "employees");
   await expect(page.getByRole("heading", { name: /directory/i })).toBeVisible();
 
-  // The cache fills. Records are written on an idle callback, so poll rather than assume the timing.
-  await expect.poll(async () => (await storedState(page)).records, { timeout: 10_000 }).toBeGreaterThan(0);
-  const before = await storedState(page);
-  expect(before.localKeys.some((k) => k.startsWith("hrms.sync:"))).toBe(true); // the reconciliation point
+  // The cache fills. Records are written on an idle callback, and the reconciliation point is written only once
+  // `GET /v1/changes` answers, so poll for BOTH rather than assume either one's timing - asserting the sync key
+  // off a single read of the state was a rotating flake, since a busy stack can land the change feed after the
+  // records.
+  await expect
+    .poll(async () => {
+      const s = await storedState(page);
+      return s.records > 0 && s.localKeys.some((k) => k.startsWith("hrms.sync:")); // the reconciliation point
+    }, { timeout: 20_000 })
+    .toBe(true);
 
   // Two stubs, for two reasons that are both about not testing something else here.
   //

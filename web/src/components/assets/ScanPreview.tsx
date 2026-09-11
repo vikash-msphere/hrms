@@ -167,7 +167,9 @@ export function ScanPreview({ scanner, className }: { scanner: CodeScanner; clas
 
   const preview = (
     <div className={cn("relative", full ? "h-full w-full" : "overflow-hidden rounded-md border", className)}>
-      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+      {/* No <track>: this is a live camera viewfinder with no audio and nothing to caption. The directive that
+          used to sit here named a jsx-a11y rule, and no a11y plugin is configured - so eslint reported the
+          disable comment itself as an unknown rule. */}
       <video
         ref={videoRef}
         className={cn("bg-black", full ? "h-full w-full object-contain" : "aspect-video w-full object-cover")}

@@ -16,6 +16,7 @@ import { getNotificationPrefs, setNotificationPrefs } from "../services/notifica
 import { computeProfileCompleteness } from "../services/profileCompleteness";
 import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, getSignature } from "../services/employeePhoto";
 import { putAttachment, downloadAttachment, deleteAttachment } from "../services/attachments";
+import { requireCappedBody } from "../services/documentsCommon";
 import { identityDocSlot } from "../services/identityDetails";
 import { toEmployeeResource } from "../http/serialize";
 import { jsonBody } from "../http/jsonRequest";
@@ -49,6 +50,7 @@ const bankSchema = z
     bank_name: z.string().nullable().optional(),
     account_name: z.string().nullable().optional(),
     account_number: z.string().nullable().optional(),
+    branch: z.string().nullable().optional(),
     ifsc_code: z.string().nullable().optional(),
     currency_code: z.string().nullable().optional(),
   })
@@ -100,11 +102,11 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
   verbs: {
     // Profile photo: media + clear (no standard equivalent for a binary upload/download).
     getPhoto: { raw: async (c, id) => c.body(await getPhoto(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },
-    uploadPhoto: { run: async (deps, user, id, _b, c) => uploadPhoto(deps, user, id, await c.req.arrayBuffer()) },
+    uploadPhoto: { run: async (deps, user, id, _b, c) => uploadPhoto(deps, user, id, await requireCappedBody(c.req.raw)) },
     clearPhoto: { run: (deps, user, id) => clearPhoto(deps, user, id) },
     // Signature image (the employee's e-signature): owner-private (the service enforces owner-only).
     getSignature: { raw: async (c, id) => c.body(await getSignature(c.get("deps"), c.get("user"), id), 200, { "Content-Type": "application/octet-stream" }) },
-    uploadSignature: { run: async (deps, user, id, _b, c) => uploadSignature(deps, user, id, await c.req.arrayBuffer(), c.req.query("content_type") || undefined) },
+    uploadSignature: { run: async (deps, user, id, _b, c) => uploadSignature(deps, user, id, await requireCappedBody(c.req.raw), c.req.query("content_type") || undefined) },
     clearSignature: { run: (deps, user, id) => clearSignature(deps, user, id) },
     // Identity-field supporting documents (slot identity:<field>). The verb is gated by the middleware
     // (employees.me.* / employees.** allow); here we additionally enforce the per-field READ grant, so a
@@ -135,7 +137,7 @@ async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "d
     return c.body(bytes, 200, { "Content-Type": row.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
   }
   if (action === "upload") {
-    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    const bytes = new Uint8Array(await requireCappedBody(c.req.raw));
     await putAttachment(deps, user, { collection: COL, objectId: id, slot, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
   } else {
     await deleteAttachment(deps, user, COL, id, slot);

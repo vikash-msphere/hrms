@@ -37,7 +37,7 @@ export function MyCompensation({ employeeId }: { employeeId: string }) {
       .catch((e) => toast({ variant: "destructive", title: "Couldn't load your compensation", description: (e as Error).message }))
       .finally(() => { if (live) setLoaded(true); });
     return () => { live = false; };
-  }, [employeeId]);
+  }, [employeeId, toast]); // `toast` is a module-level function, so naming it changes nothing but the honesty of the array
 
   const current = rows.find((r) => r.current);
   const cc = current?.currency_code;

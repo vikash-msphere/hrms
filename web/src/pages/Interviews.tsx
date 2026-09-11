@@ -74,7 +74,9 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   const candIdForApp = useMemo(() => {
     const m = new Map(apps.map((a) => [idOf(a.path), a]));
     return (appRef?: string) => { const a = appRef ? m.get(idOf(appRef)) : undefined; return a?.candidate ? idOf(a.candidate) : null; };
-  }, [apps, candidates]);
+    // Only `apps`: this one returns the id off the application and never looks a candidate up, unlike the
+    // name lookup above it. Carrying `candidates` here rebuilt the map on every candidate list refresh.
+  }, [apps]);
   const reqForApp = useMemo(() => {
     const rTitle = new Map(reqs.map((r) => [idOf(r.path), r.title]));
     const m = new Map(apps.map((a) => [idOf(a.path), a]));
@@ -122,7 +124,7 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
     return [...upcoming, ...rest];
   }, [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const todayCount = useMemo(() => rows.filter(isToday).length, [rows]); // eslint-disable-line react-hooks/exhaustive-deps
+  const todayCount = useMemo(() => rows.filter(isToday).length, [rows]);
 
   // What the scorecard dialog walks: the rounds on screen this reader could score - their own panel first,
   // held rounds before booked ones, because an unscored finished interview is what blocks a decision.
@@ -818,6 +820,12 @@ function ScorecardDialog({ interview, me, criteria, blind, empName, candName, jo
   return (
     <WriteDialog
       open
+      // A scorecard is a panelist's private read on a candidate, held back from the rest of the panel until
+      // theirs is in - so it is masked in session replay (`sentry-mask`, see web/src/instrument.ts). A dialog
+      // renders through a portal, outside `<main data-page>`, so no route-level mask can reach it; this is the
+      // same per-dialog tag the profile's pay and identity forms carry, and test/replayMaskCoverage.test.ts
+      // holds this one to it too.
+      className="sentry-mask"
       onClose={onClose}
       title={
         <span className="flex items-center gap-2 pr-8">

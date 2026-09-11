@@ -87,6 +87,38 @@ describe("policy acknowledgement chase-up", () => {
     }
   });
 
+  // The fan-out is ONE batched write for the whole audience (services/documentAck.ts sendNudges), not an
+  // awaited notify() per person - which is what it used to be, and which spent the invocation's entire
+  // subrequest budget inside a single cron subtask on any real headcount. Batching is where the NEW risk
+  // lives: a per-recipient loop cannot mis-address a row, a chunked multi-row insert can. So: every
+  // outstanding person gets exactly one notification, each addressed to themselves, with their own wording.
+  it("nudges a whole roster in one pass - one row each, correctly addressed, with per-recipient wording", async () => {
+    const outstanding: string[] = [];
+    for (let i = 0; i < 12; i++) outstanding.push(await seedEmployee());
+    const inFlight = await seedEmployee(); // opened the vendor journey, never finished
+    const signed = await seedEmployee();
+    const docId = await seedPolicy(7);
+    await deps.db.insert(schema.documentAcknowledgements).values([
+      { code: `22-${genId().slice(0, 4)}`, employeeId: inFlight, documentId: docId, version: 1, signature: "Test User" },
+      { code: `22-${genId().slice(0, 4)}`, employeeId: signed, documentId: docId, version: 1, signature: "Test User", acknowledgedTime: new Date() },
+    ]);
+
+    expect(await nudgeStaleAcks(deps)).toBe(13); // the twelve + the unfinished one, never the signer
+
+    const rows = await deps.db.select().from(schema.notifications);
+    expect(rows).toHaveLength(13);
+    // One row per person, addressed to that person - no duplicate and no cross-addressed row.
+    expect(new Set(rows.map((r) => r.recipientId)).size).toBe(13);
+    expect(rows.map((r) => r.recipientId).sort()).toEqual([...outstanding, inFlight].sort());
+    expect(rows.every((r) => r.subject === `org-documents/${docId}` && r.action === "sign" && r.priority === "high")).toBe(true);
+    // Codes are owner-embedded and allocated for the whole audience at once; a collision would silently drop
+    // a notification, so every one of them has to be distinct.
+    expect(new Set(rows.map((r) => r.code)).size).toBe(13);
+    // Wording is resolved per recipient, not shared across the batch.
+    expect(rows.find((r) => r.recipientId === inFlight)!.title).toContain("Finish signing");
+    expect(rows.find((r) => r.recipientId === outstanding[0])!.title).toContain("Still to sign");
+  });
+
   it("stops chasing whoever has signed the current version", async () => {
     const signer = await seedEmployee();
     await seedEmployee(); // still outstanding

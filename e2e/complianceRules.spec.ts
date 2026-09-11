@@ -81,7 +81,7 @@ type Page = import("@playwright/test").Page;
 /**
  * The dates the preview printed, in order.
  *
- * Cut at ", then every", not at the first comma: the app formats a date as "Sep 15, 2026", so splitting on
+ * Cut at ", then every", not at the first comma: the app formats a date as "15 Sep 2026", so splitting on
  * commas reads one filing where there are three - and a length assertion then fails for a reason that has
  * nothing to do with the page.
  */
@@ -124,10 +124,13 @@ async function sweep(page: Page) {
     page.request.get("/v1/compliance-rules?page_size=200"),
     page.request.get("/v1/compliance-events?page_size=200"),
   ]);
+  // Exact shape, not a prefix: this spec's own titles are `E2E rule <digits>` and nothing else, and a plain
+  // `startsWith("E2E rule ")` also matches `complianceRuleDelete.spec.ts`'s "E2E rule delete <digits>" - a
+  // shared prefix that let this sweep hard-purge that spec's row out from under its own still-running test.
   const mine = (res: import("@playwright/test").APIResponse) =>
     res.ok()
       ? res.json().then(({ results = [] }: { results?: { path: string; title?: string }[] }) =>
-          results.filter((r) => (r.title ?? "").startsWith("E2E rule ")).map((r) => r.path))
+          results.filter((r) => /^E2E rule \d+$/.test(r.title ?? "")).map((r) => r.path))
       : Promise.resolve([] as string[]);
   for (const path of [...(await mine(events)), ...(await mine(rules))]) await purge(page, path);
 }

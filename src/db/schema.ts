@@ -736,9 +736,9 @@ export const announcementPollVotes = sqliteTable("announcement_poll_votes", {
 
 // ---- Performance: goals ----
 // An employee's goal (performance objective). Employee-owned and code-scoped like leave-requests, so the same
-// own/dept/all ACL scopes apply. `weight` is a relative importance (0-100, used later to roll a goals score);
-// `progress` is 0-100. Status is the lifecycle of the goal itself (distinct from progress so a goal can be
-// 100% yet not formally marked done). A future review cycle link arrives with Phase 2.
+// own/dept/all ACL scopes apply. `weight` is a relative importance (0-100) that a review rolls into a weighted
+// attainment score; `progress` is 0-100. Status is the lifecycle of the goal itself (distinct from progress so
+// a goal can be 100% yet not formally marked done).
 export const goals = sqliteTable("goals", {
   uuid: pk(),
   code: codeCol(),
@@ -746,12 +746,51 @@ export const goals = sqliteTable("goals", {
   // Alignment: an optional parent goal this one rolls up under (a manager's/leader's goal). Link-only - the
   // parent's "aligned progress" is derived client-side from the children a viewer can see, never persisted.
   parentId: text("parent_id").references((): AnySQLiteColumn => goals.uuid),
+  // The review cycle this goal was set for, when it belongs to one. Optional, because plenty of goals are just
+  // work with a due date - but a goal that IS the cycle's says so instead of being guessed at from dates. The
+  // review reads its evidence through this link, and the weighted attainment it scores is the set this names.
+  cycleId: text("cycle_id").references((): AnySQLiteColumn => reviewCycles.uuid),
+  // Objective or key result. An objective is the sentence ("make onboarding excellent"); a key result is one
+  // of the numbers that proves it ("time-to-first-commit under 3 days"). A KR always hangs off an objective
+  // (`parentId`), and an objective that HAS key results stops carrying its own progress: the server derives it
+  // from theirs, weighted, on every write. Everything written before this is an objective, which is what a
+  // goal with no children has always been.
+  kind: text("kind", { enum: ["objective", "key_result"] }).notNull().default("objective"),
   title: text("title").notNull(),
   description: text("description"),
   weight: integer("weight").notNull().default(0),
   progress: integer("progress").notNull().default(0),
   status: text("status", { enum: ["not_started", "in_progress", "completed", "cancelled"] }).notNull().default("not_started"),
+  // Whether this goal has been AGREED, which is a different question from how the work is going (`status`).
+  // A review scores a person against these, so "nobody ever signed this off" is a thing the record has to be
+  // able to say. DRAFT while the owner is still writing it, PROPOSED once they hand it to their manager,
+  // AGREED once the manager accepts it - and `agreedAt`/`agreedById` stamp who accepted it and when, because
+  // an attainment figure computed from goals of unknown provenance is not defensible six months later.
+  //
+  // Defaults to AGREED: an org that has not turned goal approval on (settings/performance) is one where
+  // setting a goal IS agreeing it, and every goal in that org should read as settled rather than as a draft
+  // nobody is going to submit.
+  stage: text("stage", { enum: ["DRAFT", "PROPOSED", "AGREED"] }).notNull().default("AGREED"),
+  agreedAt: integer("agreed_at", { mode: "timestamp_ms" }),
+  agreedById: text("agreed_by_id").references((): AnySQLiteColumn => employees.uuid),
   dueDate: integer("due_date", { mode: "timestamp_ms" }),
+  // The owner's own call on whether this lands, with the sentence that explains it. Deliberately separate from
+  // `progress` and from the pace the server derives from the dates: pace is arithmetic and knows nothing about
+  // the vendor who slipped a month, and the disagreement between the two ("says on track, 25 points behind")
+  // is the conversation worth having. Null until somebody says.
+  confidence: text("confidence", { enum: ["on_track", "at_risk", "off_track"] }),
+  confidenceNote: text("confidence_note"),
+  // What this goal is waiting on. Alignment says which goal this one rolls UP into; this says which goal has
+  // to move before this one can - usually somebody else's, in another team. Same vocabulary a blocked board
+  // card uses, and the reason a goal sat at 20% all quarter is far more often this than effort.
+  blockedById: text("blocked_by_id").references((): AnySQLiteColumn => goals.uuid),
+  // Written when the goal closes: what actually happened, in the owner's words. A percentage says how far it
+  // got and nothing about why, and by review time nobody remembers. Carried into the review PDF.
+  retro: text("retro"),
+  // A goal a whole DEPARTMENT owns rather than a person. `employeeId` stays populated (the accountable lead,
+  // and the row's owner code), so every existing scope rule keeps working unchanged - this only widens who
+  // reads it as theirs, and says so on the card.
+  departmentId: text("department_id").references((): AnySQLiteColumn => departments.uuid),
   // A measure, when the goal has one: where it started, where it has to get to, and what the number IS
   // ("customers", "%", "days"). With all three set, `progress` is COMPUTED from them on every write instead of
   // being somebody's estimate - "42 of 60 customers" is a fact, "70%" is a feeling. `baselineValue` matters
@@ -765,7 +804,7 @@ export const goals = sqliteTable("goals", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("goal_emp_idx").on(t.employeeId), parentIdx: index("goal_parent_idx").on(t.parentId) }));
+}, (t) => ({ empIdx: index("goal_emp_idx").on(t.employeeId), parentIdx: index("goal_parent_idx").on(t.parentId), cycleIdx: index("goal_cycle_idx").on(t.cycleId), blockedIdx: index("goal_blocked_idx").on(t.blockedById) }));
 
 // A comment on a goal (sub-resource, like card_comments): not a wire collection, emitted inline on the goal Get
 // and written via the goal `:comment` verb. A goal is a conversation between an owner and a manager for a
@@ -780,6 +819,79 @@ export const goalComments = sqliteTable("goal_comments", {
   createdAt: created(),
 }, (t) => ({ goalIdx: index("goalcomment_goal_idx").on(t.goalId) }));
 
+// Somebody other than the owner who worked on a goal, and how much of it was theirs.
+//
+// A goal has exactly one owner, which is right for accountability and wrong for the work: a launch that two
+// teams pulled off either counts for nobody on the other side, or gets typed up a second time as a near
+// duplicate goal that then scores separately and double-counts the same win. A contributor is a SHARE of the
+// goal's attainment, credited into that person's own review - the goal itself is untouched.
+//
+// `share` is a percentage of the goal's weight, capped by the service so the credited shares can never exceed
+// the goal itself. A goal with no contributors behaves exactly as it always has.
+export const goalContributors = sqliteTable("goal_contributors", {
+  uuid: pk(),
+  goalId: text("goal_id").notNull().references(() => goals.uuid),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  share: integer("share").notNull().default(0), // percent of the goal's weight credited to this person
+  note: text("note"),
+  createdAt: created(),
+}, (t) => ({
+  goalIdx: index("goalcontrib_goal_idx").on(t.goalId),
+  empIdx: index("goalcontrib_emp_idx").on(t.employeeId),
+  // One row per person per goal: a second credit for the same person is an edit, not another share.
+  onceIdx: uniqueIndex("goalcontrib_once_idx").on(t.goalId, t.employeeId),
+}));
+
+// Somebody who wants to hear about a goal they do not own.
+//
+// The cases are specific and all of them were silent: the owner of a goal that is BLOCKED BY this one (their
+// own plan turns on it and they had no way to hear it slip), a contributor credited with a share of it, and a
+// skip-level or peer who simply cares. A goal moves on a weekly rhythm, so "remember to check" means finding
+// out about a slip a fortnight after it happened.
+//
+// A sub-resource like the comments (not a wire collection): reached through the goal's `:watch` / `:unwatch`,
+// so access inherits the goal and nobody watches a goal they cannot read.
+export const goalWatchers = sqliteTable("goal_watchers", {
+  uuid: pk(),
+  goalId: text("goal_id").notNull().references(() => goals.uuid),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  createdAt: created(),
+}, (t) => ({
+  goalIdx: index("goalwatch_goal_idx").on(t.goalId),
+  empIdx: index("goalwatch_emp_idx").on(t.employeeId),
+  onceIdx: uniqueIndex("goalwatch_once_idx").on(t.goalId, t.employeeId),
+}));
+
+// A goal blueprint: the shape of a goal the org sets over and over ("complete security training", "hit the
+// quarter's quota"), kept once and stamped out onto people. Flat-coded reference data like leave types and
+// asset categories - HR curates it in Settings, and `:apply` writes real goals from it.
+//
+// Every field is the goal's own field, so applying a template is a copy rather than a translation. The one
+// exception is `dueInDays`, which is RELATIVE: a template that carried a fixed date would be wrong the day
+// after it was written, and re-dating forty templates each quarter is the chore this exists to remove.
+export const goalTemplates = sqliteTable("goal_templates", {
+  uuid: pk(),
+  code: codeCol(),
+  title: text("title").notNull(),
+  description: text("description"),
+  weight: integer("weight").notNull().default(0),
+  dueInDays: integer("due_in_days"), // days from the day it is applied
+  unit: text("unit"),
+  baselineValue: real("baseline_value"),
+  targetValue: real("target_value"),
+  // Who it is FOR - a hint that filters the catalogue when picking, never a rule. A template suggested for
+  // one department is still applicable to anybody; the person applying it knows better than the label.
+  departmentId: text("department_id").references((): AnySQLiteColumn => departments.uuid),
+  // Free-text grouping ("New hire 30/60/90", "Sales Q3") so a SET can be applied in one press. A group is a
+  // label rather than a table: sets are renamed and reshuffled constantly, and a join table would make that a
+  // migration instead of a keystroke.
+  groupName: text("group_name"),
+  disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({ groupIdx: index("goaltpl_group_idx").on(t.groupName) }));
+
 // ---- Performance: review cycles + reviews ----
 // A review cycle (e.g. "H1 2026"): an HR-managed container, flat-coded like pay-periods. DRAFT while being set
 // up; ACTIVE once launched (which creates a `reviews` row per selected employee - HR picks who, not auto-all);
@@ -790,8 +902,20 @@ export const reviewCycles = sqliteTable("review_cycles", {
   name: text("name").notNull(),
   periodStart: integer("period_start", { mode: "timestamp_ms" }),
   periodEnd: integer("period_end", { mode: "timestamp_ms" }),
+  // When the cycle's goals were supposed to be agreed by. Goal-setting season is the half of a review cycle
+  // that had no deadline at all: the coverage count said who had no goals, but not by when that had to stop
+  // being true.
+  goalSettingDueDate: integer("goal_setting_due_date", { mode: "timestamp_ms" }),
   selfDueDate: integer("self_due_date", { mode: "timestamp_ms" }),
   managerDueDate: integer("manager_due_date", { mode: "timestamp_ms" }),
+  // Which of the framework's competencies THIS cycle rates: a JSON array of competency keys, or null for all
+  // of them (which is what every cycle written before this did).
+  //
+  // The framework is org-wide, so a probation review and an annual review had to ask the same five questions.
+  // A subset rather than a per-cycle catalogue on purpose: ratings are stored keyed by the framework's own
+  // `key`, so narrowing keeps two cycles comparable, where letting a cycle invent competencies would quietly
+  // make the attainment history meaningless. Unknown keys are inert.
+  competencyKeysJson: text("competency_keys_json"),
   state: text("state", { enum: ["DRAFT", "ACTIVE", "CLOSED"] }).notNull().default("DRAFT"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
@@ -807,6 +931,13 @@ export const reviews = sqliteTable("reviews", {
   code: codeCol(),
   cycleId: text("cycle_id").notNull().references(() => reviewCycles.uuid),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  // Who writes this one, when that is not the employee's current manager.
+  //
+  // The write-up used to fall to `managerIdOf()` and nowhere else, which is right until it isn't: somebody
+  // transfers in March and their new manager has not seen the work; a matrix report is reviewed by the lead
+  // they actually worked for; a manager is on long leave. The only fix was re-parenting the employee, which
+  // changes approvals, scopes and the org chart to solve a review. Null = the manager chain, as before.
+  reviewerId: text("reviewer_id").references(() => employees.uuid),
   state: text("state", { enum: ["SELF", "MANAGER", "SHARED", "ACKNOWLEDGED"] }).notNull().default("SELF"),
   selfComment: text("self_comment"),
   selfRatingsJson: text("self_ratings_json"), // {[competencyKey]: number} - the employee's optional self ratings
@@ -814,6 +945,14 @@ export const reviews = sqliteTable("reviews", {
   managerComment: text("manager_comment"),
   overallRating: integer("overall_rating"),
   ratingsJson: text("ratings_json"), // {[competencyKey]: number}
+  // The manager's verdict on each of the cycle's goals: {[goalCode]: {rating?: number, comment?: string}}, on
+  // the same scale as the competencies. Keyed by the goal's CODE, not its id, so the assessment survives the
+  // goal row being purged and reads the same in the snapshot below.
+  goalRatingsJson: text("goal_ratings_json"),
+  // The cycle's goals frozen as they stood when the manager shared the review: [{code, title, weight, progress,
+  // status}]. A review is a record of a moment, and goals keep moving after it - without the snapshot, last
+  // year's review would re-render against this year's progress and its attainment score would drift.
+  goalsJson: text("goals_json"),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ cycleIdx: index("rev_cycle_idx").on(t.cycleId), empIdx: index("rev_emp_idx").on(t.employeeId) }));
@@ -831,10 +970,24 @@ export const reviewFeedback = sqliteTable("review_feedback", {
   authorId: text("author_id").notNull().references(() => employees.uuid),
   comment: text("comment"),
   overallRating: integer("overall_rating"),
-  state: text("state", { enum: ["REQUESTED", "SUBMITTED", "DECLINED"] }).notNull().default("REQUESTED"),
+  // SUGGESTED is the reviewee's own nomination, and it asks nobody for anything yet.
+  //
+  // Nomination was the manager's alone, which gets the 360 backwards: the people who saw the work are known to
+  // the person who did it, and a manager two projects away is guessing. A suggestion is inert - it notifies
+  // nothing and cannot be written to - until the manager nominates that person for real, which turns the same
+  // row REQUESTED. Declining stays the nominee's own answer.
+  state: text("state", { enum: ["SUGGESTED", "REQUESTED", "SUBMITTED", "DECLINED"] }).notNull().default("REQUESTED"),
+  /** Why the nominee said no. Optional, and only ever their own words. */
+  declineReason: text("decline_reason"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ reviewIdx: index("rf_review_idx").on(t.reviewId), authorIdx: index("rf_author_idx").on(t.authorId) }));
+}, (t) => ({
+  reviewIdx: index("rf_review_idx").on(t.reviewId),
+  authorIdx: index("rf_author_idx").on(t.authorId),
+  // One row per person per review: a manager nominating somebody the reviewee already suggested upgrades that
+  // row rather than asking them twice.
+  onceIdx: uniqueIndex("rf_once_idx").on(t.reviewId, t.authorId),
+}));
 
 // ---- Performance: agile kanban boards ----
 // A kanban board: a team/department work-tracking surface. Flat-coded + HR/team-managed (like review-cycles).
@@ -908,6 +1061,17 @@ export const cards = sqliteTable("cards", {
   title: text("title").notNull(),
   description: text("description"),
   assigneeId: text("assignee_id").references(() => employees.uuid),
+  // Who FILED it, stamped once at create and never editable.
+  //
+  // The card already had two people on it and neither is this one: `employee_id` is the accountable owner
+  // (and the authz code the row is scoped by, so it is reassigned deliberately) and `assignee_id` is whoever
+  // is doing the work. When a manager files a card FOR somebody, both of those become that person and the
+  // question "who asked for this, and who do I go back to about it" had no answer on the row at all - only an
+  // audit entry, which the board cannot show and a filter cannot reach.
+  //
+  // Nullable because an admin login with no employee record can file one, and immutable because a reporter is
+  // a fact about the past: correcting it would rewrite who raised the work.
+  reporterId: text("reporter_id").references(() => employees.uuid),
   priority: text("priority", { enum: ["low", "medium", "high", "urgent"] }).notNull().default("medium"),
   labelsJson: text("labels_json").notNull().default("[]"), // string[] of board label-catalog keys
   documentsJson: text("documents_json").notNull().default("[]"), // string[] of org-document uuids linked to this card (link-only; no card-owned storage)
@@ -917,6 +1081,11 @@ export const cards = sqliteTable("cards", {
   blockReason: text("block_reason"), // optional free-text note on the block
   blockedById: text("blocked_by_id").references((): AnySQLiteColumn => cards.uuid), // the task this one is blocked by (a dependency)
   goalId: text("goal_id").references(() => goals.uuid),
+  // Repeating operational work: the weekly compliance sweep, the monthly access review, the quarterly backup
+  // restore test. When set and the card is DELIVERED, the nightly tick files the next one (due date shifted by
+  // the cadence) and MOVES the cadence onto it - so exactly one card in a series carries it, the same
+  // invariant recurring 1:1s run on. Null = a one-off card, which is every card written before this existed.
+  cadence: text("cadence", { enum: ["weekly", "biweekly", "monthly", "quarterly"] }),
   committedAt: integer("committed_at", { mode: "timestamp_ms" }),
   startedAt: integer("started_at", { mode: "timestamp_ms" }),
   deliveredAt: integer("delivered_at", { mode: "timestamp_ms" }),
@@ -927,7 +1096,7 @@ export const cards = sqliteTable("cards", {
 // said out loud in a stand-up). It is allocated max+1 like a code, so two cards filed at the same moment
 // compose the same number - and without the index both would keep it, leaving two different tasks answering
 // to one name. The index fails the loser instead, and services/cards.ts re-numbers it.
-}, (t) => ({ boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq) }));
+}, (t) => ({ boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), reporterIdx: index("card_reporter_idx").on(t.reporterId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq) }));
 
 // Append-only movement log: one row per column transition of a card. INTERNAL (not a wire collection / route):
 // written only by the card `move` verb and read only server-side by the board analytics roll-up, so it needs no
@@ -967,6 +1136,27 @@ export const cardTodos = sqliteTable("card_todos", {
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ cardIdx: index("ct_card_idx").on(t.cardId) }));
+
+// Somebody who wants to hear about a card without being the one doing it.
+//
+// Notifications used to reach exactly one person, the assignee, on exactly two events (assigned, blocked). The
+// people who actually need to know are wider and different: whoever raised it, whoever commented on it, the
+// lead who cares that this particular card moves. Their only option was to remember to look, which for a card
+// that moves once a week means finding out late.
+//
+// A sub-resource like the comments and the checklist (not a wire collection): reached through the card's own
+// `:watch` / `:unwatch` verbs, so access inherits the parent card and nobody can watch a card they cannot
+// read. The unique index makes watching idempotent - pressing it twice is one watcher, not two notifications.
+export const cardWatchers = sqliteTable("card_watchers", {
+  uuid: pk(),
+  cardId: text("card_id").notNull().references(() => cards.uuid),
+  employeeId: text("employee_id").notNull().references(() => employees.uuid),
+  createdAt: created(),
+}, (t) => ({
+  cardIdx: index("cw_card_idx").on(t.cardId),
+  empIdx: index("cw_emp_idx").on(t.employeeId),
+  onceIdx: uniqueIndex("cw_once_idx").on(t.cardId, t.employeeId),
+}));
 
 // ---- Onboarding / offboarding (employee transitions) ----
 // A transition is one employee's onboarding or offboarding: a checklist of tasks tracked to done. Subject-owned
@@ -1134,6 +1324,11 @@ export const projects = sqliteTable("projects", {
   client: text("client"),
   projectCode: text("project_code"),
   billable: integer("billable", { mode: "boolean" }).notNull().default(true),
+  // The goal this project's work is FOR, when it is for one. Hours are booked against projects and outcomes
+  // are tracked as goals, and the two have never been able to see each other: this link is what lets a goal
+  // say "140 hours logged, 30% done", which is the pairing that catches effort going into something that is
+  // not moving.
+  goalId: text("goal_id").references((): AnySQLiteColumn => goals.uuid),
   status: text("status", { enum: ["active", "archived"] }).notNull().default("active"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
@@ -1147,6 +1342,11 @@ export const timeEntries = sqliteTable("time_entries", {
   code: codeCol(),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   projectId: text("project_id").notNull().references(() => projects.uuid),
+  // The board task this hour went into, when the work is tracked as a card. Optional and secondary to the
+  // project: time still books to a project (that is what a timesheet approves and what a client is billed
+  // for), and this only says which task inside it - so "what did that task actually cost" has an answer where
+  // the board is the unit of work. Null on every entry booked straight to a project.
+  cardId: text("card_id").references(() => cards.uuid),
   date: integer("date", { mode: "timestamp_ms" }).notNull(),
   hours: real("hours").notNull().default(0),
   description: text("description"),
@@ -1156,7 +1356,7 @@ export const timeEntries = sqliteTable("time_entries", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("te_emp_idx").on(t.employeeId), projIdx: index("te_proj_idx").on(t.projectId), dateIdx: index("te_date_idx").on(t.date) }));
+}, (t) => ({ empIdx: index("te_emp_idx").on(t.employeeId), projIdx: index("te_proj_idx").on(t.projectId), cardIdx: index("te_card_idx").on(t.cardId), dateIdx: index("te_date_idx").on(t.date) }));
 
 // ---- Loans / salary advances ----
 // An employee's loan or salary advance, recovered over monthly installments. Employee-owned + code-scoped
@@ -1261,7 +1461,10 @@ export const auditLog = sqliteTable("audit_log", {
   // for the life of a session and changes on the next sign-in. Null on lanes that carry no session (an API
   // key, a Cloudflare Access assertion, the dev bypass, cron).
   sessionId: text("session_id"),
-  ip: text("ip"), // request IP (cf-connecting-ip / x-forwarded-for), when available
+  // Request IP, from `cf-connecting-ip` ONLY - the address the edge observed. Never from a forwarding header:
+  // this is a security record, and a caller-supplied one would let the subject of an investigation pick the
+  // address it reads back. Null when there is none to observe (cron, internal dispatch, off-edge deploys).
+  ip: text("ip"),
   userAgent: text("user_agent"), // request User-Agent, when available
   at: integer("at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 }, (t) => ({
@@ -1426,6 +1629,11 @@ export const compensation = sqliteTable("compensation", {
   // earnings + employer contributions, makes total CTC land on ctcAnnual. Paid as a "Special Allowance" line.
   specialAllowance: real("special_allowance").notNull().default(0),
   currency: text("currency").notNull().default("INR"),
+  // Target variable pay for a full year at 100% attainment - the bonus this person is playing for, agreed
+  // when their compensation is. Deliberately NOT part of `ctcAnnual`: CTC is what the company has committed
+  // to pay, and a figure that has to be earned is not a commitment. Null for anybody with no variable
+  // component, which is most people in most orgs.
+  variablePayTarget: real("variable_pay_target"),
   payGradeId: text("pay_grade_id").references((): AnySQLiteColumn => payGrades.uuid),
   // Optional salary structure: governs which recurring EARNING components apply to this employee (with
   // per-structure rate overrides). Null = the global component set applies (default behaviour).
@@ -1493,13 +1701,34 @@ export const bonuses = sqliteTable("bonuses", {
   scope: text("scope", { enum: ["company", "department", "individual"] }),
   scopeRef: text("scope_ref"), // department ref for a department-wide award (display/label)
   batchId: text("batch_id"), // shared by all rows of one group award
+  // The review cycle this payout came out of, when it is a `:awardVariablePay` run rather than a bonus
+  // somebody typed. It is the IDEMPOTENCE KEY for that award, which is why it is a real reference and not a
+  // sentence: the dedupe used to match on the bonus `reason` text, which carries the cycle's NAME - so
+  // renaming a cycle after awarding made the run stop recognising its own work and pay everybody a second
+  // time, while two cycles that happened to share a name (a "Q1" per year) blocked the later one's payout as
+  // already awarded. A cycle's identity does not change when its label does.
+  cycleId: text("cycle_id").references((): AnySQLiteColumn => reviewCycles.uuid),
   // A bonus is an unpaid payable until a payroll run pays it (taxable earning); paidRunId pins which run did,
   // so a rebuild is idempotent (reset first) and it's never double-paid.
   paidRunId: text("paid_run_id").references((): AnySQLiteColumn => payrollRuns.uuid),
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("bonus_emp_idx").on(t.employeeId), batchIdx: index("bonus_batch_idx").on(t.batchId), paidIdx: index("bonus_paid_idx").on(t.paidRunId) }));
+}, (t) => ({
+  empIdx: index("bonus_emp_idx").on(t.employeeId),
+  batchIdx: index("bonus_batch_idx").on(t.batchId),
+  paidIdx: index("bonus_paid_idx").on(t.paidRunId),
+  // ONE variable-pay payout per person per cycle, enforced by the DATABASE.
+  //
+  // `cycleId` was called the idempotence key above and was not one: `awardVariablePay` read what the cycle had
+  // already paid, then wrote in a loop, so two `:awardVariablePay` calls that overlapped both read "nothing
+  // paid yet" and both paid - a double payout on the one table where that is unrecoverable once payroll has
+  // run. Every other money transition in this app is guarded on the state it read (services/payroll.ts's
+  // approve flip); this is the same guarantee expressed as a constraint, which is what a per-ROW claim needs.
+  // Partial, on `cycle_id is not null`, so an ordinary typed bonus (no cycle) is untouched and a person may
+  // hold as many of those as they are given.
+  cycleOnceIdx: uniqueIndex("bonus_cycle_emp_idx").on(t.cycleId, t.employeeId).where(sql`${t.cycleId} is not null`),
+}));
 
 // Employee referrals: an employee refers an external candidate for a role. Owner-embedded code (referrer owns
 // their own; HR sees all). When the referred candidate is hired and linked to their new employee record
@@ -2528,4 +2757,32 @@ export const searchDocs = sqliteTable("search_docs", {
 }, (t) => ({
   recordIdx: uniqueIndex("search_docs_record_idx").on(t.collection, t.recordId),
   createdIdx: index("search_docs_created_idx").on(t.createdAt),
+}));
+
+// A saved custom grid: which collection one row IS, which fields are its columns, and how it is filtered and
+// sorted. The DEFINITION only - a view holds no data of its own, and running it re-reads every source under
+// the runner's own scopes, so a view shared with somebody shows them their rows, never the author's.
+//
+// Owned by its author (the code embeds the owner, like goals and check-ins), so `me`-scoped rules work on it
+// and sharing one is an ordinary object share on its code - the existing ACL, not a mechanism of its own.
+export const tableViews = sqliteTable("table_views", {
+  uuid: pk(),
+  code: codeCol(),
+  ownerId: text("owner_id").notNull().references((): AnySQLiteColumn => employees.uuid),
+  name: text("name").notNull(),
+  description: text("description"),
+  // The base collection one row of the grid is (`employees`, `tickets`, ...). Stored beside the spec because
+  // it is what the builder and the run gate on first, and a filter on it should not have to parse JSON.
+  base: text("base").notNull(),
+  // { columns[], filters[], sort[], params{} } - validated against the catalogue on every write, so a stored
+  // spec can never name a field that does not exist.
+  specJson: text("spec_json").notNull(),
+  deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
+  disabled: integer("disabled", { mode: "boolean" }).notNull().default(false), // a draft, while it is being built
+  locked: integer("locked", { mode: "boolean" }).notNull().default(false),
+  lockedBy: text("locked_by"),
+  createdAt: created(),
+  updatedAt: updated(),
+}, (t) => ({
+  ownerIdx: index("table_view_owner_idx").on(t.ownerId),
 }));

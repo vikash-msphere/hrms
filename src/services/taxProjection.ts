@@ -4,7 +4,7 @@
 // + prior-employer income; tax is computed once for the year, and the balance (annual tax - already deducted)
 // is spread over the remaining months. Pure date/assembly here; the slab math lives in the domain module.
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { chunk } from "../lib/dbBatch";
+import { chunk, groupBy } from "../lib/dbBatch";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { getSettingValue } from "./settings";
@@ -373,14 +373,10 @@ export function assembleProjection(args: {
   };
 }
 
-// The employee's VERIFIED Chapter VI-A declarations for a financial year, summed per section. Only verified rows
-// count - a bare declaration must never move withholding (that is the fraud gate the workflow exists for) - and
-// `verifiedAmount` is the figure payroll accepted, which may be less than what was declared.
-export async function verifiedDeductions(deps: Deps, employeeId: string, financialYear: string): Promise<Record<string, number>> {
-  const rows = await deps.db
-    .select()
-    .from(schema.taxDeclarations)
-    .where(and(eq(schema.taxDeclarations.employeeId, employeeId), eq(schema.taxDeclarations.financialYear, financialYear), eq(schema.taxDeclarations.status, "VERIFIED")));
+// Sum a set of declaration rows per section. Only VERIFIED rows reach here - a bare declaration must never
+// move withholding, which is the fraud gate the verify workflow exists for - and `verifiedAmount` is the
+// figure payroll accepted, which may be less than what was declared.
+function sumBySection(rows: (typeof schema.taxDeclarations.$inferSelect)[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const r of rows) {
     if (r.deleteTime) continue;
@@ -389,6 +385,39 @@ export async function verifiedDeductions(deps: Deps, employeeId: string, financi
     const section = r.section.trim();
     out[section] = round2((out[section] ?? 0) + amount);
   }
+  return out;
+}
+
+/** One employee's verified Chapter VI-A deductions for a financial year, summed per section. */
+export async function verifiedDeductions(deps: Deps, employeeId: string, financialYear: string): Promise<Record<string, number>> {
+  return sumBySection(
+    await deps.db
+      .select()
+      .from(schema.taxDeclarations)
+      .where(and(eq(schema.taxDeclarations.employeeId, employeeId), eq(schema.taxDeclarations.financialYear, financialYear), eq(schema.taxDeclarations.status, "VERIFIED"))),
+  );
+}
+
+/**
+ * THE WHOLE ORG's verified deductions for a financial year, in ONE read, keyed by employee.
+ *
+ * The single-employee reader above is right for the Tax page and for a settlement, which are about one person.
+ * The payroll build is not: it called it inside its per-employee loop, so a build was one D1 subrequest per
+ * employee - against a per-invocation budget of 50 on the free plan and 1000 on paid, and directly against the
+ * comment the build carries about its own loop touching the DB not at all. It failed at a few dozen employees,
+ * with the run left un-stamped so nobody was paid, and it failed only once real headcount was in.
+ *
+ * The financial year is the narrowing that makes one read the right shape: a year's verified declarations are
+ * a few rows per employee at most, and the build already needs every one of them. An employee with no verified
+ * declaration is simply absent from the map, which is the empty record the caller wants anyway.
+ */
+export async function verifiedDeductionsAll(deps: Deps, financialYear: string): Promise<Map<string, Record<string, number>>> {
+  const rows = await deps.db
+    .select()
+    .from(schema.taxDeclarations)
+    .where(and(eq(schema.taxDeclarations.financialYear, financialYear), eq(schema.taxDeclarations.status, "VERIFIED")));
+  const out = new Map<string, Record<string, number>>();
+  for (const [employeeId, group] of groupBy(rows, (r) => r.employeeId)) out.set(employeeId, sumBySection(group));
   return out;
 }
 

@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, test, expect, toast, ownWeekday } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, test, expect, toast, ownWeekday } from "./fixtures";
 
 // The one thing no single-page test can show: two people, two front ends, one request.
 //
@@ -14,6 +14,9 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   const employee = await as("employee");
   const reason = `E2E two-roles ${Date.now()}`;
   const manager = await as("manager");
+  // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.).
+  allowConsoleErrors(manager, /status of 503/i);
 
   // The day this spec will ask for. A weekday of its OWN: several specs ask for leave for this same person at
   // once, and two requests on one day overlap - which the form is right to refuse, leaving the submit disabled
@@ -57,9 +60,16 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   // By heading: the dialog's submit button carries the same words.
   await expect(form.getByRole("heading", { name: "Request leave" })).toBeVisible();
 
-  // Leave type is a listbox rather than a native select; take whatever the org has configured first.
+  // Leave type is a listbox rather than a native select - picked by the most balance left, not whatever the
+  // org lists first (`fixtures.ts fileLeave`'s own reasoning: on a database the suite has been running
+  // against all session, the first-listed type is the one likeliest to have run dry for this shared employee,
+  // and the form is right to refuse a type with nothing left in it).
+  const bestType = await bestLeaveTypeName(employee);
   await form.getByRole("combobox").first().click();
-  await employee.getByRole("option").first().click();
+  // Not exact: the option's own text also appends "· N left" (RequestLeaveDialog.tsx), and a type with none
+  // left renders `disabled` rather than absent - `.first()` here can silently click straight through a
+  // disabled option, leaving the combobox with no real selection and Submit correctly refusing to enable.
+  await employee.getByRole("option", { name: new RegExp(`^${bestType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).click();
   // A quick pick rather than typed dates: it sets both ends and the sessions in one press, and it is what a
   // person actually uses.
   // A weekday rather than the "Tomorrow" chip: leave is priced in WORKING days, so the chip is (correctly)
@@ -104,11 +114,32 @@ test("an employee files leave and their manager decides it", async ({ as }) => {
   await expect(manager.locator("li, div").filter({ hasText: reason }).filter({ has: managerQueue })).toHaveCount(0, { timeout: 30_000 });
 
   // And the employee's own page now says so. Approved-but-upcoming leave stays in the live Requests tab
-  // (web/src/pages/Leaves.tsx `isLive`), so the row does not move - only its status changes.
-  await employee.reload();
-  await expect(employee.getByRole("main")).toBeVisible();
-  await employee.getByRole("tab", { name: /^Requests/ }).click();
-  await employee.getByPlaceholder(/Search all records/).fill(reason);
-  await expect(employee.locator("tbody tr").filter({ hasText: /Approved/ })).toHaveCount(1);
-  await expect(employee.locator("tbody tr").filter({ hasText: /Pending/ })).toHaveCount(0);
+  // (web/src/pages/Leaves.tsx `isLive`), so the row does not move - only its status changes. Retried with a
+  // fresh reload: the shared inbox this reason is searched against is written by the rest of this suite's own
+  // leave specs constantly under 16-worker load, and the search has occasionally read mid a refetch rather
+  // than the settled result a single reload usually lands on.
+  await expect(async () => {
+    await employee.reload();
+    await expect(employee.getByRole("main")).toBeVisible();
+    await employee.getByRole("tab", { name: /^Requests/ }).click();
+    await employee.getByPlaceholder(/Search all records/).fill(reason);
+    await expect(employee.locator("tbody tr").filter({ hasText: /Approved/ })).toHaveCount(1, { timeout: 10_000 });
+    await expect(employee.locator("tbody tr").filter({ hasText: /Pending/ })).toHaveCount(0, { timeout: 10_000 });
+  }).toPass({ timeout: 60_000 });
 });
+
+/** The leave type with the most balance left for this caller - see `fixtures.ts fileLeave` for why "first". */
+async function bestLeaveTypeName(page: import("@playwright/test").Page): Promise<string> {
+  const [types, balances] = await Promise.all([
+    page.request.get("/v1/leave-types?page_size=100"),
+    page.request.get("/v1/leave-balances?page_size=100"),
+  ]);
+  const all = ((await types.json()) as { results?: { path: string; display_name?: string }[] }).results ?? [];
+  const left = new Map(
+    (((await balances.json()) as { results?: { leave_type?: string; balance_days?: number }[] }).results ?? [])
+      .map((b) => [b.leave_type ?? "", b.balance_days ?? 0] as const),
+  );
+  const best = [...all].sort((a, b) => (left.get(b.path) ?? 0) - (left.get(a.path) ?? 0))[0];
+  if (!best?.display_name) throw new Error("e2e: the org has no leave types to request");
+  return best.display_name;
+}

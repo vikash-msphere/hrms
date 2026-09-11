@@ -43,6 +43,7 @@ export const TABLES: Record<string, any> = {
   "interview-feedback": schema.interviewFeedback,
   offers: schema.offers,
   "leave-types": schema.leaveTypes,
+  "table-views": schema.tableViews,
   "letter-templates": schema.letterTemplates,
   letterheads: schema.letterheads,
   "leave-balances": schema.leaveBalances,
@@ -85,6 +86,7 @@ export const TABLES: Record<string, any> = {
   bonuses: schema.bonuses,
   assets: schema.assets,
   "asset-categories": schema.assetCategories,
+  "goal-templates": schema.goalTemplates,
   "asset-requests": schema.assetRequests,
   stocktakes: schema.stocktakes, // inventory counts (walk-throughs); flat, HR/asset-admin managed
   settlements: schema.settlements,
@@ -105,6 +107,98 @@ export const RESOURCE_COLLECTIONS = Object.keys(TABLES);
 // snapshot a record's label when the caller passed no row (one indexed uuid lookup).
 export function tableFor(collection: string): any | undefined {
   return TABLES[collection];
+}
+
+/**
+ * The OWNER column each collection's own list service binds as `applyScope`'s third argument - the column an
+ * `own` breadth is matched against. Drizzle property names, resolved off the table by `listOwnerColumn`.
+ *
+ * WHY IT HAS TO BE WRITTEN DOWN. `applyScope` takes the column; every hand-written list passes the right one
+ * inline, and until something else needed to scope the same table that was enough. The table builder does
+ * (services/tableRun.ts, over ~50 bases and every link target it follows), and it guessed `table.employeeId`
+ * for all of them - which is right for the thirty-odd employee-owned collections and wrong for every other
+ * shape: `employees` is owned by `uuid`, `assets` by `assignedTo`, `referrals` by `referrerId`. A guess that
+ * misses resolves to `undefined`, and `applyScope` fails CLOSED on a missing owner column, so an own-breadth
+ * caller silently got an empty grid - and, through the link lane, a blank employee-name column on grids that
+ * otherwise worked. Nothing leaked; the answer was just wrong in the direction nobody notices.
+ *
+ * A collection ABSENT from this map is one whose list binds no owner (the collection factory's generic list,
+ * services/crud.ts - every flat catalogue). `undefined` is the honest answer for those and `applyScope`
+ * already means the right thing by it, so absence is a value here rather than a hole.
+ *
+ * test/listOwnerColumns.test.ts reads the services back and fails when one of them binds a column this map
+ * does not name - so the two cannot drift.
+ */
+export const LIST_OWNER_COLUMNS: Record<string, string> = {
+  announcements: "authorEmployeeId",
+  applications: "code",
+  "approval-delegations": "delegatorId",
+  "asset-requests": "employeeId",
+  assets: "assignedTo",
+  attendance: "employeeId",
+  "attendance-regularizations": "employeeId",
+  "background-checks": "employeeId",
+  "benefit-enrollments": "employeeId",
+  bonuses: "employeeId",
+  candidates: "code",
+  cards: "employeeId",
+  "check-ins": "employeeId",
+  compensation: "employeeId",
+  "compliance-events": "code",
+  departments: "code",
+  dependents: "employeeId",
+  "document-acknowledgements": "employeeId",
+  employees: "uuid",
+  events: "code",
+  expenses: "employeeId",
+  goals: "employeeId",
+  "interview-feedback": "authorId",
+  interviews: "code",
+  "job-requisitions": "code",
+  "leave-balances": "employeeId",
+  "leave-encashments": "employeeId",
+  "leave-requests": "employeeId",
+  loans: "employeeId",
+  "notice-periods": "employeeId",
+  offers: "code",
+  // The two document collections scope through one service (services/documentService.ts), which picks the
+  // column from whether the collection is owned: personal documents by their employee, org documents by code.
+  "org-documents": "code",
+  "personal-documents": "employeeId",
+  "overtime-requests": "employeeId",
+  "payroll-runs": "code",
+  payslips: "employeeId",
+  positions: "employeeId",
+  referrals: "referrerId",
+  reimbursements: "employeeId",
+  "remote-work-requests": "employeeId",
+  "review-cycles": "code",
+  "review-feedback": "authorId",
+  reviews: "employeeId",
+  settlements: "employeeId",
+  "shift-assignments": "employeeId",
+  stocktakes: "code",
+  suggestions: "submitterId",
+  "table-views": "ownerId",
+  "tax-declarations": "employeeId",
+  tickets: "employeeId",
+  "time-entries": "employeeId",
+  "transition-tasks": "assigneeId",
+  transitions: "employeeId",
+  users: "employeeId",
+};
+
+/**
+ * The owner column to hand `applyScope` for `collection`, off the table backing it.
+ *
+ * Undefined when the collection binds no owner, when the map names a column the table does not carry, and
+ * when the collection is unknown - all three are the fail-closed answer `applyScope` already understands, so
+ * a caller never has to distinguish them.
+ */
+export function listOwnerColumn(collection: string, table?: any): any | undefined {
+  const t = table ?? TABLES[collection];
+  const prop = LIST_OWNER_COLUMNS[collection];
+  return t && prop ? t[prop] : undefined;
 }
 
 // id is the wire identifier in the path (currently the uuid; later the random wire id). Resolve -> code.

@@ -32,7 +32,7 @@ beforeAll(async () => {
 });
 
 const DEV_EMAIL = "dev@example.com";
-const CLEAR = [schema.timeEntries, schema.projects, schema.accessRules, schema.users, schema.employees, schema.roles];
+const CLEAR = [schema.timeEntries, schema.cards, schema.boards, schema.projects, schema.accessRules, schema.users, schema.employees, schema.roles];
 let employeeId: string;
 
 beforeEach(async () => {
@@ -105,5 +105,49 @@ describe("time entries reject archived/missing projects server-side", () => {
 
     const row = (await deps.db.select().from(schema.timeEntries).where(eq(schema.timeEntries.uuid, row0.uuid)))[0]!;
     expect(row.projectId).toBe(active);
+  });
+});
+
+// The task an hour went into. Booking stays project-first (that is what a timesheet approves and what a
+// client is billed for); the card only says WHICH task inside it, so "what did that task cost" has an answer.
+describe("time entries name the task they went into", () => {
+  async function seedCard(deleted = false): Promise<string> {
+    const board = genId();
+    await deps.db.insert(schema.boards).values({ uuid: board, code: `01-${genId().slice(0, 3)}`, name: "Board" });
+    const uuid = genId();
+    await deps.db.insert(schema.cards).values({
+      uuid, code: `c-${genId().slice(0, 4)}`, boardId: board, employeeId, columnKey: "doing", rank: 1, title: "Importer",
+      ...(deleted ? { deleteTime: new Date() } : {}),
+    });
+    return uuid;
+  }
+
+  it("keeps the link, and is NOT checked against the project - a board is not tied to one", async () => {
+    const project = await seedProject("active");
+    const card = await seedCard();
+    const res = await postJson("/v1/time-entries", { project: `projects/${project}`, card: `cards/${card}`, date: "2026-02-02", hours: 3 });
+    expect(res.status).toBe(200);
+    const row = (await deps.db.select().from(schema.timeEntries))[0]!;
+    expect(row.cardId).toBe(card);
+    expect(row.projectId).toBe(project);
+  });
+
+  it("refuses a task that does not exist or has been binned", async () => {
+    const project = await seedProject("active");
+    const gone = await seedCard(true);
+    expect((await postJson("/v1/time-entries", { project: `projects/${project}`, card: `cards/${gone}`, date: "2026-02-02", hours: 1 })).status).toBe(400);
+    expect((await postJson("/v1/time-entries", { project: `projects/${project}`, card: `cards/${genId()}`, date: "2026-02-02", hours: 1 })).status).toBe(400);
+  });
+
+  it("lets the link be cleared without touching the hours", async () => {
+    const project = await seedProject("active");
+    const card = await seedCard();
+    await postJson("/v1/time-entries", { project: `projects/${project}`, card: `cards/${card}`, date: "2026-02-02", hours: 3 });
+    const row = (await deps.db.select().from(schema.timeEntries))[0]!;
+
+    expect((await patchJson(`/v1/time-entries/${row.uuid}`, { card: "" })).status).toBe(200);
+    const after = (await deps.db.select().from(schema.timeEntries).where(eq(schema.timeEntries.uuid, row.uuid)))[0]!;
+    expect(after.cardId).toBeNull();
+    expect(after.hours).toBe(3);
   });
 });

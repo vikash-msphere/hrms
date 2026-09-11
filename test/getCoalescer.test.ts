@@ -10,7 +10,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Reads reach `batchGet` as a bare path string, or as `{ path, etag }` when the caller sent a validator. The
 // fake answers 304 for any read that carried one, which is what a server does when the copy is still current.
 type Read = string | { path: string; etag?: string };
-const batchGet = vi.fn(async (reads: Read[]) =>
+type Sub = { status: number; body: unknown; etag?: string };
+const batchGet = vi.fn(async (reads: Read[]): Promise<Sub[]> =>
   reads.map((r) => (typeof r === "string" ? { status: 200, body: { results: [] } } : { status: 304, body: "", etag: r.etag })),
 );
 vi.mock("@/api", () => ({
@@ -22,7 +23,7 @@ vi.mock("@/api", () => ({
   },
 }));
 
-const { coalescedGet, NOT_MODIFIED } = await import("@/lib/getCoalescer");
+const { coalescedGet, coalescedGetDetailed, NOT_MODIFIED } = await import("@/lib/getCoalescer");
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -93,6 +94,29 @@ describe("GET coalescer window", () => {
     expect(a).toBe(b);
     await vi.advanceTimersByTimeAsync(40);
     expect(paths()[0]).toEqual([{ path: "/v1/roles?6", etag: 'W/"same"' }]);
+  });
+
+  // The validator has to travel WITH its own answer. It used to be looked up from a `path -> etag` map after
+  // the promise resolved, so two concurrent reads of one path handed each other's etag over - and rows then
+  // stored against a validator describing a DIFFERENT set of rows are pinned there by the next 304.
+  it("gives each read back the validator its own response carried", async () => {
+    batchGet.mockImplementationOnce(async (reads: Read[]): Promise<Sub[]> =>
+      reads.map((_r, i) => ({ status: 200, body: { results: [{ i }] }, etag: `W/"answer-${i}"` })),
+    );
+    const first = coalescedGetDetailed<{ results: unknown[] }>("same-path?7");
+    const second = coalescedGetDetailed<{ results: unknown[] }>("same-path?7", 'W/"held"');
+    await vi.advanceTimersByTimeAsync(40);
+    // Two reads of one path, answered in the one batch, each keeping the etag from its own sub-response.
+    expect((await first).etag).toBe('W/"answer-0"');
+    expect((await second).etag).toBe('W/"answer-1"');
+  });
+
+  it("carries the validator a 304 came back with, so the held rows keep a usable one", async () => {
+    const answer = coalescedGetDetailed("roles?8", 'W/"held"');
+    await vi.advanceTimersByTimeAsync(40);
+    const a = await answer;
+    expect(a.body).toBe(NOT_MODIFIED);
+    expect(a.etag).toBe('W/"held"');
   });
 
   it("does not wait for a read that only starts after an earlier one resolved", async () => {

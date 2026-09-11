@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // Enrolling in a benefit, with a dependent on the cover.
 //
@@ -11,6 +11,11 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   test.setTimeout(120_000);
   const hr = await as("hr");
   const employee = await as("employee");
+  // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.). It lands on the bootstrap read here, so the shell shows its own
+  // "Can't reach the server" screen; `gotoRoute` presses the app's own Try again, and this keeps the console
+  // line that came with it from failing a test that the retry already recovered.
+  allowConsoleErrors(employee, /status of 500|status of 503/i);
   const planName = `E2E Health ${Date.now()}`;
 
   // The catalogue is HR's business (Settings → Benefit plans), so the plan arrives through the API and this
@@ -40,8 +45,30 @@ test("an employee adds a dependent and enrols in a plan that covers them", async
   // The card now says they are in - and offers to CHANGE rather than to enrol again.
   await expect(card.getByRole("button", { name: "Change" })).toBeVisible();
 
+  // Waiving is the other press the card offers right beside it - never pressed anywhere before. Enrolled,
+  // it asks first (ending real cover, not a no-op), and the card goes back to offering Enrol afterwards.
+  await card.getByRole("button", { name: "Waive" }).click();
+  const waiveConfirm = employee.getByRole("dialog");
+  await expect(waiveConfirm.getByText(`Waive ${planName}?`)).toBeVisible();
+  await expect(waiveConfirm.getByText(/dependents.*ends/i)).toBeVisible();
+  await waiveConfirm.getByRole("button", { name: "Waive", exact: true }).click();
+  await expect(toast(employee, `Waived ${planName}`)).toBeVisible();
+  await expect(card.getByRole("button", { name: "Enrol" })).toBeVisible({ timeout: 30_000 });
+  // Waived, so there is nothing left to waive - the button is gone rather than offered a second time.
+  await expect(card.getByRole("button", { name: "Waive" })).toHaveCount(0);
+
+  // Removing the dependent itself - a different row entirely from the plan card, and never pressed anywhere
+  // before this. No success toast of its own (only a failure one), so the chip actually leaving is the only
+  // signal there is. This doubles as this spec's own cleanup for the dependent it added.
+  const depChip = employee.locator("span").filter({ hasText: "E2E Dependent" });
+  await expect(depChip).toBeVisible({ timeout: 30_000 });
+  await depChip.getByRole("button", { name: "Remove" }).click();
+  const removeConfirm = employee.getByRole("dialog");
+  await expect(removeConfirm.getByText("Remove E2E Dependent?")).toBeVisible({ timeout: 30_000 });
+  await removeConfirm.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(depChip).toHaveCount(0, { timeout: 30_000 });
+
   await purgeMatching(employee, "benefit-enrollments", () => true, plan);
-  await purgeMatching(employee, "dependents", (r) => (r.name ?? r.display_name) === "E2E Dependent");
   await purge(hr, plan);
 });
 

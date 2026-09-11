@@ -4,6 +4,7 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import { byIdChunks } from "../lib/dbBatch";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -12,7 +13,7 @@ import { notify, notifyMany } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { purgeRow } from "./softDelete";
+import { purgeRow, type PurgeCascade } from "./softDelete";
 
 // Suggestion box: employee ideas, optionally anonymous, peer-upvoted, HR-responded. NO access control here
 // (middleware gates by path + grants; private by default, open box = grant read/write to `everyone`). Owned by
@@ -49,7 +50,10 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 export async function decorate(deps: Deps, actor: AppUser | undefined, rows: any[]): Promise<any[]> {
   if (rows.length === 0) return rows;
   const ids = rows.map((r) => r.uuid);
-  const votes = await deps.db.select().from(schema.suggestionVotes).where(inArray(schema.suggestionVotes.suggestionId, ids));
+  // `byIdChunks`: a full page is 100 ids, which is D1's ENTIRE parameter allowance for one statement - so this
+  // worked only while nothing else was bound to it, and the next predicate anyone adds turns a full page into
+  // `D1_ERROR: too many SQL variables` (and only a full page, so it ships looking fine).
+  const votes = await byIdChunks(ids, (group) => deps.db.select().from(schema.suggestionVotes).where(inArray(schema.suggestionVotes.suggestionId, group)));
   const up = new Map<string, number>();
   const down = new Map<string, number>();
   const mine = new Map<string, number>();
@@ -188,14 +192,22 @@ export async function mergeSuggestion(deps: Deps, actor: AppUser, id: string, in
     .set({ mergedIntoId: targetId, status: "declined", response: row.response ?? `Merged into “${target.title}”.`, respondedById: actor.uuid, updatedAt: new Date() })
     .where(eq(schema.suggestions.uuid, id))
     .returning())[0]!;
-  await audit(deps, actor, "suggestion.merge", "suggestions", id, { into: targetId, votesMoved: moving.length });
+  await audit(deps, actor, "suggestion.merge", "suggestions", id, { into: `suggestions/${targetId}`, votesMoved: moving.length });
   // The submitter hears what happened to their words, and where to follow the idea now.
   if (row.submitterId !== actor.employeeId)
     await notify(deps, { recipient: row.submitterId, type: "suggestion.merged", title: "Your suggestion was merged", body: `Folded into “${target.title}”, along with your votes.`, link: suggestionLink(targetId), subject: `suggestions/${targetId}`, actorId: actor.employeeId });
   return updated;
 }
 
+// The votes go with the suggestion; a suggestion MERGED INTO this one keeps its own life with the pointer
+// cut. Declared rather than swept by hand beforehand, so the whole teardown is one transaction - and
+// `merged_into_id` was missed entirely by the hand-written version, so purging a suggestion that others had
+// been folded into deleted its votes and then refused with a foreign-key 409.
+export const SUGGESTION_PURGE_CASCADE: PurgeCascade = {
+  remove: [{ table: schema.suggestionVotes, column: schema.suggestionVotes.suggestionId }],
+  detach: [{ table: schema.suggestions, column: schema.suggestions.mergedIntoId }],
+};
+
 export async function purgeSuggestion(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await deps.db.delete(schema.suggestionVotes).where(eq(schema.suggestionVotes.suggestionId, id));
-  await purgeRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id, ifMatch);
+  await purgeRow(deps, actor, schema.suggestions, "suggestion", "suggestions", id, ifMatch, undefined, SUGGESTION_PURGE_CASCADE);
 }

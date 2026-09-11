@@ -125,7 +125,43 @@ export async function notify(deps: Deps, input: NotifyInput): Promise<void> {
 // instead of the per-recipient read+read+insert that an announcement broadcast would otherwise do
 // O(employees) times in one request (a CPU/duration/subrequest DoS at scale). Best-effort: never throws - but
 // a lost code race is retried rather than swallowed, so "best-effort" never quietly means "not told".
-export async function notifyMany(deps: Deps, recipients: string[], input: Omit<NotifyInput, "recipient">): Promise<void> {
+/**
+ * `subjectFor` names a DIFFERENT resource per recipient, for the fan-outs where the thing being announced is
+ * one row EACH rather than one row everybody shares.
+ *
+ * A broadcast usually has a single subject (the post, the ticket), which `input.subject` covers. Applying a
+ * goal template does not: thirty people are told about thirty goals, and the subject is what the web draws
+ * the "New" marker from and what the activity trail resolves - so a shared subject would point all thirty at
+ * one goal. Without this, such a caller has to loop `notify()` per person, which is the per-employee cost this
+ * function exists to remove.
+ */
+export async function notifyMany(
+  deps: Deps,
+  recipients: string[],
+  input: Omit<NotifyInput, "recipient"> & {
+    subjectFor?: (recipientId: string) => string | null | undefined;
+    // PER-RECIPIENT text, for the same reason `subjectFor` exists. A fan-out whose wording differs per person -
+    // "your probation ends today" to the employee and "<name>'s probation ends today" to their manager, "happy
+    // <n>-year anniversary", "<n> optional holidays left to pick" - could not use this function at all, so the
+    // nightly cron looped `notify()` over the whole active roster instead. At roughly three D1 calls each (the
+    // recipient/actor read, the owned-code allocation, the insert) plus a fourth when push is configured, one
+    // subtask spent more than the invocation's whole subrequest budget on a real headcount - and because the
+    // twenty-two subtasks share one invocation, every subtask AFTER the one that hit the ceiling failed too.
+    // Two of them are date-triggered rather than state-triggered, so a night lost there is never retried.
+    //
+    // `title` stays required and is the fallback: it is the category wording, and a resolver that returns
+    // nothing for someone falls back to it rather than dropping them.
+    //
+    // NO BROWSER PUSH, and that is the trade this function is. `notify()` pushes to the recipient's registered
+    // devices, which costs a preferences read and an outbound vendor call PER PERSON - the very thing a
+    // fan-out cannot afford. So a broadcast has always landed in the bell and not on a lock screen (mentions
+    // and announcements have worked this way from the start), and the cron reminders moved onto this function
+    // now behave the same. If one of them ever needs push, the answer is to enqueue it as a job with a bounded
+    // batch per invocation (see `reminder.email` in src/cron.ts), not to loop `notify()`.
+    titleFor?: (recipientId: string) => string | null | undefined;
+    bodyFor?: (recipientId: string) => string | null | undefined;
+  },
+): Promise<void> {
   const uniq = [...new Set(recipients.filter(Boolean))];
   if (!uniq.length || !input.title) return;
   try {
@@ -175,10 +211,10 @@ export async function notifyMany(deps: Deps, recipients: string[], input: Omit<N
         code: codes.get(rid)!,
         recipientId: rid,
         type: input.type,
-        title: input.title,
-        body,
+        title: (input.titleFor ? input.titleFor(rid)?.trim() : null) || input.title,
+        body: (input.bodyFor ? input.bodyFor(rid)?.trim() || null : body),
         link,
-        subject,
+        subject: input.subjectFor ? input.subjectFor(rid)?.trim() || null : subject,
         priority,
         action,
         actorId,
@@ -206,17 +242,22 @@ export async function notifyAudience(
   await notifyMany(deps, recipients.filter((id) => id !== excludeId), input);
 }
 
+// The id inside a `<collection>/<id>` ref, or the string as given when it is already a bare id.
+const bareId = (ref: string) => (ref.includes("/") ? ref.slice(ref.lastIndexOf("/") + 1) : ref);
+
 // Resolve an audience to the (active) employee uuids it targets. Shared by notifyAudience and the automation
 // engine's emailAudience action, so both broadcast to the same set. `none` -> [].
 export async function audienceEmployeeIds(deps: Deps, audience: Audience): Promise<string[]> {
   if (audience.kind === "none") return [];
   if (audience.kind === "everyone") return activeEmployeeIds(deps);
-  if (audience.kind === "employees") return audience.employees;
-  // department: direct members, excluding deleted.
+  if (audience.kind === "employees") return audience.employees.map(bareId);
+  // department: direct members, excluding deleted. The audience is written by the workflow builder, which
+  // stores the department the way every other ref on the wire is written (`departments/<id>`) so the inbound
+  // edge decodes it; a bare id is accepted too, for a rule authored against the raw column.
   const rows = await deps.db
     .select({ uuid: schema.employees.uuid, deleteTime: schema.employees.deleteTime })
     .from(schema.employees)
-    .where(eq(schema.employees.departmentId, audience.department));
+    .where(eq(schema.employees.departmentId, bareId(audience.department)));
   return rows.filter((r) => !r.deleteTime).map((r) => r.uuid);
 }
 

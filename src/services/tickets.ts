@@ -23,6 +23,7 @@ import { shareTicketWith, grantTicketRead, revokeTicketRead, usersForEmployees }
 // The shape and the starter list live in domain/tickets.ts, so bootstrap can seed the settings row from the
 // same constant this falls back to. See the note there on why the two must not drift.
 import { DEFAULT_TICKET_CATEGORIES, MAX_TICKET_RECORDINGS, REPLAY_ID_RE, parseRecordings, type TicketCategoriesConfig } from "../domain/tickets";
+import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
 export type { TicketCategory, TicketCategoriesConfig } from "../domain/tickets";
 
 type TicketState = typeof schema.tickets.$inferSelect.state;
@@ -67,7 +68,12 @@ export async function listTickets(deps: Deps, scope: ListScope, maxPageSize: num
   // full items. One grouped read over just this page's tickets keeps it cheap.
   const ids = slice.map((r) => r.uuid);
   if (ids.length) {
-    const todoRows = await deps.db.select({ ticketId: schema.ticketTodos.ticketId, done: schema.ticketTodos.done }).from(schema.ticketTodos).where(inArray(schema.ticketTodos.ticketId, ids));
+    // `byIdChunks`, exactly as the identical card-checklist read does (services/cards.ts): a full page is 100
+    // ids and D1 binds at most 100 parameters per statement, so this had no headroom at all - the twin was
+    // chunked and this one was left, which is the shape of bug that only appears on a full page of real data.
+    const todoRows = await byIdChunks(ids, (group) =>
+      deps.db.select({ ticketId: schema.ticketTodos.ticketId, done: schema.ticketTodos.done }).from(schema.ticketTodos).where(inArray(schema.ticketTodos.ticketId, group)),
+    );
     const agg = new Map<string, { total: number; done: number }>();
     for (const r of todoRows) {
       const a = agg.get(r.ticketId) ?? { total: 0, done: 0 };
@@ -180,7 +186,9 @@ export async function createTicket(deps: Deps, actor: AppUser, input: TicketInpu
     .returning()))[0]!;
   // Optional checklist seeded at creation (custom items and/or a checklist the dialog expanded to texts).
   const items = (input.initial_todos ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
-  if (items.length) await deps.db.insert(schema.ticketTodos).values(items.map((text) => ({ ticketId: row.uuid, text })));
+  if (items.length) {
+    await runBatch(deps.db, insertBatches(items.map((text) => ({ ticketId: row.uuid, text })), (group) => deps.db.insert(schema.ticketTodos).values(group)));
+  }
   // Visibility: share read with the category's viewers (assignee + members) AND the servicing department's
   // managers. The requester is excluded - they already see their own ticket via the owner scope.
   const viewers = [...new Set([...(await categoryViewers(deps, categoryKey)), ...(await departmentManagers(deps, departmentId))])].filter((e) => e !== employeeId);
@@ -433,7 +441,10 @@ export async function addTodos(deps: Deps, actor: AppUser, id: string, texts?: s
   await getTicket(deps, actor, id); // gate + existence
   const items = (texts ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
   if (!items.length) throw invalidArgument("a checklist item is required");
-  await deps.db.insert(schema.ticketTodos).values(items.map((text) => ({ ticketId: id, text })));
+  // `insertBatches`, not one statement: a checklist row binds six parameters, so a single multi-row insert
+  // runs out of D1's hundred at seventeen items - and applying a predefined checklist is exactly the path
+  // that arrives with a long list.
+  await runBatch(deps.db, insertBatches(items.map((text) => ({ ticketId: id, text })), (group) => deps.db.insert(schema.ticketTodos).values(group)));
   await touchTicket(deps, id);
   await audit(deps, actor, "ticket.addTodos", "tickets", id, { fields: items.slice(0, 12) });
   return getTicketWithComments(deps, actor, id);

@@ -40,6 +40,11 @@ const mask = (v?: string) => {
   return v.length <= 4 ? "••••" : `•••• ${v.slice(-4)}`;
 };
 
+// The SAME masking, for a caller outside this module (the table builder renders a sensitive identity field
+// exactly as the profile does unless the reader holds `unmask`). Exported rather than reimplemented, so the
+// two surfaces can never mask differently.
+export const maskIdentityValue = (v?: string) => mask(v) ?? null;
+
 async function loadEmployee(deps: Deps, employeeId: string) {
   const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("employee not found");

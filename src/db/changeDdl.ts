@@ -102,6 +102,22 @@ const SIDE_TABLES: Record<string, { table: unknown; collection: string }> = {
 /** The side tables and the collection each one stamps. Exported for the drift test. */
 export const SIDE_STAMPS = Object.entries(SIDE_TABLES).map(([table, { collection }]) => [table, collection] as const);
 
+// `attachments` is a side table too, but a POLYMORPHIC one: every row names its own parent collection, so
+// which stamp a write moves is data, not a mapping. Hence its own triggers, reading the collection off the
+// row - `NEW` for a write, `OLD` for a delete.
+//
+// It has to stamp SOMETHING. Attachment presence is a field on the parent as the wire shows it (a referral's
+// `has_resume`, a reimbursement's receipt, an expense's invoice), and it is computed per request from this
+// table - so attaching a file changes what a list of the parent says while touching no parent row. With no
+// stamp, `GET /v1/changes` reported nothing and the global list validator (http/listEtag.ts) still matched:
+// the client asked, was told 304, and went on showing "Attach" over a resume it had just uploaded.
+const ATTACHMENT_TRIGGERS = (["INSERT", "UPDATE", "DELETE"] as const).map((kind) => {
+  const row = kind === "DELETE" ? "OLD" : "NEW";
+  return `CREATE TRIGGER "chg_${kind.slice(0, 1).toLowerCase()}_attachments" AFTER ${kind} ON "attachments" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES (${row}."collection", ${NOW_MS}) ON CONFLICT("collection") DO UPDATE SET "at" = ${NOW_MS};
+END`;
+});
+
 /** The full generated block, ready to append to the migration. Deterministic: same registry, same bytes. */
 export function renderChangeDdl(): string {
   const statements: string[] = [];
@@ -114,6 +130,7 @@ export function renderChangeDdl(): string {
     const side = SIDE_TABLES[table]!;
     statements.push(...triggersFor(side.collection, side.table, table));
   }
+  statements.push(...ATTACHMENT_TRIGGERS);
   // The header rides ON the first statement rather than standing as one of its own: every runner splits this
   // file on the breakpoint and hands each piece to D1, which rejects a piece holding only a comment.
   statements[0] = `${HEADER}\n${statements[0]}`;

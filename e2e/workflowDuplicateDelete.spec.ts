@@ -1,0 +1,72 @@
+import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
+
+// Two items on the rule card's "More" menu that `workflowEnableToggle.spec.ts` (Edit) and `workflowDryRun.
+// spec.ts` (Test) leave untouched: Duplicate opens the builder pre-filled as a brand NEW rule named
+// "<name> (copy)" rather than editing the original in place, and Delete removes a rule outright ("stops
+// firing and is removed" - unlike the toggle, which only pauses it). Neither has ever been pressed.
+test("a rule is duplicated into a real second rule, and both are deleted", async ({ as }) => {
+  test.setTimeout(120_000);
+  const page = await as("super");
+  const stamp = Date.now() % 100000;
+  const ruleName = `E2E dup rule ${stamp}`;
+  const copyName = `${ruleName} (copy)`;
+
+  const made = await page.request.post("/v1/automations", {
+    headers: SPA_HEADERS,
+    data: { name: ruleName, trigger_type: "employee.created", actions: [{ kind: "notify", recipient: { of: "subject" }, title: "hello" }] },
+  });
+  expect(made.status(), await made.text()).toBe(200);
+  const original = (await made.json()) as { path: string };
+
+  try {
+    await gotoRoute(page, "workflows", "Workflows");
+    const cardOf = (name: string) => page.locator("div").filter({ hasText: name }).filter({ has: page.getByRole("switch") }).last();
+    const original_ = cardOf(ruleName);
+    await expect(original_).toBeVisible({ timeout: 30_000 });
+    await original_.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Duplicate" }).click();
+
+    // A new, unsaved rule - not the original reopened. Pre-filled with its trigger and actions (the preview
+    // reads it back), and named for what it is.
+    const builder = page.getByRole("dialog");
+    await expect(builder.getByLabel("Name")).toHaveValue(copyName, { timeout: 30_000 });
+    await expect(builder.getByText(/^When /).first()).toBeVisible();
+    const create = builder.getByRole("button", { name: "Create rule" });
+    await expect(create).toBeEnabled();
+    await create.click();
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+
+    // A real, separate row: the original is untouched, and the copy is its own rule beside it.
+    await expect(cardOf(ruleName)).toBeVisible({ timeout: 30_000 });
+    const copyCard = cardOf(copyName);
+    await expect(copyCard).toBeVisible({ timeout: 30_000 });
+
+    // Delete the copy first, so what remains on screen for the original's own delete is unambiguous.
+    await copyCard.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    const confirmCopy = page.getByRole("dialog").filter({ hasText: "Delete this rule?" });
+    await expect(confirmCopy).toBeVisible({ timeout: 30_000 });
+    await expect(confirmCopy.getByText(new RegExp(copyName.replace(/[()]/g, "\\$&")))).toBeVisible();
+    await confirmCopy.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(toast(page, "Rule deleted")).toBeVisible({ timeout: 30_000 });
+    await expect(cardOf(copyName)).toHaveCount(0, { timeout: 30_000 });
+
+    // And the original, the same way.
+    await original_.getByRole("button", { name: "More" }).click();
+    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    const confirmOrig = page.getByRole("dialog").filter({ hasText: "Delete this rule?" });
+    await expect(confirmOrig).toBeVisible({ timeout: 30_000 });
+    await confirmOrig.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(cardOf(ruleName)).toHaveCount(0, { timeout: 30_000 });
+  } finally {
+    await purge(page, original.path);
+    await purgeNamed(page, copyName);
+  }
+});
+
+async function purgeNamed(page: import("@playwright/test").Page, name: string) {
+  const res = await page.request.get("/v1/automations?page_size=100");
+  if (!res.ok()) return;
+  const { results = [] } = (await res.json()) as { results?: { path: string; name?: string }[] };
+  for (const r of results.filter((x) => x.name === name)) await purge(page, r.path);
+}

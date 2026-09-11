@@ -10,6 +10,14 @@ breaking the rule fails `npm run verify` rather than waiting for review.
   middleware decides breadth. Gate: `test/singleSource.test.ts`.
 - **Hardcode who may do something.** Authority is policy data (roles, grants, access rules, the policy
   manifest), never a role string in code. Payroll approval being super-only is a grant `deny`, not an `if`.
+- **Read a gated query parameter with `c.req.query()`.** If the `authz` middleware decides anything from a
+  query parameter, the handler reads it through `src/http/query.ts`, which is the same WHATWG parser the gate
+  uses. The two parsers disagreed about a URL fragment: `?force=true` is what lifts a `DELETE` from `write` to
+  `admin`, the gate read it with `new URL()` (fragment stripped) and the collection factory read it with
+  Hono's parser (fragment scanned), so `DELETE /v1/<collection>/<id>#?force=true` was **gated as a soft delete
+  and executed as a hard purge**, cascading, by a caller holding only `write`. `package.json` pins
+  hono >= 4.13.5 so its parser agrees too, but a version range is a promise about a dependency and this is a
+  property of the code - keep both. Gate: `test/forcePurgeGate.test.ts`.
 - **Hand-roll a standard method.** A collection is a spec on `collectionRoutes()`; see
   `docs/03-add-a-resource.md`. Gate: `test/collectionLaneDrift.test.ts`.
 - **Add or change an endpoint without updating `openapi.yaml` first**, then `npm run api:types`. Gates:
@@ -33,6 +41,13 @@ breaking the rule fails `npm run verify` rather than waiting for review.
   money or not - so adding one means deciding, there, which it is.
 - **Keep more than one migration.** The project is greenfield: after a schema change, squash back to `0000`
   (remove the sql + meta snapshot, empty the journal, `npm run db:generate`).
+
+  **This rule expires at the first production deploy.** It works because no database has applied `0000` yet,
+  so replacing it is free. The moment production has run it, `d1_migrations` holds that migration's name and
+  Wrangler will not re-run it - so a squash is no longer a squash, it is a divergence: the new `0000` never
+  applies, every later schema change is missing from production, and nothing reports it because
+  `d1 migrations apply` correctly says there is nothing to do. On the release commit, freeze `0000` and start
+  appending `0001`, `0002`, ... Deleting this bullet is part of that commit.
 - **Put a comma inside an inline `{ }` description in `openapi.yaml`.** It crashes the linter; see
   `docs/01-aep-guidelines.md`.
 

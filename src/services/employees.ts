@@ -110,9 +110,15 @@ async function provisionAccount(deps: Deps, employeeId: string, workEmail: strin
     }
     return;
   }
+  // LOWERCASED, not the address as typed. This row IS the sign-in identity, and every lane that resolves a
+  // caller lowercases first (the Access JWT's `email`, the session cookie's, the dev bypass) - so a work email
+  // entered as `Aarav.Sharma@corp.com` was provisioned verbatim and then never found by the login that came
+  // looking for `aarav.sharma@corp.com`. Which minted a SECOND account, at the default `employee` role: the
+  // person signs in to no access, while the row HR gave their real role to sits unused beside it, holding the
+  // access rules and keys that were meant for them. Exactly what the comment above says this exists to avoid.
   await deps.db
     .insert(schema.users)
-    .values({ code: await allocFlatCode(deps, schema.users), email: workEmail, role: "employee", employeeId });
+    .values({ code: await allocFlatCode(deps, schema.users), email, role: "employee", employeeId });
 }
 
 export async function createEmployee(deps: Deps, actor: AppUser, input: EmployeeInput, id?: string) {
@@ -192,7 +198,8 @@ async function syncAccountEmail(deps: Deps, employeeId: string, workEmail: strin
     await deps.db.select({ uuid: schema.users.uuid }).from(schema.users).where(eq(schema.users.employeeId, employeeId)).limit(1)
   )[0];
   if (!linked) return provisionAccount(deps, employeeId, workEmail);
-  await deps.db.update(schema.users).set({ email: workEmail, updatedAt: new Date() }).where(eq(schema.users.uuid, linked.uuid));
+  // Lowercased, for the reason `provisionAccount` gives: this column is what a login is looked up by.
+  await deps.db.update(schema.users).set({ email: workEmail.toLowerCase(), updatedAt: new Date() }).where(eq(schema.users.uuid, linked.uuid));
 }
 
 // JSON Merge Patch: present = set, explicit null = clear, absent = unchanged.
@@ -219,7 +226,9 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
     const next = idFromPath(patch.department) ?? null;
     // Re-parent: recompute the employee's code + cascade every owned row (leave, payslips, comp, ...) + any
     // access-rule codes. moveEmployee sets departmentId itself, so it's not added to `set`.
-    if (next !== row.departmentId) { await moveEmployee(deps, id, row.code!, next); await audit(deps, actor, "employee.reparent", "employees", id, { from: row.departmentId, to: next }); }
+    // Refs, not the bare ids the column holds: an internal id must not reach the wire, and `departments/<id>`
+    // is a thing the reader's client resolves to the department's NAME.
+    if (next !== row.departmentId) { await moveEmployee(deps, id, row.code!, next); await audit(deps, actor, "employee.reparent", "employees", id, { from: row.departmentId ? `departments/${row.departmentId}` : null, to: next ? `departments/${next}` : null }); }
   }
   if (has("manager")) set.managerId = idFromPath(patch.manager) ?? null;
   if (has("start_date")) set.startDate = dateMs(patch.start_date);
@@ -234,7 +243,7 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   // account keeps the old address and the person's next login mints a SECOND one under the new email.
   if (set.workEmail && set.workEmail.toLowerCase() !== row.workEmail.toLowerCase()) await syncAccountEmail(deps, id, set.workEmail);
   const keys = Object.keys(set).filter((k) => k !== "updatedAt" && k !== "nationalIdEnc");
-  const diff = fieldDiff(row, updated!, keys);
+  const diff = fieldDiff(row, updated!, keys, "employees");
   const changedSensitive = "nationalIdEnc" in set;
   await audit(deps, actor, "employee.update", "employees", id, Object.keys(diff).length || changedSensitive ? { diff, ...(changedSensitive ? { fields: ["national_id"] } : {}) } : undefined);
   // A manager reassignment tells the employee who they now report to, and the new manager who joined their team.

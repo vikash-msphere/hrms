@@ -11,6 +11,7 @@ import { toTimeEntryResource } from "../http/serialize";
 const writeSchema = z.object({
   employee: z.string().nullable().optional(),
   project: z.string().nullable().optional(),
+  card: z.string().nullable().optional(),
   date: z.string().nullable().optional(),
   hours: z.number().optional(),
   description: z.string().nullable().optional(),

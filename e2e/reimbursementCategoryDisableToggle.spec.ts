@@ -14,20 +14,41 @@ test("disabling a reimbursement category drops it from the New claim form, and r
   expect(made.status(), await made.text()).toBe(200);
   const category = (await made.json()) as { path: string };
 
-  const categoryField = (dialog: import("@playwright/test").Locator) => dialog.locator("div").filter({ hasText: "Category" }).filter({ has: dialog.getByRole("combobox") }).last();
+  // `has:` matches its inner locator INSIDE each candidate div, so the inner one must be relative: rooted at
+  // `dialog` it would look for a dialog nested in the field and match nothing at all.
+  const categoryField = (dialog: import("@playwright/test").Locator) => dialog.locator("div").filter({ hasText: "Category" }).filter({ has: page.getByRole("combobox") }).last();
+
+  // Open New claim, check whether `name` is offered in the category picker, and close it again - three times
+  // over in this spec (present, dropped, restored), and each close matters just as much as each check: Escape
+  // (even the careful two-press version already here, animation-aware) has proven unreliable at actually
+  // closing a dialog under load elsewhere in this suite - a reload is unconditional, so it is what clears a
+  // stuck one.
+  async function checkPicker(expectOffered: boolean) {
+    await expect(async () => {
+      await gotoRoute(page, "reimbursements", "Reimbursements");
+      await page.getByRole("button", { name: "New claim" }).first().click();
+      const dialog = page.getByRole("dialog");
+      await categoryField(dialog).getByRole("combobox").click({ timeout: 10_000 });
+      const option = page.getByRole("option", { name, exact: true });
+      if (expectOffered) await expect(option).toBeVisible({ timeout: 15_000 });
+      else await expect(option).toHaveCount(0, { timeout: 15_000 });
+
+      await page.keyboard.press("Escape"); // closes the picker
+      // Wait for it to actually go: the picker is a dismissable layer with an exit ANIMATION, and while that
+      // is still playing it is the topmost layer - a second Escape inside that window is spent on it, and the
+      // dialog underneath never hears one.
+      await expect(option).toHaveCount(0);
+      await page.keyboard.press("Escape"); // and now the dialog
+      const discard = page.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
+      if (await discard.count()) await discard.first().click();
+      if (await page.getByRole("dialog").count()) await page.reload();
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
+    }).toPass({ timeout: 45_000 });
+  }
 
   try {
     // Present, before anything is touched.
-    await gotoRoute(page, "reimbursements", "Reimbursements");
-    await page.getByRole("button", { name: "New claim" }).click();
-    let dialog = page.getByRole("dialog");
-    await categoryField(dialog).getByRole("combobox").click();
-    await expect(page.getByRole("option", { name, exact: true })).toBeVisible({ timeout: 15_000 });
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    let discard = page.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
-    if (await discard.count()) await discard.first().click();
-    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
+    await checkPicker(true);
 
     await gotoRoute(page, "settings/reimbursements");
     await page.getByRole("tab", { name: "Categories" }).click();
@@ -38,16 +59,7 @@ test("disabling a reimbursement category drops it from the New claim form, and r
     await expect(toast(page, "Category disabled")).toBeVisible({ timeout: 30_000 });
 
     // Gone from the picker.
-    await gotoRoute(page, "reimbursements", "Reimbursements");
-    await page.getByRole("button", { name: "New claim" }).click();
-    dialog = page.getByRole("dialog");
-    await categoryField(dialog).getByRole("combobox").click();
-    await expect(page.getByRole("option", { name, exact: true })).toHaveCount(0, { timeout: 15_000 });
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    discard = page.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
-    if (await discard.count()) await discard.first().click();
-    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
+    await checkPicker(false);
 
     await gotoRoute(page, "settings/reimbursements");
     await page.getByRole("tab", { name: "Categories" }).click();
@@ -56,15 +68,7 @@ test("disabling a reimbursement category drops it from the New claim form, and r
     await expect(toast(page, "Category enabled")).toBeVisible({ timeout: 30_000 });
 
     // Back in the picker.
-    await gotoRoute(page, "reimbursements", "Reimbursements");
-    await page.getByRole("button", { name: "New claim" }).click();
-    dialog = page.getByRole("dialog");
-    await categoryField(dialog).getByRole("combobox").click();
-    await expect(page.getByRole("option", { name, exact: true })).toBeVisible({ timeout: 15_000 });
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    discard = page.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
-    if (await discard.count()) await discard.first().click();
+    await checkPicker(true);
   } finally {
     await purge(page, category.path);
   }

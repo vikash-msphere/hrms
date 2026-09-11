@@ -4,7 +4,7 @@ import { create, get, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
-import { idOf, formatMoney, formatDate, cn } from "@/lib/utils";
+import { idOf, formatMoney, formatDate, round2, cn } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import { navigate } from "@/router";
 import type { Expense, ExpenseBudget, ExpenseCategory, Department, Me } from "@/types";
@@ -463,12 +463,15 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
   const applyUplift = () => {
     const pct = Number(uplift);
     if (!Number.isFinite(pct)) return;
-    setRoll((ls) => (ls ?? []).map((l) => ({ ...l, amount: String(Math.round(l.source.amount * (1 + pct / 100) * 100) / 100) })));
+    // `round2` (lib/utils), never an inline `Math.round(n * 100) / 100`: the inline form multiplies in float, so
+    // a decimal half-case rounds down where the server rounds up, and the amount typed into this field is the
+    // one that gets saved. Same helper the CTC previews use, for the same reason.
+    setRoll((ls) => (ls ?? []).map((l) => ({ ...l, amount: String(round2(l.source.amount * (1 + pct / 100))) })));
   };
   // The other way to size next period's cap: what the scope actually spent this one. A cap set at 10 lakh that
   // consumed 3 is not a 5% uplift question, and the utilisation column next to it is the evidence.
   const matchSpend = () => {
-    setRoll((ls) => (ls ?? []).map((l) => (l.source.spent ? { ...l, amount: String(Math.round(l.source.spent * 100) / 100) } : l)));
+    setRoll((ls) => (ls ?? []).map((l) => (l.source.spent ? { ...l, amount: String(round2(l.source.spent)) } : l)));
   };
 
   const columns: Column<ExpenseBudget>[] = [
@@ -1291,12 +1294,15 @@ function BudgetDetail({
   onEdit: () => void;
   onDuplicate: () => void;
 }) {
-  const range = periodRange(b.period_type, b.period_key);
+  // Memoized so the query below can depend on the range itself rather than on two properties reached through
+  // an optional chain - an expression the linter cannot check, and one that silently stopped matching the
+  // body if the range ever grew a third field.
+  const range = useMemo(() => periodRange(b.period_type, b.period_key), [b.period_type, b.period_key]);
   const params = useMemo(() => ({
     ...(b.category ? { category: b.category } : {}),
     ...(b.department ? { department: b.department } : {}),
     ...(range ? { from: dayParam(range.start), to: dayParam(range.end) } : {}),
-  }), [b.category, b.department, range?.start, range?.end]);
+  }), [b.category, b.department, range]);
   const { rows: expenses, state, hasMore } = useCollection<Expense>("expenses", { params, enabled: canReadExpenses && !!range });
   const counted = expenses.filter((e) => ["SUBMITTED", "APPROVED", "PAID"].includes((e.state ?? "").toUpperCase()));
   const pct = Math.round((b.utilization ?? 0) * 100);

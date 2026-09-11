@@ -24,8 +24,23 @@ test("a letter type is written, previewed against an employee, and removed", asy
 
   // The new type is selected, and the editor is its own: label, category and the filename it downloads as.
   // The selection follows the CREATE, not the press - until the row comes back the editor is still showing
-  // whichever type was open before - so this waits rather than reads.
-  await expect(page.getByLabel("Label")).toHaveValue(label, { timeout: 30_000 });
+  // whichever type was open before - so this waits rather than reads. Retried, not just waited on: the page's
+  // own reconciliation (LettersTab.tsx, `setSelId` falling back to the list's first row whenever the selected
+  // id is not [yet] in the latest fetch it has seen) can lose a race against a slow initial load that resolves
+  // AFTER this create - landing a stale, pre-create snapshot that knocks the selection onto whatever else was
+  // first in the org's list at that moment. Re-clicking this type's own row in the rail recovers it.
+  // RELOADED before the row is looked for, not just clicked. The rail is rendered from the shared
+  // `letter-templates` snapshot, and the race described above can leave that snapshot pre-create - in which
+  // case the new type is not in the rail at ALL, so re-clicking it waits out the whole budget on an element
+  // that cannot arrive without a fresh read. A reload re-establishes the list and the selection together.
+  // `letterRequiredInput.spec.ts` reloads for the same reason.
+  await expect(async () => {
+    if ((await page.getByLabel("Label").inputValue().catch(() => "")).includes(label)) return;
+    await page.reload();
+    await expect(page.getByPlaceholder("New letter type…")).toBeVisible({ timeout: 15_000 });
+    await page.locator("#letter-type-list").getByText(label, { exact: true }).click({ timeout: 10_000 });
+    await expect(page.getByLabel("Label")).toHaveValue(label, { timeout: 10_000 });
+  }).toPass({ timeout: 90_000 });
   await page.getByLabel("Category").fill("E2E");
   await page.getByLabel("Download filename").fill("e2e-letter-{{employee.first_name}}");
 
@@ -51,6 +66,10 @@ test("a letter type is written, previewed against an employee, and removed", asy
 
   // The preview renders the draft as a real PDF, for a real employee - the only way to see the letter before
   // issuing one at somebody.
+  // Still THIS type, checked before anything is rendered off it: the editor's selection can be knocked onto
+  // another row by the reconciliation described above, and previewing then renders (or 404s against) a type
+  // belonging to some other spec, which is not this test's claim either way.
+  await expect(page.getByLabel("Label")).toHaveValue(label);
   await page.getByRole("tab", { name: "Preview" }).click();
   await page.getByLabel("Sample employee").click();
   await page.getByRole("option").first().click();

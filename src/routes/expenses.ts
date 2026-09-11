@@ -8,6 +8,7 @@ import {
   type ExpenseInput,
 } from "../services/expenses";
 import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { requireCappedBody } from "../services/documentsCommon";
 import { toExpenseResource } from "../http/serialize";
 
 const COL = "expenses";
@@ -86,7 +87,7 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
     // The invoice goes up as raw bytes, but the answer is the expense itself (now carrying its invoice flag).
     upload: {
       run: async (deps, user, id, _body, c) => {
-        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        const bytes = new Uint8Array(await requireCappedBody(c.req.raw));
         await putAttachment(deps, user, { collection: COL, objectId: id, slot: INVOICE, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
         return getExpense(deps, user, id);
       },

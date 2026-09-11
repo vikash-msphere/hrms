@@ -13,11 +13,16 @@ import { loadObjectRulesForRequest, loadObjectExceptionCodes, loadObjectExceptio
 import { SEARCHABLE_COLLECTIONS } from "../domain/searchIndex";
 import { DASHBOARD_SUMMARY_COLLECTIONS } from "../domain/dashboardSummary";
 import { ANALYTICS_COLLECTIONS } from "../domain/peopleAnalytics";
+import { TABLE_SOURCE_COLLECTIONS } from "../domain/tableFields";
 import { APPROVAL_SUMMARY_COLLECTIONS, TAX_VERIFICATION_QUEUE } from "../domain/approvalsSummary";
 import { ancestorsOf } from "../domain/codes";
 import { mergeGrants, rulesToGrant } from "../domain/compileGrants";
 import { EVERYONE_ROLE, isSuperGrant } from "../domain/grants";
 import { inScope } from "../domain/keyScope";
+// Which collections actually offer the `?force` hard purge. Written by the collection factory as each
+// collection is mounted, and every route module is imported at load (src/index.ts) - so the set is complete
+// before any request is served.
+import { hasForcePurge } from "../http/collectionRoute";
 import { accessAudit, mutationAudit } from "../domain/auditAccess";
 import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
 import { audit } from "../lib/audit";
@@ -29,6 +34,13 @@ import { isJsonBody } from "../http/jsonRequest";
 // code. This is the single place mass-assignment / self-escalation / cross-object refs are gated, so
 // services need no inline field guards. Body refs are already decoded to internal ids by the inbound
 // edge. Fail-closed on an unresolved reference; a missing/non-JSON/unparseable body adds no constraint.
+
+// The most records one bulk envelope (`{ items: [...] }`) may carry through the field/reference gate. It is a
+// CPU bound on what a single request can make this middleware decide, not a route limit - every bulk route
+// caps its own list far below (`ASSET_BATCH_MAX` is 100), and a body over this is denied outright rather than
+// gated in part. Raise it only alongside a route that genuinely needs a longer list.
+const BULK_ITEMS_MAX = 200;
+
 // Touched top-level field NAMES from a JSON write body (names only — never values, matching the audit policy).
 // Enriches the write-backstop's generic activity row so the feed can say WHAT changed ("updated · title, status")
 // instead of a bare path. The body is already parsed + cached by the handler (and bodyDecision), so this re-read
@@ -131,10 +143,18 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   // A BULK body (`{ items: [ …one record each… ] }`, as `assets:batchCreate` takes) is many records in one
   // request, so the same gates apply to each of them. Without this, wrapping a record in an envelope would be
   // a way to write a protected field or reference something unreadable - the gates would only ever look at the
-  // envelope. Records past a sane count are not gated one by one; the routes' own schemas cap the list far
-  // below this, so reaching it means the request is not one of them.
+  // envelope.
+  //
+  // The ceiling REFUSES rather than skips. It used to `slice(0, BULK_ITEMS_MAX)`, which walks the first N and
+  // lets everything after them through ungated - the one outcome this loop exists to prevent, reachable by
+  // sending N+1 records. It never fired (the widest route cap in the app is ASSET_BATCH_MAX = 100, and each
+  // route's own schema rejects a longer list before any handler sees it), so the fail-open direction was
+  // invisible and would have stayed invisible until some later collection was given a larger cap. A body over
+  // the ceiling is not a request any route accepts, so denying it costs nothing and cannot fail open; the
+  // number stays as the explicit bound on what one request may make this gate do.
   if (Array.isArray(body.items)) {
-    for (const item of body.items.slice(0, 200)) {
+    if (body.items.length > BULK_ITEMS_MAX) return { allow: false, reason: `bulk body carries more than ${BULK_ITEMS_MAX} items` };
+    for (const item of body.items) {
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
       const itemDenied = await gateRecord(item as Record<string, unknown>);
       if (itemDenied) return itemDenied;
@@ -230,7 +250,15 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       const url = new URL(c.req.url);
       pathname = url.pathname;
       // Per-request client metadata for the audit trail (this user object is request-scoped; audit() reads it).
-      user.reqMeta = { ip: c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? undefined, ua: c.req.header("user-agent") ?? undefined };
+      // `cf-connecting-ip` ONLY - the address Cloudflare itself observed, which a client cannot set (the edge
+      // overwrites any value it is handed). `x-forwarded-for` used to be the fallback and it is caller-supplied
+      // text: on this path it decides the IP written into the audit trail, so a caller could choose the address
+      // recorded against their own actions. Behind the edge that header never won anyway (cf-connecting-ip is
+      // always present), so the fallback bought nothing and only ever applied where the app is NOT behind
+      // Cloudflare - exactly the deployment where it is forgeable. No address is better than a chosen one; the
+      // column is already nullable for the callers that legitimately have none (cron, internal dispatch).
+      // Same rule the attendance clock's network fence follows (routes/attendance.ts).
+      user.reqMeta = { ip: c.req.header("cf-connecting-ip") ?? undefined, ua: c.req.header("user-agent") ?? undefined };
       // One trace for the whole request, so every audit entry it writes is recognisable as ONE act. Minted
       // here and not in audit(): the workflow engine reads `deps.trace` too (emitEvent treats a set trace as
       // "already inside an execution"), so an event this request emits, the automation it runs and the writes
@@ -242,6 +270,12 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       user.audited = false;
       const self = { employeeCode: user.employeeCode };
       const collection = pathname.replace(/^\/v1\//, "").split("/").filter(Boolean)[0] ?? "";
+      // `?force=true` is the hard purge, and it is what lifts a DELETE from `write` to `admin`. It only lifts
+      // it where the purge EXISTS: a collection whose delete is already permanent ignores the parameter
+      // outright (collectionRoute's DELETE handler), so escalating there would refuse a caller their own
+      // delete over a purge that is not on offer - which is how a `compensation` DELETE held at `write`
+      // answered 403 for `?force=true` and 204 without it.
+      const force = url.searchParams.get("force") === "true" && hasForcePurge(collection);
 
       // ---- API-key ceiling ---------------------------------------------------------------------------
       // A key's scope has ALREADY narrowed user.grant at auth time, which is what makes every grant-derived
@@ -256,7 +290,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       if (user.apiKey) {
         // Resolved off the raw pathname: the collection token and the level/verb do not depend on the
         // id -> code substitution that the coded path below performs.
-        const asked = resolveRequest(c.req.method, pathname, url.searchParams.get("force") === "true");
+        const asked = resolveRequest(c.req.method, pathname, force);
         if (!inScope(asked, user.apiKey.scope)) throw forbidden("outside api key scope");
       }
 
@@ -319,7 +353,6 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
           }
         : async (col: string, id: string) => (itemCode = await uuidToCode(deps, col, id));
       const coded = await buildCodedPath(pathname, resolveId);
-      const force = url.searchParams.get("force") === "true";
       const resolved = resolveRequest(c.req.method, coded, force);
 
       // Per-object exceptions: for an item request whose object code resolved, fetch the caller's per-object
@@ -440,6 +473,14 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // the roster it lists (`employees`) and every measure's own collection are each decided here, by the exact
     // list decision they would get on their own. A collection missing from the map costs the report a column.
     if (collection === "people-analytics") c.set("analyticsScopes", await scopesForCollections(c.get("deps"), user, ANALYTICS_COLLECTIONS));
+    // A custom grid mixes fields from many collections, so running one asks the same pair of questions of each
+    // of them - may this caller list it, and with what breadth. Decided here, once, for every collection a grid
+    // can touch; the runner only binds them. This is what makes a SHARED view safe: the recipient runs it under
+    // their own map, so they get the same grid with fewer columns and fewer rows, never the author's.
+    if (collection === "table-views") c.set("tableScopes", await scopesForCollections(c.get("deps"), user, TABLE_SOURCE_COLLECTIONS));
+    // The builder's field catalogue names collections rather than rows, so it needs only the boolean half of
+    // that decision - no scope, and no per-object exception read.
+    if (collection === "table-fields") c.set("listableCollections", listableCollectionsFor(user));
     // Approvals badge: the same per-queue pattern, decided with the `approve` verb. The prior-employer
     // verification queue has no table, so its own capability (`tax-verifications.read` - the gate its rows
     // endpoint gets) is decided here too and handed over as a boolean.

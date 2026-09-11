@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, Trash2, Pencil, MoreHorizontal, KeyRound } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { registerRoleLabels } from "@/lib/roles";
 import { usePermission } from "@/lib/perm";
 import type { User } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,6 +35,9 @@ const NO_CLONE = "__none__";
 // (protected core roles, the role you're using, and roles still held by a user cannot be deleted).
 export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement | null }) {
   const { rows: roles, reload } = useCollection<Role>("roles");
+  // The one page that always has every role's own label in hand - hand it to the shared lookup so a rule
+  // subject reads as "Finance Lead" rather than `finance_lead` wherever it is rendered next.
+  useEffect(() => registerRoleLabels(roles), [roles]);
   const { rows: users } = useCollection<User>("users");
   const canWrite = usePermission("roles.write");
   const canManagePerms = usePermission("access-rules.write");

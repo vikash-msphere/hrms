@@ -16,6 +16,7 @@ type Status = typeof schema.timeEntries.$inferSelect.status;
 export type TimeEntryInput = {
   employee?: string | null;
   project?: string | null;
+  card?: string | null; // the board task inside that project, when the work is tracked as one
   date?: string | null;
   hours?: number;
   description?: string | null;
@@ -28,6 +29,19 @@ async function assertActiveProject(deps: Deps, projectId: string) {
   const project = (await deps.db.select().from(schema.projects).where(eq(schema.projects.uuid, projectId)).limit(1))[0];
   if (!project || project.deleteTime) throw invalidArgument("project not found");
   if (project.status === "archived") throw failedPrecondition("can't log time against an archived project");
+}
+
+/**
+ * The board task an hour went into, if any.
+ *
+ * Deliberately NOT checked against the project: a card belongs to a board and a board is not tied to a
+ * project, so demanding they agree would invent a relationship the data model does not have and reject
+ * honest entries. What is checked is that the card exists and is live - a deleted task cannot have received
+ * work this morning.
+ */
+async function assertLiveCard(deps: Deps, cardId: string) {
+  const card = (await deps.db.select({ del: schema.cards.deleteTime }).from(schema.cards).where(eq(schema.cards.uuid, cardId)).limit(1))[0];
+  if (!card || card.del) throw invalidArgument("task not found");
 }
 
 export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, from?: string, to?: string, status?: string, showDeleted = false) {
@@ -43,7 +57,7 @@ export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize:
   // seeking on `createdAt`: two different orders, so the seek could land past rows that had never been returned
   // and they vanished from the listing (the same defect test/paginateOrder.test.ts pins for the tiebreaker).
   // The worked day is a PRESENTATION order, so it is applied to the page that came back, below.
-  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "time-entries" });
   return { ...page, items: page.items.sort((a, b) => +new Date(b.date) - +new Date(a.date) || a.uuid.localeCompare(b.uuid)) };
 }
 
@@ -54,6 +68,8 @@ export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEnt
   const projectId = idFromPath(input.project);
   if (!projectId) throw invalidArgument("project is required");
   await assertActiveProject(deps, projectId);
+  const cardId = idFromPath(input.card);
+  if (cardId) await assertLiveCard(deps, cardId);
   const ms = dayMs(input.date);
   if (Number.isNaN(ms)) throw invalidArgument("date is required");
   if (input.hours != null && (typeof input.hours !== "number" || input.hours < 0 || input.hours > 24)) throw invalidArgument("hours must be between 0 and 24");
@@ -63,6 +79,7 @@ export async function createTimeEntry(deps: Deps, actor: AppUser, input: TimeEnt
     ...(id ? { uuid: id } : {}),
     employeeId,
     projectId,
+    cardId: cardId ?? null,
     date: new Date(ms),
     hours: input.hours ?? 0,
     description: input.description?.trim() || null,
@@ -80,6 +97,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   const set: SetOf<typeof schema.timeEntries> = { updatedAt: new Date() };
   const has = (k: keyof TimeEntryInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("project")) { const p = idFromPath(patch.project); if (!p) throw invalidArgument("project is required"); await assertActiveProject(deps, p); set.projectId = p; }
+  if (has("card")) { const c = idFromPath(patch.card); if (c) await assertLiveCard(deps, c); set.cardId = c ?? null; }
   if (has("date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }
   if (has("hours")) { if (patch.hours == null || patch.hours < 0 || patch.hours > 24) throw invalidArgument("hours must be between 0 and 24"); set.hours = patch.hours; }
   if (has("description")) set.description = patch.description?.trim() || null;

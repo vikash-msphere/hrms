@@ -1,12 +1,13 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
-import { ClipboardCheck, ChevronRight, Check, SkipForward, UserPlus, MessageSquareQuote, CircleAlert, Hourglass, CheckCircle2, AlarmClock, ChevronsDownUp, ChevronsUpDown, BellRing, FileDown } from "lucide-react";
-import { get, invoke } from "@/api";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ClipboardCheck, ChevronRight, Check, SkipForward, UserPlus, MessageSquareQuote, CircleAlert, Hourglass, CheckCircle2, AlarmClock, ChevronsDownUp, ChevronsUpDown, BellRing, FileDown, Target } from "lucide-react";
+import { create, get, invoke } from "@/api";
 import { useRoute, setQueryParams } from "@/router";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { useHasPrintVersion } from "@/lib/letterheads";
-import { DEFAULT_PERFORMANCE, ratingLabel, type PerformanceFramework } from "@/lib/performance";
-import type { Department, Employee, Goal, Review, ReviewCycle, ReviewState, ReviewFeedback, Me, Card as KanbanCard } from "@/types";
+import { DEFAULT_PERFORMANCE, competenciesForCycle, competencyScore, ratingLabel, type PerformanceFramework } from "@/lib/performance";
+import type { Department, Employee, Review, ReviewCycle, ReviewState, ReviewFeedback, Me, Card as KanbanCard } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
@@ -23,6 +24,9 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Field, FieldRow } from "@/components/common/Field";
+import { WriteDialog } from "@/components/common/WriteDialog";
 import { useConfirm } from "@/components/common/confirm";
 import { PdfPreviewDialog, type PdfSource } from "@/components/common/PdfPreviewDialog";
 import { useToast } from "@/components/ui/use-toast";
@@ -38,7 +42,12 @@ const STAGES: { key: ReviewState; label: string }[] = [
   { key: "ACKNOWLEDGED", label: "Acknowledged" },
 ];
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
+
+// The cycle's goals as the review carries them (live before sharing, the frozen snapshot after) and the
+// manager's verdict on one. Both come off the review resource, so neither can disagree with the server's
+// attainment score or with the PDF.
+type CycleGoal = NonNullable<Review["goals"]>[number];
+type GoalVerdict = NonNullable<Review["goal_ratings"]>[string];
 
 // Compact stepper: done stages get a check, the current one is highlighted, the rest stay muted.
 function StageTrail({ state }: { state: ReviewState }) {
@@ -103,13 +112,16 @@ export default function Reviews({ me }: { me: Me }) {
     const m = new Map(employees.map((e) => [idOf(e.path), e]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) : undefined);
   }, [employees]);
-  const mine = (r: Review) => !!r.employee && idOf(r.employee) === me.employee_id;
+  // `useCallback` for both of these, because the sort below orders the whole page with them: a predicate
+  // rebuilt every render is a dependency that changes every render, and leaving it out of the array is how a
+  // sort keeps deciding "needs you" from the identity the page was first rendered with.
+  const mine = useCallback((r: Review) => !!r.employee && idOf(r.employee) === me.employee_id, [me.employee_id]);
 
   // A review the caller OWNS THE CURRENT STAGE OF reads as "needs you". Holding the verb is not the same
   // thing: a super admin (and anyone granted submitManager broadly) can act on every review in the org, and
   // keying off `can` alone put a "Needs you" badge on all of them. The manager stage belongs to the
   // reviewee's manager; everyone else with the verb is an unblocker, and gets Nudge/Skip instead.
-  const needsMe = (r: Review) => {
+  const needsMe = useCallback((r: Review) => {
     const can = r.access?.can ?? [];
     const managerOfReviewee = () => {
       const mgr = empOf(r.employee)?.manager;
@@ -120,7 +132,7 @@ export default function Reviews({ me }: { me: Me }) {
       (r.state === "MANAGER" && can.includes("submitManager") && managerOfReviewee()) ||
       (r.state === "SHARED" && mine(r) && can.includes("acknowledge"))
     );
-  };
+  }, [empOf, mine, me.employee_id]);
 
   // Reviews awaiting the caller's action first, then mine, then by cycle name.
   const sorted = useMemo(
@@ -131,7 +143,7 @@ export default function Reviews({ me }: { me: Me }) {
           Number(mine(b)) - Number(mine(a)) ||
           (cycleOf(b.cycle)?.name ?? "").localeCompare(cycleOf(a.cycle)?.name ?? ""),
       ),
-    [reviews, cycles, employees, me.employee_id],
+    [reviews, needsMe, mine, cycleOf],
   );
 
   const REVIEW_TOAST: Record<string, string> = {
@@ -199,8 +211,10 @@ export default function Reviews({ me }: { me: Me }) {
   const isFilter = (v?: string): v is Filter => v === "needs" || v === "open" || v === "done" || v === "overdue";
   const [filter, setFilter] = useState<Filter>(() => (isFilter(route.query.filter) ? route.query.filter : "all"));
   const [cycleFilter, setCycleFilter] = useState(() => route.query.cycle ?? "all");
-  const applyFilter = (f: Filter) => { setFilter(f); setQueryParams({ filter: f === "all" ? null : f }); };
-  const applyCycle = (id: string) => { setCycleFilter(id); setQueryParams({ cycle: id === "all" ? null : id }); };
+  // `useCallback` (with nothing to depend on - both setters and `setQueryParams` are stable) so the deep-link
+  // effect below can name them in its dependency array instead of holding the first render's copies.
+  const applyFilter = useCallback((f: Filter) => { setFilter(f); setQueryParams({ filter: f === "all" ? null : f }); }, []);
+  const applyCycle = useCallback((id: string) => { setCycleFilter(id); setQueryParams({ cycle: id === "all" ? null : id }); }, []);
   // The three buckets PARTITION the list (needs you / waiting on someone else / done) so the chip counts add
   // up to "All". An "in progress" bucket that also counted the needs-you rows made the numbers unreadable.
   // Every count is taken over the CYCLE-FILTERED set, the same rows the list renders - counting org-wide
@@ -247,7 +261,7 @@ export default function Reviews({ me }: { me: Me }) {
       if (!seen.has(id)) seen.set(id, cycleOf(r.cycle)?.name ?? "Cycle");
     }
     return [...seen].sort((a, b) => b[1].localeCompare(a[1]));
-  }, [reviews, cycles]);
+  }, [reviews, cycleOf]);
   const visible = sorted.filter(
     (r) =>
       inCycle(r) &&
@@ -257,6 +271,12 @@ export default function Reviews({ me }: { me: Me }) {
           : filter === "overdue" ? isOverdue(r)
           : waitingOnOthers(r))),
   );
+  // The deep-link effect below asks ONE question of this list - "is the review I was sent to on screen?" - at
+  // the moment a link is followed. Read through a ref, because the list itself is rebuilt on every render:
+  // depending on it would re-run the effect (and re-scroll the page) on every keystroke and refetch, and
+  // leaving it out of the array meant the question was answered against the first render's list.
+  const latestVisible = useRef(visible);
+  latestVisible.current = visible;
 
   const filterChip = (f: Filter, label: string) => (
     <button
@@ -292,7 +312,7 @@ export default function Reviews({ me }: { me: Me }) {
       const prior = (byEmp.get(idOf(r.employee)) ?? []).filter((x) => x.path !== r.path && x.start < start);
       return prior.sort((a, b) => b.start.localeCompare(a.start))[0]?.rating;
     };
-  }, [reviews, cycles]);
+  }, [reviews, cycleOf]);
 
   // Open/folded state lives up here so expand/collapse-all and ?review= deep links can drive it; a card
   // with no explicit entry falls back to its default (open when it needs the caller).
@@ -307,12 +327,12 @@ export default function Reviews({ me }: { me: Me }) {
   const setAllOpen = (open: boolean) => setOpenMap(Object.fromEntries(visible.map((r) => [r.path, open])));
 
   // ---- Evidence, read only once a review is actually open ---------------------------------------------------
-  // The delivered-work and goals panels live inside an expanded review. Reading two whole collections to fill
-  // panels nobody has opened is the page's largest cost by far, so both wait for the first expansion - which,
-  // on a page whose default is a folded list of headers, is often never.
+  // The delivered-work panel lives inside an expanded review. Reading a whole collection to fill a panel nobody
+  // has opened is expensive, so it waits for the first expansion - which, on a page whose default is a folded
+  // list of headers, is often never. The goals panel needs no read at all: the cycle's goals ride the review
+  // itself (`review.goals`), scored server-side, so the page never guesses which goals a cycle covered.
   const anyOpen = visible.some(isOpen);
   const { rows: cards } = useCollection<KanbanCard>("cards", { enabled: anyOpen });
-  const { rows: goals } = useCollection<Goal>("goals", { enabled: anyOpen });
   // Cards the reviewee delivered within the cycle's window — read-only evidence on the review (kanban -> perf).
   const deliveredFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): KanbanCard[] => {
     if (!empRef) return [];
@@ -325,22 +345,6 @@ export default function Reviews({ me }: { me: Me }) {
       return t >= start && t <= end;
     });
   }, [cards]);
-  // The reviewee's goals belonging to this cycle's window: due inside it, or completed inside it (perf -> perf).
-  const goalsFor = useMemo(() => (empRef?: string, cyc?: ReviewCycle): Goal[] => {
-    if (!empRef) return [];
-    const eid = idOf(empRef);
-    const start = cyc?.period_start ? new Date(cyc.period_start).getTime() : -Infinity;
-    const end = cyc?.period_end ? new Date(cyc.period_end).getTime() + 86_400_000 : Infinity;
-    const inWindow = (iso?: string | null) => {
-      if (!iso) return false;
-      const t = new Date(iso).getTime();
-      return t >= start && t <= end;
-    };
-    return goals.filter(
-      (g) => g.employee && idOf(g.employee) === eid && !g.delete_time &&
-        (inWindow(g.due_date) || (g.status === "completed" && inWindow(g.update_time))),
-    );
-  }, [goals]);
 
   // Deep link: #/reviews/<id> (notification clicks) opens that card and scrolls it into view.
   useEffect(() => {
@@ -350,10 +354,10 @@ export default function Reviews({ me }: { me: Me }) {
     // The filters persist in the URL, so a notification can deep-link a review the current filter hides -
     // the card would never render and the scroll would land nowhere. Being sent to a review outranks the
     // filter that was left behind.
-    if (!visible.some((r) => r.path === target.path)) { applyFilter("all"); applyCycle("all"); }
+    if (!latestVisible.current.some((r) => r.path === target.path)) { applyFilter("all"); applyCycle("all"); }
     setOpenMap((m) => (m[target.path] ? m : { ...m, [target.path]: true }));
     requestAnimationFrame(() => document.getElementById(`review-${route.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }));
-  }, [route.id, reviews]);
+  }, [route.id, reviews, applyFilter, applyCycle]);
 
   // When "All cycles" is showing and reviews span several, section the list by cycle (newest name first,
   // matching the menu); otherwise everything renders as one unlabelled group.
@@ -419,7 +423,7 @@ export default function Reviews({ me }: { me: Me }) {
                 subjectName={empName(f.reviewee)}
                 framework={framework}
                 onSubmit={(body) => feedbackAct(f, "submitFeedback", body)}
-                onDecline={() => feedbackAct(f, "decline")}
+                onDecline={(reason) => feedbackAct(f, "decline", reason ? { reason } : undefined)}
               />
               </AccessItem>
             ))}
@@ -497,7 +501,7 @@ export default function Reviews({ me }: { me: Me }) {
                 employee={empOf(r.employee)}
                 employeeName={empName(r.employee)}
                 deliveredCards={deliveredFor(r.employee, cycleOf(r.cycle))}
-                cycleGoals={goalsFor(r.employee, cycleOf(r.cycle))}
+                onGoalsChanged={reload}
                 empName={empName}
                 framework={framework}
                 employees={employees}
@@ -516,6 +520,8 @@ export default function Reviews({ me }: { me: Me }) {
                   if (ok) await act(r, "skipStage");
                 }}
                 onNominate={(employees) => act(r, "nominate", { employees })}
+                onSuggest={(employees) => act(r, "suggestFeedback", { employees })}
+                onAssignReviewer={(reviewer) => act(r, "assignReviewer", { reviewer })}
               />
               </AccessItem>
               </div>
@@ -530,7 +536,7 @@ export default function Reviews({ me }: { me: Me }) {
   );
 }
 
-function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prevRating, employee, employeeName, deliveredCards, cycleGoals, empName, framework, employees, departments, getSuggested, onSubmitSelf, onSubmitManager, onAcknowledge, onSkip, onNudge, onNominate }: {
+function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prevRating, employee, employeeName, deliveredCards, onGoalsChanged, empName, framework, employees, departments, getSuggested, onSubmitSelf, onSubmitManager, onAcknowledge, onSkip, onNudge, onNominate, onSuggest, onAssignReviewer }: {
   review: Review;
   cycle?: ReviewCycle;
   mine: boolean;
@@ -541,25 +547,49 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   employee?: Employee;
   employeeName: string;
   deliveredCards: KanbanCard[];
-  cycleGoals: Goal[];
+  onGoalsChanged: () => void;
   empName: (ref?: string) => string;
   framework: PerformanceFramework;
   employees: Employee[];
   departments: Department[];
   getSuggested: () => string[];
   onSubmitSelf: (selfComment: string, selfRatings?: Record<string, number>) => Promise<void>;
-  onSubmitManager: (body: { ratings: Record<string, number>; overall_rating?: number; manager_comment?: string }) => Promise<void>;
+  onSubmitManager: (body: { ratings: Record<string, number>; overall_rating?: number; manager_comment?: string; goal_ratings?: Record<string, GoalVerdict> }) => Promise<void>;
   onAcknowledge: (comment?: string) => Promise<void>;
   onSkip: () => Promise<void>;
   onNudge: () => Promise<void>;
   onNominate: (employees: string[]) => void;
+  /** The reviewee's own suggestion of who saw their work (the whole set at once). */
+  onSuggest: (employees: string[]) => void;
+  /** Name who writes this review, or "" to hand it back to the manager chain. */
+  onAssignReviewer: (reviewer: string) => void;
 }) {
   const can = review.access?.can ?? [];
   const confirm = useConfirm();
+  // What THIS cycle asks about: the org framework narrowed to the cycle's own selection. A form that offers
+  // five ratings where the cycle asks three collects two nobody wanted, and the server's competency score
+  // would not count them - so the narrowing happens once, here, and everything below reads `frameworkForCycle`.
+  const frameworkForCycle = useMemo<PerformanceFramework>(
+    () => ({ ...framework, competencies: competenciesForCycle(framework.competencies, cycle?.competency_keys) }),
+    [framework, cycle?.competency_keys],
+  );
   const [nominating, setNominating] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
+  const [reassigning, setReassigning] = useState(false);
+  // The review line being carried into a new goal, and the goal that comes out of it.
+  const verdictOf = (code: string) => (review.goal_ratings ?? {})[code];
+  const [carryGoal, setCarryGoal] = useState<CycleGoal | null>(null);
+  const [carryTitle, setCarryTitle] = useState("");
+  const [carryDesc, setCarryDesc] = useState("");
+  const [carryWeight, setCarryWeight] = useState("");
+  const [carryDue, setCarryDue] = useState("");
   // Open/folded state is owned by the page (expand-all + deep links); folded, the header line still says
   // who, which cycle, what stage, and the outcome once shared.
   const feedback = review.feedback ?? [];
+  // Two disjoint sets: names the reviewee put forward (nobody has been asked yet), and requests that were
+  // actually made. Mixing them reads as five pending requests when only two people were asked.
+  const suggestedPeers = feedback.filter((f) => f.state === "SUGGESTED" && f.author);
+  const askedFeedback = feedback.filter((f) => f.state !== "SUGGESTED");
 
   // Long-form review text survives navigating away: drafts persist per review until submitted. Held in the
   // shared draft store (lib/draftStore.ts), which namespaces them to the author and expires them - this is one
@@ -586,6 +616,17 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
     const d = Number(loadDraft("overall"));
     return Number.isFinite(d) && d > 0 ? d : undefined;
   });
+  // The manager's verdict per goal, keyed by goal code, drafted alongside the rest of the assessment.
+  const [goalRatings, setGoalRatings] = useState<Record<string, GoalVerdict>>(() => {
+    if (review.goal_ratings && Object.keys(review.goal_ratings).length) return review.goal_ratings;
+    try { return JSON.parse(loadDraft("goalRatings") || "{}"); } catch { return {}; }
+  });
+  const setGoalVerdict = (code: string, patch: GoalVerdict) =>
+    setGoalRatings((r) => {
+      const next = { ...r, [code]: { ...r[code], ...patch } };
+      saveDraft("goalRatings", JSON.stringify(next));
+      return next;
+    });
   const [mgrComment, setMgrComment] = useState(review.manager_comment || loadDraft("manager"));
   const [ackComment, setAckComment] = useState("");
   const [pdfSource, setPdfSource] = useState<PdfSource | null>(null);
@@ -597,6 +638,26 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
   const run = (key: Exclude<BusyKey, "">, fn: () => Promise<void>) => async () => {
     setBusy(key);
     try { await fn(); } finally { setBusy(""); }
+  };
+
+  // The cycle's goals, straight off the review - never re-derived here, so the panel, the attainment score and
+  // the exported PDF can never disagree about which goals this cycle covered.
+  const cycleGoals = review.goals ?? [];
+
+  // Move one goal's progress from inside the review (self stage). Status follows the number the same way the
+  // Goals page moves it, so truing a goal up here doesn't leave it "not started" at 40%.
+  const { toast } = useToast();
+  const updateGoalProgress = async (g: CycleGoal, progress: number) => {
+    const status = progress >= 100 && g.status !== "completed" ? "completed"
+      : progress > 0 && g.status === "not_started" ? "in_progress"
+      : undefined;
+    try {
+      await invoke(`goals/${idOf(g.path ?? "")}`, "updateProgress", undefined, { progress, ...(status ? { status } : {}) });
+      toast({ title: progress >= 100 ? "Goal marked complete" : `Progress set to ${progress}%`, variant: "success" });
+      onGoalsChanged();
+    } catch (e) {
+      toast({ title: "Couldn't update progress", description: (e as Error).message, variant: "destructive" });
+    }
   };
 
   // "Waiting on the manager" is only actionable if it names them, so a nudge has an obvious target.
@@ -629,12 +690,20 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
 
   // Sharing is a one-way door: it publishes the assessment to the employee and there is no path back to the
   // manager stage. So an empty form can't be submitted at all, and a partial one asks first.
-  const ratedCount = framework.competencies.filter((c) => ratings[c.key] != null).length;
+  const ratedCount = frameworkForCycle.competencies.filter((c) => ratings[c.key] != null).length;
   const managerEmpty = overall == null && ratedCount === 0 && !mgrComment.trim();
+  // The framework's weighted view of what has been rated SO FAR - the manager is choosing the overall while
+  // the form is still open, which is the one moment the number changes anything.
+  const liveCompetencyScore = competencyScore(frameworkForCycle.competencies, ratings);
+  // A goal nobody scored is the most conspicuous hole in a review that has a goals panel, so it is named in
+  // the same breath as a missing competency rather than shared silently.
+  const ratableGoals = cycleGoals.filter((g) => g.status !== "cancelled");
+  const goalRatedCount = ratableGoals.filter((g) => goalRatings[g.code]?.rating != null).length;
   const submitManagerReview = async () => {
     const missing = [
       overall == null ? "an overall rating" : "",
-      ratedCount < framework.competencies.length ? `${framework.competencies.length - ratedCount} of ${framework.competencies.length} competency ratings` : "",
+      ratedCount < frameworkForCycle.competencies.length ? `${frameworkForCycle.competencies.length - ratedCount} of ${frameworkForCycle.competencies.length} competency ratings` : "",
+      goalRatedCount < ratableGoals.length ? `${ratableGoals.length - goalRatedCount} of ${ratableGoals.length} goal ratings` : "",
       !mgrComment.trim() ? "written feedback" : "",
     ].filter(Boolean);
     if (missing.length) {
@@ -646,10 +715,20 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
       if (!ok) return;
     }
     await run("manager", async () => {
-      await onSubmitManager({ ratings, overall_rating: overall, manager_comment: mgrComment.trim() });
+      // Only verdicts that say something travel: an empty {rating, comment} pair is a form artefact.
+      const goal_ratings = Object.fromEntries(
+        Object.entries(goalRatings).filter(([, v]) => v?.rating != null || v?.comment?.trim()),
+      );
+      await onSubmitManager({
+        ratings,
+        overall_rating: overall,
+        manager_comment: mgrComment.trim(),
+        ...(Object.keys(goal_ratings).length ? { goal_ratings } : {}),
+      });
       clearDraftFor("manager");
       clearDraftFor("ratings");
       clearDraftFor("overall");
+      clearDraftFor("goalRatings");
     })();
   };
 
@@ -695,19 +774,68 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
 
       {open && (
       <div className="space-y-4 p-4">
-        {/* Goals in this cycle's period: read-only evidence from the reviewee's goals (due or completed inside it). */}
+        {/* Who writes this one. Offered before it is shared, where a transfer mid-cycle or a manager on long
+            leave otherwise left one fix: re-parent the employee, which changes approvals, scopes and the org
+            chart in order to solve a review. */}
+        {can.includes("assignReviewer") && review.state !== "SHARED" && review.state !== "ACKNOWLEDGED" && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-sm">
+            <span>
+              <span className="text-muted-foreground">Written by </span>
+              <span className="font-medium">{review.reviewer ? empName(review.reviewer) : "their manager"}</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <AccessAction verb="assignReviewer" can={can} label="Name the reviewer">
+                <Button variant="outline" size="sm" onClick={() => setReassigning(true)}>{review.reviewer ? "Change" : "Assign someone else"}</Button>
+              </AccessAction>
+              {review.reviewer && (
+                <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => onAssignReviewer("")}>Back to manager</Button>
+              )}
+            </span>
+          </div>
+        )}
+
+        {/* The goals this cycle set, with what they add up to. Live until the review is shared, the frozen
+            snapshot after - both come off the review, so this panel and the PDF always tell the same story. */}
         {cycleGoals.length > 0 && (
-          <Section label={`Goals this cycle (${cycleGoals.length})`}>
-            <ul className="space-y-1">
-              {cycleGoals.map((g) => (
-                <li key={g.path} className="flex items-center gap-2 text-sm">
-                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", g.status === "completed" ? "bg-emerald-500" : g.status === "cancelled" ? "bg-muted-foreground/40" : "bg-primary")} />
-                  <span className={cn("min-w-0 flex-1 truncate", g.status === "cancelled" && "text-muted-foreground line-through")}>{g.title}</span>
-                  {g.weight ? <span className="shrink-0 text-xs tabular-nums text-muted-foreground">wt {g.weight}</span> : null}
-                  <span className="w-9 shrink-0 text-right text-xs font-medium tabular-nums">{g.progress ?? 0}%</span>
-                </li>
+          <GoalsPanel
+            goals={cycleGoals}
+            attainment={review.goal_attainment}
+            frozen={!!review.goals_frozen}
+            verdicts={review.goal_ratings ?? {}}
+            framework={framework}
+            empName={empName}
+            // The self stage is where a goal list is worth truing up: the employee is about to be measured on
+            // these numbers, so they get to move them here rather than on another page.
+            editable={mine && review.state === "SELF" && !review.goals_frozen}
+            onProgress={updateGoalProgress}
+            onCarryToGoal={(g) => {
+              // Prefilled here rather than inside the dialog so the form owns its own state from the first
+              // render: the title carries over as-is, and the manager's verdict becomes the description,
+              // because that sentence is the reason this goal exists.
+              setCarryTitle(g.title);
+              setCarryDesc(verdictOf(g.code)?.comment ?? "");
+              setCarryWeight(g.weight ? String(g.weight) : "");
+              setCarryDue("");
+              setCarryGoal(g);
+            }}
+          />
+        )}
+
+        {/* How this person's attainment has moved across cycles. 68% reads differently after 40% than after
+            90%, and every review used to be read on its own. Present on the item read only. */}
+        {(review.attainment_trend?.length ?? 0) > 1 && (
+          <Section label="Attainment across cycles">
+            <span className="flex flex-wrap items-end gap-3">
+              {review.attainment_trend!.map((p) => (
+                <span key={p.cycle} className="flex flex-col items-center gap-1" title={`${p.name}: ${p.attainment}%${p.rating != null ? ` · rated ${p.rating}` : ""}`}>
+                  <span className="flex h-16 w-8 items-end">
+                    <span className="w-full rounded-t-sm bg-primary" style={{ height: `${Math.max(4, p.attainment)}%` }} />
+                  </span>
+                  <span className="text-[10px] tabular-nums text-muted-foreground">{p.attainment}%</span>
+                  <span className="max-w-[4.5rem] truncate text-[10px] text-muted-foreground">{p.name}</span>
+                </span>
               ))}
-            </ul>
+            </span>
           </Section>
         )}
 
@@ -737,7 +865,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                 write-up arrives structured the same way the manager will rate it. */}
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs text-muted-foreground">Add a section:</span>
-              {framework.competencies.filter((c) => !selfText.includes(`${c.label}:`)).map((c) => (
+              {frameworkForCycle.competencies.filter((c) => !selfText.includes(`${c.label}:`)).map((c) => (
                 <button
                   key={c.key}
                   type="button"
@@ -758,9 +886,14 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
             <div className="space-y-2 rounded-lg border p-3">
               <p className="text-sm font-medium">Rate yourself <span className="font-normal text-muted-foreground">(optional)</span></p>
               <ScaleLegend scale={framework.scale} />
-              {framework.competencies.map((comp) => (
-                <div key={comp.key} className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-sm">{comp.label}</span>
+              {frameworkForCycle.competencies.map((comp) => (
+                <div key={comp.key} className="flex flex-wrap items-start justify-between gap-2">
+                  <span className="min-w-0 text-sm">
+                    {comp.label}
+                    {/* The org's own definition, where it has written one: the difference between rating a
+                        word and rating the behaviour behind it. */}
+                    {comp.description && <span className="mt-0.5 block text-xs font-normal text-muted-foreground">{comp.description}</span>}
+                  </span>
                   <ScalePicker scale={framework.scale} value={selfRatings[comp.key]} onPick={(v) => setSelfRatings((r) => { const next = { ...r, [comp.key]: v }; saveDraft("selfRatings", JSON.stringify(next)); return next; })} />
                 </div>
               ))}
@@ -791,17 +924,67 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           <div className="space-y-3 rounded-lg border p-3">
             <p className="text-sm font-medium">Manager review</p>
             <ScaleLegend scale={framework.scale} />
-            {framework.competencies.map((comp) => (
-              <div key={comp.key} className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-sm">
+            {/* Goals first: what was delivered, rated one goal at a time, before the competency scores that
+                are supposed to follow from it. The weighted attainment above the grid is the number these
+                ratings are answering. */}
+            {ratableGoals.length > 0 && (
+              <div className="space-y-2 rounded-md bg-muted/30 p-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">Goals</p>
+                  {review.goal_attainment && (
+                    <span className="text-xs tabular-nums text-muted-foreground">
+                      <span className="font-semibold text-foreground">{review.goal_attainment.score}%</span> attained
+                      {!review.goal_attainment.weighted && " (unweighted)"}
+                    </span>
+                  )}
+                </div>
+                {ratableGoals.map((g) => (
+                  <div key={g.code} className="space-y-1.5 border-t pt-2 first:border-t-0 first:pt-0">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 text-sm">
+                        {g.title}
+                        <span className="ml-1.5 text-xs tabular-nums text-muted-foreground">
+                          {g.weight ? `wt ${g.weight} · ` : ""}{g.progress}%
+                        </span>
+                      </span>
+                      <ScalePicker scale={framework.scale} value={goalRatings[g.code]?.rating} onPick={(v) => setGoalVerdict(g.code, { rating: v })} />
+                    </div>
+                    <Textarea
+                      rows={1}
+                      value={goalRatings[g.code]?.comment ?? ""}
+                      onChange={(e) => setGoalVerdict(g.code, { comment: e.target.value })}
+                      placeholder={`Note on “${g.title}” (optional)`}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            {frameworkForCycle.competencies.map((comp) => (
+              <div key={comp.key} className="flex flex-wrap items-start justify-between gap-2">
+                <span className="min-w-0 text-sm">
                   {comp.label}
+                  {/* Weight where the framework sets one: a 4 on a competency worth three times another is
+                      not the same 4, and the rater should know that before they pick. */}
+                  {comp.weight ? <span className="ml-1.5 text-xs tabular-nums text-muted-foreground">wt {comp.weight}</span> : null}
                   {review.self_ratings?.[comp.key] != null && <span className="ml-1.5 text-xs text-muted-foreground">self: {review.self_ratings[comp.key]}</span>}
+                  {comp.description && <span className="mt-0.5 block text-xs font-normal text-muted-foreground">{comp.description}</span>}
                 </span>
                 <ScalePicker scale={framework.scale} value={ratings[comp.key]} onPick={(v) => setRatings((r) => { const next = { ...r, [comp.key]: v }; saveDraft("ratings", JSON.stringify(next)); return next; })} />
               </div>
             ))}
             <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
-              <span className="text-sm font-medium">Overall</span>
+              <span className="text-sm font-medium">
+                Overall
+                {/* What the competency ratings add up to, live, beside the box where the manager records
+                    their own judgement. The two disagreeing is the useful part - it is what a calibration
+                    meeting has to talk about - so it is shown before the choice, not after it. */}
+                {liveCompetencyScore && (
+                  <span className="ml-2 text-xs font-normal tabular-nums text-muted-foreground">
+                    competencies average <span className="font-semibold text-foreground">{liveCompetencyScore.score}</span>
+                    {liveCompetencyScore.weighted ? " (weighted)" : ""}
+                  </span>
+                )}
+              </span>
               <ScalePicker scale={framework.scale} value={overall} onPick={(v) => { setOverall(v); saveDraft("overall", String(v)); }} />
             </div>
             <Textarea rows={3} value={mgrComment} onChange={(e) => { setMgrComment(e.target.value); saveDraft("manager", e.target.value); }} placeholder="Overall feedback for the employee." />
@@ -827,21 +1010,38 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
 
         {/* 360 peer feedback. Managers/HR (can nominate) see authors + progress and can request more; the
             employee sees only the anonymized submitted entries (server-gated, present once shared). */}
-        {(can.includes("nominate") || feedback.length > 0) && (
+        {(can.includes("nominate") || can.includes("suggestFeedback") || feedback.length > 0) && (
           <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="flex items-center gap-1.5 text-sm font-medium"><MessageSquareQuote className="h-4 w-4 text-muted-foreground" /> Peer feedback</p>
-              {can.includes("nominate") && (
-                <AccessAction verb="nominate" can={can} label="Request 360 feedback">
-                  <Button variant="outline" size="sm" onClick={() => setNominating(true)}><UserPlus className="h-3.5 w-3.5" /> Request feedback</Button>
-                </AccessAction>
-              )}
+              <span className="flex items-center gap-1.5">
+                {/* The reviewee's own list. Nomination is the manager's decision, but who saw the work is
+                    known to the person who did it - a manager two projects away is guessing at a list. */}
+                {mine && can.includes("suggestFeedback") && review.state !== "SHARED" && review.state !== "ACKNOWLEDGED" && (
+                  <AccessAction verb="suggestFeedback" can={can} label="Suggest who saw your work">
+                    <Button variant="outline" size="sm" onClick={() => setSuggesting(true)}><UserPlus className="h-3.5 w-3.5" /> Suggest peers</Button>
+                  </AccessAction>
+                )}
+                {can.includes("nominate") && (
+                  <AccessAction verb="nominate" can={can} label="Request 360 feedback">
+                    <Button variant="outline" size="sm" onClick={() => setNominating(true)}><UserPlus className="h-3.5 w-3.5" /> Request feedback</Button>
+                  </AccessAction>
+                )}
+              </span>
             </div>
-            {feedback.length === 0 ? (
+            {/* Suggestions are not feedback: nobody has been asked anything yet, so they read as a list of
+                names above the answers rather than as pending requests among them. */}
+            {suggestedPeers.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {mine ? "You suggested" : "The reviewee suggested"}: {suggestedPeers.map((f) => empName(f.author)).join(", ")}
+                {can.includes("nominate") ? " - request feedback to actually ask them." : "."}
+              </p>
+            )}
+            {askedFeedback.length === 0 ? (
               <p className="text-sm text-muted-foreground">No peer feedback {can.includes("nominate") ? "requested yet." : "yet."}</p>
             ) : (
               <div className="space-y-2">
-                {feedback.map((f, i) => (
+                {askedFeedback.map((f, i) => (
                   <div key={f.id ?? i} className="rounded-md bg-background px-3 py-2 text-sm">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium">{f.author ? empName(f.author) : "Peer"}</span>
@@ -851,6 +1051,11 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
                       </span>
                     </div>
                     {f.comment && <p className="mt-1 whitespace-pre-wrap text-foreground/90">{f.comment}</p>}
+                    {/* Why somebody said no, where they said. It tells the manager to nominate somebody else
+                        rather than leaving them to guess whether it was a bad match or a busy week. */}
+                    {f.state === "DECLINED" && f.decline_reason && (
+                      <p className="mt-1 text-xs text-muted-foreground">Declined: {f.decline_reason}</p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -861,7 +1066,7 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
         {/* Shared / acknowledged: manager assessment is visible; the finished review can leave as a PDF. */}
         {(review.state === "SHARED" || review.state === "ACKNOWLEDGED") && (
           <>
-            <ManagerResult review={review} framework={framework} />
+            <ManagerResult review={review} framework={frameworkForCycle} />
             {can.includes("pdf") && (
               <AccessAction verb="pdf" can={can} label="Export review PDF">
                 <Button
@@ -917,13 +1122,206 @@ function ReviewCard({ review, cycle, mine, needsAction, open, onOpenChange, prev
           confirmLabel="Send requests"
           employees={employees}
           departments={departments}
-          suggested={getSuggested()}
-          exclude={[review.employee ?? "", ...feedback.map((f) => f.author ?? "")].filter(Boolean)}
+          // The reviewee's own suggestions lead the picker: they are the people who actually saw the work,
+          // and asking one of them upgrades that suggestion in place rather than asking them twice.
+          suggested={[...suggestedPeers.map((f) => f.author!), ...getSuggested()]}
+          exclude={[review.employee ?? "", ...askedFeedback.map((f) => f.author ?? "")].filter(Boolean)}
           onClose={() => setNominating(false)}
           onConfirm={(refs) => { onNominate(refs); setNominating(false); }}
         />
       )}
+      {/* A goal out of a review line. Prefilled from what the review already says - the goal's own title and
+          the manager's verdict on it - because the point is not to retype the conversation that just
+          happened. It files a NEW goal against the same person; the review's own line is untouched, since a
+          shared review is a record of a moment. */}
+      {carryGoal && (
+        <WriteDialog
+          open
+          onClose={() => setCarryGoal(null)}
+          title="Carry this into a new goal"
+          description={`Files a new goal for ${mine ? "you" : employeeName}. Pick the cycle later on the Goals page - this leaves it unattached.`}
+          collection="goals"
+          guardLabel="goal"
+          form={{ carryTitle, carryDesc, carryWeight, carryDue }}
+          submitLabel="Create goal"
+          canSubmit={!!carryTitle.trim()}
+          whyNot="Give the goal a title."
+          submitAccess={(b) => <AccessAction collection="goals" create label="Create a goal">{b}</AccessAction>}
+          onSubmit={async () => {
+            await create("goals", {
+              employee: review.employee ?? "",
+              title: carryTitle.trim(),
+              description: carryDesc.trim() || null,
+              ...(carryWeight ? { weight: Number(carryWeight) } : {}),
+              ...(carryDue ? { due_date: carryDue } : {}),
+            });
+            setCarryGoal(null);
+            onGoalsChanged();
+          }}
+        >
+          <Field label="Title"><Input value={carryTitle} onChange={(e) => setCarryTitle(e.target.value)} autoFocus /></Field>
+          <Field label="Description" info="Prefilled with the manager's note on this goal, where there was one.">
+            <Textarea rows={3} value={carryDesc} onChange={(e) => setCarryDesc(e.target.value)} />
+          </Field>
+          <FieldRow>
+            <Field label="Weight" info="Relative importance against this person's other goals. The attainment score is weighted by it.">
+              <Input type="number" min="0" value={carryWeight} onChange={(e) => setCarryWeight(e.target.value)} />
+            </Field>
+            <Field label="Due date"><Input type="date" value={carryDue} onChange={(e) => setCarryDue(e.target.value)} /></Field>
+          </FieldRow>
+        </WriteDialog>
+      )}
+      {/* One name, so the picker confirms on the first pick rather than collecting a set. */}
+      {reassigning && (
+        <EmployeePicker
+          title={`Who writes ${employeeName}'s review?`}
+          confirmLabel="Assign reviewer"
+          employees={employees}
+          departments={departments}
+          exclude={[review.employee ?? ""].filter(Boolean)}
+          onClose={() => setReassigning(false)}
+          onConfirm={(refs) => { if (refs[0]) onAssignReviewer(`employees/${idOf(refs[0])}`); setReassigning(false); }}
+        />
+      )}
+      {/* The reviewee's own list, sent as a whole set: it is a list, not an append log, so re-opening it and
+          removing a name withdraws that suggestion. */}
+      {suggesting && (
+        <EmployeePicker
+          title="Who saw your work this cycle?"
+          confirmLabel="Save suggestions"
+          employees={employees}
+          departments={departments}
+          suggested={getSuggested()}
+          initial={suggestedPeers.map((f) => f.author!)}
+          exclude={[review.employee ?? "", ...askedFeedback.map((f) => f.author ?? "")].filter(Boolean)}
+          onClose={() => setSuggesting(false)}
+          onConfirm={(refs) => { onSuggest(refs); setSuggesting(false); }}
+        />
+      )}
     </Card>
+  );
+}
+
+/**
+ * The cycle's goals on a review: what was asked for, how far it got, and what it adds up to.
+ *
+ * The header carries the weighted attainment the server computed from exactly these rows - the one number a
+ * goals panel owes a review, and the number the PDF and the calibration grid also print. `frozen` says the
+ * rows are the snapshot taken when the review was shared, which is why last year's review still reads the way
+ * it did the day it was signed.
+ *
+ * During the self stage the owner can move a goal's progress here (an unmeasured, open one): the numbers are
+ * about to be scored, and making someone leave the review to true them up is how they end up scored wrong.
+ */
+function GoalsPanel({ goals, attainment, frozen, verdicts, framework, editable, empName, onProgress, onCarryToGoal }: {
+  goals: CycleGoal[];
+  attainment?: Review["goal_attainment"];
+  frozen: boolean;
+  verdicts: Record<string, GoalVerdict>;
+  framework: PerformanceFramework;
+  editable: boolean;
+  /** For naming whose goal a contributed line belongs to. */
+  empName: (ref?: string) => string;
+  onProgress: (goal: CycleGoal, progress: number) => Promise<void>;
+  /** Open a new goal prefilled from this line (title + the manager's verdict). Absent where the caller may not create goals. */
+  onCarryToGoal?: (goal: CycleGoal) => void;
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm font-medium">
+          Goals this cycle <span className="tabular-nums text-muted-foreground">({goals.length})</span>
+          {frozen && <span className="ml-1.5 text-xs font-normal text-muted-foreground">as shared</span>}
+        </p>
+        {attainment && (
+          <span className="text-sm tabular-nums">
+            <span className="font-semibold">{attainment.score}%</span>{" "}
+            <span className="text-muted-foreground">
+              attained{attainment.weighted ? ` · weighted (${attainment.weight_total})` : " · unweighted"}
+            </span>
+          </span>
+        )}
+      </div>
+      <ul className="space-y-2">
+        {goals.map((g) => (
+          <li key={g.code} className="space-y-1">
+            <div className="flex items-center gap-2 text-sm">
+              <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", g.status === "completed" ? "bg-emerald-500" : g.status === "cancelled" ? "bg-muted-foreground/40" : "bg-primary")} />
+              <span className={cn("min-w-0 flex-1 truncate", g.status === "cancelled" && "text-muted-foreground line-through")}>{g.title}</span>
+              {/* A goal nobody agreed is still scored - it is what the person worked on - but the review says
+                  so on its face rather than presenting it as an objective both sides signed up to. */}
+              {/* A share of somebody else's goal: the weight is already scaled, but whose work it was still
+                  belongs on the line. */}
+              {g.contribution && (
+                <span className="shrink-0 text-xs text-muted-foreground" title={`${g.contribution.share}% share of ${empName(g.contribution.owner)}'s goal`}>
+                  {g.contribution.share}% share
+                </span>
+              )}
+              {g.stage && (
+                <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400" title="This goal was never agreed by a manager">
+                  {g.stage === "PROPOSED" ? "not agreed" : "draft"}
+                </span>
+              )}
+              {!!g.weight && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">wt {g.weight}</span>}
+              {verdicts[g.code]?.rating != null && (
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground" title={ratingLabel(framework.scale, verdicts[g.code]!.rating!)}>
+                  rated {verdicts[g.code]!.rating}
+                </span>
+              )}
+              <span className="w-9 shrink-0 text-right text-xs font-medium tabular-nums">{g.progress}%</span>
+              {/* The development conversation used to die in `goal_ratings`: a manager writes "keep pushing on
+                  this next quarter" and then somebody retypes it as a goal, or nobody does. One press carries
+                  the line and the verdict into next cycle's goal. */}
+              {onCarryToGoal && (
+                <AccessAction collection="goals" create label="Make this next cycle's goal">
+                  <button
+                    type="button"
+                    onClick={() => onCarryToGoal(g)}
+                    className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+                    title="Carry this into a new goal"
+                    aria-label={`Carry “${g.title}” into a new goal`}
+                  >
+                    <Target className="h-3.5 w-3.5" />
+                  </button>
+                </AccessAction>
+              )}
+            </div>
+            {verdicts[g.code]?.comment && <p className="pl-3.5 text-sm text-foreground/90">{verdicts[g.code]!.comment}</p>}
+            {/* A measured goal's progress is its measure; offering a slider would promise a write the server
+                recomputes away. Cancelled and completed goals are settled. */}
+            {editable && !g.measured && g.status !== "cancelled" && g.status !== "completed" && g.path && (
+              <GoalProgressRow goal={g} onProgress={onProgress} />
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// The self-stage progress control for one goal: drag, then save. Explicit rather than save-on-release, so a
+// scrub past 100 doesn't complete a goal by accident.
+function GoalProgressRow({ goal, onProgress }: { goal: CycleGoal; onProgress: (goal: CycleGoal, progress: number) => Promise<void> }) {
+  const [value, setValue] = useState(goal.progress);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setValue(goal.progress), [goal.path, goal.progress]);
+  const dirty = value !== goal.progress;
+  return (
+    <div className="flex items-center gap-2 pl-3.5">
+      <input
+        type="range" min={0} max={100} step={5} value={value}
+        onChange={(e) => setValue(Number(e.target.value))}
+        aria-label={`Progress on ${goal.title}`}
+        className="h-1.5 w-full cursor-pointer accent-primary"
+      />
+      <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{value}%</span>
+      <Button
+        size="sm" variant="outline" className="shrink-0" disabled={!dirty} loading={saving}
+        onClick={async () => { setSaving(true); try { await onProgress(goal, value); } finally { setSaving(false); } }}
+      >
+        Save
+      </Button>
+    </div>
   );
 }
 
@@ -933,10 +1331,14 @@ function FeedbackRequestCard({ request, subjectName, framework, onSubmit, onDecl
   subjectName: string;
   framework: PerformanceFramework;
   onSubmit: (body: { comment: string; overall_rating?: number }) => Promise<void>;
-  onDecline: () => Promise<void>;
+  onDecline: (reason?: string) => Promise<void>;
 }) {
   const [comment, setComment] = useState("");
   const [overall, setOverall] = useState<number | undefined>(undefined);
+  // Declining opens one line rather than firing immediately: "I have not worked with them this cycle" tells
+  // the manager to nominate somebody else, where a bare decline leaves them guessing.
+  const [declining, setDeclining] = useState(false);
+  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState<"" | "submit" | "decline">("");
   const run = (key: "submit" | "decline", fn: () => Promise<void>) => async () => {
     setBusy(key);
@@ -955,9 +1357,24 @@ function FeedbackRequestCard({ request, subjectName, framework, onSubmit, onDecl
           <Button size="sm" loading={busy === "submit"} onClick={run("submit", () => onSubmit({ comment: comment.trim(), overall_rating: overall }))} disabled={!comment.trim() && overall == null}>Submit feedback</Button>
         </AccessAction>
         <AccessAction verb="decline" can={request.access?.can} label="Decline feedback request">
-          <Button variant="ghost" size="sm" className="text-muted-foreground" loading={busy === "decline"} onClick={run("decline", onDecline)}>Decline</Button>
+          <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => setDeclining((d) => !d)}>Decline</Button>
         </AccessAction>
       </div>
+      {declining && (
+        <div className="space-y-2 rounded-md border border-dashed p-2.5">
+          <Input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            maxLength={500}
+            placeholder="Why? (optional) e.g. we haven't worked together this cycle"
+            aria-label="Reason for declining"
+          />
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" loading={busy === "decline"} onClick={run("decline", () => onDecline(reason.trim() || undefined))}>Decline the request</Button>
+            <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { setDeclining(false); setReason(""); }}>Keep it</Button>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -974,6 +1391,7 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 // Read-only manager assessment: per-competency ratings, overall, and the comment.
 function ManagerResult({ review, framework }: { review: Review; framework: PerformanceFramework }) {
   const ratings = review.ratings ?? {};
+  const ratedGoals = (review.goals ?? []).filter((g) => review.goal_ratings?.[g.code]?.rating != null || review.goal_ratings?.[g.code]?.comment);
   return (
     <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
       <div className="flex items-center justify-between">
@@ -988,9 +1406,15 @@ function ManagerResult({ review, framework }: { review: Review; framework: Perfo
           const mgr = ratings[comp.key];
           const gap = self != null && mgr != null && Math.abs(self - mgr) >= 2;
           return (
-            <div key={comp.key} className="flex items-center justify-between gap-2 text-sm">
-              <span className="text-muted-foreground">{comp.label}</span>
-              <span className="flex items-center gap-2 tabular-nums">
+            <div key={comp.key} className="flex items-start justify-between gap-2 text-sm">
+              <span className="min-w-0 text-muted-foreground">
+                {comp.label}
+                {comp.weight ? <span className="ml-1.5 text-xs tabular-nums">wt {comp.weight}</span> : null}
+                {/* The definition travels with the score: this panel is read months later, by people who
+                    were not in the conversation. */}
+                {comp.description && <span className="mt-0.5 block text-xs">{comp.description}</span>}
+              </span>
+              <span className="flex shrink-0 items-center gap-2 tabular-nums">
                 {/* Self vs manager: a wide gap is the thing worth talking about, so it gets the accent. */}
                 {self != null && <span className={cn("text-xs", gap ? "font-medium text-warning" : "text-muted-foreground")}>self: {self}</span>}
                 <span>{mgr != null ? `${mgr} · ${ratingLabel(framework.scale, mgr)}` : "-"}</span>
@@ -998,7 +1422,36 @@ function ManagerResult({ review, framework }: { review: Review; framework: Perfo
             </div>
           );
         })}
+        {/* Server-computed, from the same framework the PDF uses - so the page, the export and the
+            calibration grid never quote three different numbers for one review. */}
+        {review.competency_score && (
+          <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-sm">
+            <span className="font-medium">
+              Competency score
+              {!review.competency_score.weighted && <span className="ml-1.5 text-xs font-normal text-muted-foreground">(unweighted mean)</span>}
+            </span>
+            <span className="font-semibold tabular-nums">{review.competency_score.score}</span>
+          </div>
+        )}
       </div>
+      {/* The per-goal verdicts, where the manager left any. The goals themselves are listed by GoalsPanel
+          above; this is the assessment of them, so it sits with the rest of the manager's. */}
+      {ratedGoals.length > 0 && (
+        <div className="space-y-1 border-t pt-2">
+          {ratedGoals.map((g) => {
+            const v = review.goal_ratings?.[g.code];
+            return (
+              <div key={g.code} className="text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-muted-foreground">{g.title}</span>
+                  {v?.rating != null && <span className="shrink-0 tabular-nums">{v.rating} · {ratingLabel(framework.scale, v.rating)}</span>}
+                </div>
+                {v?.comment && <p className="text-foreground/90">{v.comment}</p>}
+              </div>
+            );
+          })}
+        </div>
+      )}
       {review.manager_comment && <Section label="Feedback">{review.manager_comment}</Section>}
     </div>
   );

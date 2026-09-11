@@ -88,6 +88,63 @@ function declaredVerbs(): { collection: string; verb: string; file: string }[] {
   return out;
 }
 
+// One level down again, and the last of the three: `verbs: {}` is only what a route file declares BY HAND.
+// The factory ALSO mounts the shared lifecycle members off the table's own columns - `:enable`/`:disable`
+// wherever it has `disabled`, `:lock`/`:unlock` wherever it has `locked` (http/lifecycleVerb.ts) - so those
+// paths appear in no route file and no `verbs` block, and nothing was checking them. Every one of them is a
+// POST Prism has to find: "Disable" in the expense-category row menu was mounted, wired to a table that has
+// the column, offered in the UI, and answered 405 through the proxy, so the menu item did nothing at all.
+const schemaSrcRaw = import.meta.glob("../src/db/schema.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const serviceSrc = import.meta.glob("../src/services/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+
+/** Every column name each `schema.<table>` declares. Index names in a trailing `(t) => ({...})` come along
+ *  harmlessly - only `disabled` and `locked` are ever asked for. */
+function columnsByTable(): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const block of Object.values(schemaSrcRaw)[0]!.split("\nexport const ")) {
+    const name = block.match(/^(\w+) = sqliteTable\(/)?.[1];
+    if (!name) continue;
+    out.set(name, new Set([...block.matchAll(/\n {2}(\w+):/g)].map((m) => m[1]!)));
+  }
+  return out;
+}
+
+/** Which table each collection's CrudSpec is built on, read off the spec objects in src/services. */
+function tableByCollection(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const src of Object.values(serviceSrc)) {
+    for (const m of src.matchAll(/table:\s*schema\.(\w+),[\s\S]{0,400}?collection:\s*"([a-z-]+)"/g)) out.set(m[2]!, m[1]!);
+    for (const m of src.matchAll(/collection:\s*"([a-z-]+)",[\s\S]{0,400}?table:\s*schema\.(\w+)/g)) if (!out.has(m[1]!)) out.set(m[1]!, m[2]!);
+  }
+  return out;
+}
+
+describe("a collection whose table carries a lifecycle column specifies those verbs", () => {
+  const columns = columnsByTable();
+  const tables = tableByCollection();
+  const itemPathOf = (collection: string) => specPaths.find((p) => new RegExp(`^/v1/${collection}/\\{[a-z_]+\\}$`).test(p));
+
+  it("found the collection -> table map (sanity: the spec shape still parses)", () => {
+    expect(tables.size).toBeGreaterThan(40);
+    expect(columns.get("expenseCategories")?.has("disabled")).toBe(true);
+  });
+
+  it("specifies :enable/:disable and :lock/:unlock wherever the factory mounts them", () => {
+    const missing: string[] = [];
+    for (const [collection, table] of tables) {
+      const item = itemPathOf(collection);
+      if (!item) continue; // not a routed collection (or specified under another shape)
+      const cols = columns.get(table);
+      if (!cols) continue;
+      for (const [column, verbs] of [["disabled", ["enable", "disable"]], ["locked", ["lock", "unlock"]]] as const) {
+        if (!cols.has(column)) continue;
+        for (const verb of verbs) if (!specPaths.includes(`${item}:${verb}`)) missing.push(`${item}:${verb}`);
+      }
+    }
+    expect(missing, "mounted from the table's own columns but unspecified - Prism answers 405 and the row menu does nothing").toEqual([]);
+  });
+});
+
 describe("every custom method a route mounts is in the contract", () => {
   const verbs = declaredVerbs();
 

@@ -18,7 +18,11 @@ test("a rule with a notifyAudience department action reaches that department's m
   const { results = [] } = (await employees.json()) as { results?: { work_email?: string; department?: string }[] };
   const emp = results.find((e) => e.work_email === ROLES.employee);
   if (!emp?.department) throw new Error("e2e: the employee fixture has no department to broadcast into");
-  const departmentId = emp.department.split("/")[1]!;
+  // The builder names departments, it does not ask for their ids - so the fixture's department is resolved
+  // to the name the picker will list it under.
+  const dept = await page.request.get(`/v1/${emp.department}`);
+  expect(dept.status(), await dept.text()).toBe(200);
+  const departmentName = ((await dept.json()) as { display_name: string }).display_name;
 
   await gotoRoute(page, "workflows", "Workflows");
   await sweepRules(page);
@@ -44,9 +48,9 @@ test("a rule with a notifyAudience department action reaches that department's m
 
   await thenDo.getByRole("combobox").first().click();
   await page.getByRole("option", { name: "A department", exact: true }).click();
-  await thenDo.getByPlaceholder("department id").fill(departmentId);
-  // Title/Body carry no placeholder or label - the plain <input> after the department field is Title.
-  await thenDo.getByRole("textbox").nth(1).fill(title);
+  await thenDo.getByRole("combobox", { name: "Department" }).click();
+  await page.getByRole("option", { name: departmentName, exact: true }).click();
+  await thenDo.getByPlaceholder("Notification title").fill(title);
 
   await expect(form.getByText(/^When /).first()).toBeVisible({ timeout: 30_000 });
   const [saved] = await Promise.all([

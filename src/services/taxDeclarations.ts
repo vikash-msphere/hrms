@@ -34,7 +34,7 @@ export async function listTaxDeclarations(deps: Deps, scope: ListScope, maxPageS
   // Paged on `createdAt` (the cursor's key). Grouping by tax SECTION is how the page is read, not how it is
   // paged: sorting the whole set by section and then seeking on `createdAt` were two different orders, and a
   // declaration could disappear between pages because of it.
-  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "tax-declarations" });
   return {
     ...page,
     items: page.items.sort((a, b) => (a.section ?? "").localeCompare(b.section ?? "") || +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid)),
@@ -94,7 +94,7 @@ export async function verifyTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   const updated = (await deps.db.update(schema.taxDeclarations)
     .set({ status: "VERIFIED", verifiedAmount: verifiedAmount ?? row.declaredAmount, decidedBy: actor.uuid, updatedAt: new Date() })
     .where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "tax-declaration.verify", "tax-declarations", id, stateMeta(row.status, "VERIFIED", { employee: `employees/`, diff: { status: { from: row.status, to: "VERIFIED" }, verifiedAmount: { from: row.verifiedAmount, to: updated.verifiedAmount } } }), updated);
+  await audit(deps, actor, "tax-declaration.verify", "tax-declarations", id, stateMeta(row.status, "VERIFIED", { employee: `employees/${row.employeeId}`, diff: { status: { from: row.status, to: "VERIFIED" }, verifiedAmount: { from: row.verifiedAmount, to: updated.verifiedAmount } } }), updated);
   // Notify only on an actual status change so a re-verify (amount correction) doesn't re-spam the employee.
   if (row.status !== "VERIFIED")
     await notify(deps, { recipient: row.employeeId, type: "tax.verified", title: "Tax declaration verified", body: "Your investment/tax declaration was verified.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
@@ -104,7 +104,7 @@ export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   const row = (await deps.db.select().from(schema.taxDeclarations).where(eq(schema.taxDeclarations.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("declaration not found");
   const updated = (await deps.db.update(schema.taxDeclarations).set({ status: "REJECTED", verifiedAmount: null, decidedBy: actor.uuid, updatedAt: new Date() }).where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id, stateMeta(row.status, "REJECTED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
   if (row.status !== "REJECTED")
     await notify(deps, { recipient: row.employeeId, type: "tax.rejected", title: "Tax declaration rejected", body: "Your investment/tax declaration was rejected - please review and resubmit.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
   return updated;

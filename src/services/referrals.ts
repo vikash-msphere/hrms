@@ -14,7 +14,9 @@ import { invalidArgument, notFound, failedPrecondition, aborted, oneOf } from ".
 import { keysetPage } from "./keysetPage";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { getSettingValue } from "./settings";
+import { orgToday } from "./orgDay";
 import { DEFAULT_REFERRALS_CONFIG, milestoneReached, resolveBonusAmount, type ReferralsConfig } from "../domain/referrals";
+import { systemActor } from "../lib/systemActor";
 
 export type ReferralInput = {
   referrer?: string | null;
@@ -32,8 +34,11 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const STATUSES = ["submitted", "screening", "interviewing", "hired", "joined", "rejected", "withdrawn"] as const;
 type Status = (typeof STATUSES)[number];
 const etagOf = (ms: number) => `"${ms}"`;
-// A stand-in actor for cron-issued awards (recordBonus/audit only read `email`); HR awards pass the real actor.
-const SYSTEM_ACTOR = { email: "system@referrals" } as unknown as AppUser;
+// The actor for cron-issued awards; HR awards pass the real actor. `systemActor()` (lib/systemActor.ts) rather
+// than a locally cast `{ email: "…" } as unknown as AppUser`: that cast asserted "nothing down this call tree
+// reads any other field" from a file that cannot see the call tree, and left `actor_role` null on every row
+// the milestone sweep wrote. Same identity the automation engine and internal dispatch act as.
+const SYSTEM_ACTOR = systemActor();
 
 const cfgOf = (deps: Deps) => getSettingValue<ReferralsConfig>(deps, "referrals", DEFAULT_REFERRALS_CONFIG);
 
@@ -126,7 +131,7 @@ async function awardOne(deps: Deps, actor: AppUser, row: typeof schema.referrals
   // a duplicate bonus paid out.
   const claimed = await deps.db
     .update(schema.referrals)
-    .set({ bonusStatus: "eligible", bonusAmount: amount, bonusEligibleDate: new Date(), updatedAt: new Date() })
+    .set({ bonusStatus: "eligible", bonusAmount: amount, bonusEligibleDate: deps.clock.now(), updatedAt: new Date() })
     .where(and(eq(schema.referrals.uuid, row.uuid), eq(schema.referrals.bonusStatus, "pending")))
     .returning();
   if (!claimed.length) return (await deps.db.select().from(schema.referrals).where(eq(schema.referrals.uuid, row.uuid)).limit(1))[0]!;
@@ -135,7 +140,9 @@ async function awardOne(deps: Deps, actor: AppUser, row: typeof schema.referrals
     amount,
     kind: "Referral Bonus",
     reason: `Referral: ${row.candidateName}`,
-    award_date: new Date().toISOString().slice(0, 10),
+    // The injected clock, in the org's timezone: this books a bonus that payroll picks up by pay period, and
+    // the bare `new Date()` here also meant the one date on the row ignored a time-travelled clock entirely.
+    award_date: await orgToday(deps),
   });
   const [updated] = await deps.db
     .update(schema.referrals)

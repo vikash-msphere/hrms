@@ -8,6 +8,29 @@ import { AppError, aborted, errorChainText, isCodeCollision } from "../lib/error
 // them back reveals nothing. The submitted VALUES are a different matter (a salary, a PAN) and never appear
 // here: only the path and Zod's own reason. With this the client can put the message on the field it belongs
 // to instead of showing one sentence above a twelve-field form and leaving the reader to hunt.
+// Zod's own message for a few issue kinds EMBEDS THE VALUE the caller sent - `invalid_enum_value` renders as
+// "Invalid enum value. Expected 'a' | 'b', received 'x'", and `invalid_literal` and `unrecognized_keys` do the
+// same with the key name. That is the one thing this function promises not to return, and on this app the
+// values reaching a validator are salaries, PANs and bank accounts. So the message is taken from the ISSUE
+// CODE, not from Zod, wherever Zod's would carry the input; the rest (a length rule, a regex, a required
+// field) say nothing about the value and travel as written.
+function safeMessage(issue: ZodError["issues"][number]): string {
+  switch (issue.code) {
+    case "invalid_enum_value":
+      // The permitted set is the published schema, so naming it is free - and it is the half the client needs.
+      return `must be one of: ${(issue as { options?: readonly unknown[] }).options?.join(", ") ?? "the permitted values"}`;
+    case "invalid_literal":
+      return "has a fixed permitted value";
+    case "unrecognized_keys":
+      return "contains a field this endpoint does not accept";
+    case "invalid_union":
+      // A union's message is a nest of sub-issues, each of which may carry its own received value.
+      return "does not match any accepted shape";
+    default:
+      return issue.message;
+  }
+}
+
 function zodFields(err: ZodError): { field: string; message: string }[] {
   const seen = new Set<string>();
   const out: { field: string; message: string }[] = [];
@@ -17,7 +40,7 @@ function zodFields(err: ZodError): { field: string; message: string }[] {
     const field = path.join(".");
     if (!field || seen.has(field)) continue;
     seen.add(field);
-    out.push({ field, message: issue.message });
+    out.push({ field, message: safeMessage(issue) });
     if (out.length === 12) break; // a body this wrong is a bug, not a form somebody is filling in
   }
   return out;

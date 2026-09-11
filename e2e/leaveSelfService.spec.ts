@@ -47,7 +47,12 @@ test("an employee moves a filed request, and the new form arrives pre-filled", a
     expect(filed.ok(), await filed.text()).toBe(true);
     const on = ((await filed.json()) as { start_date: string }).start_date;
     const [year, , day] = on.split("-");
-    const dated = `${Number(day)}, ${year}`;
+    // Day, the SPECIFIC month, then year: dates render day-first ("18 Jan 2027" - the format is pinned in
+    // web/src/lib/utils.ts so the browser and the server print the same one), so there is no comma to match.
+    // The month is spelled out rather than wildcarded - day-of-month + year alone still collides across the
+    // far-future days this suite hands out (several land on the same day-of-month in the same year).
+    const month = new Date(`${on}T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" });
+    const dated = new RegExp(`${Number(day)}\\s+${month}\\s+${year}`);
 
     await gotoRoute(requester, "leave-requests", "Leaves");
     await requester.getByRole("tab", { name: /^Requests/ }).click();
@@ -134,13 +139,17 @@ test("the leave page shows a balance, and the request form prices the days again
 
   // What the request costs and what it leaves - said before it is filed, not after it is approved.
   await expect(form.getByText(/day|days/).first()).toBeVisible();
-  // Nothing is filed: this half of the spec is about what the form TELLS you before you commit.
-  await employee.keyboard.press("Escape");
-  const discard = employee.getByRole("dialog");
-  if (await discard.getByRole("button", { name: /Discard|Leave/ }).count()) {
-    await discard.getByRole("button", { name: /Discard|Leave/ }).click();
-  }
-  await expect(employee.getByRole("dialog")).toHaveCount(0);
+  // Nothing is filed: this half of the spec is about what the form TELLS you before you commit. Escape (with
+  // the draft guard's own Discard answered too) has proven unreliable at actually closing a dialog under load
+  // elsewhere in this suite - a reload is unconditional, so it is what clears a stuck one here too.
+  await expect(async () => {
+    if (!(await employee.getByRole("dialog").count())) return;
+    await employee.keyboard.press("Escape");
+    const discard = employee.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
+    if (await discard.count()) await discard.first().click();
+    if (await employee.getByRole("dialog").count()) await employee.reload();
+    await expect(employee.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
 });
 
 /** Cancel the pending requests earlier runs of THIS spec left behind. */

@@ -251,12 +251,6 @@ export function splitCtc(
   return { basePay, specialAllowance: round2((lo + hi) / 2) };
 }
 
-// Whole calendar months from `fromMs` to `toMs` (0 if to <= from). Used to size backdated-increment arrears.
-export function wholeMonthsBetween(fromMs: number, toMs: number): number {
-  const a = new Date(fromMs), b = new Date(toMs);
-  return Math.max(0, (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth()));
-}
-
 export type RunState = "DRAFT" | "REVIEW" | "APPROVED" | "PUBLISHED";
 
 const TRANSITIONS: Record<RunState, RunState[]> = {

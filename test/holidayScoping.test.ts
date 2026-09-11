@@ -127,6 +127,16 @@ describe("holiday feed", () => {
     expect((await call(`/calendar/holidays/${await deps.idCodec.encode("employees", empId)}`)).status).toBe(404);
   });
 
+  // Offboarding is the only thing that revokes this URL. The token is unguessable but permanent, and it sits
+  // in whatever calendar client the employee pasted it into - there is no session to expire and no cookie to
+  // clear. Checking `delete_time` alone left a leaver subscribed to the org's calendar indefinitely.
+  it("404s once the employee is terminated", async () => {
+    await setting("holidays", { feed_enabled: true });
+    expect((await call(`/calendar/holidays/${await feedToken()}`)).status).toBe(200);
+    await deps.db.update(schema.employees).set({ status: "terminated" }).where(eq(schema.employees.uuid, empId));
+    expect((await call(`/calendar/holidays/${await feedToken()}`)).status).toBe(404);
+  });
+
   it("serves this employee's days off only: their location, and the optional ones they picked", async () => {
     await setting("holidays", { feed_enabled: true });
     const year = new Date().getUTCFullYear();

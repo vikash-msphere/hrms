@@ -10,6 +10,7 @@ import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { useKudosLevels, useKudosCategories } from "@/lib/kudosLevels";
 import { cn, colorFromString, formatDate, idOf, relativeFuture } from "@/lib/utils";
+import { todayStr, thisMonthStr } from "@/lib/orgDay";
 import type { Announcement, Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Chart, ChartCard } from "@/components/common/Chart";
@@ -25,6 +26,7 @@ import { PostComposer, type Kind } from "@/components/common/PostComposer";
 import { FEED_WIDTH, kudosTier } from "@/lib/boardCard";
 import { boardTime, byBoardOrder } from "@/lib/boardOrder";
 import { kudosCardArtUrl } from "@/lib/kudosArt";
+import { readLocalJson, writeLocalJson } from "@/lib/localPref";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { useMentions } from "@/components/common/MentionPicker";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
@@ -41,7 +43,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { useToast } from "@/components/ui/use-toast";
 import { EmojiPicker } from "@/components/common/EmojiPicker";
 
-const thisMonth = () => new Date().toISOString().slice(0, 7);
+const thisMonth = () => thisMonthStr();
 const monthName = () => new Date().toLocaleString(undefined, { month: "long" });
 
 // How many posts the board reads at a time. The feed grows by another page each time the reader reaches its
@@ -413,12 +415,10 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
   // What the reader last narrowed the board to. Read once, at mount, so a chip clicked here is not fighting a
   // write from the previous page.
   const [saved] = useState((): SavedBoardFilter => {
-    try {
-      const raw = JSON.parse(localStorage.getItem(FILTER_LS_KEY) ?? "{}") as SavedBoardFilter;
-      // Anything but a kind this build still knows is dropped, or a stale entry would land the reader on a chip
-      // that isn't there and a feed that looks broken.
-      return { kind: raw.kind && raw.kind in KIND_LABELS ? raw.kind : undefined, author: raw.author };
-    } catch { return {}; }
+    const raw = readLocalJson<SavedBoardFilter>(FILTER_LS_KEY, {});
+    // Anything but a kind this build still knows is dropped, or a stale entry would land the reader on a chip
+    // that isn't there and a feed that looks broken.
+    return { kind: raw.kind && raw.kind in KIND_LABELS ? raw.kind : undefined, author: raw.author };
   });
   // Feed filter: by kind, plus "Unread" (receipt-backed only - posts without read tracking never count) and
   // "Drafts" (only ever non-empty for someone who can post).
@@ -434,8 +434,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     const keep: SavedBoardFilter = {};
     if (filter !== "all" && filter !== "unread" && filter !== "drafts") keep.kind = filter;
     if (authorFilter) keep.author = authorFilter;
-    if (keep.kind || keep.author) localStorage.setItem(FILTER_LS_KEY, JSON.stringify(keep));
-    else localStorage.removeItem(FILTER_LS_KEY);
+    writeLocalJson(FILTER_LS_KEY, keep.kind || keep.author ? keep : null);
   }, [filter, authorFilter]);
   // The search text and the author filter are applied FIRST, and the chips count what they left - a chip
   // promising six polls that the search has already excluded sends the reader to an empty list.
@@ -601,7 +600,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     return {
       total: kudos.length,
       people: topSlices(recent, (a) => empName(a.recipient), (a) => a.points || 1, 8),
-      months: monthlyTotals(kudos.map((a) => ({ date: (a.create_time ?? "").slice(0, 10), value: 1 })), 12, new Date().toISOString().slice(0, 10)),
+      months: monthlyTotals(kudos.map((a) => ({ date: (a.create_time ?? "").slice(0, 10), value: 1 })), 12, todayStr()),
     };
   }, [rows, empName]);
 
@@ -622,7 +621,15 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
     setOpen(true);
   }
   const openCreate = () => openComposer(defaultKind);
-  const openKudos = () => openComposer("kudos");
+  // `give-kudos` may carry the person to recognise: a completed goal offers "say well done" and lands here
+  // with the owner already filled in, rather than making the giver find them again in a picker.
+  // `give-kudos` may carry WHO: a completed goal offers "say well done" and lands here with the owner already
+  // filled in, rather than making the giver find them again in a picker.
+  const [kudosTo, setKudosTo] = useState<string | undefined>(undefined);
+  const openKudos = (arg?: unknown) => {
+    setKudosTo(typeof arg === "string" ? arg : undefined);
+    openComposer("kudos");
+  };
   // Global quick actions: "Post to the board" opens the composer; "Give kudos" opens it in kudos mode.
   useIntent("new-post", openCreate);
   useIntent("give-kudos", openKudos);
@@ -1322,6 +1329,7 @@ export default function Announcements({ me, openId, solo }: { me: Me; openId?: s
         onOpenChange={setOpen}
         editing={editing}
         initialKind={composeKind}
+        initialRecipient={kudosTo}
         employees={employees}
         departments={departments}
         levels={levels}

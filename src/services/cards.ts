@@ -1,22 +1,28 @@
-import { eq, and, isNull, asc, inArray } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, asc, inArray } from "drizzle-orm";
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
+import { addDaysUtc, addMonthsUtc, advanceUntilAfter } from "../domain/calendar";
+import { sum2 } from "../domain/money";
+import { systemActor } from "../lib/systemActor";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { audit, createdMeta, fieldDiff } from "../lib/audit";
+import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { getDefaultDepartmentId } from "./settings";
+import { orgToday, dayStartMs } from "./orgDay";
+import { genId } from "../lib/idCodec";
 import { invalidArgument, notFound, aborted, failedPrecondition, oneOf, isCodeCollision, isCardSeqCollision } from "../lib/errors";
 import { etagOf } from "../http/serialize";
-import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { updateGoalProgress } from "./goals";
 import { notify } from "./notifications";
 import { notifyMentions } from "./mentions";
 import { parseColumns, commitmentIndex, columnIndex, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
+import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
 
 // Notify a card's assignee when they are newly assigned it (not a re-save to the same person, not self-assign).
 async function notifyCardAssigned(deps: Deps, actor: AppUser, card: typeof schema.cards.$inferSelect, prevAssigneeId: string | null) {
@@ -24,6 +30,236 @@ async function notifyCardAssigned(deps: Deps, actor: AppUser, card: typeof schem
   if (!to || to === prevAssigneeId || to === actor.employeeId) return;
   const key = card.keyPrefix && card.seq ? `${card.keyPrefix}-${card.seq}: ` : "";
   await notify(deps, { recipient: to, type: "board.card_assigned", title: "Task assigned to you", body: `${key}${card.title}`, link: "boards", subject: `cards/${card.uuid}`, action: "respond", actorId: actor.employeeId });
+}
+
+const cardKeyOf = (card: { keyPrefix: string | null; seq: number | null }) =>
+  card.keyPrefix && card.seq ? `${card.keyPrefix}-${card.seq}` : null;
+
+/**
+ * Tell a card's watchers something happened to it.
+ *
+ * Excludes the actor (nobody needs telling what they just did) and the assignee where they are already told
+ * by the notification for that event, so watching a card you are assigned does not double it up. Watching is
+ * opt-in and low priority by design: it is the "keep me posted" channel, not the "act on this" one, so these
+ * land digestible where the recipient has a digest configured.
+ */
+async function notifyCardWatchers(
+  deps: Deps,
+  actor: AppUser,
+  card: typeof schema.cards.$inferSelect,
+  what: { type: string; title: string; body: string },
+  alreadyTold: (string | null | undefined)[] = [],
+) {
+  const rows = await deps.db
+    .select({ employeeId: schema.cardWatchers.employeeId })
+    .from(schema.cardWatchers)
+    .where(eq(schema.cardWatchers.cardId, card.uuid));
+  const skip = new Set([actor.employeeId, ...alreadyTold].filter(Boolean) as string[]);
+  const key = cardKeyOf(card);
+  for (const r of rows) {
+    if (skip.has(r.employeeId)) continue;
+    await notify(deps, {
+      recipient: r.employeeId,
+      type: what.type,
+      title: what.title,
+      body: key ? `${key}: ${what.body}` : what.body,
+      link: "boards",
+      subject: `cards/${card.uuid}`,
+      priority: "low",
+      actorId: actor.employeeId,
+    });
+  }
+}
+
+/**
+ * Watch / unwatch a card: hear about it without being the one doing it.
+ *
+ * Idempotent both ways (a unique index makes a second watch one row, and unwatching what you do not watch is
+ * not an error), because these are toggles on a button and a double press is a double press, not a fault.
+ * Anyone who can read the card may watch it - the verb is authorized on the card itself, so a watcher can
+ * never be someone the board is closed to.
+ */
+export async function watchCard(deps: Deps, actor: AppUser, id: string, on: boolean) {
+  const card = await getCard(deps, actor, id); // gate + existence
+  if (!actor.employeeId) throw invalidArgument("only an employee can watch a task");
+  if (on) {
+    await deps.db.insert(schema.cardWatchers).values({ cardId: id, employeeId: actor.employeeId }).onConflictDoNothing();
+  } else {
+    await deps.db.delete(schema.cardWatchers).where(and(eq(schema.cardWatchers.cardId, id), eq(schema.cardWatchers.employeeId, actor.employeeId)));
+  }
+  // Deliberately unaudited: who is reading along is not a change to the work, and an audit entry per press
+  // would bury the card's actual history under people subscribing and unsubscribing.
+  return getCardWithComments(deps, actor, id);
+}
+
+// The actor for the nightly recurrence roll. The card it files was nobody's decision this morning - it is the
+// cadence somebody set once - so the audit trail says so rather than crediting whoever last touched the
+// series. (`createCard` reads `email` for the audit row and `employeeId` for "did the actor assign themselves",
+// and a system actor correctly answers no to the second.)
+//
+// `systemActor()` (lib/systemActor.ts), not a locally cast `{ email: "…" } as unknown as AppUser`. That cast
+// is a promise about which fields the whole call tree reads, made in a file that cannot see the call tree: it
+// held only while `audit()` happened to touch email/employeeId/name/role, it left `actor_role` null on every
+// row this wrote, and the day anything downstream reads another field it is `undefined` at runtime with the
+// types saying otherwise. One honest system identity, shared with the automation engine and internal dispatch.
+const SYSTEM_ACTOR = systemActor();
+
+/**
+ * File the next card in every delivered recurring series - the nightly tick's half of `cadence`.
+ *
+ * Repeating operational work (the weekly compliance sweep, the monthly access review, the quarterly restore
+ * test) had to be retyped twelve times a year, and the one that got forgotten was invisible: there is no card,
+ * so there is nothing on the board to notice the absence of.
+ *
+ * Rolls on DELIVERY, not on a date: a chore that is a week late does not want a second copy of itself filed
+ * on top of it, and the delivered card is the signal that the cycle is actually finished. The cadence MOVES to
+ * the new card (claimed with a conditional update, so two ticks racing can only produce one), which keeps
+ * exactly one live card per series - the same invariant recurring 1:1s run on.
+ *
+ * Carried over: title, description, assignee, department, priority, size, labels and the checklist, unticked -
+ * everything that makes it the same chore. Deliberately not carried: the linked GOAL (a series would inflate
+ * that goal's task count forever) and the SPRINT (a time box the next one is not in).
+ */
+export async function rollRecurringCards(deps: Deps): Promise<number> {
+  // The board is JOINED, and live-only, for a reason the claim below makes sharp: soft-deleting a board does
+  // not touch its cards (boards have no `remove` override - see routes/boards.ts), so a delivered recurring
+  // card on a deleted board stayed in this query while `createCard` refuses it with "board not found". The
+  // series was then claimed - its cadence cleared - and the create it was claimed for threw, which is the one
+  // outcome that cannot be undone by the next tick. Filtered out here instead, the series lies dormant with
+  // its cadence intact and rolls again if the board is restored.
+  const rows = (await deps.db
+    .select()
+    .from(schema.cards)
+    .innerJoin(schema.boards, eq(schema.cards.boardId, schema.boards.uuid))
+    .where(and(
+      isNull(schema.cards.deleteTime),
+      isNull(schema.boards.deleteTime),
+      isNotNull(schema.cards.cadence),
+      isNotNull(schema.cards.deliveredAt),
+    ))).map((r) => r.cards);
+  // The ORG's calendar day, anchored at UTC midnight - `advanceUntilAfter` reads it with getUTC* below, so
+  // this anchor is the day the org is actually living in. The tick fires at 02:00 UTC, which is the previous
+  // evening west of UTC, and a UTC-derived "today" therefore filed the next occurrence a day early there.
+  const today = new Date(dayStartMs(await orgToday(deps)));
+  let rolled = 0;
+  let failed = 0;
+  for (const r of rows) {
+    if (!r.cadence) continue;
+    // The next due date measured from the old one, so a series keeps its rhythm rather than drifting by
+    // however late the last one was delivered. With no due date there is no rhythm to keep, and the delivery
+    // date is the only honest anchor.
+    //
+    // Stepped until it is actually in the FUTURE (`advanceUntilAfter`, the same shape rollRecurringCheckIns
+    // uses). One step off the old due date is only the next occurrence while the series is being kept up
+    // with: a weekly chore due the 5th and delivered on the 1st of the next month got its replacement filed
+    // due the 12th - born three weeks overdue - and every occurrence after it inherited that lag. Month steps
+    // clamp the day (domain/calendar.ts), so a monthly chore on the 31st goes to 28 February instead of
+    // rolling over to 3 March and skipping the month.
+    const anchor = new Date(+new Date(r.dueDate ?? r.deliveredAt!));
+    const cadence = r.cadence;
+    const next = advanceUntilAfter(anchor, today, (d) =>
+      cadence === "monthly" ? addMonthsUtc(d, 1)
+        : cadence === "quarterly" ? addMonthsUtc(d, 3)
+        : addDaysUtc(d, cadence === "weekly" ? 7 : 14));
+
+    // Claim the series: clearing the cadence under a WHERE that still sees it means a second tick (or another
+    // worker) finds nothing to claim and files no duplicate.
+    const claimed = await deps.db
+      .update(schema.cards)
+      .set({ cadence: null, updatedAt: new Date() })
+      .where(and(eq(schema.cards.uuid, r.uuid), eq(schema.cards.cadence, r.cadence)))
+      .returning();
+    if (!claimed.length) continue;
+
+    // The new card's id is minted HERE rather than by the insert, so the failure path below can ask whether it
+    // landed. Without that it cannot: `createCard` does several writes after the row itself (the movement, the
+    // checklist, the audit entry), and a throw from one of those leaves a card that already carries the
+    // cadence - releasing the old one as well would put the series on two cards and the next tick would file a
+    // duplicate of a chore that is meant to exist once.
+    const nextId = genId();
+    try {
+      const todos = await deps.db
+        .select({ text: schema.cardTodos.text })
+        .from(schema.cardTodos)
+        .where(eq(schema.cardTodos.cardId, r.uuid))
+        .orderBy(asc(schema.cardTodos.createdAt));
+      const created = await createCard(deps, SYSTEM_ACTOR, {
+        board: `boards/${r.boardId}`,
+        employee: `employees/${r.employeeId}`,
+        title: r.title,
+        description: r.description,
+        assignee: r.assigneeId ? `employees/${r.assigneeId}` : null,
+        ...(r.departmentId ? { department: `departments/${r.departmentId}` } : { department: null }),
+        priority: r.priority,
+        size: r.size,
+        labels: (() => { try { return JSON.parse(r.labelsJson) as string[]; } catch { return []; } })(),
+        due_date: next.toISOString().slice(0, 10),
+        cadence: r.cadence,
+        initial_todos: todos.map((t) => t.text),
+      }, nextId);
+      // The reporter carries down the series. `createCard` stamps the ACTOR, which here is the nightly tick and
+      // nobody - but the chore was filed by a person, and the next instance of it is not suddenly nobody's.
+      if (r.reporterId) {
+        await deps.db.update(schema.cards).set({ reporterId: r.reporterId }).where(eq(schema.cards.uuid, created.uuid));
+        await deps.db.insert(schema.cardWatchers).values({ cardId: created.uuid, employeeId: r.reporterId }).onConflictDoNothing();
+      }
+      if (created.assigneeId) {
+        const key = cardKeyOf(created);
+        await notify(deps, {
+          recipient: created.assigneeId,
+          type: "board.card_assigned",
+          title: "Recurring task filed",
+          body: `${key ? `${key}: ` : ""}${created.title} - due ${next.toISOString().slice(0, 10)}`,
+          link: "boards",
+          subject: `cards/${created.uuid}`,
+          action: "respond",
+        });
+      }
+      rolled++;
+    } catch (err) {
+      // The create failed AFTER the claim took the cadence off the old card, so put it back: the series is
+      // retried on the next tick instead of ending here. Claim-and-then-swallow meant a repeating chore the
+      // org set up simply stopped existing, with nothing anywhere saying so - and a chore that silently stops
+      // is worse than one that is late, because the board shows no card to notice the absence of.
+      //
+      // Unless the successor actually landed first: it carries the cadence now, so the series is intact and
+      // putting it back on the old card as well would hand the next tick two copies of one chore. Only a
+      // series with nowhere to continue gets its claim back.
+      //
+      // Guarded on the value this run wrote (cadence now NULL), so releasing cannot stamp over a cadence
+      // somebody has since set by hand - the same guard shape as the claim itself.
+      const landed = (await deps.db.select({ uuid: schema.cards.uuid }).from(schema.cards).where(eq(schema.cards.uuid, nextId)).limit(1))[0];
+      if (!landed) {
+        await deps.db
+          .update(schema.cards)
+          .set({ cadence: r.cadence, updatedAt: new Date() })
+          .where(and(eq(schema.cards.uuid, r.uuid), isNull(schema.cards.cadence)));
+      }
+      failed++;
+      console.error(`[cards] recurring roll failed for card ${r.uuid}; claim released for retry`, err);
+    }
+  }
+  // Loudly, not into a log nobody reads: the cron subtask wrapper turns this into a `cron_runs` failure, so a
+  // night that could not file a recurring task shows as a failed tick in the Operations UI. Thrown only after
+  // every OTHER series has had its turn - one bad card must not cost the rest of the board their roll.
+  if (failed) throw new Error(`${failed} recurring task(s) could not be filed (${rolled} succeeded); each claim was released for the next tick`);
+  return rolled;
+}
+
+/** The watchers on a page of cards, in one query - so a board can show the eye without a read per card. */
+export async function watchersFor(deps: Deps, cardIds: string[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (!cardIds.length) return out;
+  // Chunked: a full board page is `clampPageSize` = 100 ids, which is the D1 bound-parameter cap exactly, with
+  // nothing left for a predicate beside it. See lib/dbBatch.ts ID_CHUNK.
+  const rows = await byIdChunks(cardIds, (group) =>
+    deps.db
+      .select({ cardId: schema.cardWatchers.cardId, employeeId: schema.cardWatchers.employeeId })
+      .from(schema.cardWatchers)
+      .where(inArray(schema.cardWatchers.cardId, group)),
+  );
+  for (const r of rows) (out.get(r.cardId) ?? out.set(r.cardId, []).get(r.cardId)!).push(r.employeeId);
+  return out;
 }
 
 export type CardInput = {
@@ -43,8 +279,10 @@ export type CardInput = {
   size?: number | null;
   due_date?: string | null;
   goal?: string | null;
+  cadence?: CardCadence | null; // repeating work: the next one is filed when this card is delivered
   initial_todos?: string[]; // checklist items to seed at creation (create dialog: custom items + any template)
 };
+export type CardCadence = NonNullable<typeof schema.cards.$inferSelect["cadence"]>;
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
@@ -65,7 +303,9 @@ export async function listCards(deps: Deps, scope: ListScope, maxPageSize: numbe
   // One grouped read over just this page's cards keeps it cheap.
   const ids = page.items.map((r) => r.uuid);
   if (ids.length) {
-    const todoRows = await deps.db.select({ cardId: schema.cardTodos.cardId, done: schema.cardTodos.done }).from(schema.cardTodos).where(inArray(schema.cardTodos.cardId, ids));
+    const todoRows = await byIdChunks(ids, (group) =>
+      deps.db.select({ cardId: schema.cardTodos.cardId, done: schema.cardTodos.done }).from(schema.cardTodos).where(inArray(schema.cardTodos.cardId, group)),
+    );
     const agg = new Map<string, { total: number; done: number }>();
     for (const r of todoRows) {
       const a = agg.get(r.cardId) ?? { total: 0, done: 0 };
@@ -93,7 +333,20 @@ export async function getCardWithComments(deps: Deps, actor: AppUser, id: string
   const row = await getCard(deps, actor, id);
   const comments = await deps.db.select().from(schema.cardComments).where(eq(schema.cardComments.cardId, id)).orderBy(asc(schema.cardComments.createdAt));
   const todos = await deps.db.select().from(schema.cardTodos).where(eq(schema.cardTodos.cardId, id)).orderBy(asc(schema.cardTodos.createdAt));
-  return { ...row, _comments: comments, _todos: todos };
+  const watchers = (await deps.db.select({ employeeId: schema.cardWatchers.employeeId }).from(schema.cardWatchers).where(eq(schema.cardWatchers.cardId, id))).map((w) => w.employeeId);
+  // Approved hours booked against this task. Only APPROVED time counts, for the same reason the goal's hours
+  // do: a draft entry is somebody's intention, not effort the org has agreed was spent. Undefined rather than
+  // 0 when nothing is booked - "no timesheet names this task" is not "this task took no time".
+  const hourRows = await deps.db
+    .select({ hours: schema.timeEntries.hours })
+    .from(schema.timeEntries)
+    .where(and(eq(schema.timeEntries.cardId, id), eq(schema.timeEntries.status, "APPROVED"), isNull(schema.timeEntries.deleteTime)));
+  // `sum2`, not an inline `Math.round(sum * 100) / 100`: hours are a `real` column under the same rounding
+  // rule as money (domain/money.ts is the one helper for both), and the inline form multiplies in float, so a
+  // decimal half-case rounds the wrong way. It also disagreed with the goal roll-up, which rounded the same
+  // timesheet hours to ONE place - so one task's effort read 7.53 here and 7.5 there.
+  const hours = hourRows.length ? sum2(hourRows.map((h) => h.hours ?? 0)) : undefined;
+  return { ...row, _comments: comments, _todos: todos, _watchers: watchers, _hours: hours };
 }
 
 export async function commentCard(deps: Deps, actor: AppUser, id: string, body?: string | null) {
@@ -105,6 +358,17 @@ export async function commentCard(deps: Deps, actor: AppUser, id: string, body?:
   // Naming someone in a comment is how work gets handed over on a board, so it tells them. A mention is a
   // notification and nothing more: if they cannot see this board, they still cannot - see services/mentions.ts.
   await notifyMentions(deps, actor, { subject: `cards/${id}`, link: "boards", type: "board.mention", body: text, title: card.title });
+  // Commenting is the event a watcher most wants: it is where the reason behind a move gets written down.
+  await notifyCardWatchers(deps, actor, card, {
+    type: "board.card_comment",
+    title: "New comment on a task you watch",
+    body: text.length > 140 ? `${text.slice(0, 140)}…` : text,
+  });
+  // Whoever joins a card's conversation is watching it from then on. Doing this by hand is the step everybody
+  // forgets, and then wonders why they missed the reply to their own question.
+  if (actor.employeeId) {
+    await deps.db.insert(schema.cardWatchers).values({ cardId: id, employeeId: actor.employeeId }).onConflictDoNothing();
+  }
   return getCardWithComments(deps, actor, id);
 }
 
@@ -120,7 +384,10 @@ export async function addCardTodos(deps: Deps, actor: AppUser, id: string, texts
   await getCard(deps, actor, id); // gate + existence
   const items = (texts ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
   if (!items.length) throw invalidArgument("a checklist item is required");
-  await deps.db.insert(schema.cardTodos).values(items.map((text) => ({ cardId: id, text })));
+  // `insertBatches`, not one statement: a checklist row binds six parameters, so a single multi-row insert
+  // runs out of D1's hundred at seventeen items - and applying a predefined checklist is exactly the path
+  // that arrives with a long list.
+  await runBatch(deps.db, insertBatches(items.map((text) => ({ cardId: id, text })), (group) => deps.db.insert(schema.cardTodos).values(group)));
   await touchCard(deps, id);
   await audit(deps, actor, "card.addTodos", "cards", id, { fields: items.slice(0, 12) });
   return getCardWithComments(deps, actor, id);
@@ -147,6 +414,56 @@ export async function removeCardTodo(deps: Deps, actor: AppUser, id: string, tod
   await deps.db.delete(schema.cardTodos).where(eq(schema.cardTodos.uuid, tid));
   await touchCard(deps, id);
   await audit(deps, actor, "card.removeTodo", "cards", id, { note: item.text });
+  return getCardWithComments(deps, actor, id);
+}
+
+/**
+ * Promote a checklist item into a card of its own: the item that turned out to be real work.
+ *
+ * A checklist is deliberately cheap - a line of text and a tick - and that is right until one line grows an
+ * estimate, a different assignee and a due date of its own. Until now that meant retyping it as a card and
+ * remembering to tick the original, which is exactly the kind of double bookkeeping that ends with a board
+ * and a checklist disagreeing about what is outstanding.
+ *
+ * What it does, and what it deliberately does not:
+ *  - the new card lands on the SAME board, in its first column, carrying the parent's department, sprint and
+ *    (by default) assignee, so it appears where the rest of that work lives rather than in a stray backlog;
+ *  - the parent's `goal` is NOT copied. The parent card is still linked and still counts towards the goal's
+ *    delivered share; copying it would count one piece of work twice in the roll-up;
+ *  - the item is ticked and its text gains the new card's key, so the checklist reads as a pointer to where
+ *    the work went instead of a phantom done item;
+ *  - no dependency is written. The parent is not "blocked" in the WIP sense by work it just handed off, and
+ *    `blocked_by` holds one card - spending it here would clobber a real dependency.
+ */
+export async function promoteCardTodo(deps: Deps, actor: AppUser, id: string, todoId?: string | null, assignee?: string | null) {
+  const parent = await getCard(deps, actor, id); // gate + existence
+  const tid = todoId ? todoId.split("/").pop()! : "";
+  if (!tid) throw invalidArgument("a checklist item id is required");
+  const item = (await deps.db.select().from(schema.cardTodos).where(and(eq(schema.cardTodos.uuid, tid), eq(schema.cardTodos.cardId, id))).limit(1))[0];
+  if (!item) throw notFound("checklist item not found");
+  const parentKey = parent.keyPrefix && parent.seq ? `${parent.keyPrefix}-${parent.seq}` : null;
+
+  const child = await createCard(deps, actor, {
+    board: `boards/${parent.boardId}`,
+    title: item.text,
+    description: `Promoted from ${parentKey ? `${parentKey} ` : ""}“${parent.title}”.`,
+    // `assignee` explicitly null clears it; omitted inherits the parent's, which is whose list the item was
+    // sitting on a minute ago.
+    assignee: assignee === undefined ? (parent.assigneeId ? `employees/${parent.assigneeId}` : null) : assignee,
+    ...(parent.departmentId ? { department: `departments/${parent.departmentId}` } : {}),
+    ...(parent.sprintId ? { sprint: `sprints/${parent.sprintId}` } : {}),
+  });
+  const childKey = child.keyPrefix && child.seq ? `${child.keyPrefix}-${child.seq}` : null;
+
+  await deps.db
+    .update(schema.cardTodos)
+    .set({ done: true, text: childKey ? `${item.text} → ${childKey}` : item.text, updatedAt: new Date() })
+    .where(eq(schema.cardTodos.uuid, tid));
+  await touchCard(deps, id);
+  await audit(deps, actor, "card.promoteTodo", "cards", id, {
+    note: childKey ? `${item.text} → ${childKey}` : item.text,
+    card: `cards/${child.uuid}`,
+  }, parent);
   return getCardWithComments(deps, actor, id);
 }
 
@@ -190,6 +507,9 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       keyPrefix: board.taskPrefix || null,
       sprintId: idFromPath(input.sprint) ?? null,
       employeeId,
+      // Who filed it - the actor, always, and never what the caller says. A reporter a client could set is a
+      // reporter anybody can put somebody else's name on.
+      reporterId: actor.employeeId ?? null,
       columnKey,
       departmentId,
       swimlaneKey: idFromPath(input.swimlane_key) ?? (input.swimlane_key?.trim() || null),
@@ -203,14 +523,23 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
       size: input.size ?? null,
       dueDate: input.due_date ? new Date(due) : null,
       goalId: idFromPath(input.goal) ?? null,
+      cadence: input.cadence ?? null,
     })
     .returning();
   }, (e) => isCodeCollision(e) || isCardSeqCollision(e)))[0]!;
   await deps.db.insert(schema.cardMovements).values({ cardId: row.uuid, boardId, fromColumn: null, toColumn: columnKey, actorId: actor.employeeId ?? null });
   // Optional checklist seeded at creation (custom items and/or a template the dialog expanded to texts).
   const initialTodos = (input.initial_todos ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
-  if (initialTodos.length) await deps.db.insert(schema.cardTodos).values(initialTodos.map((text) => ({ cardId: row.uuid, text })));
+  if (initialTodos.length) {
+    await runBatch(deps.db, insertBatches(initialTodos.map((text) => ({ cardId: row.uuid, text })), (group) => deps.db.insert(schema.cardTodos).values(group)));
+  }
   await audit(deps, actor, "card.create", "cards", row.uuid, createdMeta(row, "cards"), row);
+  // Whoever filed a task follows it from then on. Filing work for somebody else is precisely the case where
+  // "how is that going" gets asked, and the reporter is the one person guaranteed to want the answer -
+  // notifications skip the actor, so this costs them nothing on their own tasks.
+  if (row.reporterId) {
+    await deps.db.insert(schema.cardWatchers).values({ cardId: row.uuid, employeeId: row.reporterId }).onConflictDoNothing();
+  }
   await notifyCardAssigned(deps, actor, row, null);
   await emitEvent(deps, actor, "card.created", { subject: `cards/${row.uuid}`, employeeId, payload: { board: `boards/${boardId}`, column: columnKey, priority: row.priority } });
   await recomputeGoalProgress(deps, actor, row.goalId); // a new linked task lowers its goal's delivered share
@@ -245,10 +574,14 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
     set.dueDate = patch.due_date ? new Date(due) : null;
   }
   if (has("goal")) set.goalId = idFromPath(patch.goal) ?? null;
+  if (has("cadence")) set.cadence = patch.cadence ?? null;
   const oldGoalId = row.goalId;
   const updated = (await deps.db.update(schema.cards).set(set).where(eq(schema.cards.uuid, id)).returning())[0]!;
-  const diff = fieldDiff(row, updated, Object.keys(set));
-  await audit(deps, actor, "card.update", "cards", id, Object.keys(diff).length ? { diff } : undefined);
+  // `diffMeta(..., "cards")` rather than a bare field diff: naming the collection is what turns the FK columns
+  // (assignee, department, sprint, goal) into `<collection>/<id>` refs instead of the raw internal ids they are
+  // in the row - an internal id must not reach the wire, and a ref is what the feed resolves to a NAME. It also
+  // reports the label/document blobs as `changed` instead of dumping them into the diff.
+  await audit(deps, actor, "card.update", "cards", id, diffMeta(row, updated, set, "cards"));
   if (has("assignee")) await notifyCardAssigned(deps, actor, updated, row.assigneeId);
   // Recompute the new goal (size/reassign may change its roll-up) and, if the link moved, the old goal too.
   await recomputeGoalProgress(deps, actor, updated.goalId);
@@ -338,6 +671,17 @@ export async function moveCard(
     await notifyCardAssigned(deps, actor, updated, row.assigneeId);
   }
 
+  // Watchers hear about a column change - which is what "how is that going" means on a board - and about
+  // nothing else a move does. A reorder inside a column is housekeeping, and telling people about it is how a
+  // watch button turns into a mute button.
+  if (changingColumn) {
+    const label = cols[destIdx]!.label;
+    await notifyCardWatchers(deps, actor, updated, {
+      type: "board.card_moved",
+      title: `Moved to ${label}`,
+      body: `${updated.title} → ${label}`,
+    }, [updated.assigneeId]);
+  }
   if (changingColumn) await emitEvent(deps, actor, "card.moved", { subject: `cards/${id}`, employeeId: updated.employeeId, payload: { board: `boards/${row.boardId}`, from: row.columnKey, to: toColumn } });
   if (justCommitted) await emitEvent(deps, actor, "card.committed", { subject: `cards/${id}`, employeeId: updated.employeeId, payload: { board: `boards/${row.boardId}`, column: toColumn } });
   if (justDelivered) await emitEvent(deps, actor, "card.delivered", { subject: `cards/${id}`, employeeId: updated.employeeId, payload: { board: `boards/${row.boardId}`, column: toColumn, goal: updated.goalId ? `goals/${updated.goalId}` : null } });
@@ -389,6 +733,13 @@ export async function setCardBlocked(deps: Deps, actor: AppUser, id: string, blo
   // Alert the assignee their task is now blocked (they own unblocking it).
   if (blocked && updated.assigneeId && updated.assigneeId !== actor.employeeId)
     await notify(deps, { recipient: updated.assigneeId, type: "board.card_blocked", title: "Your task was blocked", body: `${updated.keyPrefix && updated.seq ? `${updated.keyPrefix}-${updated.seq}: ` : ""}${updated.title}${updated.blockReason ? ` - ${updated.blockReason}` : ""}`, link: "boards", subject: `cards/${id}`, priority: "high", actorId: actor.employeeId });
+  // Both directions reach the watchers. A card coming UNBLOCKED is the half nobody was ever told about, and
+  // it is the one that means somebody's own work can start.
+  await notifyCardWatchers(deps, actor, updated, blocked
+    ? { type: "board.card_blocked", title: "A task you watch is blocked", body: `${updated.title}${updated.blockReason ? ` - ${updated.blockReason}` : ""}` }
+    : { type: "board.card_unblocked", title: "A task you watch is unblocked", body: updated.title },
+    [updated.assigneeId],
+  );
   return updated;
 }
 
@@ -420,12 +771,27 @@ export async function restoreCard(deps: Deps, actor: AppUser, id: string) {
   await recomputeGoalProgress(deps, actor, (restored as { goalId?: string | null } | undefined)?.goalId);
   return restored;
 }
+// The card's own conversation and history go with it; the two pointers from records with a life of their own
+// are cut. DECLARED rather than swept by hand first, so the whole teardown is one transaction: as six awaited
+// statements ahead of the purge, a purge refused at the last step (a lost If-Match race) had already deleted
+// every comment, to-do, movement and watcher of a card that is still there.
+export const CARD_PURGE_CASCADE: PurgeCascade = {
+  remove: [
+    { table: schema.cardComments, column: schema.cardComments.cardId },
+    { table: schema.cardTodos, column: schema.cardTodos.cardId },
+    { table: schema.cardMovements, column: schema.cardMovements.cardId },
+    { table: schema.cardWatchers, column: schema.cardWatchers.cardId },
+  ],
+  detach: [
+    { table: schema.cards, column: schema.cards.blockedById }, // a card blocked by this one
+    // A booked hour outlives the task it was booked against: the timesheet is approved, and in a payroll or a
+    // client invoice it is a fact. So the link is cut, not the entry.
+    { table: schema.timeEntries, column: schema.timeEntries.cardId },
+  ],
+};
+
 export async function purgeCard(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const goalId = (await getCard(deps, actor, id)).goalId;
-  await deps.db.delete(schema.cardComments).where(eq(schema.cardComments.cardId, id));
-  await deps.db.delete(schema.cardTodos).where(eq(schema.cardTodos.cardId, id));
-  await deps.db.delete(schema.cardMovements).where(eq(schema.cardMovements.cardId, id));
-  await deps.db.update(schema.cards).set({ blockedById: null }).where(eq(schema.cards.blockedById, id)); // clear dangling blockers
-  await purgeRow(deps, actor, schema.cards, "card", "cards", id, ifMatch);
+  await purgeRow(deps, actor, schema.cards, "card", "cards", id, ifMatch, undefined, CARD_PURGE_CASCADE);
   await recomputeGoalProgress(deps, actor, goalId);
 }

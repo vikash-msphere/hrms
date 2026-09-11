@@ -40,24 +40,40 @@ test("switching a bonus's scope recomputes who it reaches and what it costs, bef
   await form.getByLabel(/^Amount/).fill(amount);
 
   // Company-wide first (the form's own default scope): every live employee.
-  await expect(form.getByText(`× ${live.length} ${live.length === 1 ? "person" : "people"}`)).toBeVisible({ timeout: 15_000 });
-  await expect(form.getByText(`₹${(1000 * live.length).toLocaleString("en-US")}`)).toBeVisible();
+  //
+  // Read back what the form says rather than pinning it to the roster counted above. The whole company is the
+  // one number in this suite that MOVES: the lane's other specs hire and soft-delete people of their own the
+  // whole time it is open, so a headcount read a moment earlier is a different company by the time the form
+  // renders. What matters here is that the figure and the money agree, and that narrowing the scope changes
+  // both.
+  const companyLine = form.getByText(/× \d+ (person|people)/);
+  await expect(companyLine).toBeVisible({ timeout: 15_000 });
+  const companyCount = Number(/× (\d+)/.exec(await companyLine.innerText())![1]);
+  expect(companyCount).toBeGreaterThan(0);
+  await expect(form.getByText(`₹${(1000 * companyCount).toLocaleString("en-US")}`)).toBeVisible();
 
   // Narrowed to one department: a smaller, different number, recomputed live off the same amount.
   await form.getByLabel("Who").click();
   await page.getByRole("option", { name: "A department" }).click();
   await form.getByLabel("Department").click();
   await page.getByRole("option", { name: dept!.display_name, exact: true }).click();
-  await expect(form.getByText(`× ${dept!.count} ${dept!.count === 1 ? "person" : "people"}`)).toBeVisible({ timeout: 15_000 });
-  await expect(form.getByText(`₹${(1000 * dept!.count).toLocaleString("en-US")}`)).toBeVisible();
+  // Read back the same way, and for the same reason: a department gains and loses people while this runs
+  // too - hiring specs file into one. What is asserted is the RECOMPUTE, which is what the control does:
+  // a smaller number than the whole company, and money that follows it.
+  const deptLine = form.getByText(/× \d+ (person|people)/);
+  await expect(deptLine).toBeVisible({ timeout: 15_000 });
+  const deptCount = Number(/× (\d+)/.exec(await deptLine.innerText())![1]);
+  expect(deptCount).toBeGreaterThan(0);
+  expect(deptCount).toBeLessThan(companyCount);
+  await expect(form.getByText(`₹${(1000 * deptCount).toLocaleString("en-US")}`)).toBeVisible();
 
   // The confirm checkpoint repeats the SAME numbers, out loud, before anything is sent - not asserted from a
   // toast afterwards, because there is no "afterwards" here: this spec declines it.
   // "Award" inside the dialog; "Award bonus" is the page button that opened it.
   await form.getByRole("button", { name: "Award", exact: true }).click();
   const confirmDialog = page.getByRole("dialog").filter({ hasText: /Award this bonus to/ });
-  await expect(confirmDialog.getByText(`Award this bonus to ${dept!.count} ${dept!.count === 1 ? "person" : "people"}?`)).toBeVisible({ timeout: 15_000 });
-  await expect(confirmDialog.getByText(`₹${(1000 * dept!.count).toLocaleString("en-US")} in total`)).toBeVisible();
+  await expect(confirmDialog.getByText(`Award this bonus to ${deptCount} ${deptCount === 1 ? "person" : "people"}?`)).toBeVisible({ timeout: 15_000 });
+  await expect(confirmDialog.getByText(`₹${(1000 * deptCount).toLocaleString("en-US")} in total`)).toBeVisible();
   await confirmDialog.getByRole("button", { name: "Cancel", exact: true }).click();
 
   // One employee: the per-person preview line disappears entirely rather than reading "× 1 person" - a

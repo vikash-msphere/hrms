@@ -30,6 +30,7 @@ import { whenReady, gc } from "./lib/clientStore";
 import { sweepSeenTickets } from "./lib/ticketsSeen";
 import { setPhotoCacheUser } from "./lib/photoCache";
 import { setSettingsUser } from "./lib/settingsStore";
+import { hydrateOrgTimezone } from "./lib/orgDay";
 import { syncThemeFromServer } from "./lib/theme";
 import { syncTabSeenFromServer } from "./lib/tabActivity";
 import { Workspace } from "./components/layout/Workspace";
@@ -66,6 +67,8 @@ const ROUTE_SCOPE: Record<string, string | null> = {
   workflows: "automations",
   "recruiting-analytics": "applications",
   "team-analytics": "employees",
+  "team-goals": "goals",
+  tables: "table-views",
   activity: "audit",
 };
 // Which approval queues each route needs ROWS for. Everywhere else the sidebar badge is all that reads
@@ -155,6 +158,8 @@ const Interviews = lazy(() => import("./pages/Interviews"));
 const Offers = lazy(() => import("./pages/Offers"));
 const RecruitingAnalytics = lazy(() => import("./pages/RecruitingAnalytics"));
 const TeamAnalytics = lazy(() => import("./pages/TeamAnalytics"));
+const GoalCockpit = lazy(() => import("./pages/GoalCockpit"));
+const TableBuilder = lazy(() => import("./pages/TableBuilder"));
 const Tickets = lazy(() => import("./pages/Tickets"));
 const Assets = lazy(() => import("./pages/Assets"));
 const Stocktakes = lazy(() => import("./pages/Stocktakes"));
@@ -193,6 +198,8 @@ const PAGE_CHUNK: Record<string, () => Promise<unknown>> = {
   interviews: () => import("./pages/Interviews"), offers: () => import("./pages/Offers"),
   "recruiting-analytics": () => import("./pages/RecruitingAnalytics"), tickets: () => import("./pages/Tickets"),
   "team-analytics": () => import("./pages/TeamAnalytics"),
+  "team-goals": () => import("./pages/GoalCockpit"),
+  tables: () => import("./pages/TableBuilder"),
   assets: () => import("./pages/Assets"), stocktakes: () => import("./pages/Stocktakes"),
   "payroll-runs": () => import("./pages/PayrollRuns"),
   "pay-periods": () => import("./pages/PayrollRuns"), workflows: () => import("./pages/Workflows"),
@@ -318,7 +325,15 @@ export default function App() {
   // Same for the resource store's on-disk copies, but keyed by the IDENTITY THE APP IS ANSWERING AS: during a
   // simulation every read returns the subject's rows, so they must not land in (or be read from) the admin's
   // own cache. Set before any collection is read; without it the store stays memory-only.
-  const cacheUser = me ? `${me.email}${viewAs ? `~${viewAs.subject}` : ""}` : undefined;
+  // ...and by the SESSION, not only the person. The email keeps two people sharing a browser apart, which was
+  // the whole job this key was written for; what it did not do is bound how long a cached copy lives. Only an
+  // explicit sign-out purges the store (lib/clientStore.ts `purgeAll`), and closing the tab is the ordinary way
+  // a person leaves - so employee records and salary figures stayed on disk, unencrypted, to be rehydrated by
+  // whoever signed in next as them. Folding the sitting in makes the cache live exactly as long as the session
+  // that filled it: a reload still hydrates from disk, and a new sign-in is a new namespace whose predecessor's
+  // records `openFor` deletes rather than reads. Absent on a session-less lane (API key, Access JWT, dev
+  // bypass), where the key falls back to the email alone and behaves as it always did.
+  const cacheUser = me ? `${me.email}${me.session_id ? `#${me.session_id}` : ""}${viewAs ? `~${viewAs.subject}` : ""}` : undefined;
   setResourceStoreUser(cacheUser);
   setPhotoCacheUser(cacheUser); // faces are cached on disk too, under the same identity key
   setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
@@ -347,6 +362,15 @@ export default function App() {
   useEffect(() => {
     if (!me) return;
     gc({ seenTickets: sweepSeenTickets });
+  }, [me]);
+
+  // Which day the app thinks it is. Every date default, `min` bound and "is this today" test in the SPA reads
+  // `todayStr()` (lib/orgDay.ts), which needs the ORG's timezone rather than UTC or the viewer's - see that
+  // file for what the UTC version got wrong. Hydrated once from the settings snapshot the app already loads,
+  // so it costs no request; until it resolves the default timezone stands, exactly as on the server.
+  useEffect(() => {
+    if (!me) return;
+    void hydrateOrgTimezone();
   }, [me]);
 
   // A simulation belongs to the admin who started it: if someone else is signed in on this browser now, drop
@@ -580,6 +604,11 @@ export default function App() {
         return <RecruitingAnalytics me={gme} />;
       case "team-analytics":
         return <TeamAnalytics me={gme} />;
+      case "team-goals":
+        return <GoalCockpit me={gme} />;
+      // `tables/<id>` opens that grid in place: a saved table is a record people link to, not a dialog.
+      case "tables":
+        return <TableBuilder me={gme} openId={route.id ?? undefined} />;
       case "tickets":
         return <Tickets me={gme} openId={route.id ?? undefined} />;
       case "assets":

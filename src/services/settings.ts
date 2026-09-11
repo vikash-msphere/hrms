@@ -22,6 +22,7 @@ export const MANAGED_KEYS = new Set<string>(["bank-formats", "payroll-debit"]);
 // so `WHERE key = ?` per key meant a scan per key. Same request, one read; a write inside the request drops it.
 export async function listSettings(deps: Deps, maxPageSize = 50, pageToken?: string) {
   const rows = (await refSettings(deps)).filter((r) => !MANAGED_KEYS.has(r.key));
+  // No `wire`: a setting's identity IS its key (`/v1/settings/<key>`) - see the note in services/roles.ts.
   return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.updatedAt), (r) => r.key);
 }
 

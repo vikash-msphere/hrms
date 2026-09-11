@@ -26,8 +26,16 @@ test("several requests can be decided together, once confirmed", async ({ as }) 
   for (const path of mine) {
     const filed = await page.request.get(`/v1/${path}`);
     expect(filed.ok(), await filed.text()).toBe(true);
-    const [year, , day] = ((await filed.json()) as { start_date: string }).start_date.split("-");
-    const row = page.locator("li, div").filter({ hasText: `${Number(day)}, ${year}` }).filter({ has: approve }).last();
+    const startDate = ((await filed.json()) as { start_date: string }).start_date;
+    const [year, , day] = startDate.split("-");
+    // Day, the SPECIFIC month, then year: dates render day-first ("18 Jan 2027" - lib/utils.ts pins the
+    // format so the browser and the server agree). A wildcard month here only constrains on day-of-month and
+    // year, which the far-future days `fileLeave` hands out do not keep unique from each other ACROSS
+    // months - two different fileLeave calls (in this run or a concurrent spec's own) routinely land on the
+    // same day-of-month in the same year, and the wildcard would then just as happily match somebody else's
+    // request, ticking (or reading back) a row this spec never filed.
+    const month = new Date(`${startDate}T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" });
+    const row = page.locator("li, div").filter({ hasText: new RegExp(`${Number(day)}\\s+${month}\\s+${year}`) }).filter({ has: approve }).last();
     await expect(row, `nothing waiting for ${path}`).toBeVisible({ timeout: 30_000 });
     await row.getByRole("checkbox", { name: /Select .*'s request/ }).check();
   }

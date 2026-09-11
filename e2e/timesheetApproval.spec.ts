@@ -22,16 +22,21 @@ test("a submitted week reaches the manager's own timesheet page, and approving c
   // spec's entry, so the queue is cleared of this spec's own leftovers first.
   await purgeLeftovers(hr);
   const project = await makeProject(hr, `E2E approval project ${stamp}`);
-  const entry = await logAndSubmit(employee, project.path);
+  // A note of its OWN, which the band renders beside the project: rows here are told apart by what they say,
+  // and the project name alone is not enough - another spec logging its own hours against this same project
+  // puts a row in this band that this test must never press Approve on (an entry somebody else has already
+  // decided answers with a 409).
+  const note = `E2E approval entry ${stamp}`;
+  const entry = await logAndSubmit(employee, project.path, note);
 
   await gotoRoute(manager, "timesheets", "Timesheets");
 
   // The band: a decision the manager owes, on the page they already had open.
   const band = manager.locator("div").filter({ hasText: /Awaiting your approval/ }).last();
   await expect(band).toBeVisible({ timeout: 30_000 });
-  // The row for THIS entry, not the first pending one: the band is a queue, and another spec's submission
-  // may be sitting in it.
-  const row = band.locator("div.rounded-md.border").filter({ hasText: project.name }).first();
+  // The row for THIS entry, found by its own note, not the first pending one: the band is a queue, and
+  // another spec's submission may be sitting in it - against this very project.
+  const row = band.locator("div.rounded-md.border").filter({ hasText: note }).first();
   await expect(row).toBeVisible();
 
   // Approved line by line: an hour approved is an hour that can be billed, so it is not a lump decision -
@@ -41,15 +46,31 @@ test("a submitted week reaches the manager's own timesheet page, and approving c
   await expect(confirm.getByText("Approve this request?")).toBeVisible({ timeout: 30_000 });
   await confirm.getByRole("button", { name: "Approve", exact: true }).click();
 
-  // The decision leaves the band - asserted on the BAND rather than on the page, because the project's name
-  // is also a row in the manager's own grid underneath, where it stays either way.
+  // The decision leaves the band, and THIS entry's own state says so. Gated on the record rather than on the
+  // band's text: the band is a shared queue, so waiting for text to leave it can wait on somebody else's row,
+  // and re-pressing Approve without asking the record first lands on an entry already settled (which is what
+  // answered with a row of 409s). Re-pressed on a miss, since a confirm click that did not land leaves this
+  // row exactly as it started.
+  const approved = async () => {
+    const res = await manager.request.get(`/v1/${entry}`);
+    if (!res.ok()) return false;
+    return ((await res.json()) as { status?: string }).status === "APPROVED";
+  };
   await expect(async () => {
+    if (await approved()) return;
     const still = manager.locator("div").filter({ hasText: /Awaiting your approval/ }).last();
-    if (await still.count()) await expect(still).not.toContainText(project.name);
-  }).toPass({ timeout: 30_000 });
-  const after = await manager.request.get(`/v1/${entry}`);
-  expect(after.ok(), await after.text()).toBe(true);
-  expect(((await after.json()) as { status?: string }).status).toBe("APPROVED");
+    if (await still.count()) {
+      const retryRow = still.locator("div.rounded-md.border").filter({ hasText: note }).first();
+      const retryApprove = retryRow.getByRole("button", { name: "Approve", exact: true });
+      if (await retryApprove.count()) {
+        await retryApprove.click();
+        const retryConfirm = manager.getByRole("dialog");
+        await expect(retryConfirm.getByText("Approve this request?")).toBeVisible({ timeout: 5_000 });
+        await retryConfirm.getByRole("button", { name: "Approve", exact: true }).click();
+      }
+    }
+    await expect.poll(approved, { timeout: 10_000 }).toBe(true);
+  }).toPass({ timeout: 60_000 });
 
   await purge(manager, entry);
   await purge(hr, project.path);
@@ -78,13 +99,13 @@ async function makeProject(page: import("@playwright/test").Page, name: string):
 }
 
 /** An hour logged and handed over, so there is something waiting on a decision. */
-async function logAndSubmit(page: import("@playwright/test").Page, project: string): Promise<string> {
+async function logAndSubmit(page: import("@playwright/test").Page, project: string, note: string): Promise<string> {
   const made = await page.request.post("/v1/time-entries", {
     headers: SPA_HEADERS,
     // Dated three weeks back on purpose: the pending band is not week-scoped (it lists every submitted entry
     // the approver may decide), while `timesheets.spec.ts` asserts the CURRENT week's total for this same
     // employee - so an hour logged into this week would change a number another spec is reading.
-    data: { project, date: inDays(-21), hours: 2, billable: true },
+    data: { project, date: inDays(-21), hours: 2, billable: true, description: note },
   });
   expect(made.status(), await made.text()).toBe(200);
   const path = ((await made.json()) as { path: string }).path;

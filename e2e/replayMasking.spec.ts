@@ -57,13 +57,20 @@ async function reportAProblem(page: Page) {
   await page.getByRole("menuitem", { name: "Report a problem" }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByPlaceholder("The page went blank when I clicked Save").fill(`E2E masking check ${Date.now()}`);
-  await dialog.getByRole("button", { name: "Send report", exact: true }).click();
+  // The button stays disabled until the org's ticket categories have loaded (`getSetting("ticket-categories")`
+  // - a settings fetch shared by every consumer's first read this session) and picked one, which on a lane
+  // heavy with OTHER browsers hitting the same settings endpoint at once can take a while longer than the
+  // ordinary case.
+  const send = dialog.getByRole("button", { name: "Send report", exact: true });
+  await expect(send).toBeEnabled({ timeout: 45_000 });
+  await send.click();
 }
 
 test.describe("session replay masking", () => {
   // The SDK's own 5s minimum replay duration has to elapse before a flush produces anything, and every action
-  // here runs under the config's slowMo. That does not fit the default 30s budget.
-  test.describe.configure({ timeout: 90_000 });
+  // here runs under the config's slowMo. That does not fit the default 30s budget - bumped in lockstep with
+  // `reportAProblem`'s own inner Send-report wait above, so a widened inner budget always has room to use.
+  test.describe.configure({ timeout: 120_000 });
 
   test("records the page text on an ordinary route", async ({ as }) => {
     const page = await as("employee");

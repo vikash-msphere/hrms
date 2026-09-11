@@ -7,7 +7,8 @@
 import { and, eq, gte, lte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, withFreshCode, CODE_WIDTH } from "./codeAlloc";
+import { isCompOffDuplicate } from "../lib/errors";
 import { getSettingValue } from "./settings";
 import { DEFAULT_ATTENDANCE, localDay, type AttendanceConfig } from "../domain/attendance";
 import { holidayApplies } from "./holidays";
@@ -124,16 +125,33 @@ export async function creditHolidayCompOff(deps: Deps): Promise<number> {
     // A half-day holiday only owes back the half the office was shut for.
     const owed = holiday.halfDay ? Math.min(days, 0.5) : days;
 
-    // Claim the day first. A duplicate (this employee, this date) means another run already credited it.
+    // Claim the day first. A duplicate (this employee, this date) means another run already credited it, and
+    // that is the ONLY failure this skips on.
+    //
+    // It used to skip on every failure - `catch { continue }` - which read as "the duplicate case" and was in
+    // fact three cases wearing one coat. A lost code race (two writes composing the same next code, the thing
+    // `withFreshCode` exists for) was treated as "already credited" and the day was dropped; so was a
+    // transient D1 error. Neither was logged, and neither gets a second chance: the tick credits YESTERDAY's
+    // holiday, so there is no later run that would find this work again. A day of leave the employee earned
+    // by working a holiday went missing with nothing anywhere to say so.
     try {
-      await deps.db.insert(schema.compOffCredits).values({
-        code: await allocOwnedCode(deps, schema.compOffCredits, schema.compOffCredits.employeeId, employeeId),
-        employeeId,
-        workedDate: new Date(dayMs),
-        days: owed,
-        holidayId: holiday.uuid,
+      await withFreshCode(async (attempt) => {
+        // `attempt > 1` re-establishes this person's counter against what is actually on disk, the same
+        // resync the notification insert does on a retry (services/notifications.ts).
+        const code = await allocOwnedCode(deps, schema.compOffCredits, schema.compOffCredits.employeeId, employeeId, CODE_WIDTH.owned, attempt > 1);
+        await deps.db.insert(schema.compOffCredits).values({
+          code,
+          employeeId,
+          workedDate: new Date(dayMs),
+          days: owed,
+          holidayId: holiday.uuid,
+        });
       });
-    } catch {
+    } catch (e) {
+      if (isCompOffDuplicate(e)) continue; // already credited by an earlier run - the idempotency this relies on
+      // Anything else is a real failure and the day is lost, so it has to be visible. Not rethrown: one
+      // employee's credit failing must not abandon the rest of the roster.
+      console.error(`comp-off: could not claim ${owed} day for ${employeeId} on ${ymd}`, e);
       continue;
     }
 

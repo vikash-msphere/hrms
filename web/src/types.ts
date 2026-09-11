@@ -172,6 +172,14 @@ export type Announcement = Wire<"announcement">;
 
 export type GoalStatus = "not_started" | "in_progress" | "completed" | "cancelled";
 export type Goal = Wire<"goal">;
+export type GoalConfidence = "on_track" | "at_risk" | "off_track";
+export type GoalStage = "DRAFT" | "PROPOSED" | "AGREED";
+export type GoalKind = "objective" | "key_result";
+// A reusable goal blueprint (Settings -> Goal templates); `:apply` stamps it out as real goals.
+export type GoalTemplate = Wire<"goal-template">;
+export type GoalPace = "ahead" | "on_track" | "behind" | "at_risk";
+/** One week of a review cycle's attainment curve, from `GET /v1/goals?cycle=…&burnup=true`. */
+export type BurnupPoint = { at: string; attained: number; expected: number };
 
 // ---- Agile kanban ----
 // One audit-trail entry from the on-demand activity feed (GET /v1/activity).
@@ -321,6 +329,10 @@ export type Me = {
   capabilities: string[];
   // Token for the subscribable holiday calendar feed; null unless the org enabled it (see routes/holidayFeed.ts).
   holiday_feed_token: string | null;
+  // Opaque id for this sitting, stable while the session lives and different after a new sign-in. The on-disk
+  // caches are namespaced to it (see App.tsx `cacheUser`) so cached records cannot outlive their session.
+  // Null on the lanes that carry no session (API key, Access JWT, dev bypass).
+  session_id: string | null;
 };
 
 export type IdentityField = Wire<"identity-field">;
@@ -331,6 +343,54 @@ export type EmployeeFieldDef = { key: string; label: string; mandatory: boolean;
 export type PersonalDetails = Wire<"personal-info">;
 
 export type BankDetails = Wire<"bank-account">;
+
+// ---- Custom tables (the grid builder) ----
+// The saved DEFINITION of a grid. Its rows are a separate call (`:run`), because they are re-read under each
+// reader's own access - which is what makes handing somebody a view safe.
+export type TableView = Wire<"table-view">;
+
+export type TableFieldKind = "text" | "number" | "money" | "date" | "datetime" | "bool" | "enum" | "ref";
+
+/** One offerable column, as GET /v1/table-fields describes it. */
+export type TableField = {
+  key: string;
+  label: string;
+  group: string;
+  kind: TableFieldKind;
+  /** The collection whose list decision gated it - shown so an author knows what a column depends on. */
+  collection: string;
+  /** PII the profile masks; the real value needs the `unmask` capability. */
+  masked?: boolean;
+  enum_values?: string[];
+};
+
+/** A link out of a catalogue node: somewhere the builder can GO, not a field. */
+export type TableLink = { path: string; label: string; collection: string; collection_label: string };
+
+/** ONE node of the catalogue: this collection's fields, and the links leading out of it. */
+export type TableCatalogue = {
+  bases: { collection: string; label: string }[];
+  base?: string;
+  label?: string;
+  /** The dotted link path this node sits at; empty at the base. */
+  path?: string;
+  node_label?: string;
+  collection?: string;
+  groups: { key: string; label: string }[];
+  fields: TableField[];
+  links: TableLink[];
+};
+
+export type TableRunColumn = { key: string; label: string; kind: TableFieldKind; collection: string; masked?: boolean };
+export type TableRunRow = { path: string; cells: Record<string, unknown>; denied?: string[] };
+export type TableRunResult = {
+  base: string;
+  columns: TableRunColumn[];
+  rows: TableRunRow[];
+  next_page_token?: string;
+  /** Columns the view asks for that this reader does not get, each with the reason. */
+  dropped: { field: string; reason: string }[];
+};
 
 // ---- Workflow & automation engine ----
 export type Automation = Wire<"automation">;

@@ -38,9 +38,15 @@ test("a chart page loads the library on demand and draws real SVG", async ({ as 
   const queue = page.locator("figure").filter({ has: page.locator("figcaption", { hasText: "Visible tickets by state" }) });
   const svg = queue.locator("svg").first();
   await expect(svg).toBeAttached();
-  const box = await svg.boundingBox();
-  expect(box?.width ?? 0).toBeGreaterThan(0);
-  expect(box?.height ?? 0).toBeGreaterThan(0);
+  // Measured by POLLING, not once: the primitive refuses to draw into a box with no width and rebuilds itself
+  // when the box gets one (`Chart.tsx`'s ResizeObserver), so on a busy machine the first painted SVG can be
+  // measured in the frame before the card has been laid out - and the rebuild that follows replaces the node.
+  await expect
+    .poll(async () => {
+      const b = await svg.boundingBox();
+      return Math.min(b?.width ?? 0, b?.height ?? 0);
+    }, { timeout: 15_000 })
+    .toBeGreaterThan(0);
 
   // Fetched by the chart, not by the shell.
   await expect.poll(() => chartLibRequests(page)).toBeGreaterThan(0);

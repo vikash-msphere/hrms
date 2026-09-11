@@ -3,6 +3,7 @@ import { HeartPulse, Plus, Pencil, Trash2, Users, Check } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatDate, formatMoney, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { BenefitCategory, BenefitEnrollment, BenefitPlan, Dependent, DependentRelationship, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -29,9 +30,10 @@ const RELATIONSHIP: { value: DependentRelationship; label: string }[] = [
   { value: "spouse", label: "Spouse" }, { value: "child", label: "Child" }, { value: "parent", label: "Parent" }, { value: "domestic_partner", label: "Domestic partner" }, { value: "other", label: "Other" },
 ];
 const per = (p: BenefitPlan) => (p.cost_period === "year" ? "/yr" : "/mo");
-const pad = (n: number) => String(n).padStart(2, "0");
 // Local-time today for the default effective date (toISOString shifts across midnight in non-UTC zones).
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 const DEP_EMPTY = { name: "", relationship: "spouse" as DependentRelationship, date_of_birth: "" };
 
 export default function Benefits({ me }: { me: Me }) {
@@ -142,8 +144,11 @@ export default function Benefits({ me }: { me: Me }) {
           />
         )}
 
-        {/* Dependents */}
-        <div id="benefit-dependents" className="mb-6 scroll-mt-24">
+        {/* Dependents. Masked in session replay (`data-sentry-mask`, see web/src/instrument.ts): a dependent
+            is somebody's spouse, child or parent by name and relationship - family and health information
+            about people who are not employees and never agreed to anything. The heading and the buttons stay
+            readable through the `unmask` list, so a replay still shows what the person was doing here. */}
+        <div id="benefit-dependents" data-sentry-mask className="mb-6 scroll-mt-24">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="flex items-center gap-2 text-sm font-semibold"><Users className="h-4 w-4 text-muted-foreground" /> Your dependents</h2>
             <AccessAction collection="dependents" create label="Add dependent">
@@ -240,7 +245,10 @@ function DependentDialog({ dependent, onClose, onSave }: {
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent scrollBody onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
+      {/* `sentry-mask` for the same reason the dependents list carries it, and separately because a dialog is
+          portalled outside `<main data-page>` where no page-level mask reaches it: this form holds a family
+          member's name and date of birth. */}
+      <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
         <DialogHeader><DialogTitle>{dependent ? "Edit dependent" : "Add dependent"}</DialogTitle></DialogHeader>
         <DialogBody>
         <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus /></Field>

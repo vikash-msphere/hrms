@@ -58,7 +58,7 @@ export function sightedIn(session: { start_time?: string }, asset: { last_verifi
 }
 
 /** Wire-side mirror of the server's scope filter, so a walk and its report always describe the same set. */
-export function inScopeWire(scope: { statuses?: string[]; categories?: string[] } | undefined, asset: { status?: string; category?: string }): boolean {
+export function inScopeWire(scope: { statuses?: string[]; categories?: string[] } | undefined, asset: { status?: string | null; category?: string | null }): boolean {
   if (scope?.statuses?.length && !scope.statuses.includes(asset.status ?? "")) return false;
   if (scope?.categories?.length && !scope.categories.includes(asset.category ?? "")) return false;
   return true;

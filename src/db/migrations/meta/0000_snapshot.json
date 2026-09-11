@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "caea8d94-126c-414f-a108-646475110082",
+  "id": "f380d856-fa35-4c8b-b8ab-ac5bfd833562",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -3445,6 +3445,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "cycle_id": {
+          "name": "cycle_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "paid_run_id": {
           "name": "paid_run_id",
           "type": "text",
@@ -3502,6 +3509,15 @@
             "paid_run_id"
           ],
           "isUnique": false
+        },
+        "bonus_cycle_emp_idx": {
+          "name": "bonus_cycle_emp_idx",
+          "columns": [
+            "cycle_id",
+            "employee_id"
+          ],
+          "isUnique": true,
+          "where": "\"bonuses\".\"cycle_id\" is not null"
         }
       },
       "foreignKeys": {
@@ -3511,6 +3527,19 @@
           "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "bonuses_cycle_id_review_cycles_uuid_fk": {
+          "name": "bonuses_cycle_id_review_cycles_uuid_fk",
+          "tableFrom": "bonuses",
+          "tableTo": "review_cycles",
+          "columnsFrom": [
+            "cycle_id"
           ],
           "columnsTo": [
             "uuid"
@@ -3936,6 +3965,94 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "card_watchers": {
+      "name": "card_watchers",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "card_id": {
+          "name": "card_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "cw_card_idx": {
+          "name": "cw_card_idx",
+          "columns": [
+            "card_id"
+          ],
+          "isUnique": false
+        },
+        "cw_emp_idx": {
+          "name": "cw_emp_idx",
+          "columns": [
+            "employee_id"
+          ],
+          "isUnique": false
+        },
+        "cw_once_idx": {
+          "name": "cw_once_idx",
+          "columns": [
+            "card_id",
+            "employee_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "card_watchers_card_id_cards_uuid_fk": {
+          "name": "card_watchers_card_id_cards_uuid_fk",
+          "tableFrom": "card_watchers",
+          "tableTo": "cards",
+          "columnsFrom": [
+            "card_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "card_watchers_employee_id_employees_uuid_fk": {
+          "name": "card_watchers_employee_id_employees_uuid_fk",
+          "tableFrom": "card_watchers",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "cards": {
       "name": "cards",
       "columns": {
@@ -4038,6 +4155,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "reporter_id": {
+          "name": "reporter_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "priority": {
           "name": "priority",
           "type": "text",
@@ -4100,6 +4224,13 @@
         },
         "goal_id": {
           "name": "goal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cadence": {
+          "name": "cadence",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -4184,6 +4315,13 @@
           ],
           "isUnique": false
         },
+        "card_reporter_idx": {
+          "name": "card_reporter_idx",
+          "columns": [
+            "reporter_id"
+          ],
+          "isUnique": false
+        },
         "card_goal_idx": {
           "name": "card_goal_idx",
           "columns": [
@@ -4259,6 +4397,19 @@
           "tableTo": "employees",
           "columnsFrom": [
             "assignee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "cards_reporter_id_employees_uuid_fk": {
+          "name": "cards_reporter_id_employees_uuid_fk",
+          "tableFrom": "cards",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "reporter_id"
           ],
           "columnsTo": [
             "uuid"
@@ -4659,6 +4810,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'INR'"
+        },
+        "variable_pay_target": {
+          "name": "variable_pay_target",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "pay_grade_id": {
           "name": "pay_grade_id",
@@ -6985,6 +7143,343 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "goal_contributors": {
+      "name": "goal_contributors",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "goal_id": {
+          "name": "goal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "share": {
+          "name": "share",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "goalcontrib_goal_idx": {
+          "name": "goalcontrib_goal_idx",
+          "columns": [
+            "goal_id"
+          ],
+          "isUnique": false
+        },
+        "goalcontrib_emp_idx": {
+          "name": "goalcontrib_emp_idx",
+          "columns": [
+            "employee_id"
+          ],
+          "isUnique": false
+        },
+        "goalcontrib_once_idx": {
+          "name": "goalcontrib_once_idx",
+          "columns": [
+            "goal_id",
+            "employee_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "goal_contributors_goal_id_goals_uuid_fk": {
+          "name": "goal_contributors_goal_id_goals_uuid_fk",
+          "tableFrom": "goal_contributors",
+          "tableTo": "goals",
+          "columnsFrom": [
+            "goal_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "goal_contributors_employee_id_employees_uuid_fk": {
+          "name": "goal_contributors_employee_id_employees_uuid_fk",
+          "tableFrom": "goal_contributors",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "goal_templates": {
+      "name": "goal_templates",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "weight": {
+          "name": "weight",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "due_in_days": {
+          "name": "due_in_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "baseline_value": {
+          "name": "baseline_value",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "target_value": {
+          "name": "target_value",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "group_name": {
+          "name": "group_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "disabled": {
+          "name": "disabled",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "delete_time": {
+          "name": "delete_time",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "goal_templates_code_unique": {
+          "name": "goal_templates_code_unique",
+          "columns": [
+            "code"
+          ],
+          "isUnique": true
+        },
+        "goaltpl_group_idx": {
+          "name": "goaltpl_group_idx",
+          "columns": [
+            "group_name"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "goal_templates_department_id_departments_uuid_fk": {
+          "name": "goal_templates_department_id_departments_uuid_fk",
+          "tableFrom": "goal_templates",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "goal_watchers": {
+      "name": "goal_watchers",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "goal_id": {
+          "name": "goal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "goalwatch_goal_idx": {
+          "name": "goalwatch_goal_idx",
+          "columns": [
+            "goal_id"
+          ],
+          "isUnique": false
+        },
+        "goalwatch_emp_idx": {
+          "name": "goalwatch_emp_idx",
+          "columns": [
+            "employee_id"
+          ],
+          "isUnique": false
+        },
+        "goalwatch_once_idx": {
+          "name": "goalwatch_once_idx",
+          "columns": [
+            "goal_id",
+            "employee_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "goal_watchers_goal_id_goals_uuid_fk": {
+          "name": "goal_watchers_goal_id_goals_uuid_fk",
+          "tableFrom": "goal_watchers",
+          "tableTo": "goals",
+          "columnsFrom": [
+            "goal_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "goal_watchers_employee_id_employees_uuid_fk": {
+          "name": "goal_watchers_employee_id_employees_uuid_fk",
+          "tableFrom": "goal_watchers",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "goals": {
       "name": "goals",
       "columns": {
@@ -7015,6 +7510,21 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "cycle_id": {
+          "name": "cycle_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'objective'"
         },
         "title": {
           "name": "title",
@@ -7054,9 +7564,66 @@
           "autoincrement": false,
           "default": "'not_started'"
         },
+        "stage": {
+          "name": "stage",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'AGREED'"
+        },
+        "agreed_at": {
+          "name": "agreed_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "agreed_by_id": {
+          "name": "agreed_by_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "due_date": {
           "name": "due_date",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "confidence_note": {
+          "name": "confidence_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "blocked_by_id": {
+          "name": "blocked_by_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "retro": {
+          "name": "retro",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -7132,6 +7699,20 @@
             "parent_id"
           ],
           "isUnique": false
+        },
+        "goal_cycle_idx": {
+          "name": "goal_cycle_idx",
+          "columns": [
+            "cycle_id"
+          ],
+          "isUnique": false
+        },
+        "goal_blocked_idx": {
+          "name": "goal_blocked_idx",
+          "columns": [
+            "blocked_by_id"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -7154,6 +7735,58 @@
           "tableTo": "goals",
           "columnsFrom": [
             "parent_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "goals_cycle_id_review_cycles_uuid_fk": {
+          "name": "goals_cycle_id_review_cycles_uuid_fk",
+          "tableFrom": "goals",
+          "tableTo": "review_cycles",
+          "columnsFrom": [
+            "cycle_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "goals_agreed_by_id_employees_uuid_fk": {
+          "name": "goals_agreed_by_id_employees_uuid_fk",
+          "tableFrom": "goals",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "agreed_by_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "goals_blocked_by_id_goals_uuid_fk": {
+          "name": "goals_blocked_by_id_goals_uuid_fk",
+          "tableFrom": "goals",
+          "tableTo": "goals",
+          "columnsFrom": [
+            "blocked_by_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "goals_department_id_departments_uuid_fk": {
+          "name": "goals_department_id_departments_uuid_fk",
+          "tableFrom": "goals",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
           ],
           "columnsTo": [
             "uuid"
@@ -11420,6 +12053,13 @@
           "autoincrement": false,
           "default": true
         },
+        "goal_id": {
+          "name": "goal_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -11459,7 +12099,21 @@
           "isUnique": true
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "projects_goal_id_goals_uuid_fk": {
+          "name": "projects_goal_id_goals_uuid_fk",
+          "tableFrom": "projects",
+          "tableTo": "goals",
+          "columnsFrom": [
+            "goal_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -12150,6 +12804,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "goal_setting_due_date": {
+          "name": "goal_setting_due_date",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "self_due_date": {
           "name": "self_due_date",
           "type": "integer",
@@ -12160,6 +12821,13 @@
         "manager_due_date": {
           "name": "manager_due_date",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "competency_keys_json": {
+          "name": "competency_keys_json",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -12268,6 +12936,13 @@
           "autoincrement": false,
           "default": "'REQUESTED'"
         },
+        "decline_reason": {
+          "name": "decline_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -12304,6 +12979,14 @@
             "author_id"
           ],
           "isUnique": false
+        },
+        "rf_once_idx": {
+          "name": "rf_once_idx",
+          "columns": [
+            "review_id",
+            "author_id"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {
@@ -12382,6 +13065,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "reviewer_id": {
+          "name": "reviewer_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "state": {
           "name": "state",
           "type": "text",
@@ -12427,6 +13117,20 @@
         },
         "ratings_json": {
           "name": "ratings_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "goal_ratings_json": {
+          "name": "goal_ratings_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "goals_json": {
+          "name": "goals_json",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -12490,6 +13194,19 @@
           "tableTo": "employees",
           "columnsFrom": [
             "employee_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reviews_reviewer_id_employees_uuid_fk": {
+          "name": "reviews_reviewer_id_employees_uuid_fk",
+          "tableFrom": "reviews",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "reviewer_id"
           ],
           "columnsTo": [
             "uuid"
@@ -13659,6 +14376,138 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "table_views": {
+      "name": "table_views",
+      "columns": {
+        "uuid": {
+          "name": "uuid",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "owner_id": {
+          "name": "owner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "base": {
+          "name": "base",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "spec_json": {
+          "name": "spec_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "delete_time": {
+          "name": "delete_time",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "disabled": {
+          "name": "disabled",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "locked": {
+          "name": "locked",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "locked_by": {
+          "name": "locked_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "table_views_code_unique": {
+          "name": "table_views_code_unique",
+          "columns": [
+            "code"
+          ],
+          "isUnique": true
+        },
+        "table_view_owner_idx": {
+          "name": "table_view_owner_idx",
+          "columns": [
+            "owner_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "table_views_owner_id_employees_uuid_fk": {
+          "name": "table_views_owner_id_employees_uuid_fk",
+          "tableFrom": "table_views",
+          "tableTo": "employees",
+          "columnsFrom": [
+            "owner_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "tax_declarations": {
       "name": "tax_declarations",
       "columns": {
@@ -14281,6 +15130,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "card_id": {
+          "name": "card_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "date": {
           "name": "date",
           "type": "integer",
@@ -14370,6 +15226,13 @@
           ],
           "isUnique": false
         },
+        "te_card_idx": {
+          "name": "te_card_idx",
+          "columns": [
+            "card_id"
+          ],
+          "isUnique": false
+        },
         "te_date_idx": {
           "name": "te_date_idx",
           "columns": [
@@ -14398,6 +15261,19 @@
           "tableTo": "projects",
           "columnsFrom": [
             "project_id"
+          ],
+          "columnsTo": [
+            "uuid"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "time_entries_card_id_cards_uuid_fk": {
+          "name": "time_entries_card_id_cards_uuid_fk",
+          "tableFrom": "time_entries",
+          "tableTo": "cards",
+          "columnsFrom": [
+            "card_id"
           ],
           "columnsTo": [
             "uuid"

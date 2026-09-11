@@ -128,7 +128,19 @@ export function LetterheadDesigner({
   // ALWAYS this version's own images, never the other's. Showing the screen version's images while the Print
   // tab was selected is what made an image uploaded to Screen look like it had been added to Print as well -
   // with a remove button that could only ever delete from Print, where there was nothing to delete.
-  const assets = allAssets[media] ?? {};
+  // Slots this dialog has just deleted. The row it draws from is the parent's cached copy, which only catches
+  // up when the reload the delete kicked off lands - and until then `assets` still lists the slot, so the
+  // thumbnail effect below asks for bytes that are already gone: a 404 in the console and a spinner sitting
+  // where the empty state belongs. Clearing a slot here is the same fact arriving a beat earlier, and the
+  // reload makes it a no-op the moment it does land.
+  const [dropped, setDropped] = React.useState<Partial<Record<LetterheadVariant, LetterheadSlot[]>>>({});
+  const assets = React.useMemo(() => {
+    const stored = allAssets[media] ?? {};
+    const gone = dropped[media];
+    if (!gone?.length) return stored;
+    return Object.fromEntries(Object.entries(stored).filter(([slot]) => !gone.includes(slot as LetterheadSlot)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `allAssets` is re-derived from the row each render
+  }, [logo.assets, media, dropped]);
   const design = editingPrint ? form.print! : form.design;
   const setDesign = (next: LetterheadDesign | ((d: LetterheadDesign) => LetterheadDesign)) =>
     setForm((f) => {
@@ -157,9 +169,12 @@ export function LetterheadDesigner({
   // Both pages as the API takes them: an empty design is stored as "no design" (the stock page) rather than as
   // an empty object, and a print page that was never turned on is stored as null - meaning "print as you
   // render", which is not the same as "print on the stock page".
+  // A print page is sent whenever one EXISTS, empty or not: "print on the stock page" is a print version, and
+  // dropping it for being empty deleted the version the reader had just added on any letterhead whose screen
+  // page was itself stock (every brand-new one).
   const writtenPages = () => ({
     design: Object.keys(form.design).length ? form.design : null,
-    print_design: form.print && Object.keys(form.print).length ? form.print : null,
+    print_design: form.print ?? null,
   });
 
   // Split what is on screen off into a NEW letterhead, artwork carried across by the server (the bytes never
@@ -188,6 +203,7 @@ export function LetterheadDesigner({
     try {
       // Into THIS version's images. The other version is untouched, which is the whole point of the pair.
       await upload<Letterhead>(path, file, { verb: "uploadImage", params: { slot, variant: media } });
+      setDropped((d) => ({ ...d, [media]: (d[media] ?? []).filter((s) => s !== slot) })); // it is back
       reload();
       // Both the thumbnails and the preview draw what is now stored server-side, so bump the nonce they watch -
       // the form itself has not changed, and neither would re-fetch on its own.
@@ -205,6 +221,7 @@ export function LetterheadDesigner({
       // From THIS version only. Nothing else has to be cleaned up: an image IS its job, so removing it is
       // what stops the band drawing - no dangling reference to tidy.
       await invoke(path, "deleteImage", undefined, undefined, { slot, variant: media });
+      setDropped((d) => ({ ...d, [media]: [...(d[media] ?? []), slot] }));
       reload();
       setArtNonce((n) => n + 1);
     } catch (e) {
@@ -261,20 +278,25 @@ export function LetterheadDesigner({
   const storedSlots = Object.keys(assets).join(",");
   React.useEffect(() => {
     if (!open) return;
-    let dropped = false;
+    let live = true;
+    // Cancelled, not just ignored, on cleanup: a Remove clicked while this is still in flight otherwise lets
+    // the request run to completion AFTER the server has deleted the bytes, logging a 404 from a slot the
+    // reader already watched disappear - see the `dropped` note above. Aborting stops the request before that
+    // response ever lands.
+    const controller = new AbortController();
     const want = Object.keys(assets) as LetterheadSlot[];
     setThumbs((t) => Object.fromEntries(want.filter((s) => t[s]).map((s) => [s, t[s]!]))); // drop deleted slots, keep the rest on screen
     void Promise.all(
       want.map(async (slot) => {
         try {
-          const src = await dataUrl(path, { verb: "image", params: { slot, variant: shownVariant } });
-          if (!dropped) setThumbs((t) => ({ ...t, [slot]: src }));
+          const src = await dataUrl(path, { verb: "image", params: { slot, variant: shownVariant }, signal: controller.signal });
+          if (live) setThumbs((t) => ({ ...t, [slot]: src }));
         } catch {
-          /* no access to the bytes, or they are gone - the card still lists the slot */
+          /* no access to the bytes, cancelled, or they are gone - the card still lists the slot */
         }
       })
     );
-    return () => { dropped = true; };
+    return () => { live = false; controller.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `assets` is re-derived each render; its KEYS are the dependency
   }, [open, path, storedSlots, artNonce, shownVariant]);
 

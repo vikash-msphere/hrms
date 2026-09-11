@@ -8,7 +8,7 @@
 // happen is DROPPING a row that would match - that is a hole. Two oracles guard it: this module's compile is
 // a lossless projection (round-tripped by `rulesToGrant`, differentially tested == blob decision), and the
 // P1 exact-IN narrowing is differentially tested as a correct superset. No SQL prefix/`LIKE` match ever.
-import type { Grant, Level } from "./permissions";
+import { LVL, type Grant, type Level } from "./permissions";
 
 export type ScopeKind = "all" | "subtree" | "exact" | "self" | "dept";
 export type Effect = "allow" | "deny";
@@ -100,7 +100,17 @@ export function rulesToGrant(rules: CompiledRule[]): Grant {
 // level raises access for that object, and an exception deny blocks it (deny precedence is unchanged). Pure
 // union - no precedence logic here; `decide()` remains the sole authority over the merged patterns.
 export function mergeGrants(base: Grant, extra: Grant): Grant {
-  const grant: Grant = { levels: { ...base.levels, ...extra.levels }, allow: [...base.allow, ...extra.allow] };
+  // The HIGHER level wins on a pattern both sides carry. A plain spread let `extra` replace it outright, which
+  // for equal patterns and unequal levels is a DOWNGRADE - a user rule holding `read` where their role holds
+  // `write` would take access away by overlaying it, which is not what an additive overlay means (deny is the
+  // instrument for taking something away, and it still wins below). Both sides were granted, so keeping the
+  // max widens nothing beyond what the two already allowed.
+  const levels: Record<string, Level> = { ...base.levels };
+  for (const [pattern, level] of Object.entries(extra.levels)) {
+    const held = levels[pattern];
+    if (held === undefined || LVL[level] > LVL[held]) levels[pattern] = level;
+  }
+  const grant: Grant = { levels, allow: [...base.allow, ...extra.allow] };
   const deny = [...(base.deny ?? []), ...(extra.deny ?? [])];
   if (deny.length) grant.deny = deny;
   return grant;

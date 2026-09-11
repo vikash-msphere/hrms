@@ -89,18 +89,44 @@ function timingSafeEqual(a: string, b: string): boolean {
   return out === 0;
 }
 
-// Cashfree returns the signed document as a URL. Run it through the SSRF guard (defense in depth - the
-// payload is HMAC-verified, but a compromised/misbehaving vendor URL must not become an internal fetch) and
-// cap the size so an oversized/chunked response can't OOM the isolate.
+/**
+ * Fetch the signed document from the URL Cashfree hands back.
+ *
+ * The URL is the VENDOR'S, so it is run through the SSRF guard first (defense in depth - the payload is
+ * HMAC-verified, but a compromised or misbehaving vendor must not be able to turn this into an internal
+ * fetch), and the size is capped so an oversized/chunked response cannot OOM the isolate.
+ *
+ * Redirects are followed BY HAND, for two reasons that the default `follow` gets wrong:
+ *
+ *  - the guard would otherwise judge only the first URL. A 302 to `169.254.169.254` (or anything else
+ *    internal) is exactly the fetch the guard exists to refuse, and it never sees it. Each hop is re-checked.
+ *  - the credentials must not travel. `authHeaders` sends the API key and secret as `x-client-*`, and the
+ *    fetch spec only strips `Authorization` across an origin change - a custom header rides along. So a
+ *    vendor URL that redirects anywhere would hand this org's Cashfree secret to whoever answers. A redirect
+ *    target is somewhere the vendor POINTED at, not the vendor, so it is fetched with no credentials at all -
+ *    which is also what a pre-signed object-storage link (the ordinary reason this redirects) wants.
+ */
+const MAX_DOWNLOAD_REDIRECTS = 3;
 async function downloadSigned(url: string, secrets: EsignSecrets): Promise<Uint8Array | undefined> {
-  try { assertPublicHttpsUrl(url); } catch { return undefined; }
-  const res = await vendorFetch(url, { headers: await authHeaders(secrets) }, "signed-doc download");
-  if (!res.ok) return undefined;
-  const len = Number(res.headers.get("content-length") || 0);
-  if (len && len > MAX_SIGNED_PDF_BYTES) return undefined;
-  const buf = new Uint8Array(await res.arrayBuffer());
-  if (buf.byteLength > MAX_SIGNED_PDF_BYTES) return undefined;
-  return buf;
+  let target = url;
+  let headers: Record<string, string> = await authHeaders(secrets);
+  for (let hop = 0; ; hop++) {
+    try { assertPublicHttpsUrl(target); } catch { return undefined; }
+    const res = await vendorFetch(target, { headers, redirect: "manual" }, "signed-doc download");
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location || hop >= MAX_DOWNLOAD_REDIRECTS) return undefined;
+      try { target = new URL(location, target).toString(); } catch { return undefined; }
+      headers = {};
+      continue;
+    }
+    if (!res.ok) return undefined;
+    const len = Number(res.headers.get("content-length") || 0);
+    if (len && len > MAX_SIGNED_PDF_BYTES) return undefined;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.byteLength > MAX_SIGNED_PDF_BYTES) return undefined;
+    return buf;
+  }
 }
 
 type CfSignPosition = { page: number; top_left_x_coordinate: number; bottom_right_x_coordinate: number; top_left_y_coordinate: number; bottom_right_y_coordinate: number };

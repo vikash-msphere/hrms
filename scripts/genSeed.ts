@@ -82,7 +82,7 @@ const deptSeq: Record<string, number> = { "04": 4, "07": 3 };
 const deptHead: Record<string, string> = { "04": "28n3tk2zdszr4", "07": "2gn3yk31dszr8" };
 const usedEmail = new Set(employees.map((e) => e.email));
 const mkEmail = (f: string, l: string) => {
-  let base = `${f}.${l}`.toLowerCase().replace(/[^a-z.]/g, "");
+  const base = `${f}.${l}`.toLowerCase().replace(/[^a-z.]/g, "");
   let e = `${base}@example.com`, i = 1;
   while (usedEmail.has(e)) e = `${base}${++i}@example.com`;
   usedEmail.add(e);

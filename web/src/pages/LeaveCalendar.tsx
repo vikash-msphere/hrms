@@ -17,8 +17,9 @@ import { buildIcs, downloadIcs } from "@/lib/ics";
 import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import {
   addDays, awayPerDay, coverOf, daysApart, dmy, expandByDay, gridCells, groupRuns, halfLabel, longDate,
-  monthDaysOf, monthLabelOf, monthStart, shortName, thinDays, todayYmd, ymOf, ymdUtc, type CalEntry,
+  monthDaysOf, monthLabelOf, monthStart, shortName, thinDays, ymOf, ymdUtc, type CalEntry,
 } from "@/lib/leaveCalendar";
+import { todayStr } from "@/lib/orgDay";
 import type { Me, Employee, Department, LeaveRequest, LeaveType, LeaveBalance, Holiday, Event, Celebration, RemoteWorkRequest } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -82,7 +83,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
     const d = readHashQuery("d");
     if (d) return d;
     const m = readHashQuery("m");
-    const t = todayYmd();
+    const t = todayStr();
     return !m || m === t.slice(0, 7) ? t : `${m}-01`;
   });
   const [draft, setDraft] = useState<{ from: string; to: string } | null>(null);
@@ -99,7 +100,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   useEffect(() => { writeHashQuery("layers", layers.size ? [...layers].sort().join(",") : null); }, [layers]);
   useEffect(() => { writeHashQuery("d", selected); }, [selected]);
 
-  const today = todayYmd();
+  const today = todayStr();
   const showRemote = layers.has("remote");
   const showCelebrations = layers.has("celebrations");
 
@@ -110,7 +111,8 @@ export default function LeaveCalendar({ me }: { me: Me }) {
       .then((s) => { if (s.value) setSchedule({ ...DEFAULT_SCHEDULE, ...s.value }); })
       .catch(() => {});
   }, []);
-  const workDays = schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5];
+  // Memoized: the fallback is a fresh array literal, and the month grid's memo keys off this.
+  const workDays = useMemo(() => (schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5]), [schedule.work_days]);
   const weekStart = schedule.week_start ?? 0;
 
   // ---- The visible window, and the rows for exactly that window ------------------------------------------

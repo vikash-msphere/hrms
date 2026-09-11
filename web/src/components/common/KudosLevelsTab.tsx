@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Award, ChevronDown, MessageSquareQuote, Plus, Save, Tag, Trash2 } from "lucide-react";
-import { get, patch } from "@/api";
+import { get } from "@/api";
 import { DEFAULT_KUDOS_LEVELS, type KudosLevel, type KudosCategory } from "@/lib/kudosLevels";
 import { IconPicker } from "@/lib/categoryIcons";
 import { KudosArtPicker } from "@/components/common/KudosArtPicker";
@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
-import { getSetting } from "@/lib/settingsStore";
+import { getSetting, saveSetting } from "@/lib/settingsStore";
 
 // HR editor for the kudos config (settings/kudos): the recognition LEVELS (weighted tiers feeding the
 // leaderboard) and the CATEGORIES (a flat, optional taxonomy for tagging recognition), each with optional
@@ -57,7 +57,7 @@ export function KudosLevelsTab() {
       .filter((c) => c.name && !seen.has(c.name.toLowerCase()) && seen.add(c.name.toLowerCase()));
     setSaving(true);
     try {
-      await patch("settings/kudos", { value: { levels: cleanedLevels, categories: cleanedCats } });
+      await saveSetting("kudos", { value: { levels: cleanedLevels, categories: cleanedCats } });
       setLevels(cleanedLevels);
       setCategories(cleanedCats);
       markSaved();

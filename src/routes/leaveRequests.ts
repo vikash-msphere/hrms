@@ -7,6 +7,7 @@ import {
   type LeaveRequestInput,
 } from "../services/leaveRequests";
 import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { requireCappedBody } from "../services/documentsCommon";
 import { toLeaveRequestResource } from "../http/serialize";
 
 const COL = "leave-requests";
@@ -59,7 +60,7 @@ export const leaveRequests = collectionRoutes<LeaveRequestInput, typeof schema.l
     // it; the answer is the request itself, now flagged as documented. Same slot shape as a claim's receipt.
     upload: {
       run: async (deps, user, id, _body, c) => {
-        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        const bytes = new Uint8Array(await requireCappedBody(c.req.raw));
         await putAttachment(deps, user, { collection: COL, objectId: id, slot: DOCUMENT, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
         return { ...(await getLeaveRequestRow(deps, id)), hasDocument: true };
       },

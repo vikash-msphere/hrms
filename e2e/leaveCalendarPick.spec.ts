@@ -53,10 +53,16 @@ test("a range picked on the grid fills the dates and prices itself", async ({ as
   await expect(form.getByText(/^1 day of leave$/)).toBeVisible({ timeout: 30_000 });
 
   // Nothing was filed: this spec is about the picker, and it leaves the person's balance where it found it.
-  await page.keyboard.press("Escape");
-  const discard = page.getByRole("button", { name: /^(Discard|Leave)$/ });
-  if (await discard.count()) await discard.first().click();
-  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+  // Escape (with the draft guard's own Discard answered too) has proven unreliable at actually closing a
+  // dialog under load elsewhere in this suite - a reload is unconditional, so it is what clears a stuck one.
+  await expect(async () => {
+    if (!(await page.getByRole("dialog").count())) return;
+    await page.keyboard.press("Escape");
+    const discard = page.getByRole("dialog").getByRole("button", { name: /^(Discard|Leave)$/ });
+    if (await discard.count()) await discard.first().click();
+    if (await page.getByRole("dialog").count()) await page.reload();
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
   expect(await filedOn(page, start), "the picker filed a request by itself").toBeFalsy();
 });
 

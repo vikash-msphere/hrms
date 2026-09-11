@@ -224,11 +224,13 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [departments]);
 
-  const isRequester = (t: Ticket) => !!(t.employee && me.employee_id && idOf(t.employee) === me.employee_id);
-  const isAssignee = (t: Ticket) => !!(t.assignee && me.employee_id && idOf(t.assignee) === me.employee_id);
+  // `useCallback` so the queues below depend on the predicates they filter with, not on a restatement of the
+  // one field those predicates read.
+  const isRequester = useCallback((t: Ticket) => !!(t.employee && me.employee_id && idOf(t.employee) === me.employee_id), [me.employee_id]);
+  const isAssignee = useCallback((t: Ticket) => !!(t.assignee && me.employee_id && idOf(t.assignee) === me.employee_id), [me.employee_id]);
 
-  const mine = useMemo(() => source.filter(isRequester).sort(byUrgency), [source, me.employee_id]);
-  const assigned = useMemo(() => source.filter(isAssignee).sort(byUrgency), [source, me.employee_id]);
+  const mine = useMemo(() => source.filter(isRequester).sort(byUrgency), [source, isRequester]);
+  const assigned = useMemo(() => source.filter(isAssignee).sort(byUrgency), [source, isAssignee]);
   // "My team" = the categories I'm the configured assignee or a member of; its queue is every ticket in those
   // categories (category membership is what already gives me visibility into them, via per-ticket sharing).
   const myCategoryKeys = useMemo(() => {
@@ -261,7 +263,7 @@ export default function Tickets({ me, openId }: { me: Me; openId?: string }) {
   const needsAction = useMemo(() => rows.filter((t) => {
     const s = upper(t.state);
     return (isAssignee(t) && (s === "OPEN" || s === "IN_PROGRESS")) || (isRequester(t) && s === "RESOLVED");
-  }), [rows, me.employee_id]);
+  }), [rows, isAssignee, isRequester]);
   const assignedOpen = useMemo(() => assigned.filter(isActive), [assigned]);
   const mineOpen = useMemo(() => mine.filter(isActive), [mine]);
   const teamOpen = useMemo(() => team.filter(isActive), [team]);
@@ -773,13 +775,20 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
   const replyRef = useRef<HTMLTextAreaElement>(null);
 
   // Fetch the full ticket (with its comment thread + checklist) whenever a row is opened.
+  // Keyed on the PATH, deliberately: the row object is replaced wholesale by every list refetch, and
+  // re-fetching the open ticket (and clearing the half-typed reply below) each time one lands is not what
+  // opening a ticket means. The row itself is still needed as the fallback when the fetch fails, so it is read
+  // through a ref - which is what lets the dependency array say exactly what it means and be checkable.
+  const ticketPath = ticket?.path;
+  const latestTicket = useRef(ticket);
+  latestTicket.current = ticket;
   useEffect(() => {
-    if (!ticket) { setFull(null); return; }
+    if (!ticketPath) { setFull(null); return; }
     setReply("");
     setNewTodo("");
     setError(null);
-    get<Ticket>(`tickets/${idOf(ticket.path)}`).then(setFull).catch(() => setFull(ticket));
-  }, [ticket?.path]);
+    get<Ticket>(`tickets/${idOf(ticketPath)}`).then(setFull).catch(() => setFull(latestTicket.current ?? null));
+  }, [ticketPath]);
 
   // Keep the thread pinned to the latest reply (new replies append at the bottom of a scrolling region).
   const commentCount = full?.comments?.length ?? 0;

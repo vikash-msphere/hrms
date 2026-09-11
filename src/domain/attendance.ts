@@ -86,8 +86,15 @@ export function workingDaysInRange(startYmd: string, endYmd: string, workDays: n
 }
 
 // Wall-clock minutes since midnight of an instant, read in the org timezone.
+//
+// `hourCycle: "h23"` is STATED rather than inferred from `hour12: false`. The two are not the same request:
+// `hour12: false` asks only "not AM/PM" and leaves the cycle to the locale, and the one it can resolve to is
+// h24, which numbers midnight as 24 rather than 00. On a runtime that does, this returns 1440 for midnight
+// instead of 0 - so a timed count-as-work event starting exactly at local midnight credits `1440 - 1440 = 0`
+// minutes on its first day (eventCreditByDay below), and the day reads as unworked. Naming the cycle removes
+// the dependency on which resolution the runtime's ICU happens to make.
 export function localMinutes(ms: number, tz: string): number {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(ms));
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms));
   const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
   const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
   return h * 60 + m;

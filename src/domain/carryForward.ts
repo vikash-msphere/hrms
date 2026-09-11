@@ -2,14 +2,13 @@
 // this module owns the year-end split math (what carries over, what's excess) and how the excess is handled.
 import { round2 } from "./money";
 
-// Calendar-year key (UTC), e.g. "2025". Carry-forward and the encashment cap window both key off this.
-export const calendarYearOf = (at: number | Date): string => String(new Date(at).getUTCFullYear());
-
-// [start, end] of the calendar year containing `at` (UTC), for "encashed this year" cap windows.
-export function calendarYearWindow(at: number | Date): { start: Date; end: Date } {
-  const y = new Date(at).getUTCFullYear();
-  return { start: new Date(Date.UTC(y, 0, 1)), end: new Date(Date.UTC(y, 11, 31, 23, 59, 59, 999)) };
-}
+// NO CALENDAR-YEAR HELPERS HERE, deliberately - not the year an instant falls in, not a year's bounds. Both
+// used to live here as UTC, and both were wrong for the same reason: a calendar year is the ORG's, and only
+// the org's timezone can say where it starts. The nightly tick fires at 02:00 UTC, which is still 31 December
+// anywhere west of UTC, so the year-end rollover forfeited and paid out a day early there; and a UTC year
+// window over `created_at` counted an encashment raised at 02:00 on 1 January IST against the previous year's
+// cap. A pure helper taking only an instant cannot know the timezone, so offering one is offering the bug
+// back. `orgYear` in services/orgDay.ts is the one answer, and it is resolved once and passed in.
 
 export type CarryForwardExcess = "encash" | "forfeit";
 
@@ -28,8 +27,18 @@ export function splitCarryForwardCumulative(balances: number[], capDays: number 
   const total = balances.reduce((s, b) => s + b, 0);
   if (capDays == null || total <= capDays) return balances.map((b) => ({ carried: round2(b), excess: 0 }));
   const factor = total > 0 ? capDays / total : 0;
+  // Allocated against a RUNNING total, not rounded share by share. Each share rounded on its own can go up by
+  // half a paise-day, and N of them put the KEPT total over the cap the policy states (measured at 0.02 days
+  // across seven leave types, on ~10% of splits) - while the excess, which the year-end auto-encashment pays
+  // out, came up short by exactly the same amount. Rounding the cumulative sum instead lands the kept total on
+  // the cap to the paise and still leaves every row at 2dp.
+  let allocated = 0; // rounded days handed out so far
+  let exact = 0; // unrounded running share
   return balances.map((b) => {
-    const carried = round2(b * factor);
+    exact += b * factor;
+    const cum = round2(exact);
+    const carried = round2(cum - allocated);
+    allocated = cum;
     return { carried, excess: round2(b - carried) };
   });
 }

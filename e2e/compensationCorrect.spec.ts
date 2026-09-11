@@ -18,11 +18,13 @@ test("a revision is corrected in place and the timeline restates", async ({ as }
   const wrong = 1_500_000 + (Date.now() % 400) * 1000;
   const right = wrong + 111_000;
 
-  // Driven on the manager's record rather than the employee's: `compensation` revises Eve, and two specs
-  // correcting the newest revision on one person would be correcting each other's row.
+  // Driven on Aadhya Patel's record - a fourth person nobody else in this ladder revises: `compensation`
+  // revises Eve, `compensationRemoveRevision` revises Mara, and two specs writing the newest revision on the
+  // same person would be racing each other's etag (409s that neither one's own retry ever fully outlasts,
+  // proven the hard way by this test and `compensationRemoveRevision` colliding on Mara together).
   await gotoRoute(page, "employees", "Directory");
-  await page.getByPlaceholder("Search people…").first().fill("Mara");
-  await page.locator("tbody tr").filter({ hasText: "Mara Manager" }).first().click();
+  await page.getByPlaceholder("Search people…").first().fill("Aadhya Patel");
+  await page.locator("tbody tr").filter({ hasText: "Aadhya Patel" }).first().click();
   await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
 
   await page.getByRole("button", { name: "Revise", exact: true }).first().click();
@@ -62,14 +64,26 @@ test("a revision is corrected in place and the timeline restates", async ({ as }
   await page.getByRole("button", { name: "Annual", exact: true }).click();
   await expect(page.getByText(right.toLocaleString("en-US")).first()).toBeVisible({ timeout: 30_000 });
 
-  await purgeNewest(page, "compensation");
+  await purgeNewest(page, "aadhya.patel@example.com");
 });
 
-/** Drop the newest row of a collection - the one this test made. */
-async function purgeNewest(page: import("@playwright/test").Page, collection: string) {
-  const res = await page.request.get(`/v1/${collection}?page_size=100`);
+/** Drop the newest compensation row for the given person - the one this test made. Scoped by employee, not
+ * just "newest in the whole org", because another spec's own write can land in between this fetch and the
+ * unscoped version's single global sort. */
+async function purgeNewest(page: import("@playwright/test").Page, workEmail: string) {
+  const who = await page.request.get(`/v1/employees?work_email=${encodeURIComponent(workEmail)}`);
+  if (!who.ok()) return;
+  const { results: people = [] } = (await who.json()) as { results?: { path: string }[] };
+  const employeePath = people[0]?.path;
+  if (!employeePath) return;
+
+  const res = await page.request.get(`/v1/compensation?page_size=100`);
   if (!res.ok()) return;
-  const { results = [] } = (await res.json()) as { results?: { path: string; create_time?: string }[] };
-  const newest = [...results].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""))[0];
+  const { results = [] } = (await res.json()) as {
+    results?: { path: string; create_time?: string; employee?: string }[];
+  };
+  const newest = results
+    .filter((r) => r.employee === employeePath)
+    .sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""))[0];
   if (newest) await purge(page, newest.path);
 }

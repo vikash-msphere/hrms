@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, ChevronUp, Cake, PartyPopper, UserPlus, ShieldCheck, CalendarRange, Clock, CalendarDays, Info, Users, type LucideIcon } from "lucide-react";
 import type { Employee, LeaveRequest, LeaveType, Holiday, Celebration, AttendanceSession, Event, Me } from "@/types";
 import { cn, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { get } from "@/api";
 import { leaveColor } from "@/lib/leaveColors";
 import { usePermission } from "@/lib/perm";
@@ -195,7 +196,10 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   refreshKey?: number; // bump to force an attendance re-fetch (e.g. after the dashboard clock in/out)
   onCollapse?: () => void; // when the host can fold the widget away, the header draws the fold control
 }) {
-  const workDays = schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5];
+  // Memoized because five memos below depend on it: the fallback is a fresh array literal every render, so
+  // as a bare const it changed identity on each pass and every memo keyed to it recomputed - the timeline's
+  // segment building among them, which is the expensive one on this widget.
+  const workDays = useMemo(() => (schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5]), [schedule.work_days]);
   // Phone layout fork: narrower name column, wider day cells (see NAME_COL_SM / DAY_MIN_SM).
   const isPhone = useMedia("(max-width: 767px)");
   const nameCol = isPhone ? NAME_COL_SM : NAME_COL;
@@ -239,11 +243,13 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   // as `hiddenMarkers` (the categories to hide). Leaves/holidays/weekends are the core schedule, never gated.
   const showCat = (k: string) => !hiddenMarkers.includes(k);
   const cols = useMemo(() => Array.from({ length: DAYS }, (_, i) => new Date(startMs + i * DAY_MS)), [startMs]);
-  const colOf = (ms: number) => Math.floor((ms - startMs) / DAY_MS);
+  // `useCallback`: four memos below map instants onto columns with this, and its identity moves with the
+  // window's start - which is exactly what those memos were restating as `startMs` by hand.
+  const colOf = useCallback((ms: number) => Math.floor((ms - startMs) / DAY_MS), [startMs]);
   const inWindow = (ms: number) => ms >= startMs && ms <= endMs;
   const now = new Date();
   const todayCol = colOf(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const todayYmd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0, 10);
+  const todayYmd = todayStr(); // the ORG's day; the UTC one this replaced disagreed for part of every day
   // Current time as a fraction of the working day (org tz) - places the live "now" line inside today's column.
   const nowFrac = Math.min(1, Math.max(0, (localMinutes(now.toISOString(), schedule.timezone) - shiftStart) / shiftSpan));
 
@@ -267,7 +273,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     const m = new Map<number, Holiday>();
     for (const h of holidays) { const c = colOf(parseYmd(h.date)); if (c >= 0 && c < DAYS) m.set(c, h); }
     return m;
-  }, [holidays, startMs]);
+  }, [holidays, colOf]);
 
   const leavesByEmp = useMemo(() => {
     const m = new Map<string, LeaveRequest[]>();
@@ -313,7 +319,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     const toYmd = new Date(endMs).toISOString().slice(0, 10);
     const t = new Date();
     const nowMs = t.getTime();
-    const todayYmd = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate())).toISOString().slice(0, 10);
+    const todayYmd = todayStr();
     const holSet = new Set(holidays.filter((h) => !h.disabled && h.applies !== false).map((h) => h.date.slice(0, 10)));
     const byEmp = new Map<string, AttendanceSession[]>();
     for (const s of sessions) {
@@ -364,7 +370,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       out.set(eid, new Map(rows.map((r) => [r.day, r] as const)));
     }
     return out;
-  }, [sessions, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs]);
+  }, [sessions, employees, leavesByEmp, eventsByEmp, holidays, schedule, startMs, endMs, workDays]);
 
   // Styled tooltip card for an attendance day: a colored status header, the punch times / hours worked, and
   // late-arrival / early-departure chips (kept even when flexible hours count the day as full).
@@ -398,7 +404,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   const leaveTip = (person: TipPerson, l: LeaveRequest): ReactNode => {
     const t = typeById.get(l.leave_type ? idOf(l.leave_type) : "");
     const start = l.start_date.slice(0, 10), end = l.end_date.slice(0, 10);
-    const todayY = new Date().toISOString().slice(0, 10);
+    const todayY = todayStr();
     const eta = todayY < start ? relDay(start) : todayY <= end ? "Ongoing" : relDay(end);
     const pending = upper(l.state) === "PENDING";
     return (
@@ -444,7 +450,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
 
   // Day-unit span [lu, ru) for each leave (half-day boundaries shave 0.5 off the start/end day); clamped to
   // the visible window. Shared by approved + pending pill rows.
-  const toSegs = (list: LeaveRequest[]) =>
+  const toSegs = useCallback((list: LeaveRequest[]) =>
     list
       .map((l) => ({ l, aRaw: colOf(parseYmd(l.start_date)), bRaw: colOf(parseYmd(l.end_date)) }))
       .filter((s) => s.bRaw >= 0 && s.aRaw < DAYS)
@@ -460,7 +466,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
           if (es === 1 && bRaw <= DAYS - 1) ru = b + 1 - 0.5; // last day ends at lunch
         }
         return { l, lu, ru };
-      });
+      }), [colOf]);
 
   // Break a leave's [lu, ru) day-span into contiguous runs of COUNTED days, skipping weekend/holiday columns
   // (isOff). This lets the pill render as separate bars over those columns so the weekend/holiday cell - and
@@ -489,7 +495,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
   // the chip says how much it is hiding before you press it.
   const pendingInView = useMemo(
     () => rows.reduce((n, e) => n + toSegs(pendingByEmp.get(idOf(e.path)) ?? []).length, 0),
-    [rows, pendingByEmp, startMs],
+    [rows, pendingByEmp, toSegs],
   );
 
   // Per-day team load: who's away (approved leave or at an event) on each visible day. Drives the "N away"
@@ -516,7 +522,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       }
     }
     return m;
-  }, [rows, leavesByEmp, eventsByEmp, startMs, schedule.timezone]);
+  }, [rows, leavesByEmp, eventsByEmp, colOf, schedule.timezone]);
   // Columns already covered by the caller's own leave. Unlike weekends/holidays these are hard barriers a
   // drag can't cross: a selection started before a leave clamps to the day just before it (see onMove).
   const leaveCols = useMemo(() => {
@@ -526,7 +532,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       for (let i = a; i <= b; i++) set.add(i);
     }
     return set;
-  }, [leavesByEmp, pendingByEmp, me.employee_id, startMs]);
+  }, [leavesByEmp, pendingByEmp, me.employee_id, colOf]);
   // Columns the caller can't request against: weekends/holidays + past (when back-dating is off) + own leave.
   // Drag, hover and selection are all suppressed on these.
   const blockedCols = useMemo(() => {
@@ -586,11 +592,14 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     return ev.clientX - r.left < r.width / 2 ? 0 : 1;
   };
   // Effective day/half range from the selection endpoints (a single half-slot = a half-day).
-  const effRange = () => {
+  // `useCallback` on `sel`, because the mouseup handler below is registered from an effect: an arrow rebuilt
+  // every render made the effect's dependency array a hand-written claim about what the handler reads, and
+  // the handler is what turns a drag into a leave request - it must read the selection this render has.
+  const effRange = useCallback(() => {
     if (!sel) return null;
     const lo = Math.min(sel.a, sel.b), hi = Math.max(sel.a, sel.b);
     return { loDay: Math.floor(lo / 2), loHalf: lo % 2, hiDay: Math.floor(hi / 2), hiHalf: hi % 2 };
-  };
+  }, [sel]);
   // The selected portion of column i as % insets (null when unselected); a boundary half-day insets by 50%.
   const selSpan = (i: number) => {
     const r = effRange();
@@ -617,7 +626,7 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
     };
     window.addEventListener("mouseup", finish);
     return () => window.removeEventListener("mouseup", finish);
-  }, [sel, cols]);
+  }, [sel, cols, effRange]);
 
   const colBg = (i: number, d: Date) => {
     if (holByCol.get(i)) return "bg-violet-100/70 dark:bg-violet-950/30";

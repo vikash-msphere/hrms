@@ -78,6 +78,9 @@ export const METRICS: readonly MetricDef[] = [
   { key: "goals_completed", label: "Goals completed", short: "Completed", group: "work", collection: "goals", unit: "count", agg: "sum", direction: "higher", hint: "Goals marked completed inside the window." },
   { key: "goals_overdue", label: "Goals overdue", short: "Slipped", group: "work", collection: "goals", unit: "count", agg: "sum", direction: "lower", hint: "Goals still in flight past their due date." },
   { key: "avg_goal_progress", label: "Average goal progress", short: "Progress", group: "work", collection: "goals", unit: "percent", agg: "avg", direction: "higher", hint: "Mean progress across their goals in flight." },
+  { key: "goal_attainment", label: "Goal attainment", short: "Attained", group: "work", collection: "goals", unit: "percent", agg: "avg", direction: "higher", hint: "Weight-adjusted delivery against the goals due inside the window - what a review scores. Cancelled goals are excluded; with no weights set it is their plain mean." },
+  { key: "goals_at_risk", label: "Goals at risk", short: "At risk", group: "work", collection: "goals", unit: "count", agg: "sum", direction: "lower", hint: "Open goals a quarter of the way behind their own pace (where they should be by now, given when they were set and when they are due), or flagged at risk by their owner." },
+  { key: "goals_stale", label: "Goals gone quiet", short: "Quiet", group: "work", collection: "goals", unit: "count", agg: "sum", direction: "lower", hint: "Open goals nobody has touched in three weeks. Silence arrives weeks before a missed due date." },
 
   // ---- Performance ----
   { key: "latest_rating", label: "Latest review rating", short: "Rating", group: "performance", collection: "reviews", unit: "rating", agg: "avg", direction: "higher", hint: "Overall rating on their most recently updated review carrying one." },
@@ -146,7 +149,9 @@ export const hhmmToMin = (s: string): number => {
 
 /** Minutes since midnight of an instant read in `tz` - so 09:05 IST is 545 whatever the server's own zone is. */
 export function localMinutes(ms: number, tz: string): number {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(ms));
+  // `hourCycle: "h23"` rather than `hour12: false` - see the note on the same function in domain/attendance.ts:
+  // `hour12: false` leaves the cycle to the locale, and h24 numbers midnight 24, which reads back as 1440.
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms));
   const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
   const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
   return h * 60 + m;

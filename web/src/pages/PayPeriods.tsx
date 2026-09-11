@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CalendarRange, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -48,6 +48,7 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
   // eleven times. A checkbox, not a third footer button: three stacked buttons on a phone is worse than a tick.
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "pay period" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   function openCreate() {
     setEditing(null);
@@ -86,7 +87,10 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
         await create("pay-periods", body);
         toast({ title: "Pay period created", variant: "success" });
       }
-      if (again && !editing) { setForm(EMPTY); guard.markSaved(EMPTY); }
+      // The just-cleared Name loses focus the instant its own Create button disables with it - see
+      // ReimbursementCategories' identical fix - so a run of twelve periods drops the reader onto the panel
+      // between fields, not back onto the one they are about to retype.
+      if (again && !editing) { setForm(EMPTY); guard.markSaved(EMPTY); nameRef.current?.focus(); }
       else { guard.markSaved(); setOpen(false); }
       reload();
     } catch (e) {
@@ -161,7 +165,7 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
           <DialogBody>
           <FormError error={err} />
           <Field label="Label">
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. May 2026" autoFocus />
+            <Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. May 2026" autoFocus />
           </Field>
           <FieldRow>
             <Field label="Period start">
@@ -170,10 +174,12 @@ export default function PayPeriods({ embedded, openId }: { me?: Me; embedded?: b
                 // Monthly is the overwhelming default - picking a start prefills month-end, pay date and label,
                 // so the common case is one field. Anything prefilled stays editable.
                 if (start && !form.end && !form.pay && !form.name.trim()) {
-                  const d = new Date(start + "T00:00:00");
-                  const endD = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-                  const iso = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-                  setForm({ name: d.toLocaleDateString(undefined, { month: "long", year: "numeric" }), start, end: iso(endD), pay: iso(endD) });
+                  // Day 0 of the next month is the last of this one, in UTC so the answer is the date rather
+                  // than the machine's evening: built from local parts, a month-end prefilled one day early
+                  // for anyone east of UTC, and a pay period is not a thing to be a day out by.
+                  const endYmd = new Date(Date.UTC(Number(start.slice(0, 4)), Number(start.slice(5, 7)), 0)).toISOString().slice(0, 10);
+                  const monthName = new Date(`${start.slice(0, 8)}01T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+                  setForm({ name: monthName, start, end: endYmd, pay: endYmd });
                 } else {
                   setForm({ ...form, start });
                 }

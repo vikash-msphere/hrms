@@ -11,7 +11,7 @@ import * as schema from "../src/db/schema";
 import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { emitEvent } from "../src/services/eventBus";
-import { invalidateAutomationCache } from "../src/services/automationEngine";
+import { invalidateAutomationCache, MAX_TOTAL_DISPATCHES } from "../src/services/automationEngine";
 import { AUTOMATIONS } from "../bootstrap/collections/automations";
 import { genId } from "../src/lib/idCodec";
 import type { AppUser } from "../src/env";
@@ -395,7 +395,7 @@ describe("workflows e2e: an exhausted dispatch budget is visible, not just logge
     await seedRule("Provision IT & workspace for new hires");
 
     const prev = deps.automationBudget;
-    deps.automationBudget = { n: 50, dropped: 0 }; // already at MAX_TOTAL_DISPATCHES
+    deps.automationBudget = { n: MAX_TOTAL_DISPATCHES, dropped: 0 }; // already exhausted
     try {
       for (let i = 0; i < 3; i++) {
         await emitEvent(deps, actor, "employee.created", { subject: `employees/${emp}`, employeeId: emp, payload: { departmentId: null, startDate: null } });

@@ -41,8 +41,20 @@ test("a filing's proof clears the warning, uploads, opens, and can be unlinked",
     await page.getByRole("button", { name: "List" }).click();
     const row = page.locator("tbody tr").filter({ hasText: title });
     await expect(row).toBeVisible({ timeout: 30_000 });
-    await row.getByRole("button", { name: "Actions" }).click();
-    await page.getByRole("menuitem", { name: "Edit" }).click();
+    // Opened and pressed as ONE retried unit. This list is shared - the other compliance specs write events
+    // while this one runs - so it re-renders and re-sorts underneath: the anchor row moves, Radix repositions
+    // the menu to follow it, and a press on an item that is still moving never lands ("element is not
+    // stable", then "element is outside of the viewport", until the budget runs out). Scrolled to first, and
+    // re-opened on a miss rather than waited out.
+    const editItem = page.getByRole("menuitem", { name: "Edit" });
+    await expect(async () => {
+      if (!(await editItem.count())) {
+        await row.scrollIntoViewIfNeeded();
+        await row.getByRole("button", { name: "Actions" }).click({ timeout: 10_000 });
+      }
+      await editItem.click({ timeout: 5_000 });
+      await expect(page.getByRole("dialog").getByText("Proof on file")).toBeVisible({ timeout: 10_000 });
+    }).toPass({ timeout: 60_000 });
 
     const edit = page.getByRole("dialog");
     await expect(edit.getByText("Proof on file")).toBeVisible({ timeout: 30_000 });

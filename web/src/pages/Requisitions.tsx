@@ -55,6 +55,9 @@ const STATUS_META: Record<string, { label: string; variant: Variant }> = {
   closed: { label: "Closed", variant: "destructive" },
   filled: { label: "Filled", variant: "secondary" },
 };
+// Sort rank for the list below. At module scope because it is a constant: rebuilt inside the component it was
+// a fresh object every render, so the sort's dependency array either lied about it or lost its memo.
+const STATUS_ORDER: Record<string, number> = { open: 0, draft: 1, on_hold: 2, filled: 3, closed: 4 };
 
 export default function Requisitions({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<JobRequisition>("job-requisitions");
@@ -88,7 +91,6 @@ export default function Requisitions({ me, openId }: { me: Me; openId?: string }
   }, [departments]);
 
   // Live hiring first (open, then drafts/on-hold), finished roles sink; newest within each group.
-  const STATUS_ORDER: Record<string, number> = { open: 0, draft: 1, on_hold: 2, filled: 3, closed: 4 };
   const items = useMemo(() =>
     [...rows].sort((a, b) =>
       (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9) || (b.create_time ?? "").localeCompare(a.create_time ?? "")),

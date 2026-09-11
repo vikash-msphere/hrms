@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Ban, Paperclip, Download, Wallet, ClipboardCheck } from "lucide-react";
 import { navigate, navigateTab } from "@/router";
 import { create, get, invoke, upload, download } from "@/api";
@@ -6,6 +6,8 @@ import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { useIntent } from "@/lib/intent";
 import { formatDate, formatMoney, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
+import { thisYearStr } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Employee, Reimbursement, ReimbursementCategory, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -37,9 +39,10 @@ import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 const sum = (rs: Reimbursement[]) => rs.reduce((n, r) => n + (r.amount || 0), 0);
-const pad = (n: number) => String(n).padStart(2, "0");
 // Local-time today, for prefilling "Date incurred" (toISOString would shift across midnight in non-UTC zones).
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 const EMPTY = { category: "", amount: "", incurred_on: "", description: "" };
 
 export default function Reimbursements({ me }: { me: Me }) {
@@ -89,18 +92,21 @@ export default function Reimbursements({ me }: { me: Me }) {
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [employees]);
 
-  const yearStart = `${new Date().toISOString().slice(0, 4)}-01-01`;
-  const isOwn = (r: Reimbursement) => !!(r.employee && me.employee_id && idOf(r.employee) === me.employee_id);
+  const yearStart = `${thisYearStr()}-01-01`;
+  // `useCallback` so the memos below depend on the predicate itself rather than restating the field it reads.
+  const isOwn = useCallback((r: Reimbursement) => !!(r.employee && me.employee_id && idOf(r.employee) === me.employee_id), [me.employee_id]);
   const isPending = (r: Reimbursement) => upper(r.state) === "PENDING";
 
-  const myAll = useMemo(() => rows.filter(isOwn), [rows, me.employee_id]);
+  const myAll = useMemo(() => rows.filter(isOwn), [rows, isOwn]);
   const pending = myAll.filter(isPending);
   const approvedUnpaid = myAll.filter((r) => upper(r.state) === "APPROVED");
   const paidThisYear = myAll.filter((r) => upper(r.state) === "PAID" && (r.paid_time ?? "") >= yearStart);
   // A claim of your own with nothing attached is the one that comes back to you; someone else's pending claim
   // is a decision you owe them. Both are worth a metric of their own.
   const missingReceipt = pending.filter((r) => !r.has_receipt);
-  const toDecide = useMemo(() => (canDecide ? rows.filter((r) => isPending(r) && !isOwn(r)) : []), [rows, canDecide, me.employee_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Names what it calls, so the disable comment that used to hold this together is gone: `isPending` is pure
+  // over its argument and `isOwn` now carries its own identity.
+  const toDecide = useMemo(() => (canDecide ? rows.filter((r) => isPending(r) && !isOwn(r)) : []), [rows, canDecide, isOwn]);
 
   const selectedCat = categories.find((c) => c.path && form.category && idOf(c.path) === idOf(form.category));
   const receiptRequired = !!selectedCat?.requires_receipt;

@@ -41,6 +41,7 @@ import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 // `renderSettingsPanel` wraps the whole switch in ONE Suspense, so a panel becoming lazy needs no change at any
 // call site - and the settings hub itself (cards, search, the command palette) reads metadata from
 // settings/registry.ts, which stays a static import precisely so it costs nothing.
+const GoalTemplates = lazy(() => import("@/pages/GoalTemplates"));
 const PayComponents = lazy(() => import("@/pages/PayComponents"));
 const PayGradesAdmin = lazy(() => import("@/pages/PayGradesAdmin"));
 const SalaryStructuresAdmin = lazy(() => import("@/pages/SalaryStructuresAdmin"));
@@ -82,7 +83,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ShieldAlert } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
-import { getSetting } from "@/lib/settingsStore";
+import { getSetting, saveSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 const DEFAULT_FIELDS: EmployeeFieldDef[] = [
@@ -147,7 +148,7 @@ function NotificationsTab({ toast }: { toast: Toast }) {
     try {
       // Materialize every category so the saved blob is complete + explicit.
       const full = Object.fromEntries(NOTIF_CATEGORIES.map((c) => [c.key, cfgOf(c)]));
-      await patch("settings/notifications", { value: { events: full } });
+      await saveSetting("notifications", { value: { events: full } });
       markSaved();
       toast({ title: "Notification settings saved" });
     } catch (e) {
@@ -498,6 +499,7 @@ function pickSettingsPanel(key: string, me: Me, toast: Toast, slot: HTMLDivEleme
     case "recruiting": return <AtsTab toast={toast} />;
     case "referrals": return <ReferralsTab toast={toast} />;
     case "performance": return <PerformancePanel />;
+    case "goal-templates": return <GoalTemplates embedded openId={openId} />;
     case "onboarding-templates": return <TransitionTemplatesEditor />;
     case "benefit-plans": return <BenefitPlansAdmin openId={openId} />;
     // Comms & support
@@ -557,7 +559,7 @@ function EsignTab({ toast }: { toast: Toast }) {
     getSetting<Partial<EsignCfg>>("esign").then((s) => { if (s.value) setCfg((p) => ({ ...p, ...s.value, providers: s.value!.providers ?? {} })); }).catch(() => {}).finally(() => setReady(true));
     get<{ providers: ProviderMeta[] }>("esign-providers").then((r) => setProviders(r.providers ?? [])).catch(() => {});
   }, []);
-  const save = async () => { try { await patch("settings/esign", { value: cfg }); markSaved(); toast({ title: "E-signature settings saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const save = async () => { try { await saveSetting("esign", { value: cfg }); markSaved(); toast({ title: "E-signature settings saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const { markSaved } = useUnsaved(cfg, ready, save);
   // Vendor config only for providers that HAVE config (Aadhaar/Cashfree); the in-app "internal" method has none.
   const vendors = providers.filter((p) => p.configFields.length > 0);
@@ -624,7 +626,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   // existing rows.
   const saveCtc = async () => {
     try {
-      await patch("settings/ctc", { value: ctc });
+      await saveSetting("ctc", { value: ctc });
       markCtcSaved();
       toast({ title: "CTC provisions saved" });
       await promptReapply();
@@ -632,14 +634,14 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
       toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) });
     }
   };
-  const saveOt = async () => { try { await patch("settings/overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); markOtSaved(); toast({ title: "Overtime policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const saveOt = async () => { try { await saveSetting("overtime", { value: { ...ot, rate_per_hour: ot.rate_per_hour > 0 ? ot.rate_per_hour : null } }); markOtSaved(); toast({ title: "Overtime policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const savePt = async () => {
     const slabs = pt.slabs.map((s, i) => ({ up_to: i === pt.slabs.length - 1 ? null : Number(s.up_to) || 0, amount: Number(s.amount) || 0 }));
     const annual_cap = pt.annual_cap == null || !Number.isFinite(pt.annual_cap) ? null : Math.max(0, Number(pt.annual_cap));
-    try { await patch("settings/professional-tax", { value: { slabs, annual_cap } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
+    try { await saveSetting("professional-tax", { value: { slabs, annual_cap } }); markPtSaved(); toast({ title: "Professional Tax slabs saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); }
   };
-  const saveGratuity = async () => { try { await patch("settings/gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
-  const savePerq = async () => { try { await patch("settings/loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const saveGratuity = async () => { try { await saveSetting("gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const savePerq = async () => { try { await saveSetting("loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const { markSaved: markGratuitySaved } = useUnsaved(gratuity, ready, saveGratuity);
   const { markSaved: markPerqSaved } = useUnsaved(perq, ready, savePerq);
   const { markSaved: markCtcSaved } = useUnsaved(ctc, ready, saveCtc);
@@ -804,7 +806,7 @@ function ReferralsTab({ toast }: { toast: Toast }) {
     try {
       // Keep tiers ordered ascending by max_days (nulls last = catch-all), matching the resolver's expectation.
       const clean = [...tiers].sort((a, b) => (a.max_days ?? Infinity) - (b.max_days ?? Infinity));
-      await patch("settings/referrals", { value: { award_trigger: trigger, default_bonus_amount: Number(amount) || 0, join_tiers: clean } });
+      await saveSetting("referrals", { value: { award_trigger: trigger, default_bonus_amount: Number(amount) || 0, join_tiers: clean } });
       markSaved();
       toast({ title: "Referral settings saved" });
     } catch (e) {
@@ -875,7 +877,7 @@ function AtsTab({ toast }: { toast: Toast }) {
     if (!stages.some((s) => s.kind === "hired")) { toast({ variant: "destructive", title: "Add a Hired stage", description: "One stage must have kind Hired (the success terminal)." }); return; }
     setSaving(true);
     try {
-      await patch("settings/ats", { value: {
+      await saveSetting("ats", { value: {
         stages,
         sources: cfg.sources.filter(Boolean),
         rejection_reasons: cfg.rejection_reasons.filter(Boolean),
@@ -1067,7 +1069,7 @@ function AttendanceTab({ toast }: { toast: Toast }) {
   async function save() {
     setSaving(true);
     try {
-      await patch("settings/attendance", { value: cfg });
+      await saveSetting("attendance", { value: cfg });
       markSaved();
       toast({ title: "Attendance schedule saved" });
     } catch (e) {
@@ -1228,7 +1230,7 @@ function ReimbursementsPanel({ toast, openId }: { toast: Toast; openId?: string 
     setMode(next);
     setSaving(true);
     try {
-      await patch("settings/reimbursements", { value: { payout_mode: next } });
+      await saveSetting("reimbursements", { value: { payout_mode: next } });
       toast({ title: "Payout mode saved", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });
@@ -1295,7 +1297,7 @@ function ExpensesPanel({ toast, openId }: { toast: Toast; openId?: string }) {
     setSaving(true);
     try {
       const parsedThresholds = thresholds.split(",").map((t) => Number(t.trim())).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
-      await patch("settings/expenses", {
+      await saveSetting("expenses", {
         value: {
           auto_approve_threshold: Number(autoApprove) > 0 ? Number(autoApprove) : 0,
           recurring_default_state: recurringState,
@@ -1390,7 +1392,7 @@ function TicketsTab({ toast }: { toast: Toast }) {
       });
     setSaving(true);
     try {
-      await patch("settings/ticket-categories", { value: { categories: out } });
+      await saveSetting("ticket-categories", { value: { categories: out } });
       setCats(out);
       markSaved();
       toast({ title: "Ticket categories saved", variant: "success" });
@@ -1520,7 +1522,7 @@ function ChecklistRow({ checklist, reload, toast }: { checklist: TicketChecklist
   const [saved, setSaved] = useState<{ name: string; items: string } | null>(null);
   const base = saved ?? { name: checklist.display_name, items: original };
   const dirty = name !== base.name || items !== base.items;
-  useUnsavedTracker(dirty, () => (name.trim() ? save() : undefined));
+  useUnsavedTracker(dirty, () => (name.trim() ? save() : undefined), busy);
 
   async function save() {
     setBusy(true);
@@ -1746,7 +1748,7 @@ function useOrgBlob(toast: Toast) {
     setSaving(true);
     try {
       const value = { ...(blob ?? {}), ...slice };
-      await patch("settings/organization", { value });
+      await saveSetting("organization", { value });
       setBlob(value as Partial<OrgSettings>);
       reload();
       toast({ title: savedTitle, variant: "success" });
@@ -2512,7 +2514,7 @@ function DashboardTab({ toast }: { toast: Toast }) {
   async function save(savedMsg: string) {
     setSaving(true);
     try {
-      await patch("settings/dashboard", { value: cfg });
+      await saveSetting("dashboard", { value: cfg });
       markSaved();
       toast({ title: savedMsg, variant: "success" });
     } catch (e) {
@@ -2785,8 +2787,8 @@ function DefaultsTab({ toast }: { toast: Toast }) {
   async function save() {
     setSaving(true);
     try {
-      await patch("settings/probation", { value: { default_months: Number(probation) } });
-      await patch("settings/holidays", {
+      await saveSetting("probation", { value: { default_months: Number(probation) } });
+      await saveSetting("holidays", {
         value: {
           max_optional: Number(maxOptional),
           pick_by: pickBy || null,
@@ -2880,7 +2882,7 @@ function EmployeeIdsTab({ toast }: { toast: Toast }) {
   async function save() {
     setSaving(true);
     try {
-      await patch("settings/employee-number", { value: { ...cfg, width: Number(cfg.width), start: Number(cfg.start) } });
+      await saveSetting("employee-number", { value: { ...cfg, width: Number(cfg.width), start: Number(cfg.start) } });
       markSaved();
       toast({ title: "Employee ID format saved", variant: "success" });
     } catch (e) {
@@ -2968,7 +2970,7 @@ function AssetTagsTab({ toast, openId }: { toast: Toast; openId?: string }) {
       const digits = cfg.digits != null ? Number(cfg.digits) : undefined;
       // Blank-id custom format rows are editing scaffolding; a saved row's label falls back to its id.
       const customs = (cfg.custom_formats ?? []).filter((f) => f.id.trim()).map((f) => ({ ...f, id: f.id.trim(), label: f.label.trim() || f.id.trim() }));
-      await patch("settings/asset-tags", { value: { ...cfg, digits, custom_formats: customs.length ? customs : undefined } });
+      await saveSetting("asset-tags", { value: { ...cfg, digits, custom_formats: customs.length ? customs : undefined } });
       markSaved();
       toast({ title: "Asset tag settings saved", variant: "success" });
     } catch (e) {
@@ -3225,7 +3227,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   async function save() {
     setSaving(true);
     try {
-      await patch("settings/leave_caps", {
+      await saveSetting("leave_caps", {
         value: {
           carry_forward_excess: excess,
           carry_forward_mode: cfMode,
@@ -3234,9 +3236,9 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
           encashment_cumulative_cap_days: encCap.trim() === "" ? null : Number(encCap),
         },
       });
-      await patch("settings/leave_encashment", { value: { rate_basis: encRateBasis, per_day_divisor: encDivisor.trim() === "" ? 30 : Number(encDivisor) } });
-      await patch("settings/leave_accrual", { value: { rounding } });
-      await patch("settings/leave-requests", { value: { allow_backdated: allowBackdated } });
+      await saveSetting("leave_encashment", { value: { rate_basis: encRateBasis, per_day_divisor: encDivisor.trim() === "" ? 30 : Number(encDivisor) } });
+      await saveSetting("leave_accrual", { value: { rounding } });
+      await saveSetting("leave-requests", { value: { allow_backdated: allowBackdated } });
       markSaved();
       toast({ title: "Leave policy saved", variant: "success" });
     } catch (e) {
@@ -3371,7 +3373,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
     }
     setSaving(true);
     try {
-      await patch("settings/employee_fields", { value: { fields: cleaned } });
+      await saveSetting("employee_fields", { value: { fields: cleaned } });
       setFields(cleaned);
       markSaved();
       toast({ title: "Employee fields saved", variant: "success" });

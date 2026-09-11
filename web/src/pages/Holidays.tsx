@@ -10,7 +10,8 @@ import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { navigate } from "@/router";
 import { formatDate, idOf, cn } from "@/lib/utils";
-import { dmy, longDate, monthLabelOf, todayYmd } from "@/lib/leaveCalendar";
+import { dmy, longDate, monthLabelOf } from "@/lib/leaveCalendar";
+import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
 import { breakAround, bestBridge, breakLabel, isWeekendDay, longBreakCount, type Break, type Bridge } from "@/lib/holidayBreaks";
 import { buildIcs, downloadIcs } from "@/lib/ics";
 import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
@@ -50,16 +51,19 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { getSetting } from "@/lib/settingsStore";
 
-// The viewer's LOCAL calendar date (toISOString would flip to UTC's date around midnight).
-const todayStr = () => new Date().toLocaleDateString("en-CA");
-// Weekday of a ymd date ("Fri") - parsed as UTC so the label never shifts with the viewer's offset.
-const weekdayOf = (ymd: string) =>
+// `todayStr` is imported from lib/orgDay, which answers the ORG's day. This file used to define its own,
+// answering the VIEWER's - so "in 3 days" until the next holiday, and the pick deadline it is measured
+// against, were counted from whatever day the reader's laptop was on.
+// Weekday of a ymd date ("Fri") - parsed as UTC so the label never shifts with the viewer's offset. Named
+// `…ShortOf` to pair with `weekdayLongOf` below, and so it cannot be mistaken for orgDay's `weekdayOf`,
+// which answers a NUMBER.
+const weekdayShortOf = (ymd: string) =>
   new Date(ymd.slice(0, 10) + "T00:00:00Z").toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" });
 const weekdayLongOf = (ymd: string) =>
   new Date(ymd.slice(0, 10) + "T00:00:00Z").toLocaleDateString(undefined, { weekday: "long", timeZone: "UTC" });
 const dayNumOf = (ymd: string) => String(Number(ymd.slice(8, 10)));
-const daysBetween = (from: string, to: string) =>
-  Math.round((Date.parse(to.slice(0, 10) + "T00:00:00Z") - Date.parse(from + "T00:00:00Z")) / 86400000);
+// Tolerates a full timestamp on either side (holiday rows carry one), then defers to the one implementation.
+const daysBetween = (from: string, to: string) => daysBetweenYmd(from.slice(0, 10), to.slice(0, 10));
 const inDaysLabel = (n: number) => (n === 0 ? "today" : n === 1 ? "tomorrow" : `in ${n} days`);
 const monthOf = (ymd: string) => ymd.slice(0, 7);
 const monthTitle = (ym: string) => monthLabelOf(new Date(ym + "-01T00:00:00Z"));
@@ -130,7 +134,8 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
   useEffect(() => { writeHashQuery("kind", kindFilter === "all" ? null : kindFilter); }, [kindFilter]);
   useEffect(() => { writeHashQuery("mine", mineOnly ? "1" : null); }, [mineOnly]);
 
-  const workDays = schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5];
+  // Memoized: the fallback is a fresh array literal, and a callback + a memo below key off this.
+  const workDays = useMemo(() => (schedule.work_days?.length ? schedule.work_days : [1, 2, 3, 4, 5]), [schedule.work_days]);
   const today = todayStr();
 
   // A holiday is a day OFF for this viewer when it's live, applies to their location, and is either fixed or an
@@ -389,7 +394,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       id: "date",
       header: "Date",
       accessor: (h) => h.date,
-      cell: (h) => `${weekdayOf(h.date)}, ${formatDate(h.date)}`,
+      cell: (h) => `${weekdayShortOf(h.date)}, ${formatDate(h.date)}`,
     },
     {
       id: "kind",
@@ -509,7 +514,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
               label: "Next day off",
               icon: CalendarDays,
               value: <span className="text-base font-semibold">{nextHoliday ? nextHoliday.display_name : "None scheduled"}</span>,
-              hint: nextHoliday ? `${weekdayOf(nextHoliday.date)} · ${inDaysLabel(daysBetween(today, nextHoliday.date))}` : "none left this year",
+              hint: nextHoliday ? `${weekdayShortOf(nextHoliday.date)} · ${inDaysLabel(daysBetween(today, nextHoliday.date))}` : "none left this year",
               // The next day off is one row, so the metric opens it rather than filtering to a list of one.
               ...(nextHoliday ? { onClick: () => openEdit(nextHoliday) } : {}),
             },
@@ -862,7 +867,7 @@ function BridgeAction({ bridge, me, onPick }: { bridge: Bridge; me: Me; onPick: 
   );
   const first = bridge.take[0]!;
   const last = bridge.take[bridge.take.length - 1]!;
-  const label = bridge.take.length === 1 ? `${weekdayOf(first)} ${dayNumOf(first)}` : `${weekdayOf(first)}-${weekdayOf(last)}`;
+  const label = bridge.take.length === 1 ? `${weekdayShortOf(first)} ${dayNumOf(first)}` : `${weekdayShortOf(first)}-${weekdayShortOf(last)}`;
   const short = bridge.take.length > available;
   return (
     <Button
@@ -907,7 +912,7 @@ function HolidayCard({ info, isNext, past, select, bridge, actions, onOpenDay }:
         )}
       >
         <span className="text-[15px] font-semibold tabular-nums">{dayNumOf(ymd)}</span>
-        <span className="mt-0.5 text-[10px] font-medium uppercase text-muted-foreground">{weekdayOf(ymd)}</span>
+        <span className="mt-0.5 text-[10px] font-medium uppercase text-muted-foreground">{weekdayShortOf(ymd)}</span>
       </button>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
@@ -926,7 +931,7 @@ function HolidayCard({ info, isNext, past, select, bridge, actions, onOpenDay }:
         {/* longDate is parsed as UTC, so this line can never disagree with the weekday on the tile. */}
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
           {longDate(ymd)}
-          {!past && ` · ${inDaysLabel(daysBetween(todayYmd(), ymd))}`}
+          {!past && ` · ${inDaysLabel(daysBetween(todayStr(), ymd))}`}
           {long && long.days > 1 && ` · off ${dmy(long.from)} - ${dmy(long.to)}`}
           {onWeekend && " · nobody gains a day"}
           {h.applies === false && " · another location's holiday"}
@@ -988,7 +993,7 @@ function YearView({ year, infos, isOff, workDays, weekStart, me, onSelectDay }: 
   return (
     <TooltipProvider delayDuration={200}>
       <div className="space-y-3">
-        <YearGrid year={year} dayOf={dayOf} today={todayYmd()} weekStart={weekStart} onSelect={onSelectDay} />
+        <YearGrid year={year} dayOf={dayOf} today={todayStr()} weekStart={weekStart} onSelect={onSelectDay} />
         <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground" data-print-hide>
           <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-primary/20" /> Holiday</span>
           <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-emerald-200 dark:bg-emerald-900" /> Your approved leave</span>

@@ -1,7 +1,7 @@
 import {
   CalendarPlus, ReceiptText, LifeBuoy, Sparkles, Megaphone,
   Target, Timer, House, MessagesSquare, UserPlus, Lightbulb, Upload, KanbanSquare, Clock,
-  HandCoins, FileCheck, UserSearch, Briefcase, UserRoundPlus, Zap, Laptop, Bug,
+  HandCoins, FileCheck, UserSearch, Briefcase, UserRoundPlus, Zap, Laptop, Bug, Table2,
   type LucideIcon,
 } from "lucide-react";
 import { navigate } from "@/router";
@@ -67,6 +67,7 @@ export const QUICK_ACTIONS: QuickAction[] = [
   { id: "new-post", label: "Post to the board", icon: Megaphone, route: "announcements", intent: "new-post", group: "Create", visible: (me) => hasCapability(me.capabilities, "announcements.write") || hasCapability(me.capabilities, "announcements.post") },
   { id: "new-document", label: "Upload a document", icon: Upload, route: "documents", intent: "new-document", group: "Create", visible: (me) => hasCapability(me.capabilities, "org-documents.write") || hasCapability(me.capabilities, "personal-documents.write") },
   { id: "new-employee", label: "Add an employee", icon: UserRoundPlus, route: "employees", intent: "new-employee", group: "Create", visible: (me) => hasCapability(me.capabilities, "employees.write") },
+  { id: "new-table", label: "Build a table", icon: Table2, route: "tables", intent: "new-table", group: "Create", visible: (me) => hasCapability(me.capabilities, "table-views.write") },
   // Give kudos is surfaced as its own always-visible top-bar button, not inside the "+" menu.
   { id: "give-kudos", label: "Give kudos", icon: Sparkles, route: "announcements", intent: "give-kudos", group: "Create", visible: (me) => hasCapability(me.capabilities, "announcements.giveKudos") },
 ];

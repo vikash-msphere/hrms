@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, personPath, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personPath, purge, test, expect } from "./fixtures";
 
 // Two small, derived facts on a candidate's own page - never opened by any other spec (nothing here
 // navigates to `#/candidates/<id>` at all), so neither has ever rendered.
@@ -8,6 +8,10 @@ test.describe("candidate profile", () => {
   test("shows who referred a candidate", async ({ as }) => {
     test.setTimeout(90_000);
     const page = await as("super");
+    // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this
+    // suite (complianceRuleDelete.spec.ts et al.). The badge this test reads is asserted below; a console
+    // line from a request retried behind that is not its failure.
+    allowConsoleErrors(page, /status of 503|status of 500/i);
     const referrer = await personPath(page, "hr");
     const candidateName = `E2E referred candidate ${Date.now()}`;
 

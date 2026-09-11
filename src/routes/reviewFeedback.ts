@@ -5,6 +5,7 @@ import { listReviewFeedback, submitFeedback, declineFeedback } from "../services
 import { toReviewFeedbackResource } from "../http/serialize";
 
 const submitSchema = z.object({ comment: z.string().nullable().optional(), overall_rating: z.number().nullable().optional() }).strict();
+const declineSchema = z.object({ reason: z.string().max(500).nullable().optional() }).strict();
 
 // 360 feedback requests. A request is minted by nominating a peer on a review, and the nominee either answers
 // it (:submitFeedback) or declines - so there is no create, no edit and no delete here.
@@ -18,6 +19,8 @@ export const reviewFeedback = collectionRoutes({
   list: (c, page) => listReviewFeedback(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state")),
   verbs: {
     submitFeedback: { schema: submitSchema, run: (deps, user, id, body) => submitFeedback(deps, user, id, body) },
-    decline: { run: (deps, user, id) => declineFeedback(deps, user, id) },
+    // Saying why is optional but useful: "I have not worked with them this cycle" tells the manager to
+    // nominate somebody else, where a bare decline leaves them guessing.
+    decline: { schema: declineSchema, run: (deps, user, id, body) => declineFeedback(deps, user, id, body?.reason) },
   },
 });

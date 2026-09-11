@@ -68,6 +68,55 @@ describe("goal alignment", () => {
     await expect(updateGoal(deps, actor, a.uuid, { parent: `goals/${c.uuid}` })).rejects.toThrow(/cycle/);
   });
 
+  it("walks a deep chain in one statement rather than one read per hop", async () => {
+    // The cycle check used to walk the chain a query at a time, up to 25 D1 reads inside a create that also
+    // allocates a code, writes the row, audits it and emits an event - against a per-invocation subrequest
+    // budget. A recursive CTE answers the same question at any depth. What is pinned here is the ANSWER: a
+    // long legal chain is still accepted, and a loop at the far end of one is still refused.
+    const actor = await seedActor();
+    let parent = await createGoal(deps, actor, { title: "root" });
+    const root = parent;
+    for (let i = 1; i < 20; i++) parent = await createGoal(deps, actor, { title: `level ${i}`, parent: `goals/${parent.uuid}` });
+    // 20 deep and legal.
+    const leaf = await createGoal(deps, actor, { title: "leaf", parent: `goals/${parent.uuid}` });
+    expect(leaf.parentId).toBe(parent.uuid);
+    // And the loop is caught from the top of the chain, not just one hop up.
+    await expect(updateGoal(deps, actor, root.uuid, { parent: `goals/${leaf.uuid}` })).rejects.toThrow(/cycle/);
+  });
+
+  it("refuses a chain past the depth cap instead of walking it", async () => {
+    const actor = await seedActor();
+    let parent = await createGoal(deps, actor, { title: "root" });
+    for (let i = 1; i <= 26; i++) parent = await createGoal(deps, actor, { title: `level ${i}`, parent: `goals/${parent.uuid}` });
+    await expect(createGoal(deps, actor, { title: "one too deep", parent: `goals/${parent.uuid}` })).rejects.toThrow(/too deep/);
+  });
+
+  it("keeps a key result a leaf: it may not sit under another key result", async () => {
+    // "A key result needs an objective to sit under" was enforced as "needs a parent", so a KR could hang off
+    // another KR. The roll-up then recurses up the chain (several reads per level), and the model stops meaning
+    // anything - a key result of a key result proves nothing and appears in no objective's roll-up.
+    const actor = await seedActor();
+    const objective = await createGoal(deps, actor, { title: "make onboarding excellent" });
+    const kr = await createGoal(deps, actor, { title: "time to first commit under 3 days", kind: "key_result", parent: `goals/${objective.uuid}` });
+
+    await expect(createGoal(deps, actor, { title: "nested", kind: "key_result", parent: `goals/${kr.uuid}` }))
+      .rejects.toThrow(/cannot sit under another key result/);
+    // A KR with no parent at all is still refused by its own rule.
+    await expect(createGoal(deps, actor, { title: "orphan", kind: "key_result" })).rejects.toThrow(/needs an objective/);
+    // Re-parenting an existing KR under another KR is the same refusal.
+    const sibling = await createGoal(deps, actor, { title: "second measure", kind: "key_result", parent: `goals/${objective.uuid}` });
+    await expect(updateGoal(deps, actor, sibling.uuid, { parent: `goals/${kr.uuid}` })).rejects.toThrow(/cannot sit under another key result/);
+  });
+
+  it("refuses to turn an objective that HAS key results into one", async () => {
+    // The same rule from below - reachable with `{kind: "key_result"}` on a goal that already has KRs.
+    const actor = await seedActor();
+    const top = await createGoal(deps, actor, { title: "top" });
+    const objective = await createGoal(deps, actor, { title: "objective", parent: `goals/${top.uuid}` });
+    await createGoal(deps, actor, { title: "its measure", kind: "key_result", parent: `goals/${objective.uuid}` });
+    await expect(updateGoal(deps, actor, objective.uuid, { kind: "key_result" })).rejects.toThrow(/has key results of its own/);
+  });
+
   it("records progress from/to and the optional note in the audit meta", async () => {
     const actor = await seedActor();
     const g = await createGoal(deps, actor, { title: "trackable" });

@@ -35,7 +35,13 @@ test("a count is opened, a tag is logged into it, and closing it leaves a report
   // A count declares what it is counting before it starts, because the scope is what its missing list will
   // mean - and it is fixed once the count closes.
   await walk.getByLabel("What to call it").fill(label);
-  await walk.getByRole("button", { name: "Start counting" }).click();
+  // Retried: the walk overlay re-renders while it decides whether an open count already exists to resume (the
+  // same "stocktakes" read `purgeOpenCounts` above just raced against), and that re-render can detach this
+  // exact button mid-click on a lane where another browser's own count is opening or closing at the same
+  // moment - the click, not just the visibility, is what needs the retry.
+  await expect(async () => {
+    await walk.getByRole("button", { name: "Start counting" }).click({ timeout: 8_000 });
+  }).toPass({ timeout: 30_000 });
 
   // The walk. A USB scanner types the tag into this field and presses Enter by itself; typing it is the same
   // path, which is what makes the count usable without a camera.
@@ -104,12 +110,17 @@ async function createAsset(page: import("@playwright/test").Page, name: string, 
   return (await res.json()) as { path: string; name: string; asset_tag?: string };
 }
 
-/** Drop any count still open, so this walk starts one of its own. */
+/** Drop any of THIS spec's own counts left open by an earlier interrupted run. */
 async function purgeOpenCounts(page: import("@playwright/test").Page) {
   const res = await page.request.get("/v1/stocktakes?page_size=100");
   if (!res.ok()) return;
-  const { results = [] } = (await res.json()) as { results?: { path: string; status?: string; close_time?: string }[] };
-  for (const c of results.filter((x) => x.status === "open" || !x.close_time)) await purge(page, c.path);
+  const { results = [] } = (await res.json()) as { results?: { path: string; label?: string; status?: string; close_time?: string }[] };
+  // Scoped to this spec's own label prefix: the org-wide open-counts list is shared, and an unscoped sweep
+  // here hard-purges whatever ANOTHER spec's own count happens to be open at the same moment (stocktakeAbandon
+  // being the sharpest case - its whole point is a count that STAYS open until it decides what to do with it).
+  for (const c of results.filter((x) => (x.status === "open" || !x.close_time) && (x.label ?? "").startsWith("E2E count "))) {
+    await purge(page, c.path);
+  }
 }
 
 /** Drop the count this spec walked. */

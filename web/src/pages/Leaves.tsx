@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Ban, Check, CalendarPlus, CalendarRange, Users, Wallet, CalendarCheck, Clock, Plane, X, Filter, Inbox, ArrowRight, Coins, CalendarSync, Paperclip, Download, History } from "lucide-react";
 import { download, get, invoke, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -7,7 +7,8 @@ import { usePermission } from "@/lib/perm";
 import { useApprovals } from "@/lib/approvals";
 import { leaveBalanceOf, leaveDecisionContext, leaveOverlapCount, leaveSummary } from "@/lib/leaveApproval";
 import { useIntent } from "@/lib/intent";
-import { formatDate, idOf, cn, personName } from "@/lib/utils";
+import { formatDate, idOf, cn, personName, round2 } from "@/lib/utils";
+import { todayStr, daysBetweenYmd } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import { readHashQuery, writeHashQuery } from "@/lib/urlQuery";
 import { useRoutedTab } from "@/lib/routedTabs";
@@ -50,8 +51,8 @@ const sumDays = (rs: LeaveRequest[]) => rs.reduce((n, r) => n + (r.days || 0), 0
 type StripFocus = "available" | "history" | "inflight" | null;
 const STRIP_FOCUS: StripFocus[] = ["available", "history", "inflight"];
 const stripFocus = (raw: string | null): StripFocus => (STRIP_FOCUS.includes(raw as StripFocus) ? (raw as StripFocus) : null);
-// Whole calendar days between two ymd strings (positive = `to` is later).
-const daysBetween = (from: string, to: string) => Math.round((Date.parse(to + "T00:00:00Z") - Date.parse(from + "T00:00:00Z")) / 86400000);
+// Whole calendar days between two ymd strings (positive = `to` is later) - lib/orgDay owns the arithmetic.
+const daysBetween = daysBetweenYmd;
 const inDaysLabel = (n: number) => (n === 0 ? "today" : n === 1 ? "tomorrow" : `in ${n} days`);
 // Half-days are real, so day counts print as 1 / 1.5 rather than 1.5000000000000002.
 const fmtDays = (n: number) => String(Math.round(n * 2) / 2);
@@ -156,10 +157,14 @@ export default function Leaves({ me }: { me: Me }) {
     const m = new Map(types.map((t) => [idOf(t.path), t]));
     return (p?: string) => (p ? m.get(idOf(p)) : undefined);
   }, [types]);
-  const typeName = (p?: string) => (p ? typeOf(p)?.display_name ?? idOf(p) : "-");
+  // These three - and the predicates further down - are `useCallback`ed because the memos below CALL them:
+  // a helper rebuilt every render is a dependency that changes every render, so listing it honestly would
+  // defeat the memo and leaving it out is the stale-closure bug the rule exists to catch. Wrapped, each one's
+  // identity moves with what it actually reads, which is what the dependency arrays used to restate by hand.
+  const typeName = useCallback((p?: string) => (p ? typeOf(p)?.display_name ?? idOf(p) : "-"), [typeOf]);
   // Each type's calendar colour (configured or a stable palette pick), so a type reads the same here, on the
   // leave calendar and on the dashboard timeline.
-  const typeColor = (p?: string) => leaveColor(typeOf(p)?.color, p ? idOf(p) : "");
+  const typeColor = useCallback((p?: string) => leaveColor(typeOf(p)?.color, p ? idOf(p) : ""), [typeOf]);
 
   // Days a range covers but is NOT charged for: non-working weekdays (per the org schedule) and holidays. The
   // server already dropped them when it computed `days` (domain/leave.ts leaveDays); naming them here is what
@@ -202,17 +207,19 @@ export default function Leaves({ me }: { me: Me }) {
   );
   const empName = (p?: string) => personName(employees, p, "-") || "-";
 
-  const today = new Date().toLocaleDateString("en-CA");
+  // The ORG's day, not the reader's. Every comparison below is against a date the SERVER decided (a request
+  // is upcoming, a balance year has started), and those are stated in the org timezone.
+  const today = todayStr();
   const yearStart = `${today.slice(0, 4)}-01-01`;
 
-  const isOwn = (lr: LeaveRequest) => !!(lr.employee && me.employee_id && idOf(lr.employee) === me.employee_id);
-  const isPending = (lr: LeaveRequest) => upper(lr.state) === "PENDING";
-  const isUpcoming = (lr: LeaveRequest) => upper(lr.state) === "APPROVED" && lr.end_date >= today;
+  const isOwn = useCallback((lr: LeaveRequest) => !!(lr.employee && me.employee_id && idOf(lr.employee) === me.employee_id), [me.employee_id]);
+  const isPending = (lr: LeaveRequest) => upper(lr.state) === "PENDING"; // pure over its argument - nothing to depend on
+  const isUpcoming = useCallback((lr: LeaveRequest) => upper(lr.state) === "APPROVED" && lr.end_date >= today, [today]);
 
   // The caller's own requests drive the balance cards below; the Requests/History tab split lives in
   // RequestsHistoryTabs. "Live" for leave includes upcoming-approved (still cancellable), but an approver's
   // History excludes only pending (so freshly-approved future leave still shows org-wide).
-  const myAll = useMemo(() => rows.filter(isOwn), [rows, me.employee_id]);
+  const myAll = useMemo(() => rows.filter(isOwn), [rows, isOwn]);
 
   // The two pictures under the balance cards, over whatever requests this caller can see: their own on a
   // self-service page, their team's for an approver - the same rows the tables below list, so the charts and
@@ -230,7 +237,7 @@ export default function Leaves({ me }: { me: Me }) {
       // different leave type as far as the reader is concerned.
       byType: { ...byType, colors: byType.labels.map((label) => typeColor(types.find((t) => t.display_name === label)?.path)) },
     };
-  }, [rows, types, today, yearStart]);
+  }, [rows, types, today, yearStart, typeName, typeColor]);
 
   const myBalances = useMemo(
     () => balances.filter((b) => me.employee_id && b.employee && idOf(b.employee) === me.employee_id),
@@ -261,7 +268,7 @@ export default function Leaves({ me }: { me: Me }) {
   // Answer-first summary: what's left, what's spent, what's still in flight, and when the next break is.
   const nextLeave = useMemo(
     () => myAll.filter(isUpcoming).sort((a, b) => a.start_date.localeCompare(b.start_date))[0],
-    [myAll, today],
+    [myAll, isUpcoming],
   );
   const myPending = useMemo(() => myAll.filter(isPending), [myAll]);
   const usedThisYear = useMemo(
@@ -271,13 +278,13 @@ export default function Leaves({ me }: { me: Me }) {
   // Only paid (entitlement-tracked) types carry a meaningful "days left"; unpaid leave isn't drawn from a balance.
   const availableDays = useMemo(
     () => myBalances.filter((b) => typeOf(b.leave_type)?.paid !== false).reduce((n, b) => n + (b.balance_days || 0), 0),
-    [myBalances, types],
+    [myBalances, typeOf],
   );
   // Everyone else the caller can already see who is off today - free from the rows this page loaded anyway, and
   // it answers "is my team covered" without a trip to the calendar.
   const outToday = useMemo(
     () => rows.filter((r) => upper(r.state) === "APPROVED" && r.start_date <= today && r.end_date >= today && !isOwn(r)),
-    [rows, today, me.employee_id],
+    [rows, today, isOwn],
   );
 
   const onLeaveNow = !!nextLeave && nextLeave.start_date <= today;
@@ -502,7 +509,11 @@ export default function Leaves({ me }: { me: Me }) {
           {lr.has_document && <Paperclip className="h-3.5 w-3.5 text-muted-foreground" aria-label="Has a supporting document" />}
         </span>
       ) },
-    { id: "reason", header: "Reason", defaultHidden: true, accessor: (lr) => lr.reason ?? "", cell: (lr) => lr.reason || "-" },
+    // The reason is masked in session replay (`data-sentry-mask`, see web/src/instrument.ts) while the rest of
+    // the page - types, dates, balances, states - stays readable. Leave is the one ordinary-looking request
+    // whose free text is routinely a diagnosis, a bereavement or a family emergency, and it is not worth
+    // masking a whole page of business data to protect one column, nor worth recording it to keep the column.
+    { id: "reason", header: "Reason", defaultHidden: true, accessor: (lr) => lr.reason ?? "", cell: (lr) => <span data-sentry-mask>{lr.reason || "-"}</span> },
   ];
 
   // Cancellable: a pending request, or an approved leave that hasn't started yet (server restores the balance).
@@ -588,8 +599,11 @@ export default function Leaves({ me }: { me: Me }) {
     }
     entries.sort((a, b) => a.on.localeCompare(b.on));
     const net = entries.reduce((n, e) => n + e.days, 0);
-    return { opening: Math.round((ledgerBalance.balance_days - net) * 100) / 100, entries };
-  }, [ledgerBalance, myAll, encashments, types, meEmployee, yearStart, me.employee_id]);
+    // `round2` (lib/utils), not an inline `Math.round(n * 100) / 100`: leave days sit under the same rounding
+    // rule as money (src/domain/money.ts is the one helper for both), and the inline form multiplies in float,
+    // so a half-day balance can round the opposite way from the same figure everywhere else on the page.
+    return { opening: round2(ledgerBalance.balance_days - net), entries };
+  }, [ledgerBalance, myAll, encashments, typeOf, meEmployee, yearStart, me.employee_id]);
 
   // Row detail drawer, addressed by path so it survives a refetch replacing the row objects.
   const [detailPath, setDetailPath] = useState<string | null>(null);
@@ -1040,7 +1054,8 @@ export default function Leaves({ me }: { me: Me }) {
                 <dt className="text-muted-foreground">Filed</dt>
                 <dd>{formatDate(detailRow.create_time)}</dd>
                 <dt className="text-muted-foreground">Reason</dt>
-                <dd>{detailRow.reason?.trim() || <span className="text-muted-foreground">Not given</span>}</dd>
+                {/* Masked in replay for the reason given on the `reason` column above. */}
+                <dd data-sentry-mask>{detailRow.reason?.trim() || <span className="text-muted-foreground">Not given</span>}</dd>
                 {isPending(detailRow) && deciderFor(detailRow) && (
                   <>
                     <dt className="text-muted-foreground">Awaiting</dt>

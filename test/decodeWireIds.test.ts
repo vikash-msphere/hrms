@@ -71,4 +71,68 @@ describe("decodeWireIdsRequest", () => {
     expect(path(out)).toEqual(`/v1/employees/${EVE}:uploadPhoto`);
     expect(new Uint8Array(await out.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
   });
+
+  // A body that declares no length is the case both length checks miss: this edge's own skip (which reads
+  // `content-length`) and middleware/bodyLimit's. It runs BEFORE auth, so reading such a body to the end was
+  // an anonymous way to spend the isolate's memory against a 10 MiB cap. A stream is used rather than a big
+  // string because that is the only shape that declares nothing - a string body sets content-length.
+  const streamOf = (chunkBytes: number, chunks: number): ReadableStream<Uint8Array> => {
+    let sent = 0;
+    return new ReadableStream({
+      pull(c) {
+        if (sent++ >= chunks) return c.close();
+        c.enqueue(new Uint8Array(chunkBytes));
+      },
+    });
+  };
+  const chunked = (body: ReadableStream<Uint8Array>) =>
+    new Request("http://x/v1/employees", { method: "POST", headers: { "content-type": "application/json" }, body, duplex: "half" } as RequestInit);
+
+  it("refuses a chunked JSON body that reads past the cap, instead of buffering it", async () => {
+    // 12 MiB in 1 MiB chunks, against the 10 MiB document cap.
+    await expect(decodeWireIdsRequest(chunked(streamOf(1024 * 1024, 12)), codec)).rejects.toMatchObject({
+      httpStatus: 400,
+      type: "/errors/invalid-argument",
+    });
+  });
+
+  it("still decodes a chunked JSON body that stays under the cap", async () => {
+    const token = await codec.encode("departments", DEPT);
+    const bytes = new TextEncoder().encode(JSON.stringify({ department: `departments/${token}` }));
+    const stream = new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
+    const out = await decodeWireIdsRequest(chunked(stream), codec);
+    expect(await out.json()).toEqual({ department: `departments/${DEPT}` });
+  });
+});
+
+// The edge is the API's, and only the API's. Everything mounted outside /v1 is either authenticated by bytes
+// somebody else signed or carries its own token, and both are broken by touching the request.
+describe("decodeWireIdsRequest leaves non-/v1 requests alone", () => {
+  it("hands back the SAME request, with the body byte-identical", async () => {
+    // The e-sign webhook's MAC covers exactly these bytes: `HMAC(secret, timestamp + rawBody)`, verified in
+    // services/esign/cashfree.ts. This edge used to read the body and pass on
+    // `JSON.stringify(JSON.parse(text))`, which is a DIFFERENT string for the same JSON - the indentation and
+    // the trailing newline below are enough - so every correctly-signed delivery verified against bytes the
+    // provider never sent and was answered "invalid webhook". Pretty-printed deliberately: compact JSON is
+    // what happens to survive a round trip, which is why the suite could not see this.
+    const token = await codec.encode("employees", EVE);
+    const raw = `{\n  "data": {\n    "reference_id": 42,\n    "note": "employees/${token}"\n  }\n}\n`;
+    const r = req("/esign/callback/cashfree", { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+    const out = await decodeWireIdsRequest(r, codec);
+    expect(out).toBe(r); // not re-created, so not re-serialized
+    expect(await out.text()).toBe(raw); // and the ref is NOT decoded: outside /v1 there are no wire ids
+  });
+
+  it("leaves a non-/v1 query string untouched", async () => {
+    // /auth/callback carries Google's `state` and `code`. Nothing there is a wire ref, and rewriting a value
+    // that merely looked like one would corrupt the round trip.
+    const token = await codec.encode("employees", EVE);
+    const out = await decodeWireIdsRequest(req(`/auth/callback?state=employees/${token}&code=x`), codec);
+    expect(new URL(out.url).search).toEqual(`?state=employees/${token}&code=x`);
+  });
+
+  it("still transforms /v1 itself (the guard is a prefix, not a rewrite of the rule)", async () => {
+    const token = await codec.encode("employees", EVE);
+    expect(path(await decodeWireIdsRequest(req(`/v1/employees/${token}`), codec))).toEqual(`/v1/employees/${EVE}`);
+  });
 });

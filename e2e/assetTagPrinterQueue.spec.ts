@@ -46,15 +46,22 @@ test("clearing the queue and starting a new sheet each confirm before they take 
   await purge(page, asset);
 });
 
-/** One asset, so the printer has stock to queue. */
+/** One asset, so the printer has stock to queue. Retried, re-resolving the category on a miss: `assetCategory`
+ *  below can hand back an EXISTING category it does not own, and another spec's own cleanup purging that same
+ *  category between this read and the asset POST 400s here with "asset category not found" - not a real
+ *  failure of this test, just a category that stopped existing while this test was mid-use of it. */
 async function makeAsset(page: import("@playwright/test").Page): Promise<string> {
-  const category = await assetCategory(page);
-  const res = await page.request.post("/v1/assets", {
-    headers: SPA_HEADERS,
-    data: { name: `E2E printer asset ${Date.now()}`, category },
-  });
-  expect(res.status(), await res.text()).toBe(200);
-  return ((await res.json()) as { path: string }).path;
+  let path = "";
+  await expect(async () => {
+    const category = await assetCategory(page);
+    const res = await page.request.post("/v1/assets", {
+      headers: SPA_HEADERS,
+      data: { name: `E2E printer asset ${Date.now()}`, category },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    path = ((await res.json()) as { path: string }).path;
+  }).toPass({ timeout: 30_000 });
+  return path;
 }
 
 /**

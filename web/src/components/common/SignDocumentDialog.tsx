@@ -134,13 +134,20 @@ export function SignDocumentDialog({
     }
   }
 
-  const mustScroll = viewable && !!bytes && !atEnd;
+  // Still fetching: a viewable document that has neither arrived nor failed. The gate stays SHUT across that
+  // window rather than opening until the bytes land - `bytes` is what turns scrolling into a requirement, so
+  // keying `mustScroll` off its arrival leaves the checkbox and Confirm live for the beat before the document
+  // is even on screen, and a policy signed there was signed without ever having been shown.
+  const loadingDoc = viewable && !bytes && !fetchFailed;
+  const mustScroll = viewable && !fetchFailed && !atEnd;
   const canConfirm = read && !mustScroll && (!needsSignature || hasSignature);
-  const whyNot = mustScroll
-    ? "Scroll to the end of the document first."
-    : !read
-      ? "Confirm you've read the document."
-      : "A signature on file is required.";
+  const whyNot = loadingDoc
+    ? "Wait for the document to load."
+    : mustScroll
+      ? "Scroll to the end of the document first."
+      : !read
+        ? "Confirm you've read the document."
+        : "A signature on file is required.";
 
   return (
     <Dialog open={!!doc} onOpenChange={(o) => !o && onClose()}>
@@ -210,7 +217,7 @@ export function SignDocumentDialog({
                 <Checkbox checked={read} disabled={mustScroll} onCheckedChange={(v) => setRead(v === true)} className="mt-0.5" />
                 <span className="text-sm">
                   I have read {mode === "acknowledge" ? "this document" : "this letter"} and agree to sign it{mode === "acknowledge" && doc.ack_version ? ` (version ${doc.ack_version})` : ""}.
-                  {mustScroll && <span className="block text-xs text-muted-foreground">Available once you reach the last page.</span>}
+                  {mustScroll && <span className="block text-xs text-muted-foreground">{loadingDoc ? "Available once the document has loaded." : "Available once you reach the last page."}</span>}
                 </span>
               </label>
 

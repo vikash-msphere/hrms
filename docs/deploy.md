@@ -164,6 +164,25 @@ those create predictable demo accounts (e.g. `super@example.com`) and must never
 If you bumped `HOLIDAY_YEAR` / `FY_START_YEAR`, regenerate first: `node --import ./scripts/tsResolve.mjs bootstrap/genBootstrap.ts >
 bootstrap/bootstrap.sql`.
 
+## 7a. Freeze the applied migrations (once, at launch)
+
+```bash
+node --import ./scripts/tsResolve.mjs scripts/freezeMigrations.ts
+git add src/db/migrations/meta/_frozen.json && git commit -m "chore: freeze the launch migration"
+```
+
+Up to this point the schema has been kept as a single migration that `npm run db:generate` re-squashes in
+place, under the same `0000_*` tag. That is fine while nothing is deployed and **silently wrong** the moment a
+real database has run it: `wrangler d1 migrations apply` records migrations by **tag** and compares nothing
+about their contents, so a re-squashed `0000_*` is *skipped*. The file changes, the deploy is green, and the
+remote schema never moves — the failure surfaces days later as a query against a column that does not exist.
+
+`freezeMigrations.ts` records the sha256 of every migration file. From then on `npm run preflight` fails the
+deploy if one of them changes, and the rule is: **an applied migration is immutable — every schema change is
+a new numbered migration.** Re-run the script after each later deploy that applies one.
+
+Until it has been run, preflight emits a warning saying exactly this.
+
 ## 8. Deploy the Worker
 
 ```bash
@@ -195,8 +214,12 @@ Every first login auto-provisions the caller as a plain `employee`. Promote your
 
 ```bash
 npx wrangler d1 execute hrms --remote \
-  --command "UPDATE users SET role='super_admin' WHERE email='admin@acme.com';"
+  --command "UPDATE users SET role='super_admin' WHERE lower(email)='admin@acme.com';"
 ```
+
+Match on `lower(email)`, and give the address in lower case. The column is plain `TEXT` with no `NOCASE`
+collation, so a bare `=` is case-sensitive: typed with the capitalisation a person uses in their signature, the
+statement reports success and updates nothing, and the break-glass account is left at `employee`.
 
 From there, the super admin provisions departments, employees, and role assignments in-app.
 
@@ -230,6 +253,11 @@ The workflow runs, in order: `npm run preflight`, `npm run verify` (spectral + t
 migrations are idempotent - wrangler skips any already recorded in D1 - so re-runs are safe. The bootstrap
 catalog (step 7) is deliberately **not** in CI: it applies exactly once to an empty database and would
 collide on re-run.
+
+That idempotence is by **tag**, not by content, which is why step 7a exists: once a migration has been
+applied, editing it is a no-op against the remote schema that no deploy reports. The preflight step is what
+catches it, and it can only do so for migrations listed in `src/db/migrations/meta/_frozen.json` - so run
+`scripts/freezeMigrations.ts` and commit its output after any deploy that applies a new migration.
 
 The preflight step reads `CF_PLAN` from a repository **variable** (not a secret), defaulting to `paid`. Set
 `CF_PLAN=free` under the `production` environment if the account is on the free plan, or the deploy ships a

@@ -8,7 +8,7 @@ import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { visibleByDelete, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 
 export type SprintInput = {
@@ -26,7 +26,7 @@ export async function listSprints(deps: Deps, _actor: AppUser, maxPageSize: numb
   let rows = await deps.db.select().from(schema.sprints);
   if (boardId) rows = rows.filter((r) => r.boardId === boardId);
   const all = visibleByDelete(rows, showDeleted);
-  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "sprints" });
   return { items: slice, nextPageToken };
 }
 
@@ -111,8 +111,13 @@ export async function completeSprint(deps: Deps, actor: AppUser, id: string) {
   return updated;
 }
 
+// A card outlives the sprint it was planned into, so the pointer is cut, not the card. DECLARED rather than
+// done by hand first: run as its own statement ahead of the purge, the detach committed even when the purge
+// was then refused, so a 409 had already emptied a sprint of its cards.
+export const SPRINT_PURGE_CASCADE: PurgeCascade = {
+  detach: [{ table: schema.cards, column: schema.cards.sprintId }],
+};
+
 export async function purgeSprint(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  // Detach cards from the sprint before removing it (FK), then purge.
-  await deps.db.update(schema.cards).set({ sprintId: null }).where(eq(schema.cards.sprintId, id));
-  await purgeRow(deps, actor, schema.sprints, "sprint", "sprints", id, ifMatch);
+  await purgeRow(deps, actor, schema.sprints, "sprint", "sprints", id, ifMatch, undefined, SPRINT_PURGE_CASCADE);
 }

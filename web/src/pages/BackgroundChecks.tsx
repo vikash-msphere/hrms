@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf, personName } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import type { BackgroundCheck, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -47,7 +48,9 @@ const OUTCOMES = ["clear", "discrepancy", "failed"];
 const EMPTY = { employee: "", check_type: "identity", status: "pending", vendor: "", reference_no: "", initiated_date: "", completed_date: "", notes: "", document: "" };
 // What a new joiner's verification normally consists of. Four dialog trips for one hire is not a workflow.
 const STANDARD_SET = ["identity", "address", "education", "employment"];
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 // A check still with the vendor. Past this many days open it is the one to chase - the table flags the same age.
 const STALE_DAYS = 14;
 const isOpenCheck = (c: BackgroundCheck) => !c.delete_time && (c.status === "pending" || c.status === "in_progress");

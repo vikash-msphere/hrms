@@ -3,16 +3,17 @@ import { describe, it, expect } from "vitest";
 import { nextOccurrence as serverNext } from "../src/services/events";
 import { nextOccurrence as clientNext, upcomingOccurrences } from "../web/src/lib/eventRepeat";
 
-// The event form previews the dates a repeat will produce; the cron creates them hours later. Two copies of one
-// stepping rule, so they are pinned to each other here - a preview that disagrees with what the cron does is
-// worse than no preview, because people plan around it.
-//
-// The interesting cases are the ones a naive "+30 days" gets wrong: month lengths, February, leap years, and
-// the end-of-month overflow JS resolves by rolling forward (31 Jan + 1 month = 2 or 3 March).
+// The event form previews the dates a repeat will produce; the cron creates them hours later. These were two
+// copies of one stepping rule, and this file pinned them to each other - which held them equal to the SAME
+// end-of-month bug, in both places, until it was found. They are now one shared implementation
+// (src/domain/calendar.ts) that both sides import, so what is left to test is the rule itself: the cases a
+// naive step gets wrong are month lengths, February, leap years, and the end-of-month overflow JS resolves by
+// rolling forward (31 Jan + 1 month = 3 March).
 const day = 86400000;
 const at = (iso: string) => Date.parse(iso);
+const ymd = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
-describe("the event form's repeat preview mirrors the cron", () => {
+describe("the event form's repeat preview and the cron are the same rule", () => {
   const cases: [string, string, "weekly" | "monthly" | "yearly"][] = [
     ["2026-08-21T09:00:00.000Z", "2026-08-21T10:00:00.000Z", "weekly"],
     ["2026-08-31T00:00:00.000Z", "2026-08-31T00:00:00.000Z", "monthly"], // 31st -> a month with 30 days
@@ -35,11 +36,25 @@ describe("the event form's repeat preview mirrors the cron", () => {
     expect(next.end - next.start).toBe(end - start);
   });
 
+  it("clamps a month step into a short month instead of rolling past it", () => {
+    // The whole point: 31 January has no counterpart in February, and JS answers "3 March" - which skips the
+    // month the occurrence belonged to AND moves every later one, since each step is taken from the last
+    // result. Clamped, the series lands in February and keeps the 28th from then on.
+    expect(ymd(serverNext(at("2026-01-31T00:00:00.000Z"), at("2026-01-31T00:00:00.000Z"), "monthly").start)).toBe("2026-02-28");
+    expect(ymd(serverNext(at("2026-08-31T00:00:00.000Z"), at("2026-08-31T00:00:00.000Z"), "monthly").start)).toBe("2026-09-30");
+    // A leap day stepped a year lands on 28 February, not on 1 March.
+    expect(ymd(serverNext(at("2028-02-29T00:00:00.000Z"), at("2028-02-29T00:00:00.000Z"), "yearly").start)).toBe("2029-02-28");
+  });
+
   it("walks forward from each occurrence, not from the first", () => {
     const start = at("2026-01-31T00:00:00.000Z");
     const three = upcomingOccurrences(start, start, "monthly", 3);
-    // Each step is taken from the previous RESULT, which is what the cron does when it catches up a stale
-    // series - so 31 Jan lands in March (Feb overflow), then April, then May.
-    expect(three.map((ms) => new Date(ms).toISOString().slice(0, 10))).toEqual(["2026-03-03", "2026-04-03", "2026-05-03"]);
+    expect(three.map(ymd)).toEqual(["2026-02-28", "2026-03-28", "2026-04-28"]);
+  });
+
+  it("keeps the weekday on a weekly step", () => {
+    const start = at("2026-08-21T09:00:00.000Z"); // a Friday
+    const three = upcomingOccurrences(start, start, "weekly", 3);
+    for (const ms of three) expect(new Date(ms).getUTCDay()).toBe(new Date(start).getUTCDay());
   });
 });

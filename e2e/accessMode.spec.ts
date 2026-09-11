@@ -28,8 +28,13 @@ test("access mode surfaces the keys, opens the rule editor, and switches off aga
   // somebody else's rules, which is the failure worth catching here.
   const editor = page.getByRole("dialog");
   await expect(editor.getByRole("heading", { name: /Manage access · Vendors/ })).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(editor).toHaveCount(0);
+  // Re-pressed on a miss rather than trusted to one press - Escape has proven unreliable at actually closing
+  // a dialog under load elsewhere in this suite - and safe to repeat here because nothing was typed into this
+  // editor, so there is no draft a second press could lose.
+  await expect(async () => {
+    await page.keyboard.press("Escape");
+    await expect(editor).toHaveCount(0, { timeout: 5_000 });
+  }).toPass({ timeout: 20_000 });
 
   // The pill is the way out, and the page goes back to being an ordinary table.
   await page.getByRole("button", { name: "Turn off access mode" }).click();

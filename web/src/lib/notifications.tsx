@@ -233,7 +233,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setRows((prev) => prev.map((r) => (wokenPaths.has(r.path) ? { ...r, snooze_until_time: undefined } : r)));
       for (const n of woken) {
         publish(NOTIF_TOPIC, { op: "reminded", path: n.path } satisfies BusMsg); // tell sibling tabs: don't re-toast
-        void patch(`notifications/${idOf(n.path)}`, { snooze_until_time: null }, n.etag).catch(() => {});
+        void patch(`notifications/${idOf(n.path)}`, { snooze_until_time: null }).catch(() => {});
       }
     }
 
@@ -288,13 +288,27 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   }, [setRows, scheduleWake, snoozedLoaded]);
   useEffect(() => subscribeTopic<BusMsg>(NOTIF_TOPIC, applyRemote), [applyRemote]);
 
+  /**
+   * Every write below sends NO `If-Match`, deliberately - the one place in this app where that is right.
+   *
+   * A version guard exists to stop one writer's edit from silently replacing another's. These rows have a
+   * single reader and writer (the recipient), and each write sets ONE flag to the value that person just
+   * chose: read, dismissed, snoozed-until. There is nothing of anybody else's to lose, so "last write wins"
+   * is exactly the intent - the last thing they did.
+   *
+   * What the guard DID do was fail: `n.etag` is the version the FEED was read at, and the feed is written from
+   * several places at once - a sibling tab through the bus, the leave-a-page sweep marking a batch read, the
+   * snooze timer clearing a stamp. Any of those moves the row's version under the list, and the next flag
+   * write answered 409, reverted the person's click and refetched the whole feed. Opening the bell and
+   * walking two pages was enough to produce it.
+   */
   const markRead = useCallback(
     async (n: Notification) => {
       if (n.read) return;
       setRows((prev) => prev.map((r) => (r.path === n.path ? { ...r, read: true } : r)));
       post({ op: "read", path: n.path });
       try {
-        await patch(`notifications/${idOf(n.path)}`, { read: true }, n.etag);
+        await patch(`notifications/${idOf(n.path)}`, { read: true });
       } catch {
         reload();
       }
@@ -308,7 +322,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setRows((prev) => prev.map((r) => (r.path === n.path ? { ...r, read: false } : r)));
       post({ op: "unread", path: n.path });
       try {
-        await patch(`notifications/${idOf(n.path)}`, { read: false }, n.etag);
+        await patch(`notifications/${idOf(n.path)}`, { read: false });
       } catch {
         reload();
       }
@@ -333,7 +347,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setRows((prev) => prev.filter((r) => r.path !== n.path));
       post({ op: "dismiss", path: n.path });
       try {
-        await patch(`notifications/${idOf(n.path)}`, { dismissed: true }, n.etag);
+        await patch(`notifications/${idOf(n.path)}`, { dismissed: true });
       } catch {
         reload();
       }
@@ -356,7 +370,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       scheduleWake(untilMs);
       post({ op: "snooze", path: n.path, until, row });
       try {
-        await patch(`notifications/${idOf(n.path)}`, { snooze_until_time: until }, n.etag);
+        await patch(`notifications/${idOf(n.path)}`, { snooze_until_time: until });
         toast({ title: "Snoozed", description: "We'll bring it back later." });
       } catch {
         reload();
@@ -372,7 +386,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setSnoozed((prev) => prev.filter((r) => r.path !== n.path));
       post({ op: "unsnooze", path: n.path });
       try {
-        await patch(`notifications/${idOf(n.path)}`, { snooze_until_time: null }, n.etag);
+        await patch(`notifications/${idOf(n.path)}`, { snooze_until_time: null });
         reload();
       } catch {
         loadSnoozed();

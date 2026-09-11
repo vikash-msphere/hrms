@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Building2, Plus, TriangleAlert } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -49,6 +49,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "vendor" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   // One vendor entered twice is one vendor's spend reported as two. Warn, never block: "Acme" and "Acme Labs"
   // are different suppliers, and only the person typing knows which case this is.
@@ -97,6 +98,9 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
         const next = { ...EMPTY, payment_terms: form.payment_terms, default_category: form.default_category };
         setForm(next);
         guard.markSaved(next);
+        // The just-cleared Name loses focus the instant its own Create button disables with it - see
+        // ReimbursementCategories' identical fix.
+        nameRef.current?.focus();
       } else {
         guard.markSaved();
         setOpen(false);
@@ -154,7 +158,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
           <DialogBody>
           <FormError error={err} />
           <div className="grid gap-4">
-            <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Vendor or supplier name" autoFocus /></Field>
+            <Field label="Name"><Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Vendor or supplier name" autoFocus /></Field>
             {editing && <VendorSpend vendor={editing.path} open={open} />}
             {nameClash && (
               <p className="-mt-1 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning">

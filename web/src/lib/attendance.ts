@@ -57,7 +57,11 @@ export const hhmmToMin = (s: string) => {
 // These three run once per PUNCH when a month of attendance is assembled, so the formatter is shared rather
 // than rebuilt per call (see lib/intl.ts). The cache is keyed on the options, so a second timezone gets its
 // own formatter rather than a wrong answer - in practice there is one, the org's.
-const HM_24 = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+// `hourCycle: "h23"`, not `hour12: false`: the latter asks only "not AM/PM" and leaves the cycle to the locale,
+// which may resolve to h24 and number midnight 24. `localMinutes` below reads that hour back as a NUMBER, so a
+// midnight punch would score 1440 instead of 0 - and this file is the browser mirror of the server's
+// derivation (src/domain/attendance.ts), which names the cycle for the same reason. The two must agree.
+const HM_24 = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const YMD = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
 const HM_12 = (tz: string): Intl.DateTimeFormatOptions => ({ timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: true });
 
@@ -247,7 +251,11 @@ export const fmtMinOfDay = (min: number) => {
 // ---- Calendar arithmetic (all UTC, since a "YYYY-MM-DD" is a calendar date, not an instant) ----
 export const monthStartOf = (ymd: string) => `${ymd.slice(0, 7)}-01`;
 export const addMonths = (ymd: string, n: number) => {
-  const [y, m] = ymd.split("-").map(Number);
+  // Sliced rather than split/destructured: a "YYYY-MM-DD" has its year and month at fixed offsets, so this
+  // is total where the destructuring was `number | undefined` and only type-checked because the web project
+  // does not set `noUncheckedIndexedAccess` (the root one does, and now sees this file).
+  const y = Number(ymd.slice(0, 4));
+  const m = Number(ymd.slice(5, 7));
   return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 10);
 };
 export const monthEndOf = (ymd: string) => new Date(Date.parse(`${addMonths(ymd, 1)}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);

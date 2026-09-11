@@ -287,6 +287,7 @@ components:
         status: { type: string, description: Account status value active/disabled. }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
         holiday_feed_token: { type: string, readOnly: true, description: "On users/me only: the caller's unguessable token for the public holiday calendar feed at /calendar/holidays/{token}. Present only when the org enabled the feed and the caller has an employee record (never for a simulated principal)." }
+        session_id: { type: string, readOnly: true, description: "On users/me only: an opaque identifier for the caller's current sitting, stable for the life of their session and different after a new sign-in. The SPA namespaces its on-disk caches to it so cached records can never outlive the session that fetched them. Absent on lanes that carry no session (an API key, the Cloudflare Access JWT, the dev bypass), where the client keeps no disk cache keyed to one." }
         caller_access:
           type: object
           readOnly: true
@@ -408,6 +409,7 @@ components:
         account_name: { type: string, description: Account holder name. }
         account_number: { type: string, writeOnly: true }
         account_number_masked: { type: string, readOnly: true, description: Account number with all but the last four digits masked. }
+        branch: { type: string, description: Branch the account is held at. A required column in several banks' bulk-payment formats. }
         ifsc_code: { type: string, description: Branch routing code (IFSC/SWIFT/sort code). }
         currency_code: { type: string }
         on_file: { type: boolean, readOnly: true, description: Whether bank details have been saved for this employee. }
@@ -1011,8 +1013,10 @@ components:
         options:
           type: array
           writeOnly: true
-          description: "Poll choices (>=2) when creating a poll. Read results back via the `poll` object."
-          items: { type: string }
+          minItems: 2
+          maxItems: 20
+          description: "Poll choices (2-20) when creating a poll. Read results back via the `poll` object."
+          items: { type: string, minLength: 1, maxLength: 200 }
         multiple: { type: boolean, writeOnly: true, description: "Poll only: allow a voter to pick more than one option." }
         closes_time: { type: string, format: date-time, writeOnly: true, description: "Poll only: optional deadline after which voting is locked." }
         poll:
@@ -1174,6 +1178,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true, description: "Set when the revision was removed from the timeline. It no longer prices any period; visible only via show_deleted / deleted_only." }
         etag: { type: string, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
+        variable_pay_target: { type: number, nullable: true, minimum: 0, description: "Target variable pay for a full year at 100% attainment. Deliberately outside `annual_ctc`: CTC is committed pay, and a figure that has to be earned is not. Feeds review-cycles:variablePay." }
         annual_ctc: { type: number, description: "The authoritative figure: annual cost to company. This is the field you set. The server derives the monthly basic (ctc.basic_pct% of the monthly CTC) and a balancing Special Allowance so the full CTC lands on it." }
         base_pay: { type: number, readOnly: true, description: "Derived: the monthly basic the CTC split resolved to (the contractual BASIC payroll and statutory math key off)." }
         special_allowance: { type: number, readOnly: true, description: "Derived: the balancing plug of the split - a monthly taxable earning on top of basic. Absent (0) when the split needs none." }
@@ -1266,14 +1271,14 @@ components:
         create_time: { type: string, format: date-time, readOnly: true }
         update_time: { type: string, format: date-time, readOnly: true }
         etag: { type: string, readOnly: true }
-        asset_tag: { type: string, description: "Human-facing tag printed on the sticker, e.g. MS-LAP-014. Allocated on create from settings/asset-tags and the category's tag_code; unique. Send one to override it; it cannot be cleared." }
+        asset_tag: { type: string, nullable: true, description: "Human-facing tag printed on the sticker, e.g. MS-LAP-014. Allocated on create from settings/asset-tags and the category's tag_code; unique. Send one to override it; it cannot be cleared." }
         name: { type: string, description: "Display name, e.g. MacBook Pro 14." }
-        category: { type: string, description: "Resource path: asset-categories/{category_id}. Decides the tag_code the allocated asset_tag carries." }
-        serial_number: { type: string }
+        category: { type: string, nullable: true, description: "Resource path: asset-categories/{category_id}. Decides the tag_code the allocated asset_tag carries." }
+        serial_number: { type: string, nullable: true }
         status: { type: string, description: "pending_verification | in_stock | pending_ack | assigned | repair | retired. The two pending states mean nobody has scanned the tag yet. Only :verify and :acknowledge produce the proven states: sending in_stock or assigned (on POST or PATCH alike) lands on the pending state that precedes it. repair and retired are set directly." }
-        assigned_to: { type: string, description: "Resource path: employees/{employee_id} (omitted when in stock)." }
-        assigned_on: { type: string, format: date, description: "Date the asset was assigned." }
-        purchase_date: { type: string, format: date }
+        assigned_to: { type: string, nullable: true, description: "Resource path: employees/{employee_id}. Null (or omitted) when in stock - how a PATCH returns an asset to the company." }
+        assigned_on: { type: string, format: date, nullable: true, description: "Date the asset was assigned." }
+        purchase_date: { type: string, format: date, nullable: true }
         tag_printed_time: { type: string, format: date-time, readOnly: true, description: "Last time a physical sticker tag was printed for this asset (set by :printTag)." }
         last_verified_time: { type: string, format: date-time, readOnly: true, description: "Last time the physical asset was sighted. Owned by :verify - not writable, so a sighting cannot be claimed without a scan." }
         last_verified_by: { type: string, readOnly: true, description: "Resource path of the employee who recorded the last sighting (employees/{employee_id})." }
@@ -1283,7 +1288,7 @@ components:
         pending_since_time: { type: string, format: date-time, readOnly: true, description: "When the current pending_verification / pending_ack wait began; drives the chase-up reminders." }
         condition: { type: string, readOnly: true, description: "Condition last reported by a scan: good | damaged | missing_parts." }
         tag_secret: { type: string, readOnly: true, description: "Nonce printed inside the QR that makes a scan proof of possession. Served ONLY to a caller who may :printTag this asset." }
-        notes: { type: string }
+        notes: { type: string, nullable: true }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: asset
@@ -1735,21 +1740,72 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller's own employee." }
         parent: { type: string, description: "Resource path: goals/{goal_id}. Optional parent goal this one aligns under (OKR-style). Cycles are rejected." }
+        kind: { type: string, enum: [objective, key_result], description: "An objective is the sentence; a key result is one of the numbers under it. A key result must name a `parent` objective, and an objective that has key results stops carrying its own `progress` - the server derives it from theirs, weighted." }
+        rolled_up: { type: boolean, readOnly: true, description: "True when this goal's progress is derived from its key results. A write to `progress` on such a goal is ignored, and :updateProgress on one is refused." }
+        cycle: { type: string, nullable: true, description: "Resource path: review-cycles/{cycle_id}. The review cycle this goal was set for; the reviewee's review scores exactly this set. Null clears it." }
         title: { type: string }
         description: { type: string }
         weight: { type: integer, description: "Relative importance 0-100." }
         progress: { type: integer, description: "Completion 0-100. Computed from the measure whenever `target_value` and `current_value` are both set - a value sent alongside them is ignored." }
         status: { type: string, enum: [not_started, in_progress, completed, cancelled], description: "Lifecycle of the goal. Default not_started. Reaching the target completes the goal." }
+        stage: { type: string, enum: [DRAFT, PROPOSED, AGREED], readOnly: true, description: "Whether the goal has been agreed - a different question from `status` (how the work is going). AGREED on every goal unless the org turns the goal-setting handshake on (settings/performance `goal_approval: required`); moved only by :propose, :approve and :requestChanges." }
+        agreed_time: { type: string, format: date-time, readOnly: true, description: "When the goal was agreed." }
+        agreed_by: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} - who agreed it." }
         due_date: { type: string, format: date }
+        confidence: { type: string, enum: [on_track, at_risk, off_track], nullable: true, description: "The owner's own forward-looking call, distinct from `progress` and from the derived `pace`. Also settable alone via :setConfidence. Null clears it." }
+        confidence_note: { type: string, maxLength: 500, nullable: true, description: "One line explaining the confidence call." }
+        blocked_by: { type: string, nullable: true, description: "Resource path: goals/{goal_id}. The goal that has to move before this one can - distinct from `parent`, which is what this rolls up into. Mutual waiting is rejected." }
+        department: { type: string, nullable: true, description: "Resource path: departments/{department_id}. Set when a TEAM owns this goal rather than one person; `employee` remains the accountable lead, so every scope rule is unchanged." }
+        retro: { type: string, maxLength: 4000, nullable: true, description: "What actually happened, written as the goal closes. Carried into the review PDF - a percentage says how far it got and nothing about why." }
+        expected_progress: { type: integer, readOnly: true, description: "Where a straight line from this goal being set to its due date puts it today, 0-100. Absent for an undated, completed or cancelled goal." }
+        drift: { type: integer, readOnly: true, description: "`progress - expected_progress`. Negative is behind. Absent whenever expected_progress is." }
+        pace: { type: string, enum: [ahead, on_track, behind, at_risk], readOnly: true, description: "Banded `drift`: at_risk at 25 points behind, behind at 10, ahead at 10 in front. Absent whenever drift is." }
+        stale_days: { type: integer, readOnly: true, description: "Days since anything happened to this goal - a write, a progress move or a comment. Absent on a completed or cancelled goal, which is supposed to go quiet." }
+        history:
+          type: array
+          readOnly: true
+          description: "How progress actually moved, rebuilt from the audit trail. Present on Get only; the first point is the goal being set."
+          items:
+            type: object
+            required: [at_time, progress]
+            properties:
+              at_time: { type: string, format: date-time }
+              progress: { type: integer }
         unit: { type: string, maxLength: 24, nullable: true, description: "What the measure counts: `customers`, `%`, `days`. Label only. Null clears it." }
         baseline_value: { type: number, nullable: true, description: "Where the measure started. Defaults to 0 when absent; set it for goals that begin above zero (churn 8% to 4%). Null clears it." }
         target_value: { type: number, nullable: true, description: "Where it has to get to. A target below the baseline counts down. Null clears it, handing progress back to manual." }
         current_value: { type: number, nullable: true, description: "Where it is now. Moving this recomputes `progress`. Null clears it." }
         measured: { type: boolean, readOnly: true, description: "True when `progress` is derived from the measure rather than set by hand." }
+        logged_hours: { type: number, readOnly: true, description: "Approved timesheet hours booked against this goal, through the projects that name it. Absent when no project points here - which is not the same as zero hours." }
         linked_tasks: { type: integer, readOnly: true, description: "How many board tasks are linked to this goal. Resolved once per page, so a list of goals can show its delivery rollup without the client reading the whole cards collection." }
         delivered_tasks: { type: integer, readOnly: true, description: "How many of `linked_tasks` are delivered." }
         task_points: { type: number, readOnly: true, description: "Total estimate points across the linked tasks (0 when they carry no size)." }
         delivered_task_points: { type: number, readOnly: true, description: "Points among the delivered linked tasks." }
+        contributors:
+          type: array
+          readOnly: true
+          description: "Who else worked on this goal and what share of it is credited to them. A contributor's share scores in THEIR review at this goal's weight scaled by it; the goal itself is unchanged. Set via :setContributors."
+          items:
+            type: object
+            required: [employee, share]
+            properties:
+              employee: { type: string, description: "Resource path: employees/{employee_id}." }
+              share: { type: integer, minimum: 0, maximum: 100, description: "Percent of the goal's weight credited to them." }
+              note: { type: string }
+        suggested_contributors:
+          type: array
+          readOnly: true
+          description: "The split the linked board tasks already imply: who delivered work on this goal, and what percentage of the DELIVERED work was theirs (story points where any linked task carries a size, otherwise one point per task). A starting point for :setContributors, never a credit - only `contributors` scores in a review. The goal's owner is excluded because their credit is whatever the contributors do not take, so unassigned and undelivered work falls into that remainder. Empty until something is delivered."
+          items:
+            type: object
+            required: [employee, share, delivered_points, delivered_tasks]
+            properties:
+              employee: { type: string, description: "Resource path: employees/{employee_id}." }
+              share: { type: integer, minimum: 0, maximum: 100, description: "Percent of the goal's delivered work assigned to them." }
+              delivered_points: { type: number, description: "Points among their delivered linked tasks (each unsized task counts 1 when no linked task carries a size)." }
+              delivered_tasks: { type: integer, description: "How many delivered linked tasks were assigned to them." }
+        watcher_count: { type: integer, readOnly: true, description: "How many people follow this goal without owning it." }
+        watching: { type: boolean, readOnly: true, description: "Whether the CALLER follows this goal - the state of the watch button. Toggle with :watch / :unwatch." }
         comments:
           type: array
           readOnly: true
@@ -1771,6 +1827,40 @@ components:
         patterns:
           - 'goals/{goal_id}'
         type: hrms.example.com/goal
+    goal-template:
+      type: object
+      description: "A goal blueprint the org keeps and stamps out onto people. Every field is the goal's own, except `due_in_days`, which is relative to the day it is applied."
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        title: { type: string, description: "The title the applied goal carries." }
+        description: { type: string, nullable: true }
+        weight: { type: integer, description: "Relative importance 0-100, copied onto the goal." }
+        due_in_days: { type: integer, nullable: true, minimum: 0, maximum: 3650, description: "Days from the day of application to the goal's due date. A template holds the interval; the goal holds the date." }
+        unit: { type: string, maxLength: 24, nullable: true }
+        baseline_value: { type: number, nullable: true }
+        target_value: { type: number, nullable: true, description: "With a target, an applied goal starts measured at its baseline." }
+        department: { type: string, nullable: true, description: "Resource path: departments/{department_id}. A hint that filters the catalogue, never a rule." }
+        group_name: { type: string, maxLength: 80, nullable: true, description: "Free-text set name (\"New hire 30/60/90\"), so a whole set can be applied in one press." }
+        disabled: { type: boolean, description: "Kept for the record but no longer offered when applying." }
+        applied_count: { type: integer, readOnly: true, description: "Goals created by the :apply that returned this. Absent otherwise." }
+        skipped_count: { type: integer, readOnly: true, description: "People who already held this template's goal in that cycle, so it was not applied twice." }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: goal-template
+        plural: goal-templates
+        patterns:
+          - 'goal-templates/{template_id}'
+        type: hrms.example.com/goal-template
     board:
       type: object
       required: [path, create_time, update_time, etag, card_count]
@@ -1856,6 +1946,18 @@ components:
         title: { type: string }
         description: { type: string }
         assignee: { type: string, description: "Resource path: employees/{employee_id}." }
+        reporter:
+          type: string
+          nullable: true
+          readOnly: true
+          description: >-
+            Resource path: employees/{employee_id}. Who FILED this task - the third person on a card, and
+            distinct from both the others: `employee` is the accountable owner (and the authz code the row is
+            scoped by), `assignee` is whoever is doing the work, and this is who to go back to about it. When
+            a manager files a task FOR somebody, the first two become that person and this is the only field
+            that still says who asked. Stamped from the CALLER at create (never from the request body) and
+            never editable afterwards, because a reporter is a fact about the past. Null when the task was
+            filed by a login with no employee record. Filing a task also makes the reporter a watcher of it.
         priority: { type: string, enum: [low, medium, high, urgent] }
         labels: { type: array, items: { type: string }, description: "Label keys from the board's label catalog." }
         documents: { type: array, items: { type: string }, description: "Linked documents, as resource paths: org-documents/{document_id}. Link-only (the card owns no storage); a write replaces the whole set." }
@@ -1894,6 +1996,26 @@ components:
               text: { type: string }
               done: { type: boolean }
               create_time: { type: string, format: date-time }
+        cadence:
+          type: string
+          enum: [weekly, biweekly, monthly, quarterly]
+          nullable: true
+          description: >-
+            Repeating work. When set, DELIVERING this card files the next one on the nightly tick - same title,
+            description, assignee, department, priority, size, labels and checklist (unticked), with the due
+            date moved on by the cadence - and the cadence moves to that new card, so exactly one card in a
+            series carries it. Rolls on delivery rather than on a date, because a chore that is a week late
+            does not want a second copy filed on top of it. The linked goal and sprint are NOT carried: a
+            series would inflate its goal's task count forever, and the next one is not in this time box.
+            Null clears it, which ends the series after the current card.
+        watchers:
+          type: array
+          readOnly: true
+          description: "Who is following this card. Present on the Get response only. Employees resource paths."
+          items: { type: string }
+        watcher_count: { type: integer, readOnly: true, description: "How many people watch this card. Present on Get only." }
+        watching: { type: boolean, readOnly: true, description: "Whether the CALLER watches this card - the state of the watch button. Present on Get only; toggle with :watch / :unwatch." }
+        logged_hours: { type: number, readOnly: true, description: "Approved timesheet hours booked against this task (time entries naming it). Absent when none are, which is not the same as zero. Present on Get only." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1932,7 +2054,7 @@ components:
         type: hrms.example.com/sprint
     review-cycle:
       type: object
-      required: [path, create_time, update_time, etag, state, review_count]
+      required: [path, create_time, update_time, etag, state, review_count, goal_coverage]
       properties:
         path:
           type: string
@@ -1945,10 +2067,49 @@ components:
         name: { type: string }
         period_start: { type: string, format: date, description: "Review period start." }
         period_end: { type: string, format: date }
+        goal_setting_due_date: { type: string, format: date, description: "Deadline for the cycle's goals to be set and agreed. Drives the countdown on the coverage warning." }
         self_due_date: { type: string, format: date, description: "Suggested deadline for self-assessments." }
         manager_due_date: { type: string, format: date, description: "Suggested deadline for manager reviews." }
+        competency_keys:
+          type: array
+          nullable: true
+          description: >-
+            Which of the framework's competencies (settings/performance) THIS cycle rates, by key. Absent or
+            empty means all of them, which is what every cycle did before this existed - so a probation review
+            and an annual review can ask different questions off one org-wide framework. A subset rather than
+            a per-cycle catalogue on purpose: ratings are stored against the framework's own keys, so
+            narrowing keeps cycles comparable where inventing competencies would make the history
+            meaningless. Unknown or retired keys are inert, and a selection matching nothing live falls back
+            to the whole framework rather than producing a review form with no questions on it.
+          items: { type: string }
         state: { type: string, readOnly: true, description: "DRAFT (being set up), ACTIVE (launched), or CLOSED." }
         review_count: { type: integer, readOnly: true, description: "How many employee reviews this cycle has." }
+        goal_coverage: { type: integer, readOnly: true, description: "How many of this cycle's reviewees have at least one goal attached to it. The shortfall against review_count is the reviews with nothing to score." }
+        variable_pay:
+          type: array
+          readOnly: true
+          description: "Present only on the :variablePay and :award answers. One line per reviewee the caller may see: what they attained, their target variable pay, and what that multiplies to. Nothing is stored - it is arithmetic over the reviews and the compensation effective at the period end."
+          items:
+            type: object
+            required: [employee, review, currency]
+            properties:
+              employee: { type: string, description: "Resource path: employees/{employee_id}." }
+              review: { type: string, description: "Resource path: reviews/{review_id}." }
+              attainment: { type: integer, nullable: true, description: "Weighted goal attainment, 0-100. Null when there was nothing to score." }
+              target: { type: number, nullable: true, description: "Full-year target variable pay from their compensation. Null when they have none." }
+              currency: { type: string }
+              recommended: { type: number, nullable: true, description: "target x attainment. Null when either half is missing." }
+              awarded: { type: number, nullable: true, description: "Already paid for this cycle, so a second run reports rather than repeats." }
+              blocked: { type: string, enum: [no_attainment, no_target, already_awarded, not_shared], description: "Why this line cannot be paid. `not_shared` is a review still in flight: it is scored live and reported, but never paid, because the score can still change." }
+        awarded:
+          type: object
+          readOnly: true
+          description: "Present only on the :award answer: what that press actually wrote."
+          properties:
+            awarded: { type: integer }
+            total: { type: number }
+            skipped: { type: integer }
+            currency: { type: string }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1987,6 +2148,83 @@ components:
           readOnly: true
           additionalProperties: { type: integer }
           description: "Per-competency ratings keyed by competency key (framework in settings/performance). Visibility as manager_comment."
+        goal_ratings:
+          type: object
+          readOnly: true
+          description: "The manager's verdict on each of the cycle's goals, keyed by goal code. Visibility as manager_comment."
+          additionalProperties:
+            type: object
+            properties:
+              rating: { type: integer, description: "On the org scale, as the competencies are." }
+              comment: { type: string }
+        goals:
+          type: array
+          readOnly: true
+          description: "The goals this cycle set for the reviewee, heaviest first. Live while the review is in progress; the snapshot frozen at sharing once `goals_frozen` is true. Absent when the caller's own goals scope doesn't reach this employee."
+          items:
+            type: object
+            required: [code, title, weight, progress, status]
+            properties:
+              code: { type: string, description: "The goal's code - the key `goal_ratings` uses." }
+              path: { type: string, description: "Resource path: goals/{goal_id}, for linking back to the live goal." }
+              title: { type: string }
+              weight: { type: integer }
+              progress: { type: integer }
+              status: { type: string, enum: [not_started, in_progress, completed, cancelled] }
+              due_date: { type: string, format: date }
+              measured: { type: boolean, description: "True when the goal's progress is computed from its measure and cannot be set by hand." }
+              stage: { type: string, enum: [DRAFT, PROPOSED], description: "Present only when the goal was never agreed - a review scoring a draft says so on its face." }
+              retro: { type: string, description: "The owner's closing account of what happened on this goal." }
+              contribution:
+                type: object
+                description: "Present when this line is a SHARE of somebody else's goal. `weight` is already scaled to the share."
+                properties:
+                  share: { type: integer }
+                  owner: { type: string, description: "Resource path: employees/{employee_id} - whose goal it is." }
+        goal_attainment:
+          type: object
+          readOnly: true
+          description: "Weighted attainment across `goals`: sum(weight x progress) / sum(weight), cancelled goals excluded. Absent when there is nothing to score."
+          required: [score, weight_total, counted, weighted]
+          properties:
+            score: { type: integer, description: "Percent attained, 0-100." }
+            weight_total: { type: integer, description: "The weights behind the score (0 when none were set)." }
+            counted: { type: integer, description: "How many goals were scored." }
+            weighted: { type: boolean, description: "False when no goal carried a weight and the plain mean of progress was used." }
+        reviewer:
+          type: string
+          nullable: true
+          readOnly: true
+          description: >-
+            Resource path: employees/{employee_id}. Who owes the write-up when it is not the employee's
+            current manager - a transfer mid-cycle, a matrix report, a manager on long leave. Absent means the
+            manager chain, which is what every review did before an override existed. Set with
+            :assignReviewer, which also re-points the self-submitted hand-off, the nudge, the acknowledgement
+            note and the scheduled "reviews you owe" metric.
+        competency_score:
+          type: object
+          readOnly: true
+          description: "What the competency `ratings` add up to on the framework's weights (settings/performance): sum(weight x rating) / sum(weight), on the org's own rating scale. Unrated competencies are left out rather than scored zero. Withheld alongside the rest of the manager's assessment until the review is shared, and absent when nothing was rated. `overall_rating` remains the manager's own judgement - this is the computed half, so a calibration meeting can see where the two differ."
+          required: [score, weight_total, counted, weighted]
+          properties:
+            score: { type: number, description: "The weighted mean rating, to one decimal place." }
+            weight_total: { type: number, description: "The weights behind the score (0 when the framework carries none)." }
+            counted: { type: integer, description: "How many competencies were rated." }
+            weighted: { type: boolean, description: "False when no rated competency carried a weight and the plain mean was used." }
+        attainment_trend:
+          type: array
+          readOnly: true
+          description: "This person's goal attainment across their last few SHARED cycles, oldest first. Present on the item read only. Built from each review's frozen snapshot, so it is the history as recorded rather than a re-derivation."
+          items:
+            type: object
+            required: [cycle, name, attainment]
+            properties:
+              cycle: { type: string, description: "Resource path: review-cycles/{cycle_id}." }
+              name: { type: string }
+              period_end: { type: string, format: date }
+              attainment: { type: integer }
+              rating: { type: integer, description: "The overall rating that cycle, when one was given." }
+        goals_frozen: { type: boolean, readOnly: true, description: "True once `goals` is the snapshot taken when the review was shared, rather than the live goals." }
         feedback:
           type: array
           readOnly: true
@@ -1995,9 +2233,10 @@ components:
             type: object
             properties:
               id: { type: string, description: "Feedback id (sub-resource handle)." }
-              state: { type: string, description: "REQUESTED, SUBMITTED, or DECLINED." }
+              state: { type: string, enum: [SUGGESTED, REQUESTED, SUBMITTED, DECLINED], description: "SUGGESTED is the reviewee's own nomination, inert until a manager nominates that person for real; then REQUESTED, SUBMITTED or DECLINED." }
               comment: { type: string }
               overall_rating: { type: integer }
+              decline_reason: { type: string, description: "Why the nominee declined, in their own words. Present only to the manager/HR." }
               author: { type: string, description: "Resource path: employees/{employee_id}. Present only to the manager/HR." }
         access:
           readOnly: true
@@ -2023,9 +2262,17 @@ components:
         review: { type: string, readOnly: true, description: "Resource path: reviews/{review_id}" }
         reviewee: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} - who the feedback is about." }
         author: { type: string, readOnly: true, description: "Resource path: employees/{employee_id} - the nominee giving feedback." }
-        state: { type: string, readOnly: true, description: "REQUESTED, SUBMITTED, or DECLINED." }
+        state:
+          type: string
+          readOnly: true
+          enum: [SUGGESTED, REQUESTED, SUBMITTED, DECLINED]
+          description: >-
+            SUGGESTED is the REVIEWEE's own nomination (via the review's :suggestFeedback) and asks nothing of
+            anybody - it notifies nobody and cannot be written to until a manager nominates that person for
+            real, which turns the same row REQUESTED. Then SUBMITTED or DECLINED is the nominee's own answer.
         comment: { type: string, readOnly: true }
         overall_rating: { type: integer, readOnly: true }
+        decline_reason: { type: string, readOnly: true, description: "Why the nominee declined, in their own words. Optional." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2158,6 +2405,89 @@ components:
         patterns:
           - 'check-ins/{check_in_id}'
         type: hrms.example.com/check-in
+    table-view:
+      type: object
+      description: >-
+        A saved custom grid: which collection one row IS (`base`), which catalogue fields are its columns, and
+        how it is filtered, sorted and parameterised. The DEFINITION only - a view holds no data. Running it
+        (`table-views/{id}:run`) re-reads every source under the RUNNER's own list scopes, so a view shared with
+        somebody shows them their own rows and drops the columns whose collections they may not list.
+      required: [path, create_time, update_time, etag]
+      properties:
+        path:
+          type: string
+          readOnly: true
+          description: The server-assigned path of the resource, unique within the service.
+        create_time: { type: string, format: date-time, readOnly: true }
+        update_time: { type: string, format: date-time, readOnly: true }
+        etag: { type: string, readOnly: true }
+        delete_time: { type: string, format: date-time, readOnly: true }
+        disabled: { type: boolean, description: "A draft: still being built, hidden from the saved-table list." }
+        locked: { type: boolean }
+        locked_by: { type: string, readOnly: true }
+        display_name: { type: string, description: "What the table is called." }
+        description: { type: string, nullable: true, description: "What the table is for. Null when unset." }
+        owner:
+          type: string
+          readOnly: true
+          description: "Resource path: employees/{employee_id} - the author. The view's code is owned by them, so sharing it is an ordinary object share."
+        base:
+          type: string
+          description: "The collection one row of the grid is (`employees`, `tickets`, ...). Must be one this caller may list; see GET /v1/table-fields."
+        columns:
+          type: array
+          description: "The grid's columns, in order. `field` is a catalogue key from GET /v1/table-fields."
+          items:
+            type: object
+            required: [field]
+            properties:
+              field: { type: string }
+              label: { type: string, description: "Header override; defaults to the catalogue label." }
+              hidden: { type: boolean }
+        filters:
+          type: array
+          maxItems: 24
+          description: "Filters ANDed over the rows. Applied in SQL where the field is a plain column of the base, and over the assembled page otherwise - including when pushing one down would exceed the page query's bound-parameter budget, which is what keeps a long `in` list from failing the whole grid."
+          items:
+            type: object
+            required: [field, op]
+            properties:
+              field: { type: string }
+              op: { type: string, enum: [eq, ne, contains, gt, gte, lt, lte, in, empty, not_empty] }
+              value:
+                description: "Omitted for `empty` / `not_empty`; a comma-separated list for `in`."
+                oneOf:
+                  - { type: string }
+                  - { type: number }
+                  - { type: boolean }
+        sort:
+          type: array
+          description: "Sort order, applied to each page (base rows page in the cursor's own order)."
+          items:
+            type: object
+            required: [field, dir]
+            properties:
+              field: { type: string }
+              dir: { type: string, enum: [asc, desc] }
+        params:
+          type: object
+          description: "Runtime inputs the grid is parameterised by. Any of them may be overridden per run on the `:run` query string."
+          properties:
+            from: { type: string, format: date, description: "Start of the window measures are read over." }
+            to: { type: string, format: date }
+            pay_period: { type: string, description: "`pay-periods/{id}` - which period the payslip columns report." }
+            financial_year: { type: string, description: "Which FY the tax-declaration columns total." }
+            department: { type: string, description: "`departments/{id}` - narrow the rows to one department (never widens)." }
+            employee: { type: string, description: "`employees/{id}` - narrow the rows to one person (never widens)." }
+        access:
+          readOnly: true
+          $ref: '#/components/schemas/access_hint'
+      x-aep-resource:
+        singular: table-view
+        plural: table-views
+        patterns:
+          - 'table-views/{table_view_id}'
+        type: hrms.example.com/table-view
     benefit-plan:
       type: object
       description: "A benefit plan in the org's catalog (HR-managed)."
@@ -2328,6 +2658,7 @@ components:
         name: { type: string }
         client: { type: string, nullable: true, description: "Free-text client/customer label. Null when unset." }
         code: { type: string, nullable: true, description: "Optional human project code. Null when unset." }
+        goal: { type: string, nullable: true, description: "Resource path: goals/{goal_id}. The goal this project's hours are for - what lets a goal report the effort spent against its progress." }
         billable: { type: boolean, description: "Default billable flag for time logged to this project." }
         status: { type: string, enum: [active, archived] }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
@@ -2352,6 +2683,15 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         employee: { type: string, description: "Resource path: employees/{employee_id}. Defaults to the caller." }
         project: { type: string, description: "Resource path: projects/{project_id}" }
+        card:
+          type: string
+          nullable: true
+          description: >-
+            Resource path: cards/{card_id}. The board task these hours went into, when the work is tracked as
+            a card - so "what did that task actually cost" has an answer. Secondary to the project, which is
+            what a timesheet approves and what a client is billed for, and NOT checked against it: a board is
+            not tied to a project, so requiring them to agree would invent a relationship the data has no way
+            to express. The task only has to exist and be live. Null clears it.
         date: { type: string, format: date }
         hours: { type: number, description: "Hours, 0-24." }
         description: { type: string }
@@ -2494,7 +2834,7 @@ components:
         etag: { type: string, readOnly: true }
         delete_time: { type: string, format: date-time, readOnly: true }
         display_name: { type: string }
-        items: { type: array, items: { type: string }, description: "Ordered checklist item texts." }
+        items: { type: array, maxItems: 100, items: { type: string, maxLength: 500 }, description: "Ordered checklist item texts. Capped at the same 100 a ticket or card may be seeded with, so a catalogue entry is always one that can be applied." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2921,7 +3261,7 @@ components:
         state: { type: string, readOnly: true, description: State value OPEN/IN_PROGRESS/RESOLVED/CLOSED/CANCELLED. }
         todo_done: { type: integer, readOnly: true, description: "Completed checklist items. Present on list and get." }
         todo_total: { type: integer, readOnly: true, description: "Total checklist items. Present on list and get." }
-        initial_todos: { type: array, items: { type: string }, writeOnly: true, description: "Create-only: checklist item texts to seed on the new ticket (custom items and/or a copied checklist)." }
+        initial_todos: { type: array, maxItems: 100, items: { type: string, maxLength: 500 }, writeOnly: true, description: "Create-only: checklist item texts to seed on the new ticket (custom items and/or a copied checklist)." }
         session_replay_id: { type: string, writeOnly: true, description: "Create-only: id of a Sentry session replay the requester chose to attach, showing the minute before they raised the ticket. 32 hex characters. Later recordings are added with :attachRecording; read them back from `session_replays`." }
         session_replays:
           type: array
@@ -3006,7 +3346,11 @@ components:
         file_name: { type: string, readOnly: true, description: Original uploaded filename including extension. }
         content_type: { type: string }
         size_bytes: { type: integer, readOnly: true }
-        expire_time: { type: string, format: date-time }
+        # Expiry is a calendar day carried as a timestamp: writes send UTC midnight on that day, so the day
+        # survives the round trip and `slice(0, 10)` on the read is the day everything compares by
+        # (`renewedExpiry`, the expiry badge). Writing a local-midnight or end-of-day stamp instead would
+        # slice back a day early or late outside UTC.
+        expire_time: { type: string, format: date-time, description: "When the document expires: UTC midnight on the expiry day. Compared by day wherever expiry is read (`renewedExpiry`, the expiry badge)." }
         requires_ack: { type: boolean, description: "When true, in-scope employees must acknowledge (e-sign) the current version via :acknowledge." }
         published: { type: boolean, description: "Published (visible in scope) by default; set false on create to file it as a draft. Toggle later via :publish/:unpublish." }
         ack_version: { type: integer, readOnly: true, description: "Current acknowledgement version; bumps when the file is replaced, re-requiring acknowledgement." }
@@ -3086,7 +3430,9 @@ components:
         file_name: { type: string, readOnly: true, description: Original uploaded filename including extension. }
         content_type: { type: string }
         size_bytes: { type: integer, readOnly: true }
-        expire_time: { type: string, format: date-time }
+        # A calendar day carried as a timestamp - see the note on the same field in the org-document schema
+        # above: writes send UTC midnight on the expiry day.
+        expire_time: { type: string, format: date-time, description: "When the document expires: UTC midnight on the expiry day. Compared by day wherever expiry is read." }
         published: { type: boolean, description: "Published (visible in scope) by default; set false on create to file it as a draft. Toggle later via :publish/:unpublish." }
         access:
           readOnly: true
@@ -4249,6 +4595,254 @@ paths:
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/event_log_entry' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/table-fields:
+    get:
+      description: >-
+        The table builder's field catalogue, ONE NODE at a time. With no `base`, lists the bases this caller may
+        build a grid on. With `?base=`, returns that base's own fields plus the links leading out of it; with
+        `?path=`, the same for the collection at the end of that link chain (`employee_id` is a ticket's
+        requester, `employee_id.department_id` their department), up to four hops. Every field names the
+        collection whose LIST decision gates it, and a field whose collection this caller cannot list is not
+        offered at all - nor is a link to a collection they cannot list. Virtual resource: no table, no rows,
+        assembled from the schema plus the org's own configuration (identity fields, pay components, leave
+        types).
+      operationId: GetTableFields
+      parameters:
+        - { in: query, name: base, schema: { type: string }, description: "The base collection to describe (e.g. `employees`)." }
+        - { in: query, name: path, schema: { type: string }, description: "Dotted link path from the base to the node to describe (e.g. `employee_id.department_id`). Empty for the base itself." }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bases]
+                properties:
+                  bases:
+                    type: array
+                    description: "The collections this caller may base a grid on."
+                    items:
+                      type: object
+                      required: [collection, label]
+                      properties:
+                        collection: { type: string }
+                        label: { type: string }
+                  base: { type: string }
+                  label: { type: string }
+                  path: { type: string, description: "The link path this node sits at; empty at the base." }
+                  node_label: { type: string, description: "What this node is called in the trail (`Requester (People)`)." }
+                  collection: { type: string, description: "The collection this node's own fields belong to." }
+                  links:
+                    type: array
+                    description: "Where a grid can go from here - one entry per foreign key to a collection this caller may list. Empty at the depth cap."
+                    items:
+                      type: object
+                      required: [path, label, collection, collection_label]
+                      properties:
+                        path: { type: string, description: "Pass back as `?path=` to describe that node." }
+                        label: { type: string, description: "What the link IS on this row (`Requester`)." }
+                        collection: { type: string }
+                        collection_label: { type: string }
+                  groups:
+                    type: array
+                    description: "The field groups, in picker order."
+                    items:
+                      type: object
+                      required: [key, label]
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                  fields:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, label, group, kind, collection]
+                      properties:
+                        key: { type: string, description: "The catalogue key, as stored in a view's columns." }
+                        label: { type: string }
+                        group: { type: string }
+                        kind: { type: string, enum: [text, number, money, date, datetime, bool, enum, ref] }
+                        collection: { type: string, description: "The collection whose list decision gated it." }
+                        masked: { type: boolean, description: "PII the profile endpoint masks; the real value needs the `unmask` capability." }
+                        enum_values: { type: array, items: { type: string } }
+                x-aep-resource:
+                  singular: table-field-catalog
+                  plural: table-field-catalogs
+                  singleton: true
+                  patterns:
+                    - 'table-fields'
+                  type: hrms.example.com/table-field-catalog
+        '403': { $ref: '#/components/responses/Problem' }
+  /v1/table-views:
+    get:
+      description: List method for table-view.
+      operationId: ListTableViews
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: base, schema: { type: string }, description: "Only views built on this base collection." }
+        - { in: query, name: q, schema: { type: string }, description: "Name/description search (narrows only)." }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+        - { in: query, name: deleted_only, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/table-view' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for table-view.
+      operationId: CreateTableView
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:
+    parameters: [ { in: path, name: table_view_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for table-view.
+      operationId: GetTableView
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Update method for table-view.
+      operationId: UpdateTableView
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for table-view.
+      operationId: DeleteTableView
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreTableView"
+      parameters: [ { in: path, name: table_view_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:disable:
+    post:
+      description: "Custom method disable: park the view as a draft."
+      operationId: ":DisableTableView"
+      parameters: [ { in: path, name: table_view_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:enable:
+    post:
+      description: "Custom method enable: publish a draft view."
+      operationId: ":EnableTableView"
+      parameters: [ { in: path, name: table_view_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:lock:
+    post:
+      description: "Custom method lock: freeze the definition so it stops changing under the people reading it."
+      operationId: ":LockTableView"
+      parameters: [ { in: path, name: table_view_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:unlock:
+    post:
+      description: "Custom method unlock: allow the definition to be edited again."
+      operationId: ":UnlockTableView"
+      parameters: [ { in: path, name: table_view_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/table-view' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/table-views/{table_view_id}:run:
+    post:
+      description: >-
+        Custom method run: produce the grid. One page of rows, each cell keyed by its catalogue field key, plus
+        the columns this caller actually gets. Every collection behind a column is separately gated by that
+        caller's own list decision and bound by its own list scope, so running somebody else's view answers
+        with the reader's rows, never the author's. Columns the reader may not have are returned in `dropped`
+        rather than silently omitted. Masked PII stays masked unless the caller holds the `unmask` capability,
+        and a run that touches masked fields writes one audit row naming the fields and the row count.
+      operationId: ":RunTableView"
+      parameters:
+        - { in: path, name: table_view_id, required: true, schema: { type: string } }
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: from, schema: { type: string, format: date } }
+        - { in: query, name: to, schema: { type: string, format: date } }
+        - { in: query, name: pay_period, schema: { type: string } }
+        - { in: query, name: financial_year, schema: { type: string } }
+        - { in: query, name: department, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [base, columns, rows, dropped]
+                properties:
+                  base: { type: string }
+                  columns:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, label, kind, collection]
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                        kind: { type: string, enum: [text, number, money, date, datetime, bool, enum, ref] }
+                        collection: { type: string }
+                        masked: { type: boolean, description: "Served masked: the caller does not hold `unmask`." }
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, cells]
+                      properties:
+                        path: { type: string, description: "The base row's own resource path." }
+                        cells:
+                          type: object
+                          description: "Column key -> value. Null means no value, or a cell this caller may not read (see `denied`)."
+                          additionalProperties: true
+                        denied:
+                          type: array
+                          description: "Column keys refused on THIS row by a per-field rule - rendered as a restricted marker, not as empty."
+                          items: { type: string }
+                  next_page_token: { type: string }
+                  dropped:
+                    type: array
+                    description: "Columns the view asks for that this caller does not get, with the reason."
+                    items:
+                      type: object
+                      required: [field, reason]
+                      properties:
+                        field: { type: string }
+                        reason: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/workflow-meta:
     get:
       description: Builder metadata for the no-code workflow UI (event catalog + resource/verb catalog + enum vocabularies). Virtual resource, no table.
@@ -4664,6 +5258,9 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: cycle, schema: { type: string }, description: "review-cycles/{cycle_id} to list one cycle's goals, or `none` for the goals set outside any cycle." }
+        - { in: query, name: stage, schema: { type: string, enum: [DRAFT, PROPOSED, AGREED] }, description: "Narrow to one stage of the goal-setting handshake - `PROPOSED` is a manager's approval queue." }
+        - { in: query, name: burnup, schema: { type: boolean }, description: "With `cycle`, also return that cycle's weighted attainment week by week (`burnup`), computed over the goals this caller may see." }
         - { in: query, name: show_deleted, schema: { type: boolean } }
       responses:
         '200':
@@ -4675,6 +5272,16 @@ paths:
                 properties:
                   results: { type: array, items: { $ref: '#/components/schemas/goal' } }
                   next_page_token: { type: string }
+                  burnup:
+                    type: array
+                    description: "Weekly attainment across the named cycle's goals, against the straight line the cycle should follow. Present only when `burnup=true` and a cycle is named."
+                    items:
+                      type: object
+                      required: [at, attained, expected]
+                      properties:
+                        at: { type: string, format: date }
+                        attained: { type: integer, description: "Weighted attainment as of that day, 0-100." }
+                        expected: { type: integer, description: "Where the cycle's own straight line sits that day, 0-100." }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
@@ -4729,6 +5336,111 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:setConfidence:
+    post:
+      description: "Custom method setConfidence: record whether the owner still expects this goal to land, without full edit rights. A change of call emits goal.confidenceChanged and tells the manager when it turns at_risk or off_track."
+      operationId: ":SetConfidenceGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confidence]
+              properties:
+                confidence: { type: string, enum: [on_track, at_risk, off_track] }
+                note: { type: string, maxLength: 500, nullable: true, description: "One line on why. Null clears the existing note." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:propose:
+    post:
+      description: "Custom method propose: hand a draft goal to the owner's manager to agree (DRAFT to PROPOSED)."
+      operationId: ":ProposeGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:approve:
+    post:
+      description: "Custom method approve: agree the goal, stamping who agreed it and when (to AGREED)."
+      operationId: ":ApproveGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:requestChanges:
+    post:
+      description: "Custom method requestChanges: send a proposed goal back to its owner (PROPOSED to DRAFT). The reason is posted as a comment on the goal, so the reply lands in the same thread."
+      operationId: ":RequestChangesGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: { type: string, minLength: 1, maxLength: 2000, description: "What needs changing." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:setContributors:
+    post:
+      description: "Custom method setContributors: replace the goal's contributors. The shares are only meaningful together, so the whole set is sent at once; they may not add up to more than 100%, and the owner is never one of them."
+      operationId: ":SetContributorsGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contributors]
+              properties:
+                contributors:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    required: [employee]
+                    properties:
+                      employee: { type: string, description: "Resource path: employees/{employee_id}." }
+                      share: { type: integer, minimum: 0, maximum: 100 }
+                      note: { type: string, maxLength: 200, nullable: true }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:watch:
+    post:
+      description: >-
+        Custom method watch: follow a goal you do not own. A watcher hears about progress moves, comments and
+        a confidence call turning at-risk or off-track - low priority, so it digests where the recipient has a
+        digest configured. Written for the cases that were silent: the owner of a goal BLOCKED BY this one, a
+        contributor credited with a share of it, a skip-level who cares. Idempotent, unaudited, and open to
+        anyone who can read the goal.
+      operationId: ":WatchGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goals/{goal_id}:unwatch:
+    post:
+      description: "Custom method unwatch: stop following this goal. Idempotent - unwatching a goal you do not watch is not an error."
+      operationId: ":UnwatchGoal"
+      parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/goals/{goal_id}:comment:
     post:
       description: "Custom method comment: add a comment to the goal. Both the owner and their manager are notified, and mentions notify the people named."
@@ -4754,6 +5466,104 @@ paths:
       parameters: [ { in: path, name: goal_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goal-templates:
+    get:
+      description: List method for goal-template.
+      operationId: ListGoalTemplates
+      parameters:
+        - { in: query, name: max_page_size, schema: { type: integer } }
+        - { in: query, name: page_token, schema: { type: string } }
+        - { in: query, name: show_deleted, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/goal-template' } }
+                  next_page_token: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+    post:
+      description: Create method for goal-template.
+      operationId: CreateGoalTemplate
+      parameters: [ { in: query, name: id, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goal-templates/{template_id}:
+    parameters: [ { in: path, name: template_id, required: true, schema: { type: string } } ]
+    get:
+      description: Get method for goal-template.
+      operationId: GetGoalTemplate
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    patch:
+      description: Update method for goal-template.
+      operationId: UpdateGoalTemplate
+      requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      description: Delete method for goal-template.
+      operationId: DeleteGoalTemplate
+      parameters:
+        - { in: query, name: force, schema: { type: boolean } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/goal-templates/{template_id}:apply:
+    post:
+      description: "Custom method apply: create a goal from this blueprint for each named employee. Somebody who already holds it in the same cycle is skipped, so applying a set twice is a no-op rather than duplicate goals."
+      operationId: ":ApplyGoalTemplate"
+      parameters: [ { in: path, name: template_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employees]
+              properties:
+                employees: { type: array, minItems: 1, maxItems: 200, items: { type: string, description: "Resource path: employees/{employee_id}." } }
+                cycle: { type: string, nullable: true, description: "Resource path: review-cycles/{cycle_id} - the cycle the created goals are set for." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goal-templates/{template_id}:enable:
+    post:
+      description: "Custom method enable: offer this template when applying again."
+      operationId: ":EnableGoalTemplate"
+      parameters: [ { in: path, name: template_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goal-templates/{template_id}:disable:
+    post:
+      description: "Custom method disable: keep the template for the record but stop offering it when applying."
+      operationId: ":DisableGoalTemplate"
+      parameters: [ { in: path, name: template_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/goal-templates/{template_id}:restore:
+    post:
+      description: "Custom method restore: undo a soft-delete."
+      operationId: ":RestoreGoalTemplate"
+      parameters: [ { in: path, name: template_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/goal-template' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/boards:
@@ -5000,7 +5810,7 @@ paths:
               type: object
               required: [texts]
               properties:
-                texts: { type: array, items: { type: string } }
+                texts: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 500 } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -5038,6 +5848,56 @@ paths:
               required: [todo]
               properties:
                 todo: { type: string, description: The checklist item's id. }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:promoteTodo:
+    post:
+      description: >-
+        Custom method promoteTodo: turn one checklist item into a card of its own - the item that grew an
+        estimate, a due date and a different assignee. The new card lands on the SAME board in its first
+        column, inheriting the parent's department, sprint and (unless `assignee` says otherwise) its
+        assignee; the item is ticked and its text gains the new card's key, so the checklist points at where
+        the work went instead of showing a phantom done item. The parent's linked `goal` is deliberately NOT
+        copied - the parent is still linked, and copying it would count one piece of work twice in the goal's
+        delivered share. No dependency is written either: handing work off does not block the parent, and
+        `blocked_by` holds a single card. Returns the PARENT card (with its updated checklist).
+      operationId: ":PromoteCardTodo"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [todo]
+              properties:
+                todo: { type: string, description: The checklist item's id. }
+                assignee: { type: string, nullable: true, description: "Resource path: employees/{employee_id} for the new card. Omit to inherit the parent card's assignee; null to leave it unassigned." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:watch:
+    post:
+      description: >-
+        Custom method watch: follow this card without being the one doing it. A watcher hears about column
+        moves, comments, and blocks in both directions - low priority, so it digests where the recipient has a
+        digest configured. Idempotent (watching twice is one watcher), unaudited (who reads along is not a
+        change to the work), and open to anyone who can read the card, since the verb is authorized on the
+        card itself. Commenting on a card watches it automatically.
+      operationId: ":WatchCard"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/cards/{card_id}:unwatch:
+    post:
+      description: "Custom method unwatch: stop following this card. Idempotent - unwatching a card you do not watch is not an error."
+      operationId: ":UnwatchCard"
+      parameters: [ { in: path, name: card_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/card' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -5295,6 +6155,33 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review-cycle' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/review-cycles/{cycle_id}:variablePay:
+    post:
+      description: "Custom method variablePay: compute what each reviewee has earned against their target variable pay. Reports only - nothing is written."
+      operationId: ":VariablePayReviewCycle"
+      parameters: [ { in: path, name: cycle_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review-cycle' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/review-cycles/{cycle_id}:award:
+    post:
+      description: "Custom method award: write a bonus for each named employee at the figure :variablePay computed. The amount is recomputed server-side, never taken from the request; a line already awarded, with no target or with nothing scored is skipped."
+      operationId: ":AwardReviewCycle"
+      parameters: [ { in: path, name: cycle_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employees]
+              properties:
+                employees: { type: array, minItems: 1, maxItems: 500, items: { type: string, description: "Resource path: employees/{employee_id}." } }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review-cycle' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/review-cycles/{cycle_id}:close:
     post:
       description: "Custom method close: mark an active cycle CLOSED."
@@ -5384,6 +6271,14 @@ paths:
                 ratings: { type: object, additionalProperties: { type: number }, description: "Per-competency ratings keyed by competency key." }
                 manager_comment: { type: string }
                 overall_rating: { type: number }
+                goal_ratings:
+                  type: object
+                  description: "The manager's verdict per goal, keyed by goal code. Verdicts for goals outside the cycle's set are ignored."
+                  additionalProperties:
+                    type: object
+                    properties:
+                      rating: { type: number }
+                      comment: { type: string, maxLength: 2000 }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -5449,7 +6344,54 @@ paths:
               type: object
               required: [employees]
               properties:
-                employees: { type: array, items: { type: string }, description: "Employee resource paths to ask for feedback." }
+                employees: { type: array, minItems: 1, maxItems: 20, items: { type: string }, description: "Employee resource paths to ask for feedback. A person the reviewee had SUGGESTED is upgraded in place rather than asked twice. Capped at the same 20 `:suggestFeedback` allows." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews/{review_id}:suggestFeedback:
+    post:
+      description: >-
+        Custom method suggestFeedback: the REVIEWEE's own list of who saw their work. Replaces the whole
+        suggested set (an empty list withdraws them all) and never touches a request a manager has already
+        made or a nominee has answered. A suggestion is inert - it notifies nobody and cannot be written to -
+        until a manager nominates that person for real, which turns the same row REQUESTED; that is what makes
+        it safe to hand this verb to the person being reviewed. Owner-only, and refused once the review is
+        shared. Nomination was the manager's alone, which has the 360 backwards: the people who actually
+        worked with somebody are known to that person.
+      operationId: ":SuggestFeedbackReview"
+      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employees]
+              properties:
+                employees: { type: array, maxItems: 20, items: { type: string }, description: "Employee resource paths the reviewee suggests. Empty clears the suggestions." }
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reviews/{review_id}:assignReviewer:
+    post:
+      description: >-
+        Custom method assignReviewer: name who writes this one review, instead of re-parenting the employee to
+        fix a review. Re-points every place that asked "who is the manager here" - the hand-off after the self
+        stage, the nudge, the acknowledgement note, and the scheduled "reviews you owe" metric. Null clears it
+        back to the manager chain. Refused once the review is SHARED, because by then its reviewer is part of
+        the record; somebody cannot be their own reviewer, and the reviewer must be an active employee.
+      operationId: ":AssignReviewerReview"
+      parameters: [ { in: path, name: review_id, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reviewer: { type: string, nullable: true, description: "Resource path: employees/{employee_id}, or null to hand the write-up back to the manager chain." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -5502,9 +6444,19 @@ paths:
         '500': { $ref: '#/components/responses/Problem' }
   /v1/review-feedback/{feedback_id}:decline:
     post:
-      description: "Custom method decline: the nominee declines a feedback request (REQUESTED to DECLINED)."
+      description: >-
+        Custom method decline: the nominee declines a feedback request (REQUESTED to DECLINED), optionally
+        saying why. The reason is useful rather than decorative - "I have not worked with them this cycle"
+        tells the manager to nominate somebody else, where a bare decline leaves them guessing.
       operationId: ":DeclineReviewFeedback"
       parameters: [ { in: path, name: feedback_id, required: true, schema: { type: string } } ]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500, nullable: true, description: "Why they declined, in their own words. Optional." }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/review-feedback' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -6358,6 +7310,12 @@ paths:
               required: [amount]
               properties:
                 amount: { type: number }
+                allow_duplicate:
+                  type: boolean
+                  description: >-
+                    Record this repayment even though an identical one was logged moments ago. Without it the
+                    call is refused with 409 already-exists, because an identical amount inside the window is
+                    indistinguishable from an accidental double-submit.
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/loan' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -7887,6 +8845,42 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories/{category_id}:enable:
+    post:
+      description: "Custom method enable for asset-category."
+      operationId: ":EnableAssetCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories/{category_id}:disable:
+    post:
+      description: "Custom method disable for asset-category."
+      operationId: ":DisableAssetCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories/{category_id}:lock:
+    post:
+      description: "Custom method lock for asset-category."
+      operationId: ":LockAssetCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/asset-categories/{category_id}:unlock:
+    post:
+      description: "Custom method unlock for asset-category."
+      operationId: ":UnlockAssetCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/asset-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/reimbursement-categories:
     get:
       description: List method for reimbursement-category.
@@ -7943,6 +8937,42 @@ paths:
     post:
       description: "Custom method restore: undo a soft-delete."
       operationId: ":RestoreReimbursementCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reimbursement-categories/{category_id}:enable:
+    post:
+      description: "Custom method enable for reimbursement-category."
+      operationId: ":EnableReimbursementCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reimbursement-categories/{category_id}:disable:
+    post:
+      description: "Custom method disable for reimbursement-category."
+      operationId: ":DisableReimbursementCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reimbursement-categories/{category_id}:lock:
+    post:
+      description: "Custom method lock for reimbursement-category."
+      operationId: ":LockReimbursementCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/reimbursement-categories/{category_id}:unlock:
+    post:
+      description: "Custom method unlock for reimbursement-category."
+      operationId: ":UnlockReimbursementCategory"
       parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/reimbursement-category' } } } }
@@ -8199,6 +9229,42 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
+  /v1/expense-categories/{category_id}:enable:
+    post:
+      description: "Custom method enable for expense-category."
+      operationId: ":EnableExpenseCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/expense-categories/{category_id}:disable:
+    post:
+      description: "Custom method disable for expense-category."
+      operationId: ":DisableExpenseCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/expense-categories/{category_id}:lock:
+    post:
+      description: "Custom method lock for expense-category."
+      operationId: ":LockExpenseCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/expense-categories/{category_id}:unlock:
+    post:
+      description: "Custom method unlock for expense-category."
+      operationId: ":UnlockExpenseCategory"
+      parameters: [ { in: path, name: category_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/expense-category' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
   /v1/vendors:
     get:
       description: List method for vendor.
@@ -8255,6 +9321,42 @@ paths:
     post:
       description: "Custom method restore: undo a soft-delete."
       operationId: ":RestoreVendor"
+      parameters: [ { in: path, name: vendor_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/vendors/{vendor_id}:enable:
+    post:
+      description: "Custom method enable for vendor."
+      operationId: ":EnableVendor"
+      parameters: [ { in: path, name: vendor_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/vendors/{vendor_id}:disable:
+    post:
+      description: "Custom method disable for vendor."
+      operationId: ":DisableVendor"
+      parameters: [ { in: path, name: vendor_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/vendors/{vendor_id}:lock:
+    post:
+      description: "Custom method lock for vendor."
+      operationId: ":LockVendor"
+      parameters: [ { in: path, name: vendor_id, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+  /v1/vendors/{vendor_id}:unlock:
+    post:
+      description: "Custom method unlock for vendor."
+      operationId: ":UnlockVendor"
       parameters: [ { in: path, name: vendor_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/vendor' } } } }
@@ -9278,7 +10380,7 @@ paths:
               type: object
               required: [texts]
               properties:
-                texts: { type: array, items: { type: string } }
+                texts: { type: array, minItems: 1, maxItems: 100, items: { type: string, maxLength: 500 } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/ticket' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -11447,8 +12549,10 @@ paths:
                 body: { type: string, description: "Required for a post; optional for a poll." }
                 options:
                   type: array
-                  description: "Poll choices (>=2). When present, creates a poll instead of a post."
-                  items: { type: string }
+                  minItems: 2
+                  maxItems: 20
+                  description: "Poll choices (2-20). When present, creates a poll instead of a post."
+                  items: { type: string, minLength: 1, maxLength: 200 }
                 multiple: { type: boolean, description: "Poll only: allow a voter to pick more than one option." }
                 closes_time: { type: string, format: date-time, description: "Poll only: optional deadline after which voting is locked." }
                 illustration: { type: string, maxLength: 120, description: "Optional art for the card: a `<category>/<slug>` path into the bundled illustration set (e.g. `celebration-recognition/celebrating`) or a `<file>.png` brand sticker. Rejected unless it matches one of those two shapes." }

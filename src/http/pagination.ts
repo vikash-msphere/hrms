@@ -1,4 +1,21 @@
 // Opaque cursor over a stable (createTime, uid) sort. Keep page sizes bounded.
+//
+// THE UID HALF IS A WIRE TOKEN, NEVER AN INTERNAL ID. A cursor is a response field, so whatever goes in it is
+// on the wire - and `base64url` is an encoding, not a wrapper: `1789015590970|0abc1def2ghj3` reads straight
+// back out of one. services/keysetPage.ts always encoded its half through the codec; this one did not, so the
+// 22 collections paged in memory published their internal primary keys in `next_page_token`. That is the id
+// the whole codec exists to keep off the wire (lib/idCodec.ts) - and the inbound edge leaves a non-token id
+// segment alone (middleware/decodeWireIds.ts), so a harvested one addresses its row directly. Authz still
+// gates by code, so this was never an access bypass; what it cost is the non-enumerability the token scheme
+// is for, and the symmetry that lets the edge be the only place ids cross.
+//
+// So the `wire` parameter below is not optional bookkeeping: pass it for every collection whose rows are
+// addressed by an internal id. The natural-key listings (roles by name, settings/policy by key) pass nothing,
+// because their uid is already the public identifier.
+import type { IdCodec } from "../lib/idCodec";
+
+/** How a cursor's uid half crosses the wire: encoded under its collection, exactly as keysetPage does. */
+export type CursorWire = { codec: IdCodec; collection: string };
 
 export const encodeCursor = (createTimeMs: number, uid: string) =>
   Buffer.from(`${createTimeMs}|${uid}`).toString("base64url");
@@ -31,14 +48,19 @@ export const clampPageSize = (n?: number) => Math.min(Math.max(n ?? 50, 1), 100)
 // The ONE thing a caller must not do is sort the row set on a different key than it pages on: the seek below
 // compares `when`, so a caller that pre-sorted by some other field and then paged would seek into an order that
 // does not exist and drop whole rows between pages. Page here, and sort a RETURNED PAGE for presentation.
-export function paginate<T>(
+//
+// ASYNC because the cursor's uid half is encoded through the codec (see the header). Deliberately async even
+// for the natural-key callers that pass no `wire`: one signature means a new listing cannot quietly take the
+// synchronous path and ship an internal id, and TypeScript flags every caller that forgets to await.
+export async function paginate<T>(
   rows: T[],
   maxPageSize: number,
   pageToken: string | undefined,
   when: (r: T) => number,
   uid: (r: T) => string,
   dir: "asc" | "desc" = "desc",
-): { items: T[]; nextPageToken?: string } {
+  wire?: CursorWire,
+): Promise<{ items: T[]; nextPageToken?: string }> {
   // ONE comparator, shared by the sort and the seek below. It used to tiebreak with `localeCompare` while the
   // seek asked `uid(e) > cur.uid`, which are two different orderings: ICU collation is case-insensitive at the
   // primary level and reorders around punctuation, byte comparison does neither. Wherever they disagreed and
@@ -53,12 +75,19 @@ export function paginate<T>(
   const byWhen = dir === "asc" ? (a: T, b: T) => when(a) - when(b) : (a: T, b: T) => when(b) - when(a);
   const sorted = [...rows].sort((a, b) => byWhen(a, b) || byUid(uid(a), uid(b)));
   const cur = decodeCursor(pageToken);
+  // The cursor carries the wire TOKEN; decode it back to the internal uid the seek compares against. Same
+  // shape as keysetPage: a token that does not decode (forged, foreign, from another collection, or minted
+  // before this collection was wired) falls back to a TIMESTAMP-ONLY bound rather than erroring or leaking.
+  // That bound can only re-show rows at the boundary instant, never skip them, so the fallback is the safe
+  // direction of wrong.
+  const curUid = cur && wire ? await wire.codec.decode(wire.collection, cur.uid) : cur?.uid ?? null;
   const past = (e: T) =>
     (dir === "asc" ? when(e) > cur!.createTimeMs : when(e) < cur!.createTimeMs) ||
-    (when(e) === cur!.createTimeMs && uid(e) > cur!.uid);
+    (curUid !== null && when(e) === cur!.createTimeMs && uid(e) > curUid);
   const start = cur ? sorted.findIndex(past) : 0;
   const slice = start < 0 ? [] : sorted.slice(start, start + maxPageSize);
   const last = slice[slice.length - 1];
-  const nextPageToken = start >= 0 && start + maxPageSize < sorted.length && last ? encodeCursor(when(last), uid(last)) : undefined;
-  return { items: slice, nextPageToken };
+  if (!(start >= 0 && start + maxPageSize < sorted.length && last)) return { items: slice };
+  const lastUid = uid(last);
+  return { items: slice, nextPageToken: encodeCursor(when(last), wire ? await wire.codec.encode(wire.collection, lastUid) : lastUid) };
 }

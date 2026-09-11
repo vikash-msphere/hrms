@@ -40,17 +40,42 @@ test("a deleted row is found under Deleted and restored", async ({ as }) => {
   // Its options are plain buttons in a popover rather than a listbox - the table draws its own list so a long
   // one can scroll inside the column header.
   await page.getByRole("button", { name: "Deleted", exact: true }).click();
+  // Closed explicitly, not assumed: the popover picking a value does not always dismiss it before the next
+  // action, and its own open content sitting over the table can intercept a click aimed at a row underneath -
+  // as can a live admin-notification toast landing at the same spot (`super` gets those org-wide in real time,
+  // and this run shares the page with the rest of the suite still generating them).
+  await page.keyboard.press("Escape");
   const deleted = page.locator("tbody tr").filter({ hasText: title });
   await expect(deleted).toHaveCount(1, { timeout: 30_000 });
 
-  // And back: a deleted row offers Restore where a live one offers Edit.
-  await deleted.getByRole("button", { name: /actions/i }).first().click();
-  await page.getByRole("menuitem", { name: "Restore" }).click();
+  // And back: a deleted row offers Restore where a live one offers Edit. The press is inside the retry and
+  // gated on the RECORD, not on the menu having been clicked: a press that detached mid-click, or one whose
+  // request met a restarting dev Worker, leaves the row deleted - and the reload below then looks for a live
+  // row that was never restored, which reads as the restore feature being broken rather than a lost press.
+  await expect(async () => {
+    if (!(await isDeleted(page, event.path))) return;
+    await deleted.getByRole("button", { name: /actions/i }).first().click({ timeout: 10_000 });
+    const restore = page.getByRole("menuitem", { name: "Restore" });
+    await expect(restore).toBeVisible({ timeout: 5_000 });
+    await restore.click({ timeout: 8_000 });
+    await expect.poll(() => isDeleted(page, event.path), { timeout: 10_000 }).toBe(false);
+  }).toPass({ timeout: 60_000 });
 
-  // Live again, which the page proves by showing it with the deleted filter cleared.
-  await page.reload();
-  await expect(page.getByRole("main")).toBeVisible();
+  // Live again, which the page proves by showing it once the Deleted view is left. The filter is cleared the
+  // way the table offers it rather than by reloading or re-navigating: those both come back to the SAME
+  // "Deleted" view (the filter rides in the table's own URL state, and a same-hash navigation does not remount
+  // the page), which would hide the row that WAS restored and show one that had not been - passing for
+  // exactly the wrong reason. Clearing asks the server for the live list, which is the claim being made here.
+  await page.getByRole("button", { name: "Clear filters" }).first().click();
   await expect(page.locator("tbody tr").filter({ hasText: title })).toHaveCount(1, { timeout: 30_000 });
 
   await purge(page, event.path);
 });
+
+/** Whether the row is still in the trash, asked of the record itself rather than of the table it is filtered
+ *  out of. `?show_deleted` because a plain read of a soft-deleted row is what the page itself has to ask for. */
+async function isDeleted(page: import("@playwright/test").Page, path: string): Promise<boolean> {
+  const res = await page.request.get(`/v1/${path}?show_deleted=true`);
+  if (!res.ok()) return true; // unreadable: treat as "not restored yet" and let the retry ask again
+  return !!((await res.json()) as { delete_time?: string }).delete_time;
+}

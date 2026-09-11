@@ -1,6 +1,7 @@
 import { allocOwnedCode } from "./codeAlloc";
-import { and, eq, inArray, isNull, gte } from "drizzle-orm";
+import { and, eq, inArray, isNull, gte, sql, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -53,14 +54,29 @@ async function findRecentDuplicate(
 }
 
 // One employee's awards (newest first), or - unfiltered - everything the caller may see.
-export async function listBonuses(deps: Deps, scope: ListScope, employeeId?: string) {
+//
+// PAGED IN SQL, on `award_date`. Unfiltered this list is org-wide, and a company-scope `bonuses:award`
+// materializes one row per employee per award - so the table grows with headcount x award events and the
+// unpaged version read all of it into the Worker on every list, sorted it in JS and returned the lot with
+// `nextPageToken: undefined`. That is the pattern keysetPage exists to replace: the DB orders and LIMITs, and
+// the caller follows the cursor. `award_date` is `notNull`, so it is a valid keyset key for every matching row.
+export async function listBonuses(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employeeId?: string) {
   const conds = [applyScope(scope, schema.bonuses.code, schema.bonuses.employeeId)];
   if (employeeId) conds.push(eq(schema.bonuses.employeeId, employeeId));
-  const rows = await deps.db.select().from(schema.bonuses).where(conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as any)) : undefined);
-  return rows.sort((a, b) => +new Date(b.awardDate) - +new Date(a.awardDate) || b.uuid.localeCompare(a.uuid));
+  const where = conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as SQL[])) : undefined;
+  return keysetPage<typeof schema.bonuses.$inferSelect>(deps, schema.bonuses, "bonuses", where, {
+    max: maxPageSize,
+    pageToken,
+    order: { expr: sql`${schema.bonuses.awardDate}`, value: (r) => +new Date(r.awardDate) },
+  });
 }
 
-export async function recordBonus(deps: Deps, actor: AppUser, input: BonusInput) {
+/**
+ * `origin` is set by a SERVER-SIDE awarder, never by a caller: it is deliberately not part of `BonusInput`,
+ * so nothing on the wire can claim a bonus came out of a review cycle. Today the one awarder that uses it is
+ * `services/variablePay.ts#awardVariablePay`, whose re-run detection reads it back.
+ */
+export async function recordBonus(deps: Deps, actor: AppUser, input: BonusInput, origin?: { cycleId?: string | null }) {
   const employeeId = idFromPath(input.employee);
   const when = dayMs(input.award_date);
   if (!employeeId) throw invalidArgument("employee is required");
@@ -90,6 +106,7 @@ export async function recordBonus(deps: Deps, actor: AppUser, input: BonusInput)
       reason,
       awardDate: new Date(when),
       scope: "individual",
+      cycleId: origin?.cycleId ?? null,
     })
     .returning())[0]!;
   await audit(deps, actor, "bonus.record", "bonuses", row.uuid, { employee: `employees/${employeeId}` });

@@ -1,8 +1,10 @@
 // Company events (holidays' timed sibling): all-day or timed, optionally counting as work for attendees.
 import { and, eq, inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
+import { byIdChunks } from "../lib/dbBatch";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
+import type { EventRepeat } from "../domain/calendar";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
 import { visibleByDelete } from "./softDelete";
@@ -23,7 +25,7 @@ export type EventInput = {
   attendees?: string[] | null; // employee paths/ids (decoded to internal ids by the inbound edge)
   repeat?: EventRepeat | null; // weekly / monthly / yearly; the cron rolls the series forward one at a time
 };
-export type EventRepeat = "weekly" | "monthly" | "yearly";
+export type { EventRepeat } from "../domain/calendar";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 // Normalise an attendees array (employee paths/ids) to a de-duped JSON array of internal ids.
@@ -42,7 +44,7 @@ function parseTime(s: string | undefined, allDay: boolean): number {
 // Scope-filtered in SQL (an event can be shared to a department), then paged like any other collection.
 export async function listEvents(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const all = visibleByDelete(await deps.db.select().from(schema.events).where(applyScope(scope, schema.events.code, schema.events.code)), showDeleted);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "events" });
 }
 
 export const eventSpec: CrudSpec<EventInput, typeof schema.events> = {
@@ -106,7 +108,9 @@ export const eventSpec: CrudSpec<EventInput, typeof schema.events> = {
 export async function withResponses(deps: Deps, actor: AppUser | undefined, rows: any[]): Promise<any[]> {
   const ids = rows.map((r) => r.uuid);
   if (!ids.length) return rows;
-  const all = await deps.db.select().from(schema.eventResponses).where(inArray(schema.eventResponses.eventId, ids));
+  // Chunked: a full page binds 100 ids, which is D1's whole per-statement parameter allowance - fine today,
+  // and `too many SQL variables` the moment anything else is bound here (see lib/dbBatch.ts#PARAM_CAP).
+  const all = await byIdChunks(ids, (group) => deps.db.select().from(schema.eventResponses).where(inArray(schema.eventResponses.eventId, group)));
   const byEvent = new Map<string, typeof all>();
   for (const r of all) byEvent.set(r.eventId, [...(byEvent.get(r.eventId) ?? []), r]);
   return rows.map((row) => {
@@ -155,20 +159,7 @@ export async function respondToEvent(deps: Deps, actor: AppUser, id: string, res
   return decorated;
 }
 
-/**
- * One step of a repeating event, in the calendar's own terms: a weekly all-hands lands on the same weekday, a
- * monthly one on the same date, a yearly one on the same date next year. Returns the new start and end, keeping
- * the event's own length.
- *
- * Shared with the web so the form can show the dates a repeat will produce before it is saved - the mirror is
- * pinned by test/eventRepeat.test.ts.
- */
-export function nextOccurrence(startMs: number, endMs: number, repeat: EventRepeat): { start: number; end: number } {
-  const span = endMs - startMs;
-  const d = new Date(startMs);
-  if (repeat === "weekly") d.setUTCDate(d.getUTCDate() + 7);
-  else if (repeat === "monthly") d.setUTCMonth(d.getUTCMonth() + 1);
-  else d.setUTCFullYear(d.getUTCFullYear() + 1);
-  return { start: +d, end: +d + span };
-}
+// The stepping rule itself is `domain/calendar.ts#nextOccurrence` - pure, and imported by the event form too,
+// so the preview and the cron cannot disagree. Re-exported here because this is where the cron reaches for it.
+export { nextOccurrence } from "../domain/calendar";
 

@@ -9,6 +9,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, auditMany } from "../lib/audit";
+import { byIdChunks } from "../lib/dbBatch";
 import { clearCache, clearCachePrefix } from "../lib/cache";
 import { notFound, failedPrecondition, alreadyExists, invalidArgument } from "../lib/errors";
 import { validateAccessRule, type AccessRuleInput } from "../domain/policyValidate";
@@ -106,10 +107,14 @@ async function subjectWords(deps: Deps, rows: Subject[]): Promise<Map<string, Re
   }
   const uuids = [...new Set(rows.filter((r) => r.subjectKind === "user").map((r) => r.subject))];
   if (uuids.length) {
-    const users = await deps.db
-      .select({ uuid: schema.users.uuid, email: schema.users.email, emp: schema.users.employeeId })
-      .from(schema.users)
-      .where(inArray(schema.users.uuid, uuids));
+    // Chunked for the same reason the purge above is: this is called with a whole batch of rules (a page of
+    // them, or every rule lapsing on one night), and each distinct user subject binds a parameter.
+    const users = await byIdChunks(uuids, (group) =>
+      deps.db
+        .select({ uuid: schema.users.uuid, email: schema.users.email, emp: schema.users.employeeId })
+        .from(schema.users)
+        .where(inArray(schema.users.uuid, group)),
+    );
     for (const u of users) out.set(`user:${u.uuid}`, { subject_label: u.email, ...(u.emp ? { subject_employee: `employees/${u.emp}` } : {}) });
   }
   return out;
@@ -130,7 +135,9 @@ const ruleMeta = (row: RuleRow, extra?: Record<string, unknown>) => {
   return {
     rule_id: row.uuid, // access-rules is not a code-bearing collection, so the trail carries the id in meta
     subject_kind: row.subjectKind,
-    subject: row.subject,
+    // A user subject is stored as a bare users uuid; the trail carries it as a REF, the way the resource
+    // serializer does, so no internal id reaches the wire and the reader's client can resolve it.
+    subject: row.subjectKind === "user" ? `users/${row.subject}` : row.subject,
     collection: row.namespace,
     pattern: row.pattern,
     scope: f.scope,
@@ -507,7 +514,13 @@ export async function purgeExpiredAccessRules(deps: Deps): Promise<number> {
     .from(schema.accessRules)
     .where(and(isNotNull(schema.accessRules.expiresAt), lte(schema.accessRules.expiresAt, now)));
   if (!expired.length) return 0;
-  await deps.db.delete(schema.accessRules).where(inArray(schema.accessRules.uuid, expired.map((r) => r.uuid)));
+  // Chunked: how many rules lapse on one night is set by whoever granted them, not by anything this loop
+  // controls - a bulk time-boxed grant (a clone, an audit window, a project's access all dated the same day)
+  // lapses together, and one `IN` list of them binds a parameter each. Past a hundred the DELETE answered
+  // `D1_ERROR: too many SQL variables` and the whole subtask failed, so nothing was purged and the audit
+  // entries below were never written either.
+  await byIdChunks(expired.map((r) => r.uuid), (group) =>
+    deps.db.delete(schema.accessRules).where(inArray(schema.accessRules.uuid, group)).returning({ uuid: schema.accessRules.uuid }));
   for (const r of expired) bustGrantCache(r.subjectKind, r.subject);
   // One entry per LAPSED RULE, batched. A nightly `{ expired: 4 }` said that four people somewhere lost
   // something - which is exactly the shape of audit entry nobody can act on. Each entry now names the subject,

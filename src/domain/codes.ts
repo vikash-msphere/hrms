@@ -39,9 +39,24 @@ export function segments(code: string): string[] {
 
 // Delimiter-boundary-aware containment: is `code` equal to scope `prefix`, or nested under it?
 // "04" covers "04", "04-1c", "04-1c-0a9"; it does NOT cover "041" or "041-x" (the boundary stops it).
-// An empty prefix matches everything (the "**" / unscoped case is handled at the permission layer).
+//
+// AN EMPTY PREFIX MATCHES NOTHING. It used to match everything, on the reading that "no scope" means
+// "unscoped" - but every caller here is asking a containment question on behalf of an access decision, and
+// for those the empty string is never a deliberate "all", it is a value that went missing. The unscoped case
+// has its own spelling (`**` / `*` in a grant pattern), handled at the permission layer and never routed
+// through this function.
+//
+// Concretely, `true` made three fail-OPEN paths in domain/permissions.ts#matchToken, each one turning a
+// self- or dept-scoped grant into an org-wide one:
+//   - a caller whose `employees.code` is `''` (the column is nullable TEXT with no CHECK, and `''` is not
+//     NULL, so the `!== null` guard there let it through) matched `me` against every row in the collection;
+//   - a code beginning with `-` gives `deptOf` an empty dept, so `my-dept` matched everything;
+//   - a pattern written `-*` asks for the prefix `''`, and matched everything.
+// None is reachable through codeAlloc today. That is the point: this is the function that must not be the
+// one place a missing value reads as authority, and "deny" is the only safe answer to a question whose
+// subject is absent.
 export function isUnder(prefix: string, code: string): boolean {
-  if (prefix === "") return true;
+  if (prefix === "") return false;
   return code === prefix || code.startsWith(prefix + "-");
 }
 

@@ -7,6 +7,9 @@ import { gotoRoute, purge, test, expect, toast } from "./fixtures";
 // somebody's quarter is being re-scored. `test/goalAlignment.test.ts` owns the rollup arithmetic; this
 // covers that a goal can be created, found, moved and closed from the page it lives on.
 test("a goal is created, its progress moved, and it completes", async ({ as }) => {
+  // Longer than the retry near the end budgets itself - a default 30s test timeout shorter than that inner
+  // window kills it mid-retry and reports it as the whole TEST timing out.
+  test.setTimeout(90_000);
   const page = await as("manager");
   const title = `E2E goal ${Date.now()}`;
 
@@ -37,16 +40,37 @@ test("a goal is created, its progress moved, and it completes", async ({ as }) =
   // The saved value, read back off the page: the row where progress is shown, not the toast that announced it.
   await expect(detail.getByText("50%").first()).toBeVisible();
 
-  // All the way: 100% closes the goal out rather than leaving it open at full.
-  await slider.fill("100");
-  await detail.getByRole("button", { name: "Save", exact: true }).click();
+  // All the way: 100% closes the goal out rather than leaving it open at full. Re-saved on a miss and gated
+  // on the RECORD: the detail showing "100%" is the slider's own local state, so a save whose request was
+  // lost (a restarting dev Worker answers it with a 503) looks exactly like one that landed - and the read
+  // from cold below then finds a goal still sitting at half, which reads as the feature not closing goals.
+  await expect(async () => {
+    if (await completed(page, title)) return;
+    await slider.fill("100");
+    await detail.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => completed(page, title), { timeout: 10_000 }).toBe(true);
+  }).toPass({ timeout: 60_000 });
   await expect(detail.getByText(/Completed|100%/).first()).toBeVisible();
 
   await page.keyboard.press("Escape");
-  // And the closed goal reads as complete on the page behind it.
-  await expect(page.locator("div.shadow-card, tbody tr, li").filter({ hasText: title }).last()).toContainText(/Completed|100%/);
+  // And the closed goal reads as complete on the page behind it - read from cold, not trusted to the list's
+  // own in-place update: closing the detail can leave the row behind it showing an in-flight optimistic state
+  // from partway through the two saves above rather than the settled one, under load.
+  await expect(async () => {
+    await page.reload();
+    await expect(page.locator("div.shadow-card, tbody tr, li").filter({ hasText: title }).last()).toContainText(/Completed|100%/, { timeout: 10_000 });
+  }).toPass({ timeout: 30_000 });
   await purge(page, await goalPath(page, title));
 });
+
+/** Whether the goal has actually closed out - asked of the record, not of the slider's own local state. */
+async function completed(page: import("@playwright/test").Page, title: string): Promise<boolean> {
+  const res = await page.request.get("/v1/goals?page_size=100");
+  if (!res.ok()) return false;
+  const { results = [] } = (await res.json()) as { results?: { title?: string; display_name?: string; progress?: number; status?: string }[] };
+  const row = results.find((g) => (g.title ?? g.display_name) === title);
+  return !!row && (row.status === "completed" || (row.progress ?? 0) >= 100);
+}
 
 /** The wire path of the goal this spec created. */
 async function goalPath(page: import("@playwright/test").Page, title: string): Promise<string> {

@@ -212,20 +212,36 @@ function ActiveProvider({ queues, withHistory, children }: { queues: readonly st
 
   // Refetch what this page is showing, plus the badge. A disabled collection's reload is a no-op read-through,
   // so this stays correct whichever queues the route asked for.
+  //
+  // The reloaders are DESTRUCTURED first. Written as `leave.reload()` with `leave.reload` in the dependency
+  // array, every entry was a member expression the linter cannot check - so it asked for the ten whole
+  // collection objects instead, which change on every fetch and would rebuild this callback (and re-run
+  // everything keyed to it) each time any queue refreshed. Naming the functions keeps the array checkable AND
+  // keeps its identity tied to the ten functions rather than to the data behind them.
+  const { reload: reloadLeave } = leave;
+  const { reload: reloadReimb } = reimb;
+  const { reload: reloadOvertime } = overtime;
+  const { reload: reloadRemote } = remote;
+  const { reload: reloadRegular } = regular;
+  const { reload: reloadEncash } = encash;
+  const { reload: reloadLoan } = loan;
+  const { reload: reloadTime } = time;
+  const { reload: reloadExpense } = expense;
+  const { reload: reloadAssetReq } = assetReq;
   const reload = useCallback(() => {
-    if (wanted("leave-requests")) leave.reload();
-    if (wanted("reimbursements")) reimb.reload();
-    if (wanted("overtime-requests")) overtime.reload();
-    if (wanted("remote-work-requests")) remote.reload();
-    if (wanted("attendance-regularizations")) regular.reload();
-    if (wanted("leave-encashments")) encash.reload();
-    if (wanted("loans")) loan.reload();
-    if (wanted("time-entries")) time.reload();
-    if (wanted("expenses")) expense.reload();
-    if (wanted("asset-requests")) assetReq.reload();
+    if (wanted("leave-requests")) reloadLeave();
+    if (wanted("reimbursements")) reloadReimb();
+    if (wanted("overtime-requests")) reloadOvertime();
+    if (wanted("remote-work-requests")) reloadRemote();
+    if (wanted("attendance-regularizations")) reloadRegular();
+    if (wanted("leave-encashments")) reloadEncash();
+    if (wanted("loans")) reloadLoan();
+    if (wanted("time-entries")) reloadTime();
+    if (wanted("expenses")) reloadExpense();
+    if (wanted("asset-requests")) reloadAssetReq();
     void loadTax();
     void loadSummary();
-  }, [wanted, leave.reload, reimb.reload, overtime.reload, remote.reload, regular.reload, encash.reload, loan.reload, time.reload, expense.reload, assetReq.reload, loadTax, loadSummary]);
+  }, [wanted, reloadLeave, reloadReimb, reloadOvertime, reloadRemote, reloadRegular, reloadEncash, reloadLoan, reloadTime, reloadExpense, reloadAssetReq, loadTax, loadSummary]);
 
   const history = useMemo<ApprovalsBuckets>(
     () => ({

@@ -9,7 +9,9 @@ import {
   attachToTicket, detachFromTicket, readTicketAttachment, attachRecordingToTicket,
   type TicketInput,
 } from "../services/tickets";
+import { requireCappedBody } from "../services/documentsCommon";
 import { toTicketResource } from "../http/serialize";
+import { MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_ITEM_LEN } from "../domain/tickets";
 
 const createSchema = z
   .object({
@@ -19,7 +21,7 @@ const createSchema = z
     subject: z.string(),
     description: z.string().nullable().optional(),
     priority: z.enum(["low", "medium", "high"]).optional(),
-    initial_todos: z.array(z.string()).optional(), // optional checklist to seed (custom items and/or a copied checklist)
+    initial_todos: z.array(z.string().max(MAX_CHECKLIST_ITEM_LEN)).max(MAX_CHECKLIST_ITEMS).optional(), // optional checklist to seed (custom items and/or a copied checklist)
     session_replay_id: z.string().nullable().optional(), // opt-in Sentry replay of the minute before raising
   })
   .strict();
@@ -29,7 +31,7 @@ const assignSchema = z.object({ assignee: z.string().nullable().optional() }).st
 const routeSchema = z.object({ department: z.string().nullable().optional() }).strict();
 const prioritySchema = z.object({ priority: z.enum(["low", "medium", "high"]) }).strict();
 const commentSchema = z.object({ body: z.string() }).strict();
-const addTodosSchema = z.object({ texts: z.array(z.string()) }).strict();
+const addTodosSchema = z.object({ texts: z.array(z.string().max(MAX_CHECKLIST_ITEM_LEN)).max(MAX_CHECKLIST_ITEMS) }).strict();
 const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).strict();
 const removeTodoSchema = z.object({ todo: z.string() }).strict();
 const detachSchema = z.object({ key: z.string() }).strict();
@@ -71,7 +73,7 @@ export const tickets = collectionRoutes<TicketInput, typeof schema.tickets>({
     // type in the query, so nothing has to be base64'd through JSON.
     attach: {
       run: async (deps, user, id, _body, c) =>
-        attachToTicket(deps, user, id, await c.req.arrayBuffer(), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
+        attachToTicket(deps, user, id, await requireCappedBody(c.req.raw), { fileName: c.req.query("file_name"), contentType: c.req.query("content_type") }),
     },
     detach: { schema: detachSchema, run: (deps, user, id, body) => detachFromTicket(deps, user, id, body.key) },
     // Add a session recording after the fact. The create body still takes the first one; this is how the

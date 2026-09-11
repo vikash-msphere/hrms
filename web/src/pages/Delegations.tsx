@@ -4,6 +4,7 @@ import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf, personName } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import type { ApprovalDelegation, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -21,8 +22,9 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 
 const COL = "approval-delegations";
-const pad = (n: number) => String(n).padStart(2, "0");
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 const EMPTY = { delegate: "", from_date: todayStr(), to_date: todayStr(), reason: "" };
 
 export default function Delegations({ me }: { me: Me }) {
@@ -66,7 +68,9 @@ export default function Delegations({ me }: { me: Me }) {
     if (editing) await patch(editing.path, body, editing.etag);
     else await create(COL, body);
     toast({ title: editing ? "Delegation updated" : "Delegation added" });
-    reload();
+    // Awaited: the dialog closes on this promise, and reopening Edit reads `rows` fresh off that same close -
+    // an un-awaited reload left a window where the list still held the pre-edit row.
+    await reload();
   }
 
   // Removing a live delegation silently re-routes approvals back to someone who may be away - worth a beat.

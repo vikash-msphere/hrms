@@ -41,7 +41,7 @@ export const REFERENCES: Record<string, Record<string, RefField>> = {
 export const PROTECTED_FIELDS: Record<string, string[]> = {
   users: ["role", "status", "employee"], // role/status escalation; employee relink = identity change
   employees: ["department", "manager", "epf_enrolled", "eps_excluded", "employee_number"], // re-parent (re-scoping) + EPF/EPS membership + human ID — payroll/HR only, never self-writable
-  compensation: ["annual_ctc", "currency_code", "pay_grade", "salary_structure"], // pay amounts (annual_ctc drives the whole split) — payroll only, never self
+  compensation: ["annual_ctc", "variable_pay_target", "currency_code", "pay_grade", "salary_structure"], // pay amounts (annual_ctc drives the whole split; variable_pay_target is the bonus they play for) — payroll only, never self
 };
 
 export function referencesOf(collection: string): Record<string, RefField> {

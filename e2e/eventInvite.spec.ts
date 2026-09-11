@@ -27,7 +27,9 @@ test("a whole department is invited in one press, and a name can be taken back o
   // Nothing invited yet, and the form says so rather than showing an empty box.
   await expect(form.getByText("No attendees yet.")).toBeVisible();
 
-  // The one press that fills a room. The picker is a Select whose placeholder names what it does.
+  // The one press that fills a room. The picker is a Select whose placeholder names what it does - and only
+  // offers departments that actually have somebody directly in them (Events.tsx), so the first option is
+  // always one that expands into at least one person.
   await form.getByRole("combobox").filter({ hasText: "Add a whole department…" }).first().click();
   const department = page.getByRole("option").first();
   const departmentName = ((await department.textContent()) ?? "").trim();

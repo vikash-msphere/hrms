@@ -97,17 +97,31 @@ export function AccessModeProvider({ userEmail, capabilities, children }: { user
     }
   }, [userEmail]);
 
+  // `enabled` mirrored into a ref so `toggle` can read the current value without reaching for a state updater.
+  //
+  // WHY IT MATTERS. The work below - a localStorage write and a second setState - used to sit INSIDE the
+  // `setEnabled` updater, purely to get at the previous value. A React updater must be pure: React re-runs it
+  // whenever it likes, and StrictMode (web/src/main.tsx) deliberately invokes it twice, so every side effect
+  // in it happens more than once per click. Reading the ref keeps the updater out of it entirely.
+  const enabledRef = React.useRef(enabled);
+  React.useEffect(() => {
+    enabledRef.current = enabled;
+  }, [enabled]);
+
   const toggle = React.useCallback(() => {
-    setEnabled((e) => {
-      const next = !e;
-      try {
-        localStorage.setItem(lsKey(userEmail), next ? "1" : "0");
-        if (next && localStorage.getItem(coachKey(userEmail)) !== "1") setCoach(true);
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
+    const next = !enabledRef.current;
+    enabledRef.current = next; // set before the render lands, so a double-click flips twice rather than racing
+    setEnabled(next);
+    // Whether this is the first time the mode has been switched on in this browser, which is what the coach
+    // mark answers. Read alongside the write so a browser with site data blocked takes neither branch.
+    let firstLook = false;
+    try {
+      localStorage.setItem(lsKey(userEmail), next ? "1" : "0");
+      firstLook = localStorage.getItem(coachKey(userEmail)) !== "1";
+    } catch {
+      /* nothing to persist to; the mode still toggles for this session */
+    }
+    if (next && firstLook) setCoach(true);
   }, [userEmail]);
 
   // Whether the modal has ever been opened, which is what gates its mount below.

@@ -8,17 +8,41 @@
 // employee-owned table). Flat tables (holidays, pay-periods, users, boards, ...) are excluded on purpose: a
 // flat top-level code like `04` can coincide with a department's top-level code `04`, so an org-wide prefix
 // rewrite would corrupt an unrelated flat row. Within the hierarchical set no such collision exists, so
-// `code = oldPrefix OR code LIKE oldPrefix||'-%'` selects exactly the subtree.
-import { and, eq, inArray, like, or, sql } from "drizzle-orm";
+// `code = oldPrefix OR code GLOB oldPrefix||'-*'` selects exactly the subtree.
+//
+// TWO TABLES ARE MIXED, and that collision is not hypothetical for them. `jobs` and `announcements` allocate
+// an OWNED code when the act has an employee behind it and a FLAT one when it does not (payroll.ts publishRun:
+// "a creator with no employee record gets a flat code + null owner"; announcements.ts: author-owned or flat).
+// `CODE_WIDTH.flat` and `CODE_WIDTH.dept` are both 2 over the same alphabet, so the flat code `0a` IS a
+// well-formed department code - and the `code = oldPrefix` arm matched it. Reparenting department `0a` rewrote
+// the eleventh job ever queued to that department's new code, on a UNIQUE column: either the row silently
+// claimed a department it has nothing to do with (and `code_sequences` still hands `0a` out again later, so the
+// next enqueue collides), or the UPDATE threw and took the whole cascade with it. `ownedWhen` is the
+// discriminator the allocation itself uses - the owner column is non-null exactly when the code is owned - so a
+// mixed table contributes only its hierarchical rows and its flat ones are left alone.
+import { and, eq, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
 import { invalidateCodeCache } from "../lib/authzResolve";
 import { invalidArgument } from "../lib/errors";
+import { runBatch, type BatchStmt } from "../lib/dbBatch";
 
-// The tables whose `code` lives in the dept/employee hierarchy. {employees, departments} + every
-// `allocOwnedCode` site (owner = an employee). Kept in lockstep with codeAlloc by test/reparenting.test.ts.
-export const HIERARCHICAL_TABLES: { table: any; collection: string }[] = [
+/**
+ * A table whose `code` lives in the dept/employee hierarchy.
+ *
+ * `collection` is the wire collection whose `access_rules` namespace may carry a code for these rows, or null
+ * for an internal table that has no wire collection at all (`comp_off_credits`) - such a table still needs its
+ * codes rewritten, but no rule can name it, so it contributes nothing to the namespace filter below.
+ *
+ * `ownedWhen` narrows a MIXED table to the rows that actually took an owned code (see the header).
+ */
+type HierTable = { table: any; collection: string | null; ownedWhen?: (t: any) => SQL };
+
+// {employees, departments} + every `allocOwnedCode` site (owner = an employee). Kept in lockstep with
+// codeAlloc by test/reparenting.test.ts, which scans the services for every owned-code allocation and fails
+// when one of them is missing from this list - the direction that had let four collections drift out of it.
+export const HIERARCHICAL_TABLES: HierTable[] = [
   { table: schema.departments, collection: "departments" },
   { table: schema.employees, collection: "employees" },
   { table: schema.leaveRequests, collection: "leave-requests" },
@@ -56,48 +80,94 @@ export const HIERARCHICAL_TABLES: { table: any; collection: string }[] = [
   { table: schema.taxDeclarations, collection: "tax-declarations" },
   { table: schema.referrals, collection: "referrals" },
   { table: schema.interviewFeedback, collection: "interview-feedback" },
-  { table: schema.announcements, collection: "announcements" },
-  { table: schema.jobs, collection: "operations" },
+  // Mixed: owned when the poster/creator has an employee record, flat when they do not. See the header.
+  { table: schema.announcements, collection: "announcements", ownedWhen: (t) => isNotNull(t.authorEmployeeId) },
+  { table: schema.jobs, collection: "operations", ownedWhen: (t) => isNotNull(t.employeeId) },
   { table: schema.tickets, collection: "tickets" },
+  // These four are owned-coded (`allocOwnedCode`) and were NOT in this list, so a reparent left their codes
+  // under the old prefix while the employee moved. Authz scope is a code-prefix match, so the rows stayed
+  // inside the OLD department's breadth, never appeared in the new one's - and, because a `me`-scoped rule
+  // matches by code too, the employee lost sight of their own rows. Silent, permanent, and invisible to the
+  // tripwire below until it learned to check this direction.
+  { table: schema.assetRequests, collection: "asset-requests" },
+  { table: schema.approvalDelegations, collection: "approval-delegations" },
+  { table: schema.tableViews, collection: "table-views" },
+  // Internal: credited by the comp-off cron, no wire collection, so no access rule can name it. Its code is
+  // owner-embedded all the same, and a code left behind is a trap for whoever exposes the collection next.
+  { table: schema.compOffCredits, collection: null },
 ];
 
-const HIER_COLLECTIONS = HIERARCHICAL_TABLES.map((h) => h.collection);
+const HIER_COLLECTIONS = HIERARCHICAL_TABLES.map((h) => h.collection).filter((c): c is string => c !== null);
 
-// Rewrite every hierarchical row under `oldPrefix` to sit under `newPrefix`, preserving the child segments
-// (`newPrefix || substr(code, len(oldPrefix)+1)`: the self row -> newPrefix exactly, a child `oldPrefix-x` ->
-// `newPrefix-x`). Also fixes any access-rule that references a moved code (per-object `match_code` shares and
-// `scope_code` subtree/dept rules), scoped to hierarchical namespaces so a flat code is never touched.
-export async function reprefixSubtree(deps: Deps, oldPrefix: string, newPrefix: string): Promise<void> {
-  if (!oldPrefix || oldPrefix === newPrefix) return;
+/**
+ * Rewrite every hierarchical row under `oldPrefix` to sit under `newPrefix`, preserving the child segments
+ * (`newPrefix || substr(code, len(oldPrefix)+1)`: the self row -> newPrefix exactly, a child `oldPrefix-x` ->
+ * `newPrefix-x`). Also fixes any access-rule that references a moved code (per-object `match_code` shares and
+ * `scope_code` subtree/dept rules), scoped to hierarchical namespaces so a flat code is never touched.
+ *
+ * ONE ATOMIC BATCH, and `also` is what makes that complete. This used to be forty-odd `await`ed UPDATEs in a
+ * loop, and the caller then repointed `parentId`/`departmentId` in a statement of its own AFTERWARDS. Two
+ * problems, one shape:
+ *
+ *   - NOT ATOMIC. Any failure partway - a UNIQUE collision on a mixed table (see the header), a timeout, the
+ *     subrequest ceiling - left the subtree's codes HALF rewritten with the parent pointer still on the old
+ *     parent. That is corruption of the authz scope key itself: some rows answer to the old prefix and some to
+ *     the new, so the moved employee is partly in each department and fully in neither. Nothing detects it and
+ *     there is no operation that repairs it.
+ *   - FORTY-THREE SEQUENTIAL ROUND TRIPS. A D1 query is a subrequest; the free per-invocation budget is 50 and
+ *     wrangler.toml claims every request path is shaped for it. This one path spent the whole budget on its
+ *     own, before auth, the audit row and the event emission were counted.
+ *
+ * `db.batch` is one subrequest and one implicit transaction (lib/dbBatch.ts), so the caller's repoint travels
+ * INSIDE it: the codes and the pointer that explains them now land together or not at all.
+ */
+export async function reprefixSubtree(deps: Deps, oldPrefix: string, newPrefix: string, also: BatchStmt[] = []): Promise<void> {
+  if (!oldPrefix || oldPrefix === newPrefix) {
+    await runBatch(deps.db, also);
+    return;
+  }
   const from = oldPrefix.length + 1; // 1-indexed substr start just past the old prefix
-  const under = (c: any) => or(eq(c, oldPrefix), like(c, `${oldPrefix}-%`)); // exact or nested (boundary-safe)
-  for (const { table } of HIERARCHICAL_TABLES) {
-    await deps.db
-      .update(table)
-      .set({ code: sql`${newPrefix} || substr(${table.code}, ${from})` })
-      .where(under(table.code));
+  // Exact or nested (boundary-safe). GLOB rather than LIKE so the prefix half can use the index on `code`
+  // instead of scanning the table - the same reason services/listScope.ts uses it, and it matters more here:
+  // this predicate runs once per hierarchical table, so LIKE made a reparent forty-three full table scans.
+  const under = (c: any) => or(eq(c, oldPrefix), sql`${c} glob ${`${oldPrefix}-*`}`);
+  const stmts: BatchStmt[] = [];
+  for (const { table, ownedWhen } of HIERARCHICAL_TABLES) {
+    stmts.push(
+      deps.db
+        .update(table)
+        .set({ code: sql`${newPrefix} || substr(${table.code}, ${from})` })
+        // A mixed table contributes only the rows that took an OWNED code; its flat-coded rows share the
+        // dept-code namespace and must not be touched.
+        .where(ownedWhen ? and(under(table.code), ownedWhen(table)) : under(table.code)),
+    );
   }
   // access_rules: matchCode (per-object) + scopeCode (subtree/dept) may point at a moved code. Only touch rules
   // in a hierarchical namespace (a flat namespace's code can collide with a dept's top-level code).
   const hierNs = inArray(schema.accessRules.namespace, HIER_COLLECTIONS);
-  await deps.db
-    .update(schema.accessRules)
-    .set({ matchCode: sql`${newPrefix} || substr(${schema.accessRules.matchCode}, ${from})`, updatedAt: new Date() })
-    .where(and(hierNs, under(schema.accessRules.matchCode)));
-  await deps.db
-    .update(schema.accessRules)
-    .set({ scopeCode: sql`${newPrefix} || substr(${schema.accessRules.scopeCode}, ${from})`, updatedAt: new Date() })
-    .where(and(hierNs, under(schema.accessRules.scopeCode)));
+  stmts.push(
+    deps.db
+      .update(schema.accessRules)
+      .set({ matchCode: sql`${newPrefix} || substr(${schema.accessRules.matchCode}, ${from})`, updatedAt: new Date() })
+      .where(and(hierNs, under(schema.accessRules.matchCode))),
+    deps.db
+      .update(schema.accessRules)
+      .set({ scopeCode: sql`${newPrefix} || substr(${schema.accessRules.scopeCode}, ${from})`, updatedAt: new Date() })
+      .where(and(hierNs, under(schema.accessRules.scopeCode))),
+  );
+  await runBatch(deps.db, [...stmts, ...also]);
   // Codes changed: drop this isolate's uuid->code cache immediately (others self-heal via its TTL).
   invalidateCodeCache();
 }
 
 // Move an employee into a new department (null = top-level/unassigned). Allocates the employee's new segment
-// under the target dept, reprefixes the employee row + all its owned rows, then repoints departmentId.
+// under the target dept, then reprefixes the employee row + all its owned rows AND repoints departmentId in
+// one atomic batch - the pointer and the codes it explains must never disagree (see reprefixSubtree).
 export async function moveEmployee(deps: Deps, employeeId: string, oldCode: string, newDeptId: string | null): Promise<string> {
   const newCode = await allocUnderDept(deps, newDeptId, CODE_WIDTH.employee);
-  await reprefixSubtree(deps, oldCode, newCode);
-  await deps.db.update(schema.employees).set({ departmentId: newDeptId, updatedAt: new Date() }).where(eq(schema.employees.uuid, employeeId));
+  await reprefixSubtree(deps, oldCode, newCode, [
+    deps.db.update(schema.employees).set({ departmentId: newDeptId, updatedAt: new Date() }).where(eq(schema.employees.uuid, employeeId)),
+  ]);
   return newCode;
 }
 
@@ -112,7 +182,8 @@ export async function moveDepartment(deps: Deps, deptId: string, oldCode: string
     if (parent.code && (parent.code === oldCode || parent.code.startsWith(`${oldCode}-`))) throw invalidArgument("a department cannot be moved under itself or one of its descendants");
   }
   const newCode = await allocUnderDept(deps, newParentId, CODE_WIDTH.dept);
-  await reprefixSubtree(deps, oldCode, newCode);
-  await deps.db.update(schema.departments).set({ parentId: newParentId, updatedAt: new Date() }).where(eq(schema.departments.uuid, deptId));
+  await reprefixSubtree(deps, oldCode, newCode, [
+    deps.db.update(schema.departments).set({ parentId: newParentId, updatedAt: new Date() }).where(eq(schema.departments.uuid, deptId)),
+  ]);
   return newCode;
 }

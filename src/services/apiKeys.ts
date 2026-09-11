@@ -44,7 +44,7 @@ export async function listApiKeys(deps: Deps, _actor: AppUser, maxPageSize: numb
   const all = rows
     .filter((r) => (deletedOnly ? r.deleteTime !== null : showDeleted || r.deleteTime === null))
     .filter((r) => !needle || `${r.name} ${r.description ?? ""} ${r.prefix}`.toLowerCase().includes(needle));
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "api-keys" });
 }
 
 async function getApiKey(deps: Deps, _actor: AppUser, id: string) {

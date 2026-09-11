@@ -5,6 +5,34 @@ import { fileURLToPath, URL } from "node:url";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import type { ClientRequest } from "node:http";
+import { execFileSync } from "node:child_process";
+
+/**
+ * The release this build reports itself as.
+ *
+ * WHY IT IS DERIVED RATHER THAN REQUIRED. `VITE_APP_VERSION` is what the bundle stamps on every error it
+ * reports (web/src/instrument.ts) and what the source maps are uploaded against, so the two halves of a trace
+ * only meet when it is set - and it is a value CI has to remember to export. It was not set, which is the one
+ * failure mode that looks answered: every issue arrives tagged "unknown release", the maps match nothing, and
+ * the first production stack trace is minified with no explanation.
+ *
+ * The commit is the honest answer and the machine already knows it, so an unset variable falls back to the
+ * short SHA rather than to nothing. `git` may be absent (a container build off a tarball) and the tree may be
+ * dirty; both are reported rather than guessed at, and an explicit VITE_APP_VERSION always wins.
+ */
+function resolveAppVersion(): string | undefined {
+  if (process.env.VITE_APP_VERSION) return process.env.VITE_APP_VERSION;
+  try {
+    const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (!sha) return undefined;
+    const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().length > 0;
+    return dirty ? `${sha}-dirty` : sha;
+  } catch {
+    return undefined; // no git, no commit: preflight's warning stands rather than a made-up version shipping
+  }
+}
+
+const APP_VERSION = resolveAppVersion();
 
 // Emit the PWA manifest at build/serve time so its name follows VITE_APP_NAME (public/ files are copied
 // verbatim - a static manifest there could not carry the configured app name).
@@ -224,7 +252,7 @@ function preloadUiFont(): Plugin {
 // checks this table against NAV so a new tab cannot quietly fall out of its workspace.
 const PAGE_GROUPS: Record<string, readonly string[]> = {
   "ws-team": ["Directory", "EmployeeProfile", "OrgChart", "TeamAnalytics", "Onboarding", "NoticePeriods", "BackgroundChecks"],
-  "ws-progress": ["Boards", "Goals", "Reviews", "CheckIns"],
+  "ws-progress": ["Boards", "Goals", "GoalCockpit", "Reviews", "CheckIns"],
   "ws-connect": ["Announcements", "Suggestions", "Events"],
   "ws-hiring": ["Pipeline", "Requisitions", "Candidates", "CandidateProfile", "Interviews", "Offers", "Referrals", "RecruitingAnalytics"],
   "ws-time": ["Attendance", "Schedule", "Timesheets", "Overtime", "RemoteWork", "Delegations"],
@@ -276,7 +304,7 @@ function privateWeight(id: string, getModuleInfo: (id: string) => { importers: r
       // A virtual or generated module has no file on disk; it carries no weight worth counting.
     }
     // importers.length > 1 means some other chunk pulls this in too, so it is not this module's to pay for.
-    for (const dep of info.importedIds) if (!seen.has(dep) && getModuleInfo(dep)?.importers.length === 1) (seen.add(dep), queue.push(dep));
+    for (const dep of info.importedIds) if (!seen.has(dep) && getModuleInfo(dep)?.importers.length === 1) { seen.add(dep); queue.push(dep); }
   }
   weightCache.set(id, bytes);
   return bytes;
@@ -319,7 +347,7 @@ function reachedByShell(id: string, getModuleInfo: (id: string) => { isEntry: bo
     const info = getModuleInfo(queue.pop()!);
     if (!info) continue;
     if (info.isEntry) answer = true;
-    else for (const importer of info.importers) if (!seen.has(importer)) (seen.add(importer), queue.push(importer));
+    else for (const importer of info.importers) if (!seen.has(importer)) { seen.add(importer); queue.push(importer); }
   }
   // A false answer means the whole ancestor set was explored and held no entry. The ancestors of anything in
   // that set are themselves in it, so the answer is theirs too. A true answer stopped early and only the
@@ -368,6 +396,15 @@ const WEB_ROOT = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig(({ mode }) => ({
   root: WEB_ROOT,
+  // The derived release has to reach the BUNDLE, not just the source-map upload: `instrument.ts` reads
+  // `import.meta.env.VITE_APP_VERSION` for the `release` it tags every event with, and Vite only populates
+  // that from a .env file or a real environment variable - a value computed in this config is invisible to it.
+  // Defined here so the tag the events carry and the release the maps are uploaded against are one string by
+  // construction. An explicit VITE_APP_VERSION in the environment still wins (see resolveAppVersion), and
+  // when there is no version to be had the key resolves to undefined exactly as before.
+  define: {
+    "import.meta.env.VITE_APP_VERSION": JSON.stringify(APP_VERSION),
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -401,7 +438,7 @@ export default defineConfig(({ mode }) => ({
             // The release the maps belong to. MUST match what the bundle reports at runtime
             // (VITE_APP_VERSION -> `release` in web/src/instrument.ts) or the maps are uploaded against a
             // release no event ever claims, and traces stay minified with nothing to explain why.
-            release: { name: process.env.VITE_APP_VERSION },
+            release: { name: APP_VERSION },
             // Absolute, for the same reason as `root` above: a cwd-relative glob here deletes nothing when
             // the build is started from anywhere but the repo root, which would leave the unminified source
             // maps sitting in the output to be uploaded to Cloudflare as public assets.

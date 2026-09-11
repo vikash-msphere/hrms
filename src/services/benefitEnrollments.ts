@@ -66,7 +66,7 @@ export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPa
   if (empId) conds.push(eq(schema.benefitEnrollments.employeeId, empId));
   const all = (await deps.db.select().from(schema.benefitEnrollments).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
     .filter((e) => showDeleted || !e.deleteTime);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "benefit-enrollments" });
 }
 
 // An enrollment is owned by its employee (the code embeds the owner, so own/dept/all scoping works), and the

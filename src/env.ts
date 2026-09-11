@@ -62,6 +62,10 @@ export type Bindings = {
   EMAIL_API_KEY: string;
   EMAIL_FROM: string;
   EMAIL_REGION?: string;
+  // Divert every outbound message to this ONE address instead of its real recipient. For a staging/rehearsal
+  // deploy: `console` proves nothing about whether email works, and a real vendor on a copy of the database
+  // mails real employees from a real company address. Preflight makes this a blocking error in production.
+  EMAIL_REDIRECT_TO?: string;
   // Optional comma-separated allow-list of email domains permitted to AUTO-PROVISION on first login (e.g.
   // "example.com"). Cloudflare Access is the real perimeter; this is a cheap second net so a misconfigured
   // Access policy can't silently create employee-role users for outside emails. Unset/empty = no restriction.
@@ -123,6 +127,11 @@ export type Variables = {
   // GET /v1/approvals-summary: per-queue APPROVE scopes (not list scopes - the badge counts what the caller may
   // decide on), decided by the middleware. A queue the caller holds the verb in at no scope is absent.
   approvalScopes: Map<string, import("./domain/access").ListScope>;
+  // `POST /v1/table-views/{id}:run` (the custom-grid runner): per-collection list scopes for every collection a
+  // grid can touch, decided by the middleware from the same decide()/scopeFor() a real list request gets. The
+  // runner binds them and decides nothing, so a column whose collection is missing from the map is dropped and
+  // the rows behind every column are the caller's own - which is what makes SHARING a view safe.
+  tableScopes: Map<string, import("./domain/access").ListScope>;
   // GET /v1/changes: which collections this caller may LIST at all. Names only - the answer is a set of
   // collection names, not rows - so this is the boolean half of searchScopes, decided the same way and costing
   // no read. A collection the caller cannot list is never named in the answer.

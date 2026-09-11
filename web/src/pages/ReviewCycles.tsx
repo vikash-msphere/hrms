@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import { Plus, Pencil, Trash2, Rocket, UserPlus, Lock, Unlock, BarChart3 } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Plus, Pencil, Trash2, Rocket, UserPlus, Lock, Unlock, BarChart3, Coins } from "lucide-react";
 import { create, patch, invoke, remove, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
 import { DEFAULT_PERFORMANCE, ratingLabel, type PerformanceFramework } from "@/lib/performance";
-import type { Department, Employee, Review, ReviewCycle } from "@/types";
+import type { BurnupPoint, Department, Employee, Review, ReviewCycle } from "@/types";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Chart } from "@/components/common/Chart";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
 import { AccessScope } from "@/components/access/AccessScope";
@@ -20,6 +22,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
@@ -29,22 +32,27 @@ const STATE: Record<ReviewCycle["state"], { label: string; variant: "muted" | "s
   ACTIVE: { label: "Active", variant: "secondary" },
   CLOSED: { label: "Closed", variant: "success" },
 };
-const EMPTY = { name: "", period_start: "", period_end: "", self_due_date: "", manager_due_date: "" };
+const EMPTY = { name: "", period_start: "", period_end: "", goal_setting_due_date: "", self_due_date: "", manager_due_date: "" };
 
-const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const todayIso = () => ymd(new Date());
-const addDays = (iso: string, n: number) => { const d = new Date(`${iso}T00:00:00`); d.setDate(d.getDate() + n); return ymd(d); };
+// The last calendar day of the quarter starting at month `firstMonth` (0-based). Day 0 of the month AFTER the
+// quarter is the day before it begins, i.e. the quarter's last - stated in UTC so the answer is the date
+// itself and not the machine's evening.
+const quarterEnd = (year: number, firstMonth: number) => new Date(Date.UTC(year, firstMonth + 3, 0)).toISOString().slice(0, 10);
 // The periods a cycle is actually run over, named the way people name them. Each also proposes the name, so
 // one chip fills the whole top half of the form.
+//
+// Which quarter is "this" one comes from the ORG's day (lib/orgDay), not the browser's: a reviewer in another
+// timezone must be offered the same quarter as everyone else, and on the last day of a quarter the two
+// disagree about which one that is.
 function periodPresets(): { label: string; name: string; start: string; end: string }[] {
-  const now = new Date();
-  const y = now.getFullYear();
-  const q = Math.floor(now.getMonth() / 3);
+  const today = todayStr();
+  const y = Number(today.slice(0, 4));
+  const q = Math.floor((Number(today.slice(5, 7)) - 1) / 3);
   const quarter = (year: number, index: number) => ({
     label: `Q${index + 1} ${String(year).slice(2)}`,
     name: `Q${index + 1} ${year} Review`,
-    start: ymd(new Date(year, index * 3, 1)),
-    end: ymd(new Date(year, index * 3 + 3, 0)),
+    start: `${year}-${String(index * 3 + 1).padStart(2, "0")}-01`,
+    end: quarterEnd(year, index * 3),
   });
   const prevQ = q === 0 ? quarter(y - 1, 3) : quarter(y, q - 1);
   return [
@@ -55,9 +63,18 @@ function periodPresets(): { label: string; name: string; start: string; end: str
     { label: `${y}`, name: `${y} Annual Review`, start: `${y}-01-01`, end: `${y}-12-31` },
   ];
 }
+// How long is left to get this cycle's goals agreed, in the words a chaser would use.
+function goalSettingCountdown(due: string): string {
+  const days = daysBetweenYmd(todayStr(), due);
+  if (days > 1) return `${days} days to the goal deadline`;
+  if (days === 1) return "goal deadline is tomorrow";
+  if (days === 0) return "goal deadline is today";
+  return `${-days} days past the goal deadline`;
+}
+
 // Whole months between two dates, for the "covers 6 months" line.
 function spanLabel(start: string, end: string): string {
-  const days = Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000) + 1;
+  const days = daysBetweenYmd(start, end) + 1;
   if (days < 45) return `${days} days`;
   const months = Math.round(days / 30.44);
   return months % 12 === 0 && months >= 12 ? `${months / 12} year${months === 12 ? "" : "s"}` : `${months} months`;
@@ -76,7 +93,17 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
   const [picker, setPicker] = useState<{ cycle: ReviewCycle; mode: "launch" | "enroll" } | null>(null);
   // Chosen but not committed: the preview stage between picking people and creating their reviews.
   const [pending, setPending] = useState<{ cycle: ReviewCycle; mode: "launch" | "enroll"; refs: string[] } | null>(null);
+  // Which framework competencies this cycle rates. Empty = all of them, which is both the default and what
+  // clearing the selection means, so the two states are one state.
+  const [pickedCompetencies, setPickedCompetencies] = useState<string[]>([]);
+  const [framework, setFramework] = useState<PerformanceFramework>(DEFAULT_PERFORMANCE);
+  useEffect(() => {
+    getSetting<{ competencies?: PerformanceFramework["competencies"]; scale?: PerformanceFramework["scale"] }>("performance")
+      .then((cfg) => { if (cfg.value?.competencies?.length) setFramework({ ...DEFAULT_PERFORMANCE, ...cfg.value }); })
+      .catch(() => { /* the defaults are a working framework */ });
+  }, []);
   const [calibrating, setCalibrating] = useState<string | null>(null); // cycle path whose calibration panel is open
+  const [paying, setPaying] = useState<string | null>(null); // cycle path whose variable-pay panel is open
 
   const sorted = useMemo(() => [...rows].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? "")), [rows]);
   const badRange = !!form.period_start && !!form.period_end && form.period_end < form.period_start;
@@ -96,26 +123,33 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
       period_start: p.start,
       period_end: p.end,
       // Two weeks for the self-review, two more for the manager's: the cadence the reminders assume.
-      self_due_date: f.self_due_date || addDays(p.end, 14),
-      manager_due_date: f.manager_due_date || addDays(p.end, 28),
+      // Goal setting belongs at the START of the period it covers - a goal agreed in the last week measures
+      // nothing. Two weeks in is the deadline most orgs land on.
+      goal_setting_due_date: f.goal_setting_due_date || addDaysYmd(p.start, 14),
+      self_due_date: f.self_due_date || addDaysYmd(p.end, 14),
+      manager_due_date: f.manager_due_date || addDaysYmd(p.end, 28),
     }));
   }
 
-  function openCreate() { setEditing(null); setForm(EMPTY); setOpen(true); }
+  function openCreate() { setEditing(null); setForm(EMPTY); setPickedCompetencies([]); setOpen(true); }
   function openEdit(c: ReviewCycle) {
     setEditing(c);
-    setForm({ name: c.name, period_start: c.period_start ?? "", period_end: c.period_end ?? "", self_due_date: c.self_due_date ?? "", manager_due_date: c.manager_due_date ?? "" });
+    setForm({ name: c.name, period_start: c.period_start ?? "", period_end: c.period_end ?? "", goal_setting_due_date: c.goal_setting_due_date ?? "", self_due_date: c.self_due_date ?? "", manager_due_date: c.manager_due_date ?? "" });
+    setPickedCompetencies(c.competency_keys ?? []);
     setOpen(true);
   }
 
   async function submit() {
-    const body = {
+    const body: Record<string, unknown> = {
       name: form.name.trim(),
       // Date fields are `format: date`, and "" is not a date - an empty one is left out.
       ...(form.period_start ? { period_start: form.period_start } : {}),
       ...(form.period_end ? { period_end: form.period_end } : {}),
+      ...(form.goal_setting_due_date ? { goal_setting_due_date: form.goal_setting_due_date } : {}),
       ...(form.self_due_date ? { self_due_date: form.self_due_date } : {}),
       ...(form.manager_due_date ? { manager_due_date: form.manager_due_date } : {}),
+      // Always sent, including empty: clearing the selection is a real edit ("ask about all of them again").
+      competency_keys: pickedCompetencies,
     };
     if (editing) await patch(`review-cycles/${idOf(editing.path)}`, body, editing.etag);
     else await create("review-cycles", body);
@@ -195,11 +229,26 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
                     {(c.period_start || c.period_end) && (
                       <p className="mt-0.5 text-xs tabular-nums text-muted-foreground">{c.period_start ?? "…"} → {c.period_end ?? "…"}</p>
                     )}
+                    {/* Reviewees with no goals attached: their review has nothing to score, and the time to
+                        fix that is while the cycle is young - not when a manager opens an empty goals panel. */}
+                    {(c.review_count ?? 0) > (c.goal_coverage ?? 0) && (
+                      <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
+                        {(c.review_count ?? 0) - (c.goal_coverage ?? 0)} of {c.review_count} {(c.review_count ?? 0) - (c.goal_coverage ?? 0) === 1 ? "reviewee has" : "reviewees have"} no goals in this cycle
+                        {/* Against the deadline, while there is still time to do something about it - a
+                            coverage gap with no date attached is a fact nobody is on the hook for. */}
+                        {c.goal_setting_due_date && ` · ${goalSettingCountdown(c.goal_setting_due_date)}`}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     {(c.review_count ?? 0) > 0 && (
                       <Button variant={calibrating === c.path ? "secondary" : "ghost"} size="sm" onClick={() => setCalibrating(calibrating === c.path ? null : c.path)}>
                         <BarChart3 className="h-3.5 w-3.5" /> Calibration
+                      </Button>
+                    )}
+                    {(c.review_count ?? 0) > 0 && can.includes("variablePay") && (
+                      <Button variant={paying === c.path ? "secondary" : "ghost"} size="sm" onClick={() => setPaying(paying === c.path ? null : c.path)}>
+                        <Coins className="h-3.5 w-3.5" /> Variable pay
                       </Button>
                     )}
                     {c.state === "DRAFT" && can.includes("launch") && (
@@ -231,6 +280,7 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
                   </div>
                 </Card>
                 {calibrating === c.path && <CalibrationPanel cycle={c} employees={employees} departments={departments} />}
+                {paying === c.path && <VariablePayPanel cycle={c} employees={employees} />}
                 </div>
                 </AccessItem>
               );
@@ -288,6 +338,9 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
             <Field label="Period start (optional)"><Input type="date" value={form.period_start} onChange={(e) => setForm({ ...form, period_start: e.target.value })} /></Field>
             <Field label="Period end (optional)" error={badRange ? "End is before the start." : undefined} hint={span ? `Covers ${span}.` : undefined}><Input type="date" value={form.period_end} min={form.period_start || undefined} onChange={(e) => setForm({ ...form, period_end: e.target.value })} /></Field>
           </FieldRow>
+          <Field label="Goals agreed by (optional)" hint="When this cycle's goals have to be set. The cycle counts down to it while people still have time to act.">
+            <Input type="date" value={form.goal_setting_due_date} onChange={(e) => setForm({ ...form, goal_setting_due_date: e.target.value })} />
+          </Field>
           <FieldRow>
             <Field label="Self-review due (optional)" hint="Everyone reviewed is nudged as this date approaches."><Input type="date" value={form.self_due_date} onChange={(e) => setForm({ ...form, self_due_date: e.target.value })} /></Field>
             <Field label="Manager review due (optional)" hint="Managers are nudged as this date approaches."><Input type="date" value={form.manager_due_date} onChange={(e) => setForm({ ...form, manager_due_date: e.target.value })} /></Field>
@@ -302,6 +355,41 @@ export default function ReviewCycles({ embedded }: { embedded?: boolean }) {
             <p className="text-xs text-amber-600 dark:text-amber-400">
               A review is due before the period it covers has finished.
             </p>
+          )}
+          {/* What this cycle asks about. The framework is org-wide, so a probation review and an annual review
+              had to rate the same five things; this narrows the questions without inventing competencies,
+              which would make two cycles' scores incomparable. */}
+          {framework.competencies.length > 1 && (
+            <Field
+              label="Competencies rated"
+              hint={pickedCompetencies.length === 0 ? "All of them. Untick any this cycle should not ask about." : `${pickedCompetencies.length} of ${framework.competencies.length}. Ratings are stored against the framework's own keys, so cycles stay comparable.`}
+            >
+              <div className="flex flex-wrap gap-1.5">
+                {framework.competencies.map((c) => {
+                  // No selection means "all of them", so every chip reads as on until somebody narrows it.
+                  const on = pickedCompetencies.length === 0 || pickedCompetencies.includes(c.key);
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      title={c.description || undefined}
+                      onClick={() => {
+                        const current = pickedCompetencies.length === 0 ? framework.competencies.map((x) => x.key) : pickedCompetencies;
+                        const next = on ? current.filter((k) => k !== c.key) : [...current, c.key];
+                        // Back to every competency is back to "no selection" - the same thing, stored as null.
+                        setPickedCompetencies(next.length === framework.competencies.length ? [] : next);
+                      }}
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                        on ? "border-primary bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent",
+                      )}
+                    >
+                      {c.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
           )}
           {!editing && (
             <p className="text-xs text-muted-foreground">
@@ -368,7 +456,7 @@ function LaunchPreview({ cycle, mode, refs, employees, onBack, onClose, onConfir
   const name = (e: Employee) => `${e.first_name} ${e.last_name}`;
   const noManager = picked.filter((e) => !e.manager);
   const joinedLate = picked.filter((e) => !!cycle.period_start && !!e.start_date && e.start_date > cycle.period_start);
-  const onProbation = picked.filter((e) => !!e.probation_end_date && e.probation_end_date >= todayIso());
+  const onProbation = picked.filter((e) => !!e.probation_end_date && e.probation_end_date >= todayStr());
   // Names, then "and N more" - a list of forty is not a warning anybody reads.
   const few = (list: Employee[]) => list.slice(0, 3).map(name).join(", ") + (list.length > 3 ? ` and ${list.length - 3} more` : "");
 
@@ -436,6 +524,10 @@ function LaunchPreview({ cycle, mode, refs, employees, onBack, onClose, onConfir
 // completion alongside a partial distribution.
 function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycle; employees: Employee[]; departments: Department[] }) {
   const [reviews, setReviews] = useState<Review[] | null>(null);
+  // The cycle's attainment curve, computed server-side over the goals THIS caller may see and read in the
+  // same lazy breath as the reviews - a calibration meeting wants the shape of the quarter, and one final
+  // number cannot tell a steady climb from a week of back-filling.
+  const [burnup, setBurnup] = useState<BurnupPoint[]>([]);
   const [framework, setFramework] = useState<PerformanceFramework>(DEFAULT_PERFORMANCE);
   const [dept, setDept] = useState("all");
   const [error, setError] = useState("");
@@ -458,6 +550,12 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
           if (!pageToken) break;
         }
         if (live) setReviews(rows);
+        // One row asked for, because the curve is what this call is for - the goals themselves are already on
+        // the reviews. A caller who cannot read goals simply gets no curve.
+        const curve = await get<{ burnup?: BurnupPoint[] }>(
+          `goals?cycle=${encodeURIComponent(cycle.path)}&burnup=true&max_page_size=1`,
+        ).catch(() => null);
+        if (live && curve?.burnup) setBurnup(curve.burnup);
       } catch (e) {
         if (live) setError((e as Error).message);
       }
@@ -479,6 +577,13 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
   const avg = rated.length ? rated.reduce((s, r) => s + (r.overall_rating ?? 0), 0) / rated.length : null;
   const counts = framework.scale.map((s) => ({ ...s, count: rated.filter((r) => r.overall_rating === s.value).length }));
   const max = Math.max(1, ...counts.map((c) => c.count));
+  // Rating against delivery: the two halves of a performance conversation, which a single distribution bar
+  // can't separate. Only reviews carrying both a rating and a goal score can be placed.
+  const placed = rated.filter((r) => r.goal_attainment);
+  const empName = (ref?: string) => {
+    const e = employees.find((x) => idOf(x.path) === idOf(ref ?? ""));
+    return e ? `${e.first_name} ${e.last_name}` : "Someone";
+  };
 
   return (
     <div className="mt-2 space-y-3 rounded-lg border bg-muted/20 p-4">
@@ -519,6 +624,252 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
           ))}
         </div>
       )}
+      {burnup.length > 1 && (
+        <div className="space-y-1 border-t pt-3">
+          <p className="text-sm font-medium">Attainment through the cycle</p>
+          <Chart
+            type="line"
+            height={200}
+            labels={burnup.map((p) => p.at.slice(5))}
+            datasets={[
+              { name: "Attained", values: burnup.map((p) => p.attained) },
+              { name: "Expected", values: burnup.map((p) => p.expected) },
+            ]}
+            format={(v) => `${v}%`}
+            hideDots
+            ariaLabel="Weighted goal attainment across the cycle, against the straight line the cycle should follow"
+          />
+        </div>
+      )}
+      <NineBox reviews={placed} scale={framework.scale} name={empName} missing={rated.length - placed.length} />
+    </div>
+  );
+}
+
+type VariablePayLine = NonNullable<ReviewCycle["variable_pay"]>[number];
+
+/**
+ * What the cycle's attainment is worth, and the press that pays it.
+ *
+ * Two steps on purpose: the server computes and reports, then the same arithmetic is re-run when awarding, so
+ * nothing anybody typed decides an amount. A line that cannot be paid says why (no goals scored, no target on
+ * their compensation, already awarded) rather than quietly showing a blank.
+ */
+function VariablePayPanel({ cycle, employees }: { cycle: ReviewCycle; employees: Employee[] }) {
+  const [lines, setLines] = useState<VariablePayLine[] | null>(null);
+  const [error, setError] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const { toast } = useToast();
+  const confirm = useConfirm();
+
+  // `useCallback` so the effect can depend on the loader itself rather than on a hand-listed subset of what
+  // the loader reads - the identity moves with the cycle, so it fires exactly when it fired before.
+  const load = useCallback(async () => {
+    try {
+      const res = await invoke<ReviewCycle>(`review-cycles/${idOf(cycle.path)}`, "variablePay");
+      setLines(res.variable_pay ?? []);
+      // Everything payable is pre-selected: the common press is "pay what the cycle earned", and hunting for
+      // fourteen checkboxes to reach it is how people end up paying the wrong set.
+      setPicked((res.variable_pay ?? []).filter((l) => !l.blocked && (l.recommended ?? 0) > 0).map((l) => l.employee));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [cycle.path]);
+  useEffect(() => { void load(); }, [load]);
+
+  const name = (ref?: string) => {
+    const e = employees.find((x) => idOf(x.path) === idOf(ref ?? ""));
+    return e ? `${e.first_name} ${e.last_name}` : "Someone";
+  };
+  const money = (n: number | null | undefined, currency: string) =>
+    n == null ? "-" : `${currency} ${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+
+  if (error) return <div className="mt-2 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">Couldn't compute variable pay: {error}</div>;
+  if (!lines) return <TableSkeleton rows={4} cols={4} className="mt-2 rounded-lg border bg-muted/20 px-4" />;
+
+  const payable = lines.filter((l) => !l.blocked && (l.recommended ?? 0) > 0);
+  const chosen = lines.filter((l) => picked.includes(l.employee));
+  const total = chosen.reduce((s, l) => s + (l.recommended ?? 0), 0);
+  const currency = lines[0]?.currency ?? "INR";
+
+  async function award() {
+    const ok = await confirm({
+      title: `Award ${money(total, currency)}?`,
+      description: `${chosen.length} ${chosen.length === 1 ? "person" : "people"}. This writes a bonus each, at the figure computed here, payable by the next payroll run.`,
+      confirmLabel: "Award variable pay",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await invoke<ReviewCycle>(`review-cycles/${idOf(cycle.path)}`, "award", undefined, { employees: picked });
+      setLines(res.variable_pay ?? []);
+      setPicked([]);
+      toast({
+        title: `${res.awarded?.awarded ?? 0} payout${(res.awarded?.awarded ?? 0) === 1 ? "" : "s"} awarded`,
+        description: res.awarded ? `${money(res.awarded.total, res.awarded.currency ?? currency)} in total${res.awarded.skipped ? `, ${res.awarded.skipped} skipped` : ""}.` : undefined,
+        variant: "success",
+      });
+    } catch (e) {
+      toast({ title: "Couldn't award", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 space-y-3 rounded-lg border bg-muted/20 p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm font-medium">Variable pay</p>
+        <p className="text-xs text-muted-foreground">Target variable pay x what each person attained. Nothing is paid until you award it.</p>
+      </div>
+      {lines.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No reviews in this cycle you can see.</p>
+      ) : (
+        <>
+          <div className="scroll-shadow-x overflow-x-auto [--scroll-ground:hsl(var(--card))]">
+            <table className="table-stack w-full min-w-[34rem] text-sm">
+              <thead>
+                <tr className="border-b text-left text-xs text-muted-foreground">
+                  <th className="w-8 py-1.5" />
+                  <th className="py-1.5 font-medium">Person</th>
+                  <th className="py-1.5 text-right font-medium">Attained</th>
+                  <th className="py-1.5 text-right font-medium">Target</th>
+                  <th className="py-1.5 text-right font-medium">Recommended</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l) => (
+                  <tr key={l.employee} className={cn("border-b last:border-0", l.blocked && "opacity-70")}>
+                    <td className="py-1.5">
+                      <Checkbox
+                        checked={picked.includes(l.employee)}
+                        disabled={!!l.blocked || !(l.recommended ?? 0)}
+                        onCheckedChange={(v) => setPicked((p) => (v === true ? [...p, l.employee] : p.filter((x) => x !== l.employee)))}
+                        aria-label={`Award ${name(l.employee)}`}
+                      />
+                    </td>
+                    <td className="py-1.5" data-label="Person">
+                      {name(l.employee)}
+                      {l.blocked && (
+                        <span className="ml-1.5 text-xs text-muted-foreground">
+                          {l.blocked === "already_awarded" ? `already awarded ${money(l.awarded, l.currency)}`
+                            : l.blocked === "no_target" ? "no variable pay target"
+                            : l.blocked === "not_shared" ? "review not shared yet"
+                            : "nothing scored yet"}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums" data-label="Attained">{l.attainment != null ? `${l.attainment}%` : "-"}</td>
+                    <td className="py-1.5 text-right tabular-nums text-muted-foreground" data-label="Target">{money(l.target, l.currency)}</td>
+                    <td className="py-1.5 text-right font-medium tabular-nums" data-label="Recommended">{money(l.recommended, l.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm">
+              <span className="font-semibold tabular-nums">{money(total, currency)}</span>{" "}
+              <span className="text-muted-foreground">across {chosen.length} of {payable.length} payable</span>
+            </p>
+            <AccessAction verb="award" objectPath={cycle.path} can={cycle.access?.can} label="Award variable pay">
+              <Button size="sm" loading={busy} disabled={!chosen.length} onClick={award}>Award variable pay</Button>
+            </AccessAction>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Attainment bands, low to high. 100% is "delivered what was asked", so it is a band boundary rather than a
+// point on a gradient: the interesting split is short of target / on target / beyond it.
+const ATTAINMENT_BANDS = [
+  { key: "under", label: "Under 70%", test: (s: number) => s < 70 },
+  { key: "on", label: "70-99%", test: (s: number) => s >= 70 && s < 100 },
+  { key: "over", label: "100%+", test: (s: number) => s >= 100 },
+];
+
+/**
+ * Rating against goal attainment - the grid a calibration meeting actually argues over.
+ *
+ * A rating distribution says how generous the managers were; it cannot say whether the generosity followed
+ * delivery. Crossing the two puts the two conversations that matter in the corners: strong ratings on weak
+ * delivery (top-left) and weak ratings on delivered goals (bottom-right). Both are invisible in a bar chart.
+ *
+ * Rating bands are thirds of whatever scale the org configured, so a 4-level or 6-level framework bands the
+ * same way a 5-level one does.
+ */
+function NineBox({ reviews, scale, name, missing }: {
+  reviews: Review[];
+  scale: { value: number; label: string }[];
+  name: (ref?: string) => string;
+  missing: number;
+}) {
+  const ordered = [...scale].sort((a, b) => a.value - b.value);
+  const bandOf = (v: number) => {
+    const i = ordered.findIndex((s) => s.value === v);
+    return i < 0 ? 1 : Math.min(2, Math.floor((i * 3) / Math.max(1, ordered.length)));
+  };
+  const bandLabel = (band: number) => {
+    const vals = ordered.filter((s) => bandOf(s.value) === band).map((s) => s.value);
+    if (!vals.length) return "-";
+    return vals.length === 1 ? `${vals[0]}` : `${vals[0]}-${vals[vals.length - 1]}`;
+  };
+  const cell = (band: number, att: typeof ATTAINMENT_BANDS[number]) =>
+    reviews.filter((r) => bandOf(r.overall_rating!) === band && att.test(r.goal_attainment!.score));
+
+  if (!reviews.length) {
+    return (
+      <p className="border-t pt-3 text-sm text-muted-foreground">
+        Rating against delivery appears once shared reviews carry goals{missing > 0 ? ` (${missing} rated review${missing === 1 ? " has" : "s have"} no goals attached to this cycle)` : ""}.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1.5 border-t pt-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-sm font-medium">Rating against delivery</p>
+        <p className="text-xs text-muted-foreground">
+          {reviews.length} placed{missing > 0 ? ` · ${missing} without goals` : ""}
+        </p>
+      </div>
+      <div className="scroll-shadow-x overflow-x-auto [--scroll-ground:hsl(var(--card))]">
+        <div className="grid min-w-[22rem] grid-cols-[auto_repeat(3,minmax(0,1fr))] gap-1">
+          <span />
+          {ATTAINMENT_BANDS.map((a) => (
+            <span key={a.key} className="pb-0.5 text-center text-[11px] text-muted-foreground">{a.label}</span>
+          ))}
+          {[2, 1, 0].map((band) => (
+            <Fragment key={band}>
+              <span className="self-center pr-1 text-[11px] tabular-nums text-muted-foreground">Rating {bandLabel(band)}</span>
+              {ATTAINMENT_BANDS.map((a) => {
+                const rows = cell(band, a);
+                // The two corners worth arguing about: high rating on weak delivery, low rating on delivered goals.
+                const flag = (band === 2 && a.key === "under") || (band === 0 && a.key === "over");
+                return (
+                  <div
+                    key={a.key}
+                    title={rows.map((r) => `${name(r.employee)} · ${r.overall_rating} · ${r.goal_attainment!.score}%`).join("\n") || "Nobody"}
+                    className={cn(
+                      "min-h-[3.25rem] rounded-md border p-1.5 text-center",
+                      rows.length ? (flag ? "border-amber-400/70 bg-amber-500/10" : "bg-background") : "border-dashed opacity-60",
+                    )}
+                  >
+                    <span className="text-sm font-semibold tabular-nums">{rows.length || ""}</span>
+                    {rows.length > 0 && (
+                      <p className="truncate text-[10px] leading-tight text-muted-foreground">
+                        {name(rows[0]!.employee)}{rows.length > 1 ? ` +${rows.length - 1}` : ""}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </Fragment>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

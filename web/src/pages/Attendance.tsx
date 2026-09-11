@@ -43,8 +43,10 @@ import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
 // Wall-clock "HH:MM" (24h) of an instant in the org timezone, for prefilling the correction modal's time inputs.
+// `hourCycle: "h23"` because this fills an `<input type="time">`, which accepts 00-23 and rejects "24:15" - and
+// `hour12: false` leaves the cycle to the locale, where h24 spells midnight that way.
 const hhmm = (iso: string, tz: string) =>
-  dateFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
+  dateFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
 // "Thu, Jun 12" for the history table's day column (the range caption above carries the year). One row per day
 // of the range, so the formatter is shared rather than rebuilt per cell (see lib/intl.ts).
 const DAY_OPTS: Intl.DateTimeFormatOptions = { weekday: "short", month: "short", day: "numeric" };
@@ -146,11 +148,14 @@ export default function Attendance({ me }: { me: Me }) {
   const { rows: regularizations, reload: reloadRegs } = useCollection<AttendanceRegularization>("attendance-regularizations");
   const rosterTruncated = useCollectionHasMore(["employees", "leave-requests"]);
 
-  const mine = (ref?: string) => !!ref && idOf(ref) === me.employee_id;
+  // `useCallback`, because five memos and an effect on this page filter with it: as a bare arrow it changed
+  // identity every render, so each of those either had to restate `me.employee_id` by hand or keep the copy it
+  // was first given. Its identity now moves with the one field it reads.
+  const mine = useCallback((ref?: string) => !!ref && idOf(ref) === me.employee_id, [me.employee_id]);
   // My correction requests (attendance-regularizations), newest first, so pending + decided are visible in one place.
   const myRegs = useMemo(
     () => regularizations.filter((r) => mine(r.employee)).sort((a, b) => (b.date ?? "").localeCompare(a.date ?? "") || (b.create_time ?? "").localeCompare(a.create_time ?? "")),
-    [regularizations, me.employee_id],
+    [regularizations, mine],
   );
   // Days already waiting on a decision, so the correction dialog can say so before a second request is filed.
   const pendingCorrectionDays = useMemo(
@@ -224,7 +229,7 @@ export default function Attendance({ me }: { me: Me }) {
     return m;
   }, [holidays]);
   const holidaySet = useMemo(() => new Set(holidayByDay.keys()), [holidayByDay]);
-  const myApprovedLeaves = useMemo(() => leaves.filter((l) => mine(l.employee) && upper(l.state) === "APPROVED"), [leaves, me.employee_id]);
+  const myApprovedLeaves = useMemo(() => leaves.filter((l) => mine(l.employee) && upper(l.state) === "APPROVED"), [leaves, mine]);
   const leaveRanges = useMemo<LeaveRange[]>(() => myApprovedLeaves.map((l) => ({ start: l.start_date, end: l.end_date })), [myApprovedLeaves]);
   // The approved leave covering a given day (for the expanded "why no punches" detail).
   const leaveForDay = useCallback((day: string) => myApprovedLeaves.find((l) => l.start_date <= day && day <= l.end_date), [myApprovedLeaves]);
@@ -248,13 +253,13 @@ export default function Attendance({ me }: { me: Me }) {
   // fetch so the My-clock punch log and the cumulative total stay put while you page through history.
   const todayRow = useMemo(
     () => buildRows(recentSessions.filter((s) => mine(s.employee)), { from: orgToday, to: orgToday, leaves: leaveRanges, joined: joinedYmd })[0],
-    [recentSessions, buildRows, leaveRanges, joinedYmd, me.employee_id, orgToday],
+    [recentSessions, buildRows, leaveRanges, joinedYmd, mine, orgToday],
   );
 
   // The history window: punches + holidays + my approved leave, with absent-day detection.
   const rows = useMemo(
     () => buildRows(pageSessions.filter((s) => mine(s.employee)), { from: fromYmd, to: toYmd, leaves: leaveRanges, joined: joinedYmd }),
-    [pageSessions, buildRows, leaveRanges, fromYmd, toYmd, joinedYmd, me.employee_id],
+    [pageSessions, buildRows, leaveRanges, fromYmd, toYmd, joinedYmd, mine],
   );
   const rowByDay = useMemo(() => new Map(rows.map((r) => [r.day, r])), [rows]);
 
@@ -377,7 +382,7 @@ export default function Attendance({ me }: { me: Me }) {
       }
     })();
     return () => { live = false; };
-  }, [compare, prevWindow, buildRows, leaveRanges, joinedYmd, tz, sched.full_day_minutes, orgToday, me.employee_id]);
+  }, [compare, prevWindow, buildRows, leaveRanges, joinedYmd, tz, sched.full_day_minutes, orgToday, mine]);
 
   async function punch(verb: "clockIn" | "clockOut") {
     await clock.punch(verb);
@@ -1408,9 +1413,10 @@ function TeamPanel({ today, period, departments, windowLabel, tz, now, off, full
   const [dept, setDept] = useState("all");
   const [picked, setPicked] = useState<TeamGroup>("in");
 
-  const inDept = (d?: string) => dept === "all" || d === dept;
-  const todayRows = useMemo(() => today.filter((e) => inDept(e.dept)), [today, dept]);
-  const periodRows = useMemo(() => period.filter((e) => inDept(e.dept)), [period, dept]);
+  // `useCallback` so both row memos below name the filter they apply rather than the state it reads.
+  const inDept = useCallback((d?: string) => dept === "all" || d === dept, [dept]);
+  const todayRows = useMemo(() => today.filter((e) => inDept(e.dept)), [today, inDept]);
+  const periodRows = useMemo(() => period.filter((e) => inDept(e.dept)), [period, inDept]);
 
   const counts = useMemo(() => {
     const c: Record<TeamGroup, number> = { in: 0, not_in: 0, done: 0, leave: 0 };

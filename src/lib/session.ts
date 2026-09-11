@@ -37,7 +37,15 @@ export async function openSession(token: string, secretB64: string, nowMs: numbe
     const ok = await crypto.subtle.verify("HMAC", await hmacKey(secretB64, "verify"), fromB64url(token.slice(dot + 1)), enc.encode(payload));
     if (!ok) return null;
     const session = JSON.parse(new TextDecoder().decode(fromB64url(payload))) as Session;
-    if (typeof session.email !== "string" || !session.email || typeof session.exp !== "number") return null;
+    if (typeof session.email !== "string" || !session.email) return null;
+    // `iat` is checked as strictly as `exp`, because the auth middleware makes a SECURITY decision from it: a
+    // session issued before the user's `sessions_valid_from` stamp is dead, which is what "sign out everywhere"
+    // and "I lost my phone" mean. A payload without one left `sessionIat` undefined, which passes the `!== null`
+    // guard there and then compares `undefined < stamp` as false - so the revocation check waved the cookie
+    // through, and the audit trail's session id read `<uuid>:undefined`. Nothing mints such a cookie today
+    // (`sealSession` always writes both), and the MAC means an attacker cannot either; this is here so the one
+    // field that decides revocation is not also the one field nobody validates.
+    if (!Number.isFinite(session.exp) || !Number.isFinite(session.iat)) return null;
     if (session.exp <= nowMs) return null;
     return session;
   } catch {

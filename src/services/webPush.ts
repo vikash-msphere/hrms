@@ -5,11 +5,40 @@
 import { and, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import { assertPublicHttpsUrl } from "../lib/urlGuard";
 
 export const PUSH_PREF_KEY = "push_subscriptions";
-const MAX_DEVICES = 5;
+export const MAX_PUSH_DEVICES = 5;
 
 type StoredSub = { endpoint: string; keys: { p256dh: string; auth: string } };
+
+/**
+ * Is this endpoint one the Worker may `fetch`?
+ *
+ * IT IS AN OUTBOUND URL FROM AN UNTRUSTED SOURCE, and it was treated as a string. A subscription is written
+ * through `PATCH /v1/preferences/push_subscriptions`, whose body is the caller's own to set, and the sender
+ * (lib/webPush.ts) does `fetch(sub.endpoint, init)`. So any signed-in employee could register up to five
+ * arbitrary URLs - `http://`, any port, a private address - and have the Worker POST to each of them on every
+ * notification they could provoke about themselves. That is precisely the primitive `assertPublicHttpsUrl`
+ * exists for, written for the automation-webhook action and applied nowhere else; the guard's own header
+ * explains why an author-supplied host has to be parsed into an address rather than prefix-matched.
+ *
+ * Checked at BOTH ends. Here is the send side, which covers rows an older build already stored; the write
+ * side refuses it up front (services/preferences.ts) so a rejected endpoint is an error the caller sees
+ * rather than a subscription that silently never delivers.
+ *
+ * Real push endpoints are on port 443 of a handful of vendor hosts (FCM, Mozilla, Apple, WNS), so nothing
+ * legitimate is turned away. An explicit host allow-list would be tighter still; it is not used because a
+ * browser this build has not heard of would then stop working with no way for an operator to tell why.
+ */
+export function pushEndpointAllowed(endpoint: string): boolean {
+  try {
+    assertPublicHttpsUrl(endpoint);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function parseSubs(value: string): StoredSub[] {
   try {
@@ -17,8 +46,8 @@ function parseSubs(value: string): StoredSub[] {
     if (!Array.isArray(v?.subs)) return [];
     return v.subs.filter((s): s is StoredSub => {
       const c = s as StoredSub;
-      return typeof c?.endpoint === "string" && typeof c?.keys?.p256dh === "string" && typeof c?.keys?.auth === "string";
-    }).slice(0, MAX_DEVICES);
+      return typeof c?.endpoint === "string" && typeof c?.keys?.p256dh === "string" && typeof c?.keys?.auth === "string" && pushEndpointAllowed(c.endpoint);
+    }).slice(0, MAX_PUSH_DEVICES);
   } catch {
     return [];
   }

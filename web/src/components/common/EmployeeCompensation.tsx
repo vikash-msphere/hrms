@@ -3,6 +3,7 @@ import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight, Penc
 import { get, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatMoney, cn, idOf, round2 as r2 } from "@/lib/utils";
+import { todayStr as todayYmd } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Compensation, PayComponent, PayGrade, SalaryStructure, Bonus } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,7 +39,6 @@ function BandBadge({ row }: { row: Compensation }) {
   );
 }
 
-const todayYmd = () => new Date().toISOString().slice(0, 10);
 // Monthly value of a recurring earning component against a given base (mirrors the server's payroll/ctc math).
 const monthlyOf = (c: PayComponent, basic: number) =>
   c.method === "fixed" ? c.rate ?? 0 : c.method === "percent_base" ? basic * ((c.rate ?? 0) / 100) : 0;
@@ -70,7 +70,10 @@ const pfWagesOf = (basic: number, special: number, earningComps: PayComponent[],
 export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled = false }: { employeeId: string; canEdit: boolean; epfEnrolled?: boolean }) {
   const { toast } = useToast();
   const { org } = useOrg();
-  const money = (n: number, cc?: string) => formatMoney(n, cc || org.default_currency, currencyDecimals(cc, org));
+  // Memoized because a memo below formats with it: an arrow rebuilt every render is a dependency that changes
+  // every render, which is either a lie in the dependency array or a memo that never holds. Its identity moves
+  // with the org's currency settings, which is the only thing it reads.
+  const money = useCallback((n: number, cc?: string) => formatMoney(n, cc || org.default_currency, currencyDecimals(cc, org)), [org]);
   const { rows: payComponents } = useCollection<PayComponent>("pay-components");
   const { rows: payGrades } = useCollection<PayGrade>("pay-grades");
   const { rows: structures } = useCollection<SalaryStructure>("salary-structures");
@@ -103,7 +106,8 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     getSetting<Partial<typeof ctcCfg>>("ctc").then((s) => { if (s.value) setCtcCfg((p) => ({ ...p, ...s.value })); }).catch(() => {});
   }, []);
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       const r = await get<{ results: Compensation[] }>(`compensation?employee=${encodeURIComponent("employees/" + employeeId)}`);
       setRows(r.results ?? []);
@@ -115,10 +119,10 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     } finally {
       setLoaded(true);
     }
-  }
+  }, [employeeId, toast]);
   useEffect(() => {
     void load();
-  }, [employeeId]);
+  }, [load]);
 
   const current = rows.find((r) => r.current);
   const cc = current?.currency_code;
@@ -283,7 +287,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     else if (g.band_max != null && ctc > g.band_max) note = "above band";
     const compa = g.band_mid ? ` · ${(ctc / g.band_mid).toFixed(2)}×` : "";
     return `${range} (${note}${compa})`;
-  }, [payGrades, form.pay_grade, form.ctc]);
+  }, [payGrades, form.pay_grade, form.ctc, money]);
 
   const Row = ({ label, amount, kind, strong }: { label: ReactNode; amount?: number; kind?: "earning" | "deduction"; strong?: boolean }) => (
     <div className={cn("flex items-center justify-between py-1.5", strong && "border-t font-semibold")}>

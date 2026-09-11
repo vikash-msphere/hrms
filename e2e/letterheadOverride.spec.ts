@@ -63,7 +63,9 @@ test("overriding a letter's letterhead at generation time changes which one the 
     // The field is the innermost div that carries the label AND the combobox it labels; `hasText` alone
     // resolves `.last()` to whichever nested div is deepest, which is the bare label once the dialog has
     // grown a hint line under it.
-    const letterheadField = dialog.locator("div").filter({ hasText: "Letterhead" }).filter({ has: dialog.getByRole("combobox") }).last();
+    // The `has:` locator is matched inside each candidate, so it is page-rooted: `dialog.getByRole(...)`
+    // would ask for a dialog nested within the field.
+    const letterheadField = dialog.locator("div").filter({ hasText: "Letterhead" }).filter({ has: page.getByRole("combobox") }).last();
     await letterheadField.getByRole("combobox").click();
     await page.getByRole("option", { name: printLabel, exact: true }).click();
     await expect(dialog.getByText("Overriding this letter type, for this document only.")).toBeVisible();

@@ -3,6 +3,7 @@ import type { AppEnv } from "../env";
 import { listActivity, listAllActivity } from "../services/activity";
 import { caseMembers } from "../services/activityCase";
 import { toActivityResource } from "../http/serialize";
+import { queryParam } from "../http/query";
 
 // GET /v1/activity — the audit trail, newest-first, keyset-paged (`page_token` = the `at` epoch-ms of the
 // last row seen). Two modes, both gated in the authz middleware (single source):
@@ -16,7 +17,16 @@ export const activity = new Hono<AppEnv>().get("/", async (c) => {
   const limit = Number(c.req.query("max_page_size")) || undefined;
   const q = c.req.query("q");
   const tone = c.req.query("tone");
-  const resource = c.req.query("resource") ?? "";
+  // READ THROUGH http/query.ts, because the AUTHZ MIDDLEWARE ALSO READS THIS ONE.
+  //
+  // `?resource` is what picks the gate this request gets (READ on the named entity, or the org-wide `audit`
+  // capability when it is absent), and middleware/authz.ts decides that from `new URL(c.req.url)`. Hono's
+  // own parser scans from the first `?` to the end of the string, so the two once disagreed about a query
+  // smuggled past a `#` - which is exactly how `#?force=true` was gated as a soft delete and executed as a
+  // hard purge. `force` was moved to the shared reader then; this parameter was missed. The hono pin makes
+  // the two agree today, but a version range is a promise about a dependency and this is a property of the
+  // code: whatever the gate reads, the handler reads the same way. See the header of http/query.ts.
+  const resource = queryParam(c, "resource") ?? "";
 
   if (resource) {
     const slash = resource.indexOf("/");

@@ -59,6 +59,57 @@ test("an API key is created, shown once, and revoked", async ({ as }) => {
   await purgeNamed(page, name);
 });
 
+// Rotating is a different press from plain Revoke above: one action mints a same-scope replacement, shows
+// ITS secret once, and only then revokes the old key - so a credential in use never has a window with
+// nothing working. Never pressed anywhere before this.
+test("rotating an API key mints a same-scope replacement and revokes the old one", async ({ as }) => {
+  test.setTimeout(180_000);
+  const page = await as("super");
+  allowConsoleErrors(page, /clipboard|Document is not focused/i);
+  const name = `E2E rotate key ${Date.now() % 100000}`;
+
+  await gotoRoute(page, "settings/api-keys");
+  await page.getByRole("button", { name: "New key" }).first().click();
+  const form = page.getByRole("dialog");
+  await form.getByLabel("Name").fill(name);
+  await form.getByRole("button", { name: "Create key" }).click();
+  const minted = page.getByRole("dialog").filter({ hasText: "Copy your key now" });
+  await expect(minted).toBeVisible({ timeout: 30_000 });
+  const originalSecret = await minted.getByRole("textbox").first().inputValue();
+  await minted.getByRole("button", { name: "Done" }).click();
+  const nagged1 = page.getByRole("button", { name: "Close anyway" });
+  if (await nagged1.count()) await nagged1.click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+
+  const rows = page.locator("tbody tr").filter({ hasText: name });
+  await expect(rows).toHaveCount(1);
+  await rows.first().getByRole("button", { name: "API key actions" }).click();
+  await page.getByRole("menuitem", { name: "Rotate" }).click();
+  const confirm = page.getByRole("dialog").filter({ hasText: `Rotate "${name}"?` });
+  await expect(confirm).toBeVisible({ timeout: 30_000 });
+  await expect(confirm.getByText(/revoked immediately after/)).toBeVisible();
+  await confirm.getByRole("button", { name: "Create the replacement", exact: true }).click();
+
+  // The replacement's own one-time reveal - a second, DIFFERENT secret, not the same key shown twice.
+  const replacement = page.getByRole("dialog").filter({ hasText: "Copy your key now" });
+  await expect(replacement).toBeVisible({ timeout: 30_000 });
+  const newSecret = await replacement.getByRole("textbox").first().inputValue();
+  expect(newSecret.length).toBeGreaterThan(20);
+  expect(newSecret).not.toBe(originalSecret);
+  await replacement.getByRole("button", { name: "Done" }).click();
+  const nagged2 = page.getByRole("button", { name: "Close anyway" });
+  if (await nagged2.count()) await nagged2.click();
+  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+
+  // Same name, both generations on the list: the old one revoked, the new one live to take its place.
+  await expect(rows).toHaveCount(2, { timeout: 30_000 });
+  await expect(rows.filter({ hasText: /Revoked/i })).toHaveCount(1);
+  const stillActive = rows.filter({ hasNotText: /Revoked/i });
+  await expect(stillActive).toHaveCount(1);
+
+  await purgeNamed(page, name);
+});
+
 /** Drop the key this spec minted. */
 async function purgeNamed(page: import("@playwright/test").Page, name: string) {
   const res = await page.request.get("/v1/api-keys?page_size=100");

@@ -26,15 +26,23 @@ test("a bank template is read in, its columns mapped, and the debit account read
   // helper rather than by retyping the box: the list is a shared org setting, and a spec that writes back the
   // whole textarea deletes whatever a spec running beside it added between the read and the save. What the
   // banks panel itself does with typing is `settingsPanels.spec.ts`'s subject, not this one's.
-  const dropBank = await withAllowedBank(page, bankName);
+  let dropBank = await withAllowedBank(page, bankName);
 
   // The new bank is now offered, and picking it opens its (empty) format. Read from cold first: this browser
   // is holding the settings snapshot it took when the page loaded (web/src/lib/settingsStore.ts), and the
-  // bank was added over the wire, so a reload is what puts it in front of the reader.
-  await gotoRoute(page, "settings/bank-formats");
-  await page.reload();
+  // bank was added over the wire, so a reload is what puts it in front of the reader. Re-added, not just
+  // re-checked, on a miss: `withAllowedBank` itself is etag-safe against another `editBanks` caller, but a
+  // DIFFERENT settings panel's own Save (banks & currency, quick actions, letter defaults, default
+  // department - each reads the WHOLE shared blob at ITS OWN page-mount and writes the whole thing back,
+  // Settings.tsx's useOrgBlob, "single-admin last-write-wins is fine" by deliberate design) can still land in
+  // between this add and this reload and silently take it back out - re-running the add is what survives that.
   const bankButton = page.getByRole("button", { name: bankName }).first();
-  await expect(bankButton).toBeVisible({ timeout: 30_000 });
+  await expect(async () => {
+    await gotoRoute(page, "settings/bank-formats");
+    await page.reload();
+    if (!(await bankButton.count())) dropBank = await withAllowedBank(page, bankName);
+    await expect(bankButton).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 60_000 });
   await bankButton.click();
   await expect(page.getByText("No template uploaded")).toBeVisible();
   // Nothing to map until a template arrives, so the mapping table isn't there to be filled in wrongly.
@@ -69,9 +77,15 @@ test("a bank template is read in, its columns mapped, and the debit account read
   expect((await saved).ok(), "the bank format was not saved").toBe(true);
 
   // Read back from cold: the mapping survived, and the debit account comes back as a mask - never as the
-  // digits that were typed.
-  await page.reload();
-  await page.getByRole("button", { name: bankName }).first().click();
+  // digits that were typed. Re-added on a miss same as the first reload above: the bank NAME can be clobbered
+  // back out of the allow-list by another settings panel's Save in this window too, and re-adding it does not
+  // lose the format mapping already saved under it (a separate row, keyed by the bank).
+  await expect(async () => {
+    await page.reload();
+    if (!(await bankButton.count())) dropBank = await withAllowedBank(page, bankName);
+    await expect(bankButton).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 60_000 });
+  await bankButton.click();
   await expect(page.getByText(/3 columns · sheet "Payments"/)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByLabel("Data starts on row")).toHaveValue("2");
   await expect(page.locator("tbody tr").first()).toContainText("Beneficiary name");

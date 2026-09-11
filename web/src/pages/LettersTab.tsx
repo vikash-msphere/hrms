@@ -214,13 +214,19 @@ export default function LettersTab({ toast }: { toast: Toast }) {
     if (dirty) return;
     const t: Template[] = rows.map((r) => ({ id: r.path, etag: r.etag, label: r.label, category: r.category, filename: r.filename, letterhead: r.letterhead, inputs: r.inputs, blocks: r.blocks ?? [], access: r.access }));
     setTemplates(t);
-    setSelId((cur) => (t.some((x) => x.id === cur) ? cur : t[0]?.id ?? ""));
+    // Only default to the first template when NOTHING was selected yet. `cur` set but momentarily absent from
+    // THIS particular rows snapshot is not evidence the selection is wrong - `rows` is a shared, revalidated-in-
+    // the-background read, and a snapshot that raced ahead of (or fell behind) the create/select that just set
+    // `cur` catches up on its own next update. Falling back to `t[0]` here instead swaps the editor onto
+    // whichever OTHER template happens to sort first - somebody else's, on a page where more than one browser
+    // can be adding templates at once - which is a worse failure than a still-loading panel for a beat.
+    setSelId((cur) => (!cur || t.some((x) => x.id === cur) ? cur : t[0]?.id ?? ""));
   }, [rows, dirty]);
   function revert() { setDirty(false); reload(); }
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
 
   const selected = useMemo(() => templates.find((t) => t.id === selId), [templates, selId]);
-  useUnsavedTracker(dirty, () => save());
+  useUnsavedTracker(dirty, () => save(), saving);
   const categories = useMemo(() => Array.from(new Set(templates.map((t) => t.category?.trim()).filter(Boolean))) as string[], [templates]);
 
   function mutateSelected(fn: (t: Template) => Template) {
@@ -263,7 +269,16 @@ export default function LettersTab({ toast }: { toast: Toast }) {
     const t = templates.find((x) => x.id === id);
     if (!t) return;
     if (!(await confirm({ title: `Delete "${t.label}"?`, description: "This removes the letter type. Existing generated letters are unaffected.", confirmLabel: "Delete", destructive: true }))) return;
-    try { await remove(t.id); setDirty(false); await reload(); toast({ title: "Deleted", variant: "success" }); }
+    try {
+      await remove(t.id);
+      setDirty(false);
+      // Explicit, rather than left to the rows-sync effect's own fallback: that fallback no longer swaps a
+      // SET selection onto whatever sorts first just because a snapshot does not (yet) contain it - correct
+      // for a create still propagating, but this delete genuinely means "cur is gone", so it says so here.
+      if (id === selId) setSelId("");
+      await reload();
+      toast({ title: "Deleted", variant: "success" });
+    }
     catch (e) { toast({ title: "Couldn't delete", description: (e as Error).message, variant: "destructive" }); }
   }
 
@@ -355,7 +370,9 @@ export default function LettersTab({ toast }: { toast: Toast }) {
             <div className="flex items-center gap-1.5 border-t pt-2">
               <Input className="h-8 text-sm" placeholder="New letter type…" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addTemplate()} />
               <AccessAction collection="letter-templates" create label="Letter types">
-                <Button size="sm" variant="outline" onClick={addTemplate} disabled={!newLabel.trim()}><Plus className="h-4 w-4" /></Button>
+                {/* Named, not just a glyph: an icon-only control with no accessible name is unreachable by
+                    anyone using a screen reader, and unaddressable by anything else that goes by name. */}
+                <Button size="sm" variant="outline" aria-label="Add letter type" title="Add letter type" onClick={addTemplate} disabled={!newLabel.trim()}><Plus className="h-4 w-4" /></Button>
               </AccessAction>
             </div>
           </CardContent>

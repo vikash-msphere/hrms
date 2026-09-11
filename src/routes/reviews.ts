@@ -1,19 +1,47 @@
 import { z } from "zod";
+import { inArray } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
 import { contentDisposition } from "../http/contentDisposition";
-import { listReviews, submitSelf, submitManager, acknowledgeReview, skipReviewStage, nudgeReview, renderReviewPdf } from "../services/reviews";
-import { nominateFeedback, feedbackForReviews } from "../services/reviewFeedback";
+import { listReviews, submitSelf, submitManager, acknowledgeReview, skipReviewStage, nudgeReview, renderReviewPdf, goalsForReviews, attainmentTrend, assignReviewer } from "../services/reviews";
+import { nominateFeedback, suggestFeedback, feedbackForReviews } from "../services/reviewFeedback";
+import { getSettingValue } from "../services/settings";
+import { DEFAULT_PERFORMANCE, competenciesForCycle, type PerformanceFramework } from "../domain/performance";
 import { toReviewResource } from "../http/serialize";
+import type { AppUser } from "../env";
 
 type Feedback = typeof schema.reviewFeedback.$inferSelect;
+type ReviewRow = typeof schema.reviews.$inferSelect;
 
-// Every answer carries the review's 360 feedback, so it is attached before serializing: one query per page,
-// one per single row.
-const withFeedback = async <T extends { uuid: string }>(deps: Deps, rows: T[]) => {
-  const fb = await feedbackForReviews(deps, rows.map((r) => r.uuid));
-  return rows.map((r) => Object.assign(r, { _fb: fb.get(r.uuid) ?? [] }));
+// Every answer carries the review's 360 feedback and the cycle's goals, both attached before serializing: two
+// queries per page, two per single row. The goals ride the review so the page renders its evidence panel and
+// its attainment score without reading the whole goals collection to find the handful that belong to a cycle.
+const withEvidence = async <T extends ReviewRow>(deps: Deps, actor: AppUser, rows: T[]) => {
+  const cycleIds = [...new Set(rows.map((r) => r.cycleId))];
+  const [fb, goals, framework, cycles] = await Promise.all([
+    feedbackForReviews(deps, rows.map((r) => r.uuid)),
+    goalsForReviews(deps, actor, rows),
+    // The competency catalogue, once for the page: the serializer needs the weights to say what the ratings
+    // add up to, and a client that re-derived it from its own copy of the framework could disagree with the
+    // PDF about the same review.
+    getSettingValue<PerformanceFramework>(deps, "performance", DEFAULT_PERFORMANCE),
+    // Which of those competencies each cycle actually asks about. One query for the page - a probation review
+    // and an annual review are the same framework narrowed two different ways.
+    cycleIds.length
+      ? deps.db.select({ uuid: schema.reviewCycles.uuid, keys: schema.reviewCycles.competencyKeysJson }).from(schema.reviewCycles).where(inArray(schema.reviewCycles.uuid, cycleIds))
+      : Promise.resolve([] as { uuid: string; keys: string | null }[]),
+  ]);
+  const keysByCycle = new Map(cycles.map((c) => [c.uuid, c.keys]));
+  // The trend is ONE person's history, so it rides the single-review read only: a page of reviews would mean
+  // a query each, and a list has no room to draw it anyway.
+  const trend = rows.length === 1 ? await attainmentTrend(deps, rows[0]!.employeeId) : undefined;
+  return rows.map((r) => Object.assign(r, {
+    _fb: fb.get(r.uuid) ?? [],
+    _goals: goals.get(r.uuid) ?? [],
+    _competencies: competenciesForCycle(framework.competencies ?? [], keysByCycle.get(r.cycleId) ?? null),
+    ...(trend ? { _trend: trend } : {}),
+  }));
 };
 
 const selfSchema = z.object({
@@ -24,9 +52,19 @@ const managerSchema = z.object({
   ratings: z.record(z.string(), z.number()).optional(),
   manager_comment: z.string().nullable().optional(),
   overall_rating: z.number().nullable().optional(),
+  // The manager's verdict per goal, keyed by the goal's code. Verdicts for goals outside the cycle's set are
+  // dropped by the service, so a stale form can't attach an assessment to a goal this review never held.
+  goal_ratings: z.record(z.string(), z.object({ rating: z.number().optional(), comment: z.string().max(2000).optional() }).strict()).optional(),
 }).strict();
-const nominateSchema = z.object({ employees: z.array(z.string()).min(1) }).strict();
+// Capped at the same twenty `suggestFeedback` allows: the two halves of one list (who the reviewee says saw
+// their work, who the manager actually asks) had different limits, and the unbounded one was the half that
+// writes rows and sends mail. A 360 with more than twenty reviewers is not a 360.
+const nominateSchema = z.object({ employees: z.array(z.string()).min(1).max(20) }).strict();
+// The reviewee's own list, which may legitimately be emptied (a withdrawn suggestion is a suggestion removed).
+const suggestSchema = z.object({ employees: z.array(z.string()).max(20) }).strict();
 const acknowledgeSchema = z.object({ comment: z.string().nullable().optional() }).strict();
+// Null clears the override, handing the write-up back to the manager chain.
+const reviewerSchema = z.object({ reviewer: z.string().nullable().optional() }).strict();
 
 // Performance reviews. A review is created by launching its cycle and is only ever moved by the stage verbs -
 // there is no create, no edit and no delete here - so the factory mounts list, get and the seven verbs.
@@ -47,16 +85,28 @@ export const reviews = collectionRoutes({
     row._managerVisible = shared || !isOwner;
     row._feedbackNamed = !isOwner;
     if (!isOwner) row._feedback = feedback; // manager/HR: all entries (progress + authors)
-    else if (shared) row._feedback = feedback.filter((f) => f.state === "SUBMITTED"); // employee: submitted only, anonymized
-    else row._feedback = undefined; // employee, not yet shared: omit
+    else {
+      // The employee sees two disjoint things: their OWN suggestions (names they typed themselves, carrying no
+      // feedback content, so there is nothing to withhold), and once the review is shared, the submitted
+      // feedback - anonymized. Everything in between is the manager's process and stays theirs.
+      const own = feedback.filter((f) => f.state === "SUGGESTED");
+      const answered = shared ? feedback.filter((f) => f.state === "SUBMITTED") : [];
+      row._feedback = own.length || answered.length ? [...own, ...answered] : undefined;
+    }
     return toReviewResource(row);
   },
   list: (c, page) => listReviews(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("cycle"), c.req.query("state")),
-  decorate: (deps, _actor, rows) => withFeedback(deps, rows),
+  decorate: (deps, actor, rows) => withEvidence(deps, actor, rows),
   verbs: {
     submitSelf: { schema: selfSchema, run: (deps, user, id, body) => submitSelf(deps, user, id, body.self_comment, body.self_ratings) },
     submitManager: { schema: managerSchema, run: (deps, user, id, body) => submitManager(deps, user, id, body) },
     nominate: { schema: nominateSchema, run: (deps, user, id, body) => nominateFeedback(deps, user, id, body.employees) },
+    // The reviewee's own suggestion of who saw their work. Inert until the manager nominates one of them for
+    // real, which is what makes it safe to hand this verb to the person being reviewed.
+    suggestFeedback: { schema: suggestSchema, run: (deps, user, id, body) => suggestFeedback(deps, user, id, body.employees) },
+    // Point this one review at a specific reviewer (a transfer, a matrix report, a manager on leave) instead
+    // of re-parenting the employee to fix a review.
+    assignReviewer: { schema: reviewerSchema, run: (deps, user, id, body) => assignReviewer(deps, user, id, body.reviewer) },
     acknowledge: { schema: acknowledgeSchema, run: (deps, user, id, body) => acknowledgeReview(deps, user, id, body.comment) },
     skipStage: { run: (deps, user, id) => skipReviewStage(deps, user, id) },
     nudge: { run: (deps, user, id) => nudgeReview(deps, user, id) },

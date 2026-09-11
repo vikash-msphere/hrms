@@ -17,6 +17,7 @@ const reviseSchema = z
   .object({
     employee: z.string(),
     annual_ctc: z.number().positive(),
+    variable_pay_target: z.number().min(0).nullable().optional(),
     currency_code: z.string().optional(),
     pay_grade: z.string().nullable().optional(),
     salary_structure: z.string().nullable().optional(),

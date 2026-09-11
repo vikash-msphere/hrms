@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Landmark } from "lucide-react";
 import { get, patch } from "@/api";
 import type { BankDetails } from "@/types";
@@ -17,8 +17,8 @@ import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, Dia
 import { useToast } from "@/components/ui/use-toast";
 import { useOrg } from "@/lib/org";
 
-type Form = { bank_name: string; account_name: string; account_number: string; ifsc_code: string; currency_code: string };
-const EMPTY: Form = { bank_name: "", account_name: "", account_number: "", ifsc_code: "", currency_code: "" };
+type Form = { bank_name: string; account_name: string; account_number: string; branch: string; ifsc_code: string; currency_code: string };
+const EMPTY: Form = { bank_name: "", account_name: "", account_number: "", branch: "", ifsc_code: "", currency_code: "" };
 
 /** An employee's bank account. The server keeps it encrypted and only ever returns the
  *  account number masked; access is restricted to the owner, HR and super_admin. */
@@ -36,16 +36,20 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
   const [err, setErr] = useState<string | null>(null);
   const guard = useDialogGuard(open, { form, confirmNumber }, () => setOpen(false), { label: "bank details" });
 
-  async function load() {
+  // `useCallback` + `[load]`, rather than a plain function and a hand-written `[employeeId]`: the effect's
+  // real dependency IS the loader, and listing its inputs by hand is a claim the linter cannot check and the
+  // next person cannot maintain - the class of bug where a fetch keeps reading the employee it was first
+  // mounted with. The identity changes exactly when `employeeId` does, so this fires when it always fired.
+  const load = useCallback(async () => {
     try {
       setData(await get<BankDetails>(`employees/${employeeId}/bank-account`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
-  }
-  useEffect(() => {
-    load();
   }, [employeeId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   function openEdit() {
     // Pre-fill the non-secret fields; the account number is never returned, so it starts blank.
@@ -53,6 +57,7 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
       bank_name: data?.bank_name ?? "",
       account_name: data?.account_name ?? "",
       account_number: "",
+      branch: data?.branch ?? "",
       ifsc_code: data?.ifsc_code ?? "",
       currency_code: data?.currency_code ?? org.default_currency ?? "INR",
     });
@@ -94,6 +99,7 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
   // access rule to `bank-account.<key>`.
   const rows: [string, string | undefined, string][] = [
     ["Bank name", data?.bank_name, "bank_name"],
+    ["Branch", data?.branch, "branch"],
     ["IFSC / routing code", data?.ifsc_code, "ifsc_code"],
     ["Account holder", data?.account_name, "account_name"],
     ["Account number", data?.account_number_masked, "account_number"],
@@ -163,6 +169,11 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
               />
             </Field>
           </FieldRow>
+          {/* Several banks' bulk-payment formats carry a branch column of their own (services/bankFile.ts maps
+              it), and it is not derivable from the IFSC without a lookup table nobody here has. */}
+          <Field label="Branch" hint="Optional - some bulk-payment formats require it.">
+            <Input value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} />
+          </Field>
           <Field label="Account holder" hint="As the bank has it - a mismatched name gets the transfer rejected.">
             <Input value={form.account_name} onChange={(e) => setForm({ ...form, account_name: e.target.value })} />
           </Field>

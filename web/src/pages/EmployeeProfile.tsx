@@ -8,7 +8,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { patch } from "@/api";
 import { formatDate, idOf, probationLabel, tenureLabel } from "@/lib/utils";
 import { navigate } from "@/router";
-import { usePermission, useCanSeeActivity } from "@/lib/perm";
+import { usePermission, useCanSeeActivity, useIsSuperAdmin } from "@/lib/perm";
 import type { Department, Employee, LeaveBalance, LeaveRequest, LeaveType, Me } from "@/types";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { DataState } from "@/components/common/DataState";
@@ -76,8 +76,11 @@ export default function EmployeeProfile({ id, me, sub }: { id: string; me: Me; s
   const canActivity = useCanSeeActivity("employees"); // gates the Activity tab (server ANDs with employee read)
   // The org-wide audit grant, which is what `?subject` needs - see the note on that panel below.
   const canOrgActivity = useCanSeeActivity();
-  // Personal/bank details are visible to the employee themselves, HR and super_admin.
-  const canBank = me.employee_id === id || canManage;
+  // Personal/bank details are visible to the employee themselves and super_admin only - these are the
+  // field-precise sub-resources (src/domain/grants.ts OWN_PII), never reached by the broad `employees.write`
+  // grant HR/manager hold for the directory (that's `canManage`, deliberately not used here).
+  const isSuperAdmin = useIsSuperAdmin();
+  const canBank = me.employee_id === id || isSuperAdmin;
   // Tax: owner, HR, payroll, super (anyone holding the employees.tax capability); the server still enforces.
   const canTax = usePermission("employees.tax.read");
   // Compensation (salary + revisions): payroll + super (the compensation collection grant).

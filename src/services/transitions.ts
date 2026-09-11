@@ -4,11 +4,12 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
+import { byIdChunks } from "../lib/dbBatch";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
-import { purgeRow } from "./softDelete";
+import { purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -45,8 +46,11 @@ async function getTransition(deps: Deps, _actor: AppUser, id: string) {
 export async function tasksForTransitions(deps: Deps, transitionIds: string[]) {
   const map = new Map<string, (typeof schema.transitionTasks.$inferSelect)[]>();
   if (!transitionIds.length) return map;
-  const rows = (await deps.db.select().from(schema.transitionTasks).where(inArray(schema.transitionTasks.transitionId, transitionIds)))
-    .sort((a, b) => a.position - b.position || +new Date(a.createdAt) - +new Date(b.createdAt));
+  // Chunked over D1's 100-parameter ceiling (lib/dbBatch.ts#PARAM_CAP): a full page of transitions binds the
+  // entire allowance in one statement. The sort runs over the JOINED result, so chunking changes no ordering.
+  const rows = (await byIdChunks(transitionIds, (group) =>
+    deps.db.select().from(schema.transitionTasks).where(inArray(schema.transitionTasks.transitionId, group)),
+  )).sort((a, b) => a.position - b.position || +new Date(a.createdAt) - +new Date(b.createdAt));
   for (const r of rows) {
     const list = map.get(r.transitionId) ?? [];
     list.push(r);
@@ -209,7 +213,26 @@ export async function appendTransitionTask(deps: Deps, actor: AppUser, transitio
   return row;
 }
 
+// The tasks are PART OF the transition (no life of their own) - removed with it. Background checks, offers
+// and notice periods each OUTLIVE it (their own compliance/ATS/exit record), so those are detached rather
+// than deleted - undeclared, all four were foreign keys that turned `DELETE ?force=true` into a 409/500.
+// Named and exported so test/purgeCascadeDrift can hold it against the schema's own foreign keys.
+export const TRANSITION_PURGE_CASCADE: PurgeCascade = {
+  remove: [{ table: schema.transitionTasks, column: schema.transitionTasks.transitionId }],
+  detach: [
+    { table: schema.backgroundChecks, column: schema.backgroundChecks.transitionId },
+    { table: schema.offers, column: schema.offers.transitionId },
+    { table: schema.noticePeriods, column: schema.noticePeriods.transitionId },
+  ],
+};
+
 export async function purgeTransition(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  await deps.db.delete(schema.transitionTasks).where(eq(schema.transitionTasks.transitionId, id));
-  await purgeRow(deps, actor, schema.transitions, "transition", "transitions", id, ifMatch);
+  //
+  // DECLARED rather than written out here, and handed to `purgeRow`: it does the teardown only AFTER the etag
+  // and lock checks, which is the whole difference. Run ahead of it, the four writes above landed even when
+  // the purge itself was then refused - an If-Match from a stale read, or a locked transition - so a request
+  // that was answered 409 had already deleted every task and cut the record loose from its offer, its
+  // background check and its notice period. `purgeRow` also bumps `updated_at` on each row it detaches, so a
+  // client holding a pre-detach read stops being able to offer an If-Match that still matches.
+  await purgeRow(deps, actor, schema.transitions, "transition", "transitions", id, ifMatch, undefined, TRANSITION_PURGE_CASCADE);
 }

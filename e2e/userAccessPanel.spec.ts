@@ -51,7 +51,9 @@ test("a login's role and employee link are changed, and two accounts are disable
     await edit.getByLabel("Linked employee").click();
     await page.getByPlaceholder("Search employees…").fill(`RolesA${stamp}`);
     await expect(page.getByText(`already linked to ${emailA}`, { exact: false })).toBeVisible({ timeout: 15_000 });
-    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape"); // closes the employee picker's popover
+    await expect(page.getByPlaceholder("Search employees…")).toHaveCount(0);
+    await page.keyboard.press("Escape"); // and now the dialog itself
     const discard = page.getByRole("dialog");
     if (await discard.getByRole("button", { name: /Discard|Leave/ }).count()) {
       await discard.getByRole("button", { name: /Discard|Leave/ }).click();

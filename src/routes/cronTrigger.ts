@@ -26,7 +26,20 @@ export const cronTrigger = new Hono<AppEnv>().post("/", async (c) => {
   // the nightly cron iterates every employee and can exceed the request CPU/subrequest budget - in the
   // background via waitUntil, stamping done/error on the same row. Poll cron-runs to see the outcome.
   const { runId, start } = await startCronRun(cron, deps);
-  c.executionCtx.waitUntil(finishCronRun(cron, deps, runId, start, false));
+  // `c.executionCtx` THROWS when the context has none (the test runner, and any in-process dispatch) rather
+  // than returning undefined, so it cannot be read inline - the same guard middleware/auth.ts and
+  // routes/batch.ts already carry, and this was the one place that read it bare. Without an execution context
+  // there is nothing to hand the promise to, so the work is awaited instead: the caller waits, which is
+  // slower than a real trigger and is the only honest alternative to dropping the run on the floor.
+  const work = finishCronRun(cron, deps, runId, start, false);
+  let scheduled = false;
+  try {
+    c.executionCtx.waitUntil(work);
+    scheduled = true;
+  } catch {
+    /* no execution context */
+  }
+  if (!scheduled) await work;
   const row = (await deps.db.select().from(schema.cronRuns).where(eq(schema.cronRuns.uuid, runId)).limit(1))[0];
   if (!row) throw notFound("cron run not found");
   return c.json(toCronRunResource(row));

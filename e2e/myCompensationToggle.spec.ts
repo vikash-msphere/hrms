@@ -6,7 +6,10 @@ import { gotoRoute, test, expect } from "./fixtures";
 // same CTC and its whole breakdown - has never run.
 test("the Monthly/Annual toggle re-prices the CTC and its breakdown together", async ({ as }) => {
   test.setTimeout(90_000);
-  const page = await as("employee");
+  // Read as payroll, not as an ordinary employee: `compensation` is granted to payroll_admin (and super)
+  // alone in the seeded role matrix, so on any other login the tab is correctly not offered at all. This is
+  // the SELF-service card either way - payroll reading their own row, on their own profile.
+  const page = await as("payroll");
   await gotoRoute(page, "profile", "Profile");
   await page.getByRole("tab", { name: "Compensation" }).click();
 

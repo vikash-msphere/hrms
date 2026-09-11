@@ -3,6 +3,7 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listReferrals, getReferral, createReferral, updateReferral, awardReferralBonusNow, type ReferralInput } from "../services/referrals";
 import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { requireCappedBody } from "../services/documentsCommon";
 import { toReferralResource } from "../http/serialize";
 
 const COL = "referrals";
@@ -49,7 +50,7 @@ export const referrals = collectionRoutes<ReferralInput, typeof schema.referrals
     award: { run: (deps, user, id) => awardReferralBonusNow(deps, user, id) },
     upload: {
       run: async (deps, user, id, _body, c) => {
-        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        const bytes = new Uint8Array(await requireCappedBody(c.req.raw));
         await putAttachment(deps, user, { collection: COL, objectId: id, slot: RESUME, bytes, fileName: c.req.query("file_name"), contentType: c.req.query("content_type") });
         return getReferral(deps, user, id);
       },

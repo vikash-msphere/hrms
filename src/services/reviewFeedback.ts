@@ -1,5 +1,7 @@
 import { eq, and, inArray } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, allocOwnedCodesFor } from "./codeAlloc";
+import { insertBatches, runBatch, type BatchStmt } from "../lib/dbBatch";
+import { genId } from "../lib/idCodec";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -8,7 +10,7 @@ import type { AppUser } from "../env";
 import { audit, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition, forbidden } from "../lib/errors";
 import { paginate } from "../http/pagination";
-import { notify } from "./notifications";
+import { notify, notifyMany } from "./notifications";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 type State = typeof schema.reviewFeedback.$inferSelect.state;
@@ -18,7 +20,7 @@ export async function listReviewFeedback(deps: Deps, scope: ListScope, maxPageSi
   if (stateFilter) conds.push(eq(schema.reviewFeedback.state, stateFilter as State));
   const all = await deps.db.select().from(schema.reviewFeedback).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
   // Oldest first: 360 feedback on one review reads as a thread, in the order it was given.
-  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc");
+  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc", { codec: deps.idCodec, collection: "review-feedback" });
   return { items: slice, nextPageToken };
 }
 
@@ -45,13 +47,99 @@ export async function nominateFeedback(deps: Deps, actor: AppUser, reviewId: str
   );
   const reviewee = (await deps.db.select({ f: schema.employees.firstName, l: schema.employees.lastName }).from(schema.employees).where(eq(schema.employees.uuid, review.employeeId)).limit(1))[0];
   const revieweeName = reviewee ? `${reviewee.f} ${reviewee.l}`.trim() : "a colleague";
-  for (const authorId of ids) {
-    if (existing.has(authorId)) continue;
-    const code = await allocOwnedCode(deps, schema.reviewFeedback, schema.reviewFeedback.authorId, authorId);
-    const fb = (await deps.db.insert(schema.reviewFeedback).values({ code, reviewId, revieweeId: review.employeeId, authorId }).returning())[0]!;
-    await notify(deps, { recipient: authorId, type: "review.feedback_requested", title: "Feedback requested", body: `You've been asked to give feedback on ${revieweeName}.`, link: "reviews", subject: `review-feedback/${fb.uuid}`, action: "respond", actorId: actor.employeeId });
+  // A row the REVIEWEE suggested is upgraded rather than skipped: the manager agreeing with a suggestion is
+  // the moment it becomes a real request, and inserting a second row would ask the same person twice.
+  const suggested = new Map(
+    (await deps.db
+      .select({ uuid: schema.reviewFeedback.uuid, a: schema.reviewFeedback.authorId })
+      .from(schema.reviewFeedback)
+      .where(and(eq(schema.reviewFeedback.reviewId, reviewId), eq(schema.reviewFeedback.state, "SUGGESTED"))))
+      .map((r) => [r.a, r.uuid] as const),
+  );
+  // Batched, not looped. Every D1 round trip is a Worker subrequest against a per-invocation ceiling, and a
+  // nomination is a list somebody picks off a team - looping meant an owned-code allocation, an insert and a
+  // whole `notify` (five more) per nominee. The two kinds of nominee are kept apart because they are different
+  // writes: a SUGGESTED row is promoted in place, a new one is inserted.
+  const upgrades = ids.map((a) => [a, suggested.get(a)] as const).filter((p): p is readonly [string, string] => !!p[1]);
+  const fresh = ids.filter((a) => !suggested.has(a) && !existing.has(a));
+  // The row each nominee is told about - a promoted suggestion keeps its id, a new request gets one minted
+  // here so the notification can name it without reading the inserts back.
+  const rowIdFor = new Map<string, string>(upgrades);
+  const now = new Date();
+  const stmts: BatchStmt[] = upgrades.map(([, uuid]) =>
+    deps.db.update(schema.reviewFeedback).set({ state: "REQUESTED", updatedAt: now }).where(eq(schema.reviewFeedback.uuid, uuid)));
+  if (fresh.length) {
+    // The SAME per-(table, owner) counters `allocOwnedCode` takes from - see codeAlloc.ts allocOwnedCodesFor.
+    const codes = await allocOwnedCodesFor(deps, schema.reviewFeedback, schema.reviewFeedback.authorId, fresh);
+    const rows = fresh.map((authorId) => {
+      const uuid = genId();
+      rowIdFor.set(authorId, uuid);
+      return { uuid, code: codes.get(authorId)!, reviewId, revieweeId: review.employeeId, authorId };
+    });
+    stmts.push(...insertBatches(rows, (group) => deps.db.insert(schema.reviewFeedback).values(group)));
   }
-  await audit(deps, actor, "review.nominate", "reviews", reviewId, { employee: `employees/${review.employeeId}`, fields: ids.slice(0, 12) }, review);
+  // One atomic batch: a half-nominated panel is a state the caller cannot see and the second press cannot fix.
+  await runBatch(deps.db, stmts);
+  await notifyMany(deps, [...rowIdFor.keys()], {
+    type: "review.feedback_requested",
+    title: "Feedback requested",
+    body: `You've been asked to give feedback on ${revieweeName}.`,
+    link: "reviews",
+    action: "respond",
+    actorId: actor.employeeId,
+    // Each nominee is being told about THEIR request, not a shared one.
+    subjectFor: (rid) => `review-feedback/${rowIdFor.get(rid)}`,
+  });
+  // The nominees as REFS, not the bare ids: an internal id must not reach the wire, and the feed resolves a
+  // ref to the person's name.
+  await audit(deps, actor, "review.nominate", "reviews", reviewId, { employee: `employees/${review.employeeId}`, fields: ids.slice(0, 12).map((i) => `employees/${i}`) }, review);
+  return review;
+}
+
+/**
+ * The REVIEWEE suggests who saw their work (called by the review's `suggestFeedback` verb).
+ *
+ * Nomination was the manager's alone, which has the 360 backwards: the people who actually worked with
+ * somebody are known to that person, and a manager two projects away is guessing at a list. A suggestion is
+ * inert - it notifies nobody and cannot be written to - until the manager nominates that person for real,
+ * which turns the same row REQUESTED. So this asks nothing of anyone and cannot be used to solicit feedback.
+ *
+ * Replaces the whole suggested set (the reviewee's list is a list, not an append log), and never touches a row
+ * that is already REQUESTED, SUBMITTED or DECLINED - those are the manager's process and the nominee's answer.
+ */
+export async function suggestFeedback(deps: Deps, actor: AppUser, reviewId: string, employeeRefs: string[]) {
+  const review = (await deps.db.select().from(schema.reviews).where(eq(schema.reviews.uuid, reviewId)).limit(1))[0];
+  if (!review) throw notFound("review not found");
+  // Owner-only, hard-enforced: this is the reviewee's own list of who saw their work. HR nominating on
+  // somebody's behalf is `nominate`, which is a different act with a different audit entry.
+  if (review.employeeId !== actor.employeeId) throw forbidden("only the reviewee can suggest who saw their work");
+  if (review.state === "SHARED" || review.state === "ACKNOWLEDGED") {
+    throw failedPrecondition("this review has already been shared - peer feedback can no longer be added to it");
+  }
+  const ids = [...new Set(employeeRefs.map(idFromPath).filter(Boolean) as string[])].filter((id) => id !== review.employeeId);
+  if (ids.length > 20) throw invalidArgument("suggest up to 20 people");
+
+  const rows = await deps.db
+    .select({ uuid: schema.reviewFeedback.uuid, a: schema.reviewFeedback.authorId, state: schema.reviewFeedback.state })
+    .from(schema.reviewFeedback)
+    .where(eq(schema.reviewFeedback.reviewId, reviewId));
+  const live = new Set(rows.filter((r) => r.state !== "SUGGESTED").map((r) => r.a));
+  const already = new Map(rows.filter((r) => r.state === "SUGGESTED").map((r) => [r.a, r.uuid] as const));
+
+  // Drop the suggestions that were withdrawn, keep the ones that stayed, add the new ones.
+  for (const [authorId, uuid] of already) {
+    if (!ids.includes(authorId)) await deps.db.delete(schema.reviewFeedback).where(eq(schema.reviewFeedback.uuid, uuid));
+  }
+  for (const authorId of ids) {
+    if (already.has(authorId) || live.has(authorId)) continue;
+    const code = await allocOwnedCode(deps, schema.reviewFeedback, schema.reviewFeedback.authorId, authorId);
+    await deps.db.insert(schema.reviewFeedback).values({ code, reviewId, revieweeId: review.employeeId, authorId, state: "SUGGESTED" });
+  }
+  await audit(deps, actor, "review.suggestFeedback", "reviews", reviewId, {
+    employee: `employees/${review.employeeId}`,
+    fields: ids.slice(0, 12).map((i) => `employees/${i}`),
+    note: ids.length ? `${ids.length} suggested` : "suggestions cleared",
+  }, review);
   return review;
 }
 
@@ -76,15 +164,18 @@ export async function submitFeedback(deps: Deps, actor: AppUser, id: string, inp
   return updated;
 }
 
-// The nominee declines a feedback request (REQUESTED -> DECLINED).
-export async function declineFeedback(deps: Deps, actor: AppUser, id: string) {
+// The nominee declines a feedback request (REQUESTED -> DECLINED), optionally saying why.
+export async function declineFeedback(deps: Deps, actor: AppUser, id: string, reason?: string | null) {
   const row = (await deps.db.select().from(schema.reviewFeedback).where(eq(schema.reviewFeedback.uuid, id)).limit(1))[0];
   if (!row) throw notFound("feedback request not found");
   if (row.authorId !== actor.employeeId) throw forbidden("only the nominated author can decline this feedback request");
   if (row.state !== "REQUESTED") throw failedPrecondition("this feedback request is no longer open");
-  const updated = (await deps.db.update(schema.reviewFeedback).set({ state: "DECLINED", updatedAt: new Date() }).where(and(eq(schema.reviewFeedback.uuid, id), eq(schema.reviewFeedback.state, "REQUESTED"))).returning())[0];
+  // The reason matters: "I have not worked with them this cycle" tells the manager to nominate somebody else,
+  // where a bare decline leaves them guessing whether it was a bad match or a busy week.
+  const text = reason?.trim() || null;
+  const updated = (await deps.db.update(schema.reviewFeedback).set({ state: "DECLINED", declineReason: text, updatedAt: new Date() }).where(and(eq(schema.reviewFeedback.uuid, id), eq(schema.reviewFeedback.state, "REQUESTED"))).returning())[0];
   if (!updated) throw failedPrecondition("this feedback request is no longer open");
-  await audit(deps, actor, "review-feedback.decline", "review-feedback", id, stateMeta("REQUESTED", "DECLINED", { employee: `employees/${row.revieweeId}` }), updated);
+  await audit(deps, actor, "review-feedback.decline", "review-feedback", id, stateMeta("REQUESTED", "DECLINED", { employee: `employees/${row.revieweeId}`, ...(text ? { note: text } : {}) }), updated);
   return updated;
 }
 

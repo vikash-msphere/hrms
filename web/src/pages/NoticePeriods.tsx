@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf, humanize, personName } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import type { NoticePeriod, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
@@ -33,7 +34,6 @@ import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { getSetting } from "@/lib/settingsStore";
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
 const TYPES = ["resignation", "termination", "retirement", "other"];
 const EMPTY = { employee: "", type: "resignation", notice_date: todayStr(), last_working_day: "", status: "serving", reason: "", notes: "", start_offboarding: false, template: "" };
 
@@ -129,12 +129,14 @@ export default function NoticePeriods({ me, openId }: { me: Me; openId?: string 
     setOpen(true);
   }
   function bodyFromForm() {
-    return { employee: form.employee || null, type: form.type, notice_date: form.notice_date, last_working_day: form.last_working_day, status: form.status, reason: form.reason.trim() || null, notes: form.notes.trim() || null };
+    // Empty fields go as `""`, never `null` - every service reads the empty string as "clear it", and a null
+    // fails contract validation at the Prism proxy the dev server goes through (web/src/api.ts).
+    return { employee: form.employee || "", type: form.type, notice_date: form.notice_date, last_working_day: form.last_working_day, status: form.status, reason: form.reason.trim(), notes: form.notes.trim() };
   }
   async function submit() {
     if (editing) { await patch("notice-periods/" + idOf(editing.path), bodyFromForm(), editing.etag); toast({ title: "Notice updated", variant: "success" }); }
     else {
-      await create("notice-periods", { ...bodyFromForm(), start_offboarding: form.start_offboarding, template: form.start_offboarding ? form.template || null : null });
+      await create("notice-periods", { ...bodyFromForm(), start_offboarding: form.start_offboarding, template: form.start_offboarding ? form.template || "" : "" });
       toast({ title: form.start_offboarding ? "Notice recorded · offboarding started" : "Notice recorded", variant: "success" });
     }
     reload();

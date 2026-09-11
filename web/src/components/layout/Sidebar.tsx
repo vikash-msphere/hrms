@@ -11,6 +11,7 @@ import { useOrg, orgAnniversary, orgNameFontStack, orgNameWeight, orgNameSizePx,
 import { useMedia } from "@/hooks/useMedia";
 import { useTheme } from "@/lib/theme";
 import { lockPageScroll } from "@/lib/scrollLock";
+import { readLocal, writeLocal } from "@/lib/localPref";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Me } from "@/types";
 
@@ -37,10 +38,10 @@ function saveCollapsed(email: string, set: Set<string>) {
 
 // Whether the whole sidebar is collapsed to an icon rail, a per-user preference (localStorage, pure UI).
 const railKey = (email: string) => `nav:rail:${email}`;
-const loadRail = (email: string) => localStorage.getItem(railKey(email)) === "1";
-const saveRail = (email: string, on: boolean) => {
-  try { localStorage.setItem(railKey(email), on ? "1" : "0"); } catch { /* ignore */ }
-};
+// Guarded like its sibling writer: the Sidebar mounts in the app shell, so an unguarded read here took the
+// whole frame down (not one page) on a browser with site data blocked.
+const loadRail = (email: string) => readLocal(railKey(email)) === "1";
+const saveRail = (email: string, on: boolean) => writeLocal(railKey(email), on ? "1" : "0");
 
 // A festive balloon-and-ribbon overlay shown during the company anniversary week (matches the balloon+ribbon
 // reference): big glossy teardrop balloons cluster up-and-right (overlapping only the logo's right edge),

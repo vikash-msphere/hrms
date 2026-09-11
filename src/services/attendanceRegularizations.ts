@@ -1,5 +1,6 @@
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt } from "drizzle-orm";
+import { chunk, ID_CHUNK, runBatch } from "../lib/dbBatch";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -92,14 +93,36 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   if (to === "APPROVED") {
     const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
     const tz = att.timezone || "Asia/Kolkata";
-    const targetYmd = localDay(+new Date(row.date), tz);
+    // `date` is a DATE-ONLY column, anchored at UTC midnight like every other one in the schema, so the day it
+    // names is read in UTC. It was read with `localDay(..., tz)` instead, which asks a different question: west
+    // of UTC, midnight-Z on the requested day is the PREVIOUS evening locally, so an approval superseded the
+    // wrong day's punches while writing the (correct, absolute) corrected instants - leaving two days wrong at
+    // once. Invisible in the default configuration, because Asia/Kolkata is +05:30 and midnight-Z is 05:30 the
+    // same morning. The audit line below already read it this way; the two now agree. See services/orgDay.ts
+    // `dayStartMs` for the same rule stated once.
+    const targetYmd = new Date(row.date).toISOString().slice(0, 10);
+    // WIDEN IN SQL, DECIDE IN JS - the pattern services/orgDay.ts describes. This used to read EVERY
+    // non-superseded punch the employee had ever made and keep the one day of them, so an ordinary approval
+    // grew a whole tenure's worth of row reads. No timezone is more than 14 hours from UTC, so one UTC day of
+    // slack on each side cannot exclude an instant whose org-local day is `targetYmd`; the exact call stays
+    // with `localDay`, which is the one definition of a local day in the app.
+    const dayStart = Date.parse(`${targetYmd}T00:00:00Z`);
     const existing = (await deps.db
       .select({ uuid: schema.attendanceSessions.uuid, clockIn: schema.attendanceSessions.clockIn })
       .from(schema.attendanceSessions)
-      .where(and(eq(schema.attendanceSessions.employeeId, row.employeeId), isNull(schema.attendanceSessions.supersededBy))))
+      .where(and(
+        eq(schema.attendanceSessions.employeeId, row.employeeId),
+        isNull(schema.attendanceSessions.supersededBy),
+        gte(schema.attendanceSessions.clockIn, new Date(dayStart - 86_400_000)),
+        lt(schema.attendanceSessions.clockIn, new Date(dayStart + 2 * 86_400_000)),
+      )))
       .filter((s) => localDay(+new Date(s.clockIn), tz) === targetYmd);
-    for (const s of existing) {
-      await deps.db.update(schema.attendanceSessions).set({ supersededBy: id, updatedAt: new Date() }).where(eq(schema.attendanceSessions.uuid, s.uuid));
+    // ONE atomic batch, not one UPDATE per punch. Sequentially they were N subrequests against the
+    // per-invocation budget AND non-atomic: a failure partway left the day's punches superseded with no
+    // correction rows written to replace them, which reads as a day nobody worked.
+    if (existing.length) {
+      await runBatch(deps.db, chunk(existing.map((s) => s.uuid), ID_CHUNK).map((ids) =>
+        deps.db.update(schema.attendanceSessions).set({ supersededBy: id, updatedAt: new Date() }).where(inArray(schema.attendanceSessions.uuid, ids))));
     }
     for (const p of row.sessions) {
       // Each corrected session allocates its own code, so each is retried on its own: an approval that

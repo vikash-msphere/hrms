@@ -3,6 +3,7 @@ import { AlertTriangle, FileSignature, FileText, Link2, Plus, Check, Send, Ban, 
 import { create, get, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, idOf } from "@/lib/utils";
+import { todayStr, addDaysYmd, daysBetweenYmd } from "@/lib/orgDay";
 import { useMoney, useOrg } from "@/lib/org";
 import { useHasPrintVersion } from "@/lib/letterheads";
 import { isConflict } from "@/lib/formError";
@@ -292,9 +293,8 @@ export default function Offers({ me: _me, openId }: { me: Me; openId?: string })
   );
 }
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
-const addDays = (ymd: string, n: number) => new Date(Date.parse(`${ymd}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
-const daysBetween = (from: string, to: string) => Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+const addDays = addDaysYmd;
+const daysBetween = daysBetweenYmd;
 /** The 1st of the month after `ymd` - how joining dates are actually agreed. */
 const firstOfNextMonth = (ymd: string) => {
   const d = new Date(`${ymd}T00:00:00Z`);

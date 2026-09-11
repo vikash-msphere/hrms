@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect, toast } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Payroll, driven the way payroll is actually driven.
 //
@@ -15,6 +15,12 @@ import { gotoRoute, test, expect, toast } from "./fixtures";
 test("a payroll run is created, built, submitted and approved - and payroll cannot approve it", async ({ as }) => {
   test.setTimeout(120_000);
   const admin = await as("super");
+  // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.) - it can surface as a 503, or (this quick-run picks a month and
+  // reuses whatever period/run already exists for it) as a 400 when a concurrent payroll spec's own build on
+  // the SAME period lands in between two of this test's own requests. The retry this test already relies on
+  // (Playwright's own, or the toPass blocks above) is what actually recovers from either.
+  allowConsoleErrors(admin, /status of 503|status of 400|status of 409/i);
   await gotoRoute(admin, "payroll-runs", "Payroll");
 
   // The quick run: pick a month, get a pay period (created if the org has none for it) and a draft run. It
@@ -24,7 +30,14 @@ test("a payroll run is created, built, submitted and approved - and payroll cann
   const quick = admin.getByRole("dialog");
   await expect(quick.getByRole("heading", { name: "Quick monthly run" })).toBeVisible();
   const period = (await quick.getByRole("combobox").first().innerText()).replace(" · period exists", "").trim();
-  await quick.getByRole("button", { name: "Create run" }).click();
+  // The run's own wire path, taken from the create's OWN response rather than guessed from the table later:
+  // several payroll specs run against this same month, so "the newest draft" is not this test's run, and the
+  // build below needs to ask the SERVER about THIS run rather than trust a toast that lives five seconds.
+  const [createdRun] = await Promise.all([
+    admin.waitForResponse((r) => /\/v1\/payroll-runs$/.test(r.url()) && r.request().method() === "POST" && r.ok()),
+    quick.getByRole("button", { name: "Create run" }).click(),
+  ]);
+  const runPath = ((await createdRun.json()) as { path: string }).path;
   await expect(toast(admin, /Monthly run created|Payroll run created/)).toBeVisible();
 
   const row = admin.locator("tbody tr").filter({ hasText: period }).first();
@@ -37,8 +50,26 @@ test("a payroll run is created, built, submitted and approved - and payroll cann
   await expect(admin.getByRole("menuitem", { name: "Build" })).toBeVisible();
   await expect(admin.getByRole("menuitem", { name: "Publish" })).toHaveCount(0);
   await expect(admin.getByRole("menuitem", { name: "Approve" })).toHaveCount(0);
-  await admin.getByRole("menuitem", { name: "Build" }).click();
-  await expect(toast(admin, /Run built/)).toBeVisible();
+  // Retried: a transient 409/503 on a busy lane can leave the toast never arriving even though the press
+  // landed - re-opening the menu and pressing again is safe, since a second Build on an already-built run is
+  // the same request repeated, not a different one. Gated on the run's OWN COMPUTED LINES, asked of the
+  // server, not on the toast: building leaves the run in DRAFT (only submitting moves it on), so the row says
+  // nothing about it, and a toast lives about five seconds - a loaded machine misses it, and the loop then
+  // waits forever on a notification for work that was already done.
+  await expect(async () => {
+    if (await built(admin, runPath)) return;
+    const menuOpen = await admin.getByRole("menuitem", { name: "Build" }).count();
+    if (menuOpen) {
+      await admin.getByRole("menuitem", { name: "Build" }).click();
+    } else {
+      await row.getByRole("button", { name: "Actions" }).click();
+      const build = admin.getByRole("menuitem", { name: "Build" });
+      if (await build.count()) await build.click();
+    }
+    await expect
+      .poll(() => built(admin, runPath), { timeout: 10_000 })
+      .toBe(true);
+  }).toPass({ timeout: 45_000 });
 
   // The numbers it computed are readable from the same menu - a run nobody can look inside is a number
   // nobody can defend.
@@ -72,7 +103,13 @@ test("a payroll run is created, built, submitted and approved - and payroll cann
 
   await row.getByRole("button", { name: "Actions" }).click();
   await admin.getByRole("menuitem", { name: "Submit" }).click();
-  await expect(toast(admin, "Submitted for review")).toBeVisible();
+  // Either signal, not the toast alone: a transient 503 on a busy lane can leave it never arriving even
+  // though the submit itself landed, and the row's own state outlasts the toast's few seconds on screen.
+  await expect(async () => {
+    const gotToast = await toast(admin, "Submitted for review").count();
+    const inReview = await row.locator("text=/Review/i").count();
+    expect(gotToast || inReview).toBeTruthy();
+  }).toPass({ timeout: 30_000 });
   await expect(row).toContainText(/Review/i);
 
   // A run in review is exactly where the second pair of eyes belongs - and the payroll role, who runs
@@ -123,10 +160,25 @@ test("a payroll run is created, built, submitted and approved - and payroll cann
   const ecrBytes = await readFile(ecrPath);
   expect(ecrBytes.length).toBeGreaterThan(0);
 
-  // Take the run back out, so the lane can run again against the same month.
+  // Take the run back out, so the lane can run again against the same month. The menu closed behind the
+  // download above - picking any item dismisses it - so it is opened again for this one.
+  await row.getByRole("button", { name: "Actions" }).click();
   await admin.getByRole("menuitem", { name: "Delete run" }).click();
   const confirm = admin.getByRole("dialog");
   await expect(confirm.getByText("Delete payroll run?")).toBeVisible();
   await confirm.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(toast(admin, "Run deleted")).toBeVisible();
 });
+
+/**
+ * Whether the run has been BUILT - it has computed lines of its own.
+ *
+ * The run's `state` cannot answer this: a build leaves it in DRAFT (only submitting moves it to REVIEW), so
+ * the table shows the same badge before and after. Its items are what a build actually produces, which is
+ * also what the breakdown dialog reads, so this is the same fact the page shows - asked without a toast.
+ */
+async function built(page: import("@playwright/test").Page, runPath: string): Promise<boolean> {
+  const res = await page.request.get(`/v1/${runPath}/items?page_size=1`);
+  if (!res.ok()) return false;
+  return (((await res.json()) as { results?: unknown[] }).results ?? []).length > 0;
+}

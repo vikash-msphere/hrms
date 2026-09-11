@@ -18,7 +18,8 @@ import { currentComp, monthlyRecurringGross } from "./taxProjection";
 import { applyStructure } from "../domain/payroll";
 import { structureLinesById } from "./salaryStructures";
 import { encashmentRatePerDay, encashmentAmount, encashmentEligibilityError, type RateBasis } from "../domain/encashment";
-import { calendarYearWindow, type CarryForwardExcess } from "../domain/carryForward";
+import { type CarryForwardExcess } from "../domain/carryForward";
+import { orgYear, type OrgYear } from "./orgDay";
 
 // Org-wide leave caps config (data, configurable in Settings). Picks per-type vs cumulative caps for both
 // encashment and carry-forward, and what happens to carry-forward excess (auto-encash up to the cap, or
@@ -99,19 +100,68 @@ async function adjustBalance(deps: Deps, employeeId: string, leaveTypeId: string
   }
 }
 
-// Days already committed (APPROVED or PAID) in the current calendar year - the running total the annual cap
-// is measured against. Scoped to one leave type (per-type mode) or all types (cumulative mode).
-export async function encashedDaysThisYear(deps: Deps, employeeId: string, leaveTypeId?: string): Promise<number> {
-  const yr = calendarYearWindow(deps.clock.now());
+// Days already committed (APPROVED or PAID) in a calendar year - the running total the annual cap is measured
+// against. Scoped to one leave type (per-type mode) or all types (cumulative mode).
+//
+// The year is the ORG's (services/orgDay `orgYear`), and it is passed IN rather than derived here. Two reasons,
+// both load-bearing:
+//   - `created_at` is an instant, not a date-only column, so the window has to be the org's year and not UTC's.
+//     Bounded in UTC it counted an encashment raised at 02:00 on 1 January IST - 20:30 on 31 December UTC -
+//     against the PREVIOUS year's cap, which both under-counted this year's usage (letting an employee encash
+//     past the annual cap) and over-counted last year's.
+//   - the year-end rollover calls this once per employee per leave type, on a cron tick with no per-request
+//     settings memo. Resolving it here would be a D1 read every time; resolved once by the caller it is one.
+// `from`/`to` only NARROW the read (they are deliberately loose); `covers` is what actually decides.
+export async function encashedDaysThisYear(deps: Deps, employeeId: string, year: OrgYear, leaveTypeId?: string): Promise<number> {
   const conds = [
     eq(schema.leaveEncashments.employeeId, employeeId),
     inArray(schema.leaveEncashments.state, ["APPROVED", "PAID"] as const),
-    gte(schema.leaveEncashments.createdAt, yr.start),
-    lte(schema.leaveEncashments.createdAt, yr.end),
+    gte(schema.leaveEncashments.createdAt, year.from),
+    lte(schema.leaveEncashments.createdAt, year.to),
   ];
   if (leaveTypeId) conds.push(eq(schema.leaveEncashments.leaveTypeId, leaveTypeId));
   const rows = await deps.db.select().from(schema.leaveEncashments).where(and(...conds));
-  return round2(rows.reduce((s, r) => s + r.days, 0));
+  return round2(rows.filter((r) => r.createdAt && year.covers(r.createdAt)).reduce((s, r) => s + r.days, 0));
+}
+
+/**
+ * The SAME figure for the whole org, in one read.
+ *
+ * The comment above says the rollover calls the single-employee reader "once per employee per leave type", and
+ * that is exactly the problem: on the one night of the year carry-forward runs, that is a D1 round-trip per
+ * employee (cumulative mode) or per employee per leave type (per-type mode), on a tick that shares one
+ * invocation's subrequest budget with twenty-one other subtasks. The rollover both forfeits leave and creates
+ * real encashment payouts, so running out of budget half-way through is the worst place in the app to do it.
+ *
+ * The year's window is the same loose bound with the same `covers` decision, so this returns what a per-
+ * employee call would have. `total` is the cumulative-mode figure; `perType` the per-type-mode one.
+ */
+export async function encashedDaysThisYearAll(
+  deps: Deps,
+  year: OrgYear,
+): Promise<{ total: (employeeId: string) => number; perType: (employeeId: string, leaveTypeId: string) => number }> {
+  const rows = await deps.db
+    .select()
+    .from(schema.leaveEncashments)
+    .where(
+      and(
+        inArray(schema.leaveEncashments.state, ["APPROVED", "PAID"] as const),
+        gte(schema.leaveEncashments.createdAt, year.from),
+        lte(schema.leaveEncashments.createdAt, year.to),
+      ),
+    );
+  const byEmp = new Map<string, number>();
+  const byEmpType = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.createdAt || !year.covers(r.createdAt)) continue;
+    byEmp.set(r.employeeId, (byEmp.get(r.employeeId) ?? 0) + r.days);
+    const k = `${r.employeeId}${r.leaveTypeId}`;
+    byEmpType.set(k, (byEmpType.get(k) ?? 0) + r.days);
+  }
+  return {
+    total: (employeeId) => round2(byEmp.get(employeeId) ?? 0),
+    perType: (employeeId, leaveTypeId) => round2(byEmpType.get(`${employeeId}${leaveTypeId}`) ?? 0),
+  };
 }
 
 // Per-day rate + payable for `days`, from the employee's CURRENT compensation and the org's encashment rate
@@ -151,7 +201,7 @@ export async function computeAndStoreEncashment(deps: Deps, actor: AppUser, inpu
   const balance = await balanceOf(deps, employeeId, leaveTypeId);
   const cumulative = caps.encashment_mode === "cumulative";
   const capDays = cumulative ? caps.encashment_cumulative_cap_days : lt.encashmentCapDaysPerYear;
-  const alreadyEncashed = capDays != null ? await encashedDaysThisYear(deps, employeeId, cumulative ? undefined : leaveTypeId) : 0;
+  const alreadyEncashed = capDays != null ? await encashedDaysThisYear(deps, employeeId, await orgYear(deps), cumulative ? undefined : leaveTypeId) : 0;
   const reason = encashmentEligibilityError({
     encashable: lt.encashable,
     disabled: lt.disabled,
@@ -234,7 +284,7 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string) 
     capDays = lt?.encashmentCapDaysPerYear ?? null;
   }
   if (capDays != null) {
-    const alreadyEncashed = await encashedDaysThisYear(deps, row.employeeId, cumulative ? undefined : row.leaveTypeId);
+    const alreadyEncashed = await encashedDaysThisYear(deps, row.employeeId, await orgYear(deps), cumulative ? undefined : row.leaveTypeId);
     if (round2(alreadyEncashed + row.days) > capDays) {
       throw failedPrecondition(`annual encashment cap of ${capDays} day(s) exceeded (${alreadyEncashed} already used)`);
     }
@@ -263,7 +313,7 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string) 
     await deps.db.update(schema.leaveEncashments).set({ state: "PENDING", decidedBy: null, updatedAt: new Date() }).where(eq(schema.leaveEncashments.uuid, id));
     throw failedPrecondition(`insufficient leave balance (${await balanceOf(deps, row.employeeId, row.leaveTypeId)} day(s) available)`);
   }
-  await audit(deps, actor, "leave_encashment.approve", "leave-encashments", id, stateMeta("PENDING", "APPROVED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "leave_encashment.approve", "leave-encashments", id, stateMeta("PENDING", "APPROVED", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "encashment.approved", title: "Leave encashment approved", body: `Your encashment of ${row.days} day(s) was approved.`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "leaveEncashment.approved", { subject: `leave-encashments/${id}`, employeeId: row.employeeId, payload: { days: row.days, amount: row.amount } });
   return updated;
@@ -274,7 +324,7 @@ export async function rejectEncashment(deps: Deps, actor: AppUser, id: string) {
   if (row.state !== "PENDING") throw failedPrecondition("encashment is not pending");
   const [updated] = await deps.db.update(schema.leaveEncashments)
     .set({ state: "REJECTED", decidedBy: actor.uuid, updatedAt: new Date() }).where(eq(schema.leaveEncashments.uuid, id)).returning();
-  await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id, stateMeta(row.state, "REJECTED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "encashment.rejected", title: "Leave encashment rejected", body: `Your encashment of ${row.days} day(s) was rejected.`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
   return updated;
 }
@@ -290,7 +340,7 @@ export async function cancelEncashment(deps: Deps, actor: AppUser, id: string) {
     .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, from))).returning();
   if (!updated) throw failedPrecondition("encashment is no longer cancellable");
   if (from === "APPROVED") await adjustBalance(deps, row.employeeId, row.leaveTypeId, row.days); // credit the days back
-  await audit(deps, actor, "leave_encashment.cancel", "leave-encashments", id, stateMeta(from, "CANCELLED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "leave_encashment.cancel", "leave-encashments", id, stateMeta(from, "CANCELLED", { employee: `employees/${row.employeeId}` }), updated);
   return updated;
 }
 

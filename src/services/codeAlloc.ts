@@ -129,6 +129,36 @@ export async function allocOwnedCodesFor(
   minWidth: number = CODE_WIDTH.owned,
   /** The owners' employee codes, when the caller has already read them - a fan-out usually has. */
   ownerCodes?: Map<string, string | null>,
+  resync = false,
+): Promise<Map<string, string>> {
+  const runs = await allocOwnedCodeRuns(deps, table, ownerCol, new Map(ownerUuids.map((uuid) => [uuid, 1])), minWidth, ownerCodes, resync);
+  return new Map([...runs].map(([uuid, codes]) => [uuid, codes[0]!]));
+}
+
+/**
+ * SEVERAL owned codes for each of many owners, in one pass - `allocOwnedCodesFor` generalised from one-per-owner
+ * to `counts.get(owner)`-per-owner, and the function it is now implemented in terms of.
+ *
+ * The shape exists because the one-per-owner form is the wrong one for a fan-out that writes several rows under
+ * the SAME owner: the nightly leave accrual creates a balance row per (employee x accruing leave type), so a
+ * five-type org needs five codes in one owner's namespace. Called one at a time that is a counter round-trip per
+ * pair - headcount x types of them - inside the single invocation the nightly tick gets, which is how a
+ * first-ever accrual night runs out of subrequests part-way through the roster and leaves half the org without
+ * balances. Reserving a RUN per owner makes the whole night one batch of indexed counter bumps.
+ *
+ * Codes in a run are consecutive, so `counts` must be the real number of rows about to be written: a reserved
+ * number that goes unused is a gap in the sequence, which is harmless, but a run that is too short is a missing
+ * code the caller cannot recover from.
+ */
+export async function allocOwnedCodeRuns(
+  deps: Deps,
+  table: any,
+  ownerCol: any,
+  /** How many codes each owner needs. Owners mapped to 0 (or absent) get none. */
+  counts: Map<string, number>,
+  minWidth: number = CODE_WIDTH.owned,
+  /** The owners' employee codes, when the caller has already read them - a fan-out usually has. */
+  ownerCodes?: Map<string, string | null>,
   /**
    * Re-establish each counter against what is actually STORED before taking a number, instead of trusting it.
    *
@@ -140,9 +170,12 @@ export async function allocOwnedCodesFor(
    * the read that makes the scope correct from then on.
    */
   resync = false,
-): Promise<Map<string, string>> {
-  const owners = [...new Set(ownerUuids.filter(Boolean))];
-  const out = new Map<string, string>();
+): Promise<Map<string, string[]>> {
+  // An owner asking for nothing is not an owner: dropping them here keeps them out of every statement below,
+  // so a caller may pass its whole roster and let the counts decide who is actually touched.
+  const owners = [...new Set([...counts].filter(([uuid, n]) => uuid && n > 0).map(([uuid]) => uuid))];
+  const need = (uuid: string) => Math.max(1, Math.trunc(counts.get(uuid) ?? 1));
+  const out = new Map<string, string[]>();
   if (!owners.length) return out;
 
   // The prefix half of the code: the owner's own employee code. One read for the whole fan-out, skipped when
@@ -154,8 +187,16 @@ export async function allocOwnedCodesFor(
     for (const r of rows) parentCode.set(r.uuid, r.code);
   }
 
-  // The leaf half: bump every owner's counter in one batch. A scope with no counter row yet updates nothing,
-  // which is exactly how the first-touch set is identified - no extra read to find it.
+  /** The owner's `n` consecutive codes, ending at the counter value their reservation returned. */
+  const run = (uuid: string, endValue: number): string[] => {
+    const n = need(uuid);
+    const parent = parentCode.get(uuid) ?? null;
+    return Array.from({ length: n }, (_, k) => childCodeAt(parent, endValue - n + 1 + k, minWidth));
+  };
+
+  // The leaf half: bump every owner's counter in one batch, by the size of that owner's run. A scope with no
+  // counter row yet updates nothing, which is exactly how the first-touch set is identified - no extra read to
+  // find it.
   const scopes = owners.map((uuid) => ({ uuid, scope: ownedScope(table, uuid) }));
   const seeding: { uuid: string; scope: string }[] = [];
   if (resync) {
@@ -163,13 +204,13 @@ export async function allocOwnedCodesFor(
   } else {
     const bumped = await batchRows(
       deps,
-      scopes.map(({ scope }) =>
-        deps.db.update(schema.codeSequences).set({ next: sql`${schema.codeSequences.next} + 1` }).where(eq(schema.codeSequences.scope, scope)).returning(),
+      scopes.map(({ uuid, scope }) =>
+        deps.db.update(schema.codeSequences).set({ next: sql`${schema.codeSequences.next} + ${need(uuid)}` }).where(eq(schema.codeSequences.scope, scope)).returning(),
       ),
     );
     scopes.forEach(({ uuid, scope }, i) => {
       const row = (bumped[i] as { next: number }[] | undefined)?.[0];
-      if (row) out.set(uuid, childCodeAt(parentCode.get(uuid) ?? null, row.next, minWidth));
+      if (row) out.set(uuid, run(uuid, row.next));
       else seeding.push({ uuid, scope });
     });
     if (!seeding.length) return out;
@@ -191,16 +232,17 @@ export async function allocOwnedCodesFor(
     deps,
     seeding.map(({ uuid, scope }) => {
       const mark = maxChildSeg(seen.get(uuid) ?? [], parentCode.get(uuid) ?? null);
+      // `next` lands on the LAST value of the run in both branches, which is what `run()` counts back from.
       return deps.db
         .insert(schema.codeSequences)
-        .values({ scope, next: mark + 1 })
-        .onConflictDoUpdate({ target: schema.codeSequences.scope, set: { next: sql`max(${schema.codeSequences.next}, ${mark}) + 1` } })
+        .values({ scope, next: mark + need(uuid) })
+        .onConflictDoUpdate({ target: schema.codeSequences.scope, set: { next: sql`max(${schema.codeSequences.next}, ${mark}) + ${need(uuid)}` } })
         .returning();
     }),
   );
   seeding.forEach(({ uuid }, i) => {
     const row = (created[i] as { next: number }[] | undefined)?.[0];
-    if (row) out.set(uuid, childCodeAt(parentCode.get(uuid) ?? null, row.next, minWidth));
+    if (row) out.set(uuid, run(uuid, row.next));
   });
   return out;
 }

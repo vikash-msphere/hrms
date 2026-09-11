@@ -3,12 +3,16 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import {
   listCards, getCardWithComments, createCard, updateCard, moveCard, setCardBlocked, assignCard, prioritizeCard,
-  commentCard, addCardTodos, toggleCardTodo, removeCardTodo, deleteCard, restoreCard, purgeCard,
+  commentCard, addCardTodos, toggleCardTodo, removeCardTodo, promoteCardTodo, watchCard, deleteCard, restoreCard, purgeCard,
   type CardInput,
 } from "../services/cards";
 import { toCardResource } from "../http/serialize";
 import { CARD_PRIORITIES } from "../domain/boards";
+// A card's checklist and a ticket's are the same thing seeded from the same catalogue, so they share the cap.
+import { MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_ITEM_LEN } from "../domain/tickets";
 const priorityEnum = z.enum(CARD_PRIORITIES);
+// Repeating work. Same vocabulary as a recurring 1:1, plus the quarterly rhythm operational chores run on.
+const cadenceEnum = z.enum(["weekly", "biweekly", "monthly", "quarterly"]);
 
 const createSchema = z.object({
   board: z.string().min(1),
@@ -27,7 +31,8 @@ const createSchema = z.object({
   size: z.number().nullable().optional(),
   due_date: z.string().nullable().optional(),
   goal: z.string().nullable().optional(),
-  initial_todos: z.array(z.string()).optional(),
+  cadence: cadenceEnum.nullable().optional(),
+  initial_todos: z.array(z.string().max(MAX_CHECKLIST_ITEM_LEN)).max(MAX_CHECKLIST_ITEMS).optional(),
 }).strict();
 const updateSchema = z.object({
   title: z.string().min(1).optional(),
@@ -42,15 +47,18 @@ const updateSchema = z.object({
   size: z.number().nullable().optional(),
   due_date: z.string().nullable().optional(),
   goal: z.string().nullable().optional(),
+  cadence: cadenceEnum.nullable().optional(),
 }).strict();
 const moveSchema = z.object({ to_column: z.string().min(1), to_swimlane: z.string().nullable().optional(), rank: z.number().optional(), to_assignee: z.string().nullable().optional(), to_goal: z.string().nullable().optional(), to_priority: z.string().nullable().optional(), to_department: z.string().nullable().optional(), to_sprint: z.string().nullable().optional() }).strict();
 const blockSchema = z.object({ reason: z.string().nullable().optional(), blocked_by: z.string().nullable().optional() }).strict();
 const assignSchema = z.object({ assignee: z.string().nullable().optional() }).strict();
 const prioritizeSchema = z.object({ priority: priorityEnum }).strict();
 const commentSchema = z.object({ body: z.string() }).strict();
-const todosSchema = z.object({ texts: z.array(z.string()) }).strict();
+const todosSchema = z.object({ texts: z.array(z.string().max(MAX_CHECKLIST_ITEM_LEN)).max(MAX_CHECKLIST_ITEMS) }).strict();
 const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).strict();
 const removeTodoSchema = z.object({ todo: z.string() }).strict();
+// Promote: `assignee` omitted inherits the parent card's, an explicit null leaves the new card unassigned.
+const promoteTodoSchema = z.object({ todo: z.string(), assignee: z.string().nullable().optional() }).strict();
 
 // Kanban cards. Every write past the row is the service's own: a create seeds the checklist, a delete or
 // restore re-rolls the parent goal's progress, and a purge tears down comments, todos, movements and any
@@ -64,7 +72,9 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
   param: "card_id",
   createSchema,
   updateSchema,
-  serialize: toCardResource,
+  // The viewer's own id rides along so the serializer can answer `watching` - the state of the watch button -
+  // instead of shipping the watcher list for a client to match against itself.
+  serialize: (row, user) => toCardResource(Object.assign(row, { _viewerEmployeeId: user?.employeeId ?? null })),
   overrides: {
     // The item read carries the card's comment thread.
     get: (deps, actor, id) => getCardWithComments(deps, actor, id),
@@ -91,5 +101,12 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
     addTodos: { schema: todosSchema, run: (deps, user, id, b) => addCardTodos(deps, user, id, b.texts) },
     toggleTodo: { schema: toggleTodoSchema, run: (deps, user, id, b) => toggleCardTodo(deps, user, id, b.todo, b.done) },
     removeTodo: { schema: removeTodoSchema, run: (deps, user, id, b) => removeCardTodo(deps, user, id, b.todo) },
+    // The checklist item that turned out to be real work: files it as a card on the same board and ticks the
+    // item, so the board and the checklist never disagree about what is outstanding.
+    promoteTodo: { schema: promoteTodoSchema, run: (deps, user, id, b) => promoteCardTodo(deps, user, id, b.todo, Object.prototype.hasOwnProperty.call(b, "assignee") ? b.assignee : undefined) },
+    // Follow a task without being the one doing it. Both directions are idempotent, so a double press is a
+    // double press rather than an error.
+    watch: { run: (deps, user, id) => watchCard(deps, user, id, true) },
+    unwatch: { run: (deps, user, id) => watchCard(deps, user, id, false) },
   },
 });

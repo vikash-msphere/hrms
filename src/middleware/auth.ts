@@ -10,7 +10,7 @@ import type { Policy } from "../domain/manifests";
 import { mergeGrants } from "../domain/compileGrants";
 import { loadRoleGrant, loadUserGrant, loadManifest } from "../lib/policyLoad";
 import { resolveViewAs, VIEW_AS_HEADER } from "../lib/viewAs";
-import { unauthenticated, forbidden } from "../lib/errors";
+import { unauthenticated, forbidden, isUserEmailCollision } from "../lib/errors";
 import { getCookie } from "hono/cookie";
 import { openSession } from "../lib/session";
 import { SESSION_COOKIE } from "../routes/authRoutes";
@@ -191,13 +191,33 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   } else {
     const token = c.req.header("Cf-Access-Jwt-Assertion");
     if (!token) throw unauthenticated("missing Access token");
+    // ASSERTED HERE, not only at boot. `makeDeps` already refuses to start an Access-mode deploy that is
+    // missing either of these (deps.ts assertConfigured), which is the check that actually protects the
+    // deployment - this one exists because of HOW jose reads the options below: `jwtVerify` skips the
+    // `iss`/`aud` check ENTIRELY when the option is undefined rather than failing. So a `CF_ACCESS_AUD` that
+    // went missing would not narrow verification, it would remove it, and any token signed by the team's
+    // Access JWKS - including one minted for a DIFFERENT application in the same team - would authenticate.
+    // A silent widening is the wrong thing to leave depending on a check in another module.
+    if (!team || !c.env.CF_ACCESS_AUD) throw new Error("Access mode requires CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD");
     jwks ??= createRemoteJWKSet(new URL(`${team}/cdn-cgi/access/certs`));
+    let claimed: unknown;
     try {
       const { payload } = await jwtVerify(token, jwks, { issuer: team, audience: c.env.CF_ACCESS_AUD });
-      email = String(payload.email).toLowerCase();
+      claimed = payload.email;
     } catch {
       throw unauthenticated("invalid Access token");
     }
+    // A verified Access token is not automatically a PERSON. A SERVICE TOKEN issued for the same application
+    // passes this verification with the same issuer and audience and carries no `email` claim at all - it
+    // identifies itself by `common_name`. `String(payload.email)` turned that into the literal string
+    // "undefined", which is a valid-looking email address to everything downstream: the lookup missed, so the
+    // provisioning path below minted a real `employee` account named "undefined" that every service-token
+    // request then shared. Today the domain allow-list happens to catch it (an empty domain matches nothing),
+    // but that list is optional in Access mode and is a perimeter, not a claim check. This app has no machine
+    // lane on the browser path - a machine caller uses an API key - so a token with no human behind it is
+    // refused here rather than allowed to become one.
+    if (typeof claimed !== "string" || !claimed.includes("@")) throw unauthenticated("Access token carries no email (a service token cannot sign in; use an API key)");
+    email = claimed.toLowerCase();
   }
 
   // Resolve the caller AND their employee `code` (the dept-scope key) in one read via a left join, so
@@ -205,6 +225,13 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // `access_rules` / `policy` store (cached per role / globally, short TTL), so the hot path reads them
   // from the isolate cache (~0 reads warm) and the decision needs no per-request policy join.
   let user = await loadUserRow(deps, eq(schema.users.email, email));
+  // Second look, case-insensitively, before concluding this caller has no account. The exact match above is the
+  // indexed one and answers every ordinary request; this runs only when it misses, which is either a genuine
+  // first login or a row stored with different case by an older build (`email` is UNIQUE on the raw column, so
+  // both could exist at once). Provisioning on top of such a row is the harmful outcome - a second account at
+  // the default role, while the one carrying their real role and their access rules goes unused - so it is
+  // adopted here instead. One unindexed read, on the path that was about to write a row.
+  if (!user) user = await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`);
   if (!user) {
     // First-login auto-provisioning. Optional second perimeter (Access is primary): if ALLOWED_EMAIL_DOMAINS
     // is configured, only those domains may mint a new user, so a too-broad Access policy can't silently create
@@ -225,23 +252,41 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
         .where(and(sql`lower(${schema.employees.workEmail}) = ${email}`, isNull(schema.employees.deleteTime)))
         .limit(1)
     )[0];
-    const inserted = (
-      await deps.db
-        .insert(schema.users)
-        .values({ code: await allocFlatCode(deps, schema.users), email, role: "employee", employeeId: emp?.uuid ?? null })
-        .returning()
-    )[0]!;
-    user = {
-      uuid: inserted.uuid,
-      email: inserted.email,
-      role: inserted.role,
-      status: inserted.status,
-      employeeId: inserted.employeeId,
-      employeeCode: emp?.code ?? null,
-      firstName: null,
-      lastName: null,
-      sessionsValidFrom: inserted.sessionsValidFrom,
-    };
+    // ADOPT THE WINNER on a lost race. A first login is not one request: a cold page load fires the bootstrap
+    // prefetch and whatever the landing route reads, concurrently, and each of them arrives here having read
+    // no user. Both then insert, `users.email` being UNIQUE is what stops the second row, and the loser used
+    // to surface as an unhandled `D1_ERROR: UNIQUE constraint failed: users.email` - a 500 on the very first
+    // screen a new employee ever sees, on a request that had in fact succeeded a millisecond earlier. So the
+    // collision is read as what it is (the row now exists) and the winner's row is loaded instead. The lookup
+    // is the case-insensitive one for the same reason the read above falls back to it.
+    let provisioned: UserRow;
+    try {
+      const inserted = (
+        await deps.db
+          .insert(schema.users)
+          .values({ code: await allocFlatCode(deps, schema.users), email, role: "employee", employeeId: emp?.uuid ?? null })
+          .returning()
+      )[0]!;
+      provisioned = {
+        uuid: inserted.uuid,
+        email: inserted.email,
+        role: inserted.role,
+        status: inserted.status,
+        employeeId: inserted.employeeId,
+        employeeCode: emp?.code ?? null,
+        firstName: null,
+        lastName: null,
+        sessionsValidFrom: inserted.sessionsValidFrom,
+      };
+    } catch (e) {
+      if (!isUserEmailCollision(e)) throw e;
+      const winner = await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`);
+      // The row was there a moment ago and is not now: only a delete landing between the two statements
+      // explains that, and re-entering the race is not better than saying so.
+      if (!winner) throw unauthenticated("sign-in raced an account change; try again");
+      provisioned = winner;
+    }
+    user = provisioned;
   }
   if (user.status !== "active") throw forbidden("user disabled");
   // Session revocation. A session cookie issued before the user's cut-off is dead, whatever its `exp` says -

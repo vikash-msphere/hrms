@@ -303,6 +303,18 @@ describe("custom-method bodies reach the body gate", () => {
     });
   });
 
+  // The ceiling on the bulk loop REFUSES; it does not walk the first N and wave the rest through. That
+  // direction matters more than the number: the gate used to slice the list, so a caller holding no reference
+  // grant could put the record it was not allowed to write past position N and have it arrive ungated. No
+  // route accepts a list this long anyway (ASSET_BATCH_MAX is 100), which is exactly why nothing would have
+  // noticed. The grant here is the FULL allow set, so the only thing left that can answer 403 is the ceiling.
+  it("refuses a bulk envelope longer than the gate will walk, rather than gating part of it", async () => {
+    await withRules([...batch, ["asset-categories.**", "read"]]);
+    const items = (n: number) => ({ items: Array.from({ length: n }, () => ({ name: "Laptop", category: catRef() })) });
+    expect((await send("POST", "/v1/assets:batchCreate", items(200), JSON_TYPES[0]!)).status).not.toBe(403);
+    expect((await send("POST", "/v1/assets:batchCreate", items(201), JSON_TYPES[0]!)).status).toBe(403);
+  });
+
   it("gates a reference on an item-level verb, whose code is not `<code>:verb`", async () => {
     // `assets:verify` carries a `stocktake` ref: filing a sighting against a count you cannot read would be
     // recording into somebody else's report. The path's code segment must be the code, not code-plus-verb.

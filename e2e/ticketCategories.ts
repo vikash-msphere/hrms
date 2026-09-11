@@ -43,12 +43,21 @@ async function mutate(page: Page, change: (categories: Category[]) => Category[]
       headers: { ...SPA_HEADERS, ...(etag ? { "If-Match": etag } : {}) },
       data: { value: { categories: next } },
     });
-    if (res.ok()) return;
-    // Anything but success is retried by re-reading: 409 is the conflict this is here for, and the row not
-    // existing yet is a race two specs can both lose on their first attempt.
-    if (attempt === ATTEMPTS - 1) expect(res.status(), await res.text()).toBe(200);
+    // A 200 is not yet proof, and this is the one case If-Match cannot cover: a read that answered 404 has no
+    // version to hold, so both specs that saw "no row" write UNGUARDED, the row exists by the time the second
+    // one lands, and its blind update takes the first one's category away with it - a 200 each and one
+    // category gone. So the write is CONFIRMED by re-reading: once the change reads back as already applied
+    // there is a version to hold, and every later save in this loop is guarded by it.
+    if (res.ok()) {
+      const { categories: after } = await readCategories(page);
+      if (!change(after)) return;
+    } else if (attempt === ATTEMPTS - 1) {
+      expect(res.status(), await res.text()).toBe(200);
+    }
     await page.waitForTimeout(100 + attempt * 150);
   }
+  // Ten reads, ten writes, and the list still does not carry the change: that is not a lost race any more.
+  expect(change((await readCategories(page)).categories), "the ticket-category list never took the change").toBeNull();
 }
 
 /** Add one category, leaving every other spec's alone. */

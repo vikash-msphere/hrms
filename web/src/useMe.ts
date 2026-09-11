@@ -28,6 +28,7 @@ const toMe = (u: User | null): Me | null =>
         employee_id: u.employee ? idOf(u.employee) : null,
         capabilities: u.caller_access?.capabilities ?? [],
         holiday_feed_token: u.holiday_feed_token ?? null,
+        session_id: u.session_id ?? null,
       }
     : null;
 

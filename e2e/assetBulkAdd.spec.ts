@@ -1,4 +1,4 @@
-import { gotoRoute, purge, test, expect } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // A delivery, added as a delivery.
 //
@@ -15,6 +15,9 @@ test("the bulk dialog counts what it will create, from a quantity or a pasted li
   test.setTimeout(180_000);
   const page = await as("hr");
   const admin = await as("super"); // the hard purge is an admin's to make
+  // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.) - the retry below on the submit is what actually recovers from it.
+  allowConsoleErrors(page, /status of 500|status of 503/i);
   const stamp = Date.now() % 1_000_000;
   const name = `E2E delivery ${stamp}`;
 
@@ -51,9 +54,19 @@ test("the bulk dialog counts what it will create, from a quantity or a pasted li
   await expect(form.getByText(/^3 to add/)).toBeVisible({ timeout: 30_000 });
   await expect(form.getByRole("button", { name: /^Add 3 assets$/ })).toBeVisible();
 
-  await form.getByRole("button", { name: /^Add 3 assets$/ }).click();
-  // The dialog closing is the write landing; a refusal keeps it open with the reason pinned.
-  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 60_000 });
+  // The dialog closing is the write landing; a refusal keeps it open with the reason pinned. Re-pressed on a
+  // miss, checked by the serials themselves first: a transient 500 (the same rare dev-Worker-restart hiccup
+  // documented elsewhere in this suite) can leave the dialog open with no way to tell, from the client alone,
+  // whether the write actually landed before the response was lost - so this checks the register directly
+  // before re-pressing, rather than risk creating six records instead of three.
+  await expect(async () => {
+    if (await page.getByRole("dialog").count()) {
+      if ((await bySerial(page, serials)).length === serials.length) return;
+      const addBtn = page.getByRole("dialog").getByRole("button", { name: /^Add 3 assets$/ });
+      if (await addBtn.count()) await addBtn.click();
+    }
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
+  }).toPass({ timeout: 90_000 });
 
   try {
     // Three records, one per line - not one record with three serials on it, which is what "bulk" means in

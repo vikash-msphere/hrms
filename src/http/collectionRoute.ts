@@ -21,7 +21,9 @@ import { accessHint, withAccess } from "./accessHint";
 import { clampPageSize } from "./pagination";
 import { lastWriteAt, listEtag, etagMatches } from "./listEtag";
 import { jsonBody } from "./jsonRequest";
+import { queryFlag, queryParam } from "./query";
 import { crudService, type CrudService, type CrudSpec, type CrudTable } from "../services/crud";
+import type { PurgeCascade } from "../services/softDelete";
 
 /**
  * One custom method. The common shape is `{schema?, run}`: the factory parses the body, calls `run`, then
@@ -99,6 +101,30 @@ export type CollectionRouteSpec<I, T extends CrudTable = CrudTable> = CrudSpec<I
   verbs?: Record<string, VerbEntry>;
 };
 
+// The collections that actually answer `DELETE ?force=true` with a hard purge, written here as each one is
+// mounted. The authz middleware escalates a forced delete from `write` to `admin`, and this is how it knows
+// there is something to escalate TO: a collection whose delete is already permanent ignores `?force`
+// entirely (see the DELETE handler below), so refusing the caller over that parameter would deny a delete
+// they hold on a purge that does not exist. Nothing outside this factory reads `force`.
+const forcePurgeable = new Set<string>();
+
+/** Whether `DELETE /v1/<collection>?force=true` means a hard purge, rather than the collection's own delete. */
+export function hasForcePurge(collection: string): boolean {
+  return forcePurgeable.has(collection);
+}
+
+// Every declared teardown, recorded as its collection is mounted, so a test can hold each one against the
+// foreign keys the schema actually declares (test/purgeCascadeDrift). A cascade may be ABSENT - an employee
+// with payslips is a row the org may not quietly erase, and the resulting 409 is the intended answer - but
+// one that exists must be COMPLETE: the purge deletes the children it lists before the row it cannot delete,
+// so a half-listed cascade destroys the named children and then 409s over the ones it forgot.
+const purgeCascades = new Map<string, { table: unknown; cascade: PurgeCascade }>();
+
+/** The `purgeCascade` of every factory-built collection that declares one, by collection name. */
+export function declaredPurgeCascades(): Map<string, { table: unknown; cascade: PurgeCascade }> {
+  return purgeCascades;
+}
+
 export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: CollectionRouteSpec<I, T>) {
   const svc: CrudService<I> = { ...crudService(spec), ...spec.overrides };
   const { param, collection, serialize } = spec;
@@ -135,6 +161,8 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   // row would keep re-routing approvals) while having no restore and no `?force`: that is `overrides.remove`
   // plus `softDelete: false`.
   const canDelete = softDeletable || !!spec.overrides?.remove;
+  if (softDeletable) forcePurgeable.add(collection);
+  if (spec.purgeCascade) purgeCascades.set(collection, { table: spec.table, cascade: spec.purgeCascade });
   // The access hint must describe THIS collection's actual surface, not a default. Forward and inverse
   // lifecycle members are both listed so the UI gets a hint whichever state a row is in (they share one grant
   // pattern, so it only costs an in-memory decide()).
@@ -154,12 +182,12 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   app.get("/", async (c) => {
     // Resolved ONCE, for the generic list and the route-level hook alike.
     const page: PageRequest = {
-      maxPageSize: clampPageSize(Number(c.req.query("max_page_size")) || undefined),
-      pageToken: c.req.query("page_token"),
+      maxPageSize: clampPageSize(Number(queryParam(c, "max_page_size")) || undefined),
+      pageToken: queryParam(c, "page_token"),
       // `deleted_only` implies "deleted are visible", so a list hook that only knows the boolean cannot
       // accidentally exclude the very rows being asked for.
-      showDeleted: c.req.query("show_deleted") === "true" || c.req.query("deleted_only") === "true",
-      deletedOnly: c.req.query("deleted_only") === "true",
+      showDeleted: queryFlag(c, "show_deleted") || queryFlag(c, "deleted_only"),
+      deletedOnly: queryFlag(c, "deleted_only"),
     };
     const user = c.get("user");
     // Conditional GET (src/http/listEtag.ts). The client caches this page and revalidates when its freshness
@@ -207,7 +235,7 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
   // answer: the route does not exist, rather than existing and refusing.
   if (canCreate && createSchema) {
     app.post("/", zValidator("json", createSchema), async (c) =>
-      item(c, await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, c.req.query("id"))));
+      item(c, await svc.create(c.get("deps"), c.get("user"), c.req.valid("json") as I, queryParam(c, "id"))));
   }
   if (canUpdate && updateSchema) {
     app.patch(`/:${param}`, zValidator("json", updateSchema), async (c) =>
@@ -220,7 +248,13 @@ export function collectionRoutes<I, T extends CrudTable = CrudTable>(spec: Colle
       const ifMatch = c.req.header("If-Match");
       // ?force is the hard purge (admin); the plain call is the soft delete `:restore` can undo. A collection
       // whose delete is already permanent has neither - there is nothing to escalate to.
-      if (softDeletable && c.req.query("force") === "true") await svc.purge(c.get("deps"), c.get("user"), id, ifMatch);
+      //
+      // READ THROUGH http/query.ts, NOT `c.req.query()`. This is the one parameter in the app that lifts a
+      // request's required level, and middleware/authz.ts decides that lift with `new URL().searchParams`.
+      // Hono's parser reads past a `#`, the WHATWG one does not, so `#?force=true` was gated as a `write`
+      // soft delete here and executed as an `admin` hard purge - see the header of http/query.ts. Both
+      // readers now use the same parser, so the gate and the act cannot mean different things by `force`.
+      if (softDeletable && queryFlag(c, "force")) await svc.purge(c.get("deps"), c.get("user"), id, ifMatch);
       else await svc.remove(c.get("deps"), c.get("user"), id, ifMatch);
       return c.body(null, 204);
     });

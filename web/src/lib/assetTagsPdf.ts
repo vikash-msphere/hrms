@@ -3,6 +3,9 @@
 // lazily (pdf-lib) only when the user exports.
 import { PDFDocument, StandardFonts, rgb, type PDFImage, type PDFPage } from "pdf-lib";
 import { slotPos, fitLabelBlock, labelLineSpecs, labelTextBox, LABEL_LINE_HEIGHT, type SheetFormat } from "./assetTags";
+// The SAME sanitizer the Worker's PDF renderers use (src/lib/winAnsi.ts), not a copy: the standard fonts here
+// are WinAnsi-encoded exactly as they are there. See the note at the specs below for what it prevents.
+import { enc } from "../../../src/lib/winAnsi";
 
 const MM = 72 / 25.4; // mm -> pt
 const A4 = { w: 210 * MM, h: 297 * MM };
@@ -69,13 +72,20 @@ export async function buildTagSheetsPdf(opts: PdfOptions): Promise<Uint8Array> {
     // with the preview's Arial, so the same words land on the same lines at the same size. Layout is in
     // mm (the size floor is a physical one); only the drawing converts to points.
     const withLogo = !!logo;
+    // SANITIZED AT THE SOURCE, so wrapping, scaling and drawing all see the same string. pdf-lib encodes to
+    // measure as well as to draw, so a character the base font cannot encode throws out of the measure
+    // callback below rather than rendering as a blank - and every one of these fields is free text an
+    // operator types: the org name, the sticker footer, an asset's name. A rupee sign in the footer or an
+    // asset named in any non-Latin script took the whole sheet export down with it, which is the one moment
+    // somebody is standing at a label printer. The HTML preview (AssetTagPrinter) is deliberately left
+    // unsanitized: it can render those characters, and only the PDF has to give them up.
     const fitted = fitLabelBlock(
       labelLineSpecs({
-        org: show.org && !withLogo ? opts.orgName : "",
-        tag: label.tag,
-        name: show.name ? label.name : "",
-        serial: show.serial ? label.serial : "",
-        footer: opts.footer ?? "",
+        org: show.org && !withLogo ? enc(opts.orgName) : "",
+        tag: enc(label.tag),
+        name: show.name ? enc(label.name) : "",
+        serial: show.serial ? enc(label.serial) : "",
+        footer: enc(opts.footer ?? ""),
       }),
       box,
       f.h,

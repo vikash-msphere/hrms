@@ -26,7 +26,7 @@ export async function listDependents(deps: Deps, scope: ListScope, maxPageSize: 
   if (empId) conds.push(eq(schema.dependents.employeeId, empId));
   const all = (await deps.db.select().from(schema.dependents).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
     .filter((d) => showDeleted || !d.deleteTime);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "dependents" });
 }
 
 export const dependentSpec: CrudSpec<DependentInput, typeof schema.dependents> = {

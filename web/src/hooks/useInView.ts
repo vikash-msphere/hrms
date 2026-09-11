@@ -37,7 +37,7 @@ export function useVisibleRegions(rootMargin = "300px") {
           for (const e of entries) {
             if (!e.isIntersecting) continue;
             const id = (e.target as HTMLElement).dataset.region;
-            if (id) (arrived.push(id), nodes.current.delete(id));
+            if (id) { arrived.push(id); nodes.current.delete(id); }
             io.current?.unobserve(e.target); // latched: one sighting per region is all this needs
           }
           if (!arrived.length) return;

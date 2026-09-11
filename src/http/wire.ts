@@ -51,6 +51,7 @@ type AlwaysPresent = {
   candidate: "name";
   card: "column_key" | "rank" | "title" | "priority" | "labels" | "blocked";
   "check-in": "action_items";
+  "table-view": "display_name" | "base" | "columns" | "filters" | "sort" | "params";
   compensation: "annual_ctc" | "currency_code" | "effective_from";
   "compliance-event": "title" | "frequency" | "due_date" | "status";
   "compliance-rule": "title" | "frequency" | "due_day" | "active";

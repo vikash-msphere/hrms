@@ -43,6 +43,7 @@ const COLLECTION_ALLOW: Record<string, string> = {
   "leave-requests": "conflict check for one interview slot; a page-wide view would not answer it",
   events: "conflict check for one interview slot",
   reviews: "cycle progress roll-up, paged through to completion",
+  goals: "the calibration panel's attainment curve: narrowed to one cycle, asks for a single row, and exists FOR the aggregate the server computes alongside it (`?burnup=true`) - the store's snapshot models neither",
   notifications: "the snoozed view is the INVERSE of the cached feed; fetched once, only when it is opened",
   // The employee-profile panels: each is narrowed to ONE employee and mounted only when its tab is opened, so
   // there is no page-wide snapshot to share (and the profile is the only place they are read).
@@ -56,6 +57,7 @@ const COLLECTION_ALLOW: Record<string, string> = {
   "dashboard-summary": "aggregate KPI counts, not a collection",
   "people-analytics": "the per-person report: one aggregate over a window the page chooses, not a collection - this read EXISTS to stop the page fetching eight collections to compute it",
   "activity-counts": "tab-bar \"new since last seen\" counts, not a collection - this read EXISTS to stop the badges fetching collections",
+  "table-fields": "the custom-grid field catalogue for ONE base, assembled per caller from the schema + org config; it owns no rows and is read only while a table is being built",
 };
 
 // ---- 3. preferences ------------------------------------------------------------------------------------------

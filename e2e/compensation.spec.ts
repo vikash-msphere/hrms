@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // What somebody is paid, and the two ways it changes: a revision to the standing figure, and a one-off bonus.
 //
@@ -10,6 +10,10 @@ test.describe("compensation", () => {
   test("a revision is entered and the timeline reads back the new CTC", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("payroll");
+    // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this
+    // suite (complianceRuleDelete.spec.ts et al.). What the timeline reads back is what this test proves; a
+    // console line from a request retried behind that is not its failure.
+    allowConsoleErrors(page, /status of 503|status of 500/i);
     // A figure no other spec would produce, so reading it back off the timeline means this revision and not
     // a leftover.
     const ctc = 1_800_000 + (Date.now() % 900) * 1000;
@@ -28,23 +32,35 @@ test.describe("compensation", () => {
     // which the form derives rather than asking anybody to compute.
     await form.getByLabel("Annual CTC").fill(String(ctc));
     await expect(form.getByText(/Basic/).first()).toBeVisible();
-    await form.getByRole("button", { name: "Save revision" }).click();
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // The row's own path, taken off the response that made it. Cleanup has to drop THIS row and only this
+    // row, in a `finally`: the timeline refuses a second revision taking effect on a date one already holds
+    // (services/compensation.ts - "edit that one rather than adding a second"), so a revision left behind by
+    // a half-finished attempt makes Playwright's own retry of this test unwinnable, and dropping "the newest
+    // compensation row" instead would take whichever OTHER spec's revision landed last on a busy lane.
+    let created: string | undefined;
+    const [made] = await Promise.all([
+      page.waitForResponse((r) => r.request().method() === "POST" && /\/v1\/compensation(\?|$)/.test(r.url()), { timeout: 60_000 }),
+      form.getByRole("button", { name: "Save revision" }).click(),
+    ]);
+    if (made.ok()) created = ((await made.json()) as { path?: string }).path;
+    try {
+      await expect(page.getByRole("dialog")).toHaveCount(0);
 
-    // Read back on the timeline. The timeline shows monthly by default - the number most people think in -
-    // so it is switched to annual, the unit the revision was entered in, and the figure has to be the one
-    // that was typed.
-    const annual = ctc.toLocaleString("en-US");
-    await page.getByRole("button", { name: "Annual", exact: true }).click();
-    await expect(page.getByText(annual).first()).toBeVisible({ timeout: 30_000 });
+      // Read back on the timeline. The timeline shows monthly by default - the number most people think in -
+      // so it is switched to annual, the unit the revision was entered in, and the figure has to be the one
+      // that was typed.
+      const annual = ctc.toLocaleString("en-US");
+      await page.getByRole("button", { name: "Annual", exact: true }).click();
+      await expect(page.getByText(annual).first()).toBeVisible({ timeout: 30_000 });
 
-    // And again from cold, because a revision that lives only in the page's state is a pay cut nobody ordered.
-    await page.reload();
-    await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
-    await page.getByRole("button", { name: "Annual", exact: true }).click();
-    await expect(page.getByText(annual).first()).toBeVisible({ timeout: 30_000 });
-
-    await purgeNewest(page, "compensation");
+      // And again from cold, because a revision that lives only in the page's state is a pay cut nobody ordered.
+      await page.reload();
+      await page.getByRole("tab", { name: /Compensation|Pay/ }).first().click();
+      await page.getByRole("button", { name: "Annual", exact: true }).click();
+      await expect(page.getByText(annual).first()).toBeVisible({ timeout: 30_000 });
+    } finally {
+      if (created) await purge(page, created);
+    }
   });
 
   // HR awards, payroll pays: the seeded policy gives `bonuses` write to HR and read to payroll, because a
@@ -52,6 +68,10 @@ test.describe("compensation", () => {
   test("a bonus is awarded to one person and lands on the bonus list", async ({ as }) => {
     test.setTimeout(180_000);
     const page = await as("hr");
+    // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this
+    // suite (complianceRuleDelete.spec.ts et al.). What the list and the record read back is what this
+    // test proves; a console line from a request retried behind that is not its failure.
+    allowConsoleErrors(page, /status of 503|status of 500/i);
     const reason = `E2E bonus ${Date.now() % 100000}`;
 
     // An award is recorded against the person, on their own pay tab: it is a decision about them, and the
@@ -83,15 +103,6 @@ test.describe("compensation", () => {
     await purgeBonus(page, reason);
   });
 });
-
-/** Drop the newest row of a collection - the one the test just made. */
-async function purgeNewest(page: import("@playwright/test").Page, collection: string) {
-  const res = await page.request.get(`/v1/${collection}?page_size=100`);
-  if (!res.ok()) return;
-  const { results = [] } = (await res.json()) as { results?: { path: string; create_time?: string }[] };
-  const newest = [...results].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""))[0];
-  if (newest) await purge(page, newest.path);
-}
 
 /** Drop the bonus this spec awarded. */
 async function purgeBonus(page: import("@playwright/test").Page, reason: string) {

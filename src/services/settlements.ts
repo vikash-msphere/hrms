@@ -1,6 +1,7 @@
 import { allocOwnedCode } from "./codeAlloc";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -28,7 +29,7 @@ import {
   DEFAULT_GRATUITY_CONFIG, type GratuityConfig, type SettlementLine,
 } from "../domain/settlement";
 import { round2, sum2 } from "../domain/money";
-import { runBatch, chunk, type BatchStmt } from "../lib/dbBatch";
+import { runBatch, chunk, byIdChunks, type BatchStmt } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
 import { notify } from "./notifications";
 import { refHolidays, refLeaveTypes, refPayComponents, refPayPeriods } from "../lib/refData";
@@ -46,11 +47,18 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const daysInMonthUTC = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
 
-export async function listSettlements(deps: Deps, scope: ListScope, employeeId?: string) {
+// PAGED IN SQL, on `settlement_date`. One leaver has one or two snapshots, but the unfiltered list is every
+// exit the org has ever settled and was returned whole, with `nextPageToken: undefined` - no cursor to follow
+// however long the list got. `settlement_date` is `notNull`, so it is a valid keyset key for every matching row.
+export async function listSettlements(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employeeId?: string) {
   const conds = [applyScope(scope, schema.settlements.code, schema.settlements.employeeId)];
   if (employeeId) conds.push(eq(schema.settlements.employeeId, employeeId));
-  const rows = await deps.db.select().from(schema.settlements).where(conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as any)) : undefined);
-  return rows.sort((a, b) => +new Date(b.settlementDate) - +new Date(a.settlementDate) || b.uuid.localeCompare(a.uuid));
+  const where = conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as SQL[])) : undefined;
+  return keysetPage<typeof schema.settlements.$inferSelect>(deps, schema.settlements, "settlements", where, {
+    max: maxPageSize,
+    pageToken,
+    order: { expr: sql`${schema.settlements.settlementDate}`, value: (r) => +new Date(r.settlementDate) },
+  });
 }
 
 // What one settlement consumed, stored on the row (settledJson) so a recompute can release it first.
@@ -117,11 +125,35 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= fromMs && +new Date(h.date) <= toMs)
       .map((h) => localDay(+new Date(h.date), tz)),
   );
-  const leaveRanges = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.employeeId, employeeId)))
+  // Both reads below are BOUND TO THE FINAL MONTH IN SQL, with a UTC day of slack at each end (no timezone is
+  // more than 14 hours from UTC, so nothing whose org-local day falls in the window can lie outside them) and
+  // the exact call left to `localDay` in JS - the same "widen in SQL, decide in JS" rule services/orgDay.ts
+  // states. They were scoped to the EMPLOYEE only, so this function's own comment ("a handful of reads") held
+  // for a new joiner and quietly stopped holding for anyone with tenure: a ten-year leaver's settlement read
+  // every leave request and every punch of those ten years to use one month of them. The `events` read below
+  // was narrowed for exactly this reason; these are the two it left behind.
+  const windowFrom = new Date(fromMs - 86_400_000);
+  const windowTo = new Date(toMs + 2 * 86_400_000);
+  const leaveRanges = (await deps.db
+    .select()
+    .from(schema.leaveRequests)
+    .where(and(
+      eq(schema.leaveRequests.employeeId, employeeId),
+      eq(schema.leaveRequests.state, "APPROVED"),
+      gte(schema.leaveRequests.endDate, windowFrom),
+      lte(schema.leaveRequests.startDate, windowTo),
+    )))
     .filter((l) => l.state === "APPROVED" && +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
     .map((l) => ({ start: localDay(+new Date(l.startDate), tz), end: localDay(+new Date(l.endDate), tz) }));
   const workedByDay = new Map<string, number>();
-  for (const s of await deps.db.select().from(schema.attendanceSessions).where(eq(schema.attendanceSessions.employeeId, employeeId))) {
+  for (const s of await deps.db
+    .select()
+    .from(schema.attendanceSessions)
+    .where(and(
+      eq(schema.attendanceSessions.employeeId, employeeId),
+      gte(schema.attendanceSessions.clockIn, windowFrom),
+      lte(schema.attendanceSessions.clockIn, windowTo),
+    ))) {
     const ms = +new Date(s.clockIn);
     if (ms < fromMs || ms > toMs + 86_400_000) continue;
     const day = localDay(ms, tz);
@@ -132,7 +164,13 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
   // at a count_as_work event (see assembleLop in services/payroll.ts).
   const nowMs = +deps.clock.now();
   const events: WorkEvent[] = [];
-  for (const e of await deps.db.select().from(schema.events)) {
+  // Bound to the final month in SQL, like the two reads above it and like assembleLop: the leave and
+  // attendance reads were already narrowed to one employee, and this one - the only whole-table read left in
+  // a function whose comment claims "a handful of reads" - grew with every event the org had ever held.
+  for (const e of await deps.db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.countAsWork, true), isNull(schema.events.deleteTime), gte(schema.events.endTime, new Date(fromMs - 86_400_000)), lte(schema.events.startTime, new Date(toMs + 86_400_000))))) {
     if (e.deleteTime || !e.countAsWork) continue;
     if (+new Date(e.endTime) < fromMs - 86_400_000 || +new Date(e.startTime) > toMs + 86_400_000) continue;
     try {
@@ -180,16 +218,23 @@ async function averageMonthlyBasic(deps: Deps, employeeId: string, asOf: Date): 
 async function esiContributingAtExit(deps: Deps, employeeId: string, exitDate: Date): Promise<boolean> {
   const cp = esiContributionPeriod(exitDate);
   const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
+  // COMMITTED runs only, in SQL. This read the whole `payroll_runs` table and threw away the drafts in JS,
+  // which is every run the org has ever built to answer a question about one contribution period.
   const runIds = new Set(
-    (await deps.db.select().from(schema.payrollRuns))
-      .filter((r) => r.state === "APPROVED" || r.state === "PUBLISHED")
+    (await deps.db.select({ uuid: schema.payrollRuns.uuid, payPeriodId: schema.payrollRuns.payPeriodId })
+      .from(schema.payrollRuns)
+      .where(inArray(schema.payrollRuns.state, ["APPROVED", "PUBLISHED"])))
+      // The period window stays in JS: `pay_periods` is already memoized per request by lib/refData, so
+      // joining it here would cost a read to avoid one that has already happened.
       .filter((r) => { const p = periods.get(r.payPeriodId); return !!p && +new Date(p.payDate) >= cp.start && +new Date(p.payDate) < cp.end; })
       .map((r) => r.uuid),
   );
   if (!runIds.size) return false;
-  const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.employeeId, employeeId));
+  // And the items narrowed to THOSE runs, chunked for the D1 parameter cap - not every payslip line this
+  // employee has ever been paid, filtered down to a couple of them afterwards.
+  const items = await byIdChunks([...runIds], (group) =>
+    deps.db.select().from(schema.payrollRunItems).where(and(eq(schema.payrollRunItems.employeeId, employeeId), inArray(schema.payrollRunItems.runId, group))));
   return items.some((it) => {
-    if (!runIds.has(it.runId)) return false;
     try {
       return (JSON.parse(it.linesJson) as { code?: string }[]).some((l) => l.code === "ESI");
     } catch {

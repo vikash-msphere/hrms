@@ -4,18 +4,90 @@ import { invalidArgument } from "../lib/errors";
 
 export const VALID_DOC_TYPES = ["CONTRACT", "ID", "PAYSLIP", "POLICY", "LETTER", "FORM16", "INSURANCE", "OTHER"] as const;
 
-// Hard cap on any document/Form-16 upload. The body is buffered whole (arrayBuffer) then AES-encrypted (a
-// second full copy) before it reaches R2, so an uncapped upload is a memory + storage DoS. 25 MiB covers real
-// HR documents with margin.
-export const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+// Hard cap on any document/Form-16 upload.
+//
+// THE BINDING CONSTRAINT IS ISOLATE MEMORY, NOT STORAGE. A Workers isolate has 128 MB and serves MANY
+// concurrent requests, so this ceiling is not "how big a file do we tolerate" - it is "how big a file, times
+// how many at once, before the isolate is killed and takes every unrelated in-flight request with it".
+//
+// One upload costs roughly three times the file: the buffered request body (`arrayBuffer`), the AES-GCM
+// ciphertext, and the sealed [iv||ct] buffer handed to R2. A download costs twice: the ciphertext read back
+// and the decrypted plaintext. One-shot AES-GCM cannot stream - the tag covers the whole message - so the
+// second copy on each path is structural, not sloppiness.
+//
+// At 25 MiB that was ~75 MB for a single upload: two concurrent ones exceeded the isolate on their own, and
+// the failure mode is not a 413 for the uploader, it is `Worker exceeded memory limit` for everyone the
+// isolate was serving. 10 MiB puts a concurrent upload at ~30 MB, so several overlap comfortably, and it
+// matches the attachment default (services/attachments.ts) so the app has one answer to "how big may a file
+// be" instead of two. Raising it is a memory decision, not a product one: work out the peak first.
+export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+
+/** The one refusal for a request body over the cap - shared so every place that enforces it agrees on the
+ *  status and the wording (middleware/bodyLimit.ts from the declared length; `readCappedBody` below from the
+ *  bytes, for a body that declares none). */
+export const bodyTooLarge = () =>
+  invalidArgument(`request body too large (max ${Math.floor(MAX_DOCUMENT_BYTES / (1024 * 1024))} MiB)`);
+
 /**
- * Backstop on the bytes actually read.
+ * Read a request body to bytes, ABANDONING the read the moment it passes `max`.
  *
- * The real cap is middleware/bodyLimit.ts, which refuses an oversized body from its `Content-Length` before any
- * handler reads it - that ordering is the point, because `arrayBuffer()` commits the whole payload to isolate
- * memory and the docstore's AES pass then copies it again, so a check on `byteLength` alone fires after the
- * memory it was protecting has already been spent. What is left for this function is the one case the header
- * cannot answer: a chunked body, which declares no length.
+ * This is the only body read in the app that is a real cap. `request.arrayBuffer()` reads to the end of the
+ * stream however long that is, so a size check on the result fires after the memory it was protecting has
+ * already been spent - and middleware/bodyLimit.ts cannot help, because it decides from `Content-Length` and a
+ * `Transfer-Encoding: chunked` body declares none. Both checks therefore passed and the payload was committed
+ * to a 128 MB isolate whole, against a 10 MiB ceiling: an authenticated caller could do it through any of the
+ * fourteen upload routes, and an anonymous one through the /diag relay, which needs no credential at all.
+ *
+ * The stream is consumed in chunks with a running total and cancelled as soon as the total passes the cap, so
+ * the bytes held are bounded by one chunk past it and the rest is never pulled.
+ *
+ * Returns null when the body is over the cap - the refusal is the CALLER's, because they do not agree on it:
+ * an upload answers `bodyTooLarge` (400, the shared wording), the telemetry relay answers 413 in the shape its
+ * client SDK understands. Use `requireCappedBody` for the former.
+ */
+export async function readCappedBody(request: Request, max: number = MAX_DOCUMENT_BYTES): Promise<ArrayBuffer | null> {
+  const stream = request.body;
+  if (!stream) return new ArrayBuffer(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    joined.set(c, at);
+    at += c.byteLength;
+  }
+  return joined.buffer;
+}
+
+/** `readCappedBody` with the shared refusal already applied - what every upload route wants. */
+export async function requireCappedBody(request: Request, max: number = MAX_DOCUMENT_BYTES): Promise<ArrayBuffer> {
+  const body = await readCappedBody(request, max);
+  if (!body) throw bodyTooLarge();
+  return body;
+}
+
+/**
+ * Backstop on the bytes a service was handed.
+ *
+ * The cap that matters is the one taken BEFORE the buffer exists: `readCappedBody` for a request body, and
+ * middleware/bodyLimit.ts earlier still for one that declares its length. This is what remains for bytes that
+ * did not arrive as a request body at all - a signed PDF downloaded from an e-sign vendor, say - and for a
+ * caller that hands over an already-buffered array.
  */
 export function assertUploadSize(byteLength: number): void {
   if (byteLength > MAX_DOCUMENT_BYTES) throw invalidArgument(`file too large (max ${Math.floor(MAX_DOCUMENT_BYTES / (1024 * 1024))} MiB)`);
@@ -34,13 +106,27 @@ const ALLOWED_EXTENSIONS = new Set([
 // SVG is deliberately NOT allowed: it can carry inline script and is a stored-XSS vector if ever served
 // inline. (The API CSP + attachment disposition also defend, but the file type is refused outright.)
 
+/** The bare media type: lowercased, parameters stripped.
+ *
+ *  A `Content-Type` may carry parameters - `image/svg+xml; charset=utf-8` is the same media type as
+ *  `image/svg+xml`, and browsers and curl both send the parameterized form routinely. Every comparison below
+ *  is against a bare type, so they all have to be made against this rather than against the raw header, and
+ *  the exact refusals were what an unnormalized string got wrong in both directions: the SVG refusal was an
+ *  `===` that a parameter walked straight past (`image/svg+xml; charset=utf-8` then matched the broad
+ *  `image/` arm and was allowed), and `text/plain; charset=utf-8` - the ordinary way a .txt is sent - failed
+ *  the allow arm and was refused unless the file name happened to carry an extension. */
+const mediaType = (contentType?: string): string | undefined =>
+  contentType?.toLowerCase().split(";")[0]!.trim() || undefined;
+
 export function isAllowedUpload(fileName?: string, contentType?: string): boolean {
   const ext = fileName?.split(".").pop()?.toLowerCase();
   if (ext === "svg") return false;
+  const ct = mediaType(contentType);
+  // The SVG refusal comes before the extension allow-list, not after it: the media type is what the file IS,
+  // and a name is only what it was called. `logo.png` declaring `image/svg+xml` is an SVG.
+  if (ct === "image/svg+xml") return false;
   if (ext && ALLOWED_EXTENSIONS.has(ext)) return true;
-  const ct = contentType?.toLowerCase();
   if (ct) {
-    if (ct === "image/svg+xml") return false;
     if (ct.startsWith("image/")) return true;
     if (ct === "application/pdf" || ct === "text/plain" || ct.includes("rtf")) return true;
     if (/word|opendocument|msword|excel|spreadsheet|sheet|presentation|powerpoint/.test(ct)) return true;
@@ -52,7 +138,7 @@ export function isAllowedUpload(fileName?: string, contentType?: string): boolea
 // itself with an acknowledgement certificate page appended (pdf-lib can only merge PDF pages), so a non-PDF
 // source could never be combined. Enforced at upload + when toggling requires_ack on.
 export function isPdfUpload(fileName?: string, contentType?: string): boolean {
-  if ((contentType?.toLowerCase() ?? "") === "application/pdf") return true;
+  if (mediaType(contentType) === "application/pdf") return true;
   return fileName?.split(".").pop()?.toLowerCase() === "pdf";
 }
 
@@ -82,7 +168,7 @@ const EXT_BY_TYPE: Record<string, string> = {
 // no uploaded file name, so the title carries the identity - it needs the extension appended or the browser/OS
 // saves an extensionless file. Slashes are stripped: the name lands in Content-Disposition and on disk.
 export function documentFileName(row: { fileName?: string | null; title?: string | null; contentType?: string | null }): string {
-  const ext = EXT_BY_TYPE[(row.contentType ?? "").toLowerCase().split(";")[0]!.trim()];
+  const ext = EXT_BY_TYPE[mediaType(row.contentType ?? undefined) ?? ""];
   const base = (row.fileName || row.title || "document").replace(/[/\\]/g, "-").trim();
   const hasExt = /\.[a-z0-9]{1,5}$/i.test(base);
   return hasExt || !ext ? base : `${base}.${ext}`;

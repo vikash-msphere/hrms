@@ -1,5 +1,6 @@
 import { eq, inArray } from "drizzle-orm";
 import { allocFlatCode, withFreshCode } from "./codeAlloc";
+import { chunk, ID_CHUNK } from "../lib/dbBatch";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -8,7 +9,7 @@ import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { visibleByDelete, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import {
   DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, normalizeSwimlanes, normalizeLabels,
   normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
@@ -39,7 +40,7 @@ const asArgError = <T>(fn: () => T): T => {
 
 export async function listBoards(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const all = visibleByDelete(await deps.db.select().from(schema.boards), showDeleted);
-  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "boards" });
   return { items: slice, nextPageToken };
 }
 
@@ -153,9 +154,37 @@ export async function boardMetrics(deps: Deps, actor: AppUser, id: string, days 
   );
 }
 
+// The board's one-hop children. Named and exported so test/purgeCascadeDrift can hold it against the foreign
+// keys the schema declares - a hand-written purge is exactly where an unlisted reference hides.
+export const BOARD_PURGE_CASCADE: PurgeCascade = {
+  remove: [
+    { table: schema.cardMovements, column: schema.cardMovements.boardId },
+    { table: schema.cards, column: schema.cards.boardId },
+    { table: schema.sprints, column: schema.sprints.boardId },
+  ],
+};
+
 export async function purgeBoard(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
-  // Tear down children bottom-up (FKs): movements, then cards, then the board.
-  await deps.db.delete(schema.cardMovements).where(eq(schema.cardMovements.boardId, id));
-  await deps.db.delete(schema.cards).where(eq(schema.cards.boardId, id));
-  await purgeRow(deps, actor, schema.boards, "board", "boards", id, ifMatch);
+  // Tear down bottom-up (FKs). The one-hop children of the board - movements, cards, sprints - are DECLARED,
+  // so `purgeRow` runs them in order and turns anything still referencing the board into a 409. What it cannot
+  // reach is a GRANDCHILD: a comment, a to-do or a watcher hangs off a CARD, and the cascade is keyed by the
+  // purged row's id, so those are swept here first, exactly as `purgeCard` sweeps them for one card.
+  //
+  // The grandchild sweep is DECLARED as `first` rather than awaited here, so it lands in the same transaction
+  // as the purge. Run ahead of it, every comment, to-do and watcher on every card of the board was already
+  // gone if the purge itself was then refused - and the refusal says "still referenced by other records",
+  // which reads as though nothing happened.
+  const cardIds = (await deps.db.select({ uuid: schema.cards.uuid }).from(schema.cards).where(eq(schema.cards.boardId, id))).map((c) => c.uuid);
+  const now = new Date();
+  const first = chunk(cardIds, ID_CHUNK).flatMap((group) => [
+    deps.db.delete(schema.cardComments).where(inArray(schema.cardComments.cardId, group)),
+    deps.db.delete(schema.cardTodos).where(inArray(schema.cardTodos.cardId, group)),
+    deps.db.delete(schema.cardWatchers).where(inArray(schema.cardWatchers.cardId, group)),
+    // Two pointers from records with a life of their own: a card on ANOTHER board blocked by one of these, and
+    // a booked hour, which outlives the task it was booked against (see `purgeCard`). Cut, not removed - and
+    // `updated_at` moves with the cut so a client holding the pre-detach read stops matching on If-Match.
+    deps.db.update(schema.cards).set({ blockedById: null, updatedAt: now }).where(inArray(schema.cards.blockedById, group)),
+    deps.db.update(schema.timeEntries).set({ cardId: null, updatedAt: now }).where(inArray(schema.timeEntries.cardId, group)),
+  ]);
+  await purgeRow(deps, actor, schema.boards, "board", "boards", id, ifMatch, undefined, { ...BOARD_PURGE_CASCADE, first });
 }

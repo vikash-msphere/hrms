@@ -3,13 +3,14 @@ import { Plus, Pencil, Trash2, FolderKanban } from "lucide-react";
 import { create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, idOf } from "@/lib/utils";
-import type { Project } from "@/types";
+import type { Goal, Project } from "@/types";
 import { DataState } from "@/components/common/DataState";
 import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
+import { Combobox } from "@/components/ui/combobox";
 import { WriteDialog } from "@/components/common/WriteDialog";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
@@ -21,11 +22,13 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 
-const EMPTY = { name: "", client: "", code: "", billable: true, status: "active" as "active" | "archived" };
+const EMPTY = { name: "", client: "", code: "", billable: true, goal: "none", status: "active" as "active" | "archived" };
 
 // HR/PM editor for the project catalog (Settings → Payroll → Projects).
 export default function ProjectsAdmin({ openId }: { openId?: string }) {
   const { rows, state, error, reload } = useCollection<Project>("projects");
+  // Small, and only used to fill one picker; empty for anybody who cannot read goals, which hides the field.
+  const { rows: goals } = useCollection<Goal>("goals");
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -45,11 +48,11 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
   function openCreate() { setEditing(null); setForm(EMPTY); setOpen(true); }
   function openEdit(p: Project) {
     setEditing(p);
-    setForm({ name: p.name, client: p.client ?? "", code: p.code ?? "", billable: p.billable, status: p.status });
+    setForm({ name: p.name, client: p.client ?? "", code: p.code ?? "", billable: p.billable, goal: p.goal ? `goals/${idOf(p.goal)}` : "none", status: p.status });
     setOpen(true);
   }
   async function save() {
-    const body = { name: form.name.trim(), client: form.client.trim() || null, code: form.code.trim() || null, billable: form.billable, status: form.status };
+    const body = { name: form.name.trim(), client: form.client.trim() || null, code: form.code.trim() || null, billable: form.billable, goal: form.goal === "none" ? null : form.goal, status: form.status };
     if (editing) await patch(`projects/${idOf(editing.path)}`, body, editing.etag);
     else await create("projects", body);
     toast({ title: editing ? "Project updated" : "Project added", variant: "success" });
@@ -57,7 +60,7 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
   }
   // "Save & add another" keeps the client and billable flag: a run of projects is usually for one client.
   function nextBlank() {
-    setForm({ ...EMPTY, client: form.client, billable: form.billable });
+    setForm({ ...EMPTY, client: form.client, billable: form.billable, goal: form.goal });
     nameRef.current?.focus();
   }
   async function del(p: Project) {
@@ -147,6 +150,18 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
               <span className="block text-xs text-muted-foreground">Time logged here counts as client-billable by default.</span>
             </span>
           </label>
+          {/* What the hours are FOR. With a goal named, that goal reports the effort spent against its own
+              progress - the one view that catches work going into something that is not moving. */}
+          {goals.length > 0 && (
+            <Field label="Goal (optional)" hint="The outcome these hours are for. The goal then shows the hours booked against it.">
+              <Combobox
+                value={form.goal}
+                onValueChange={(v) => setForm({ ...form, goal: v })}
+                searchPlaceholder="Search goals…"
+                options={[{ value: "none", label: "No goal" }, ...goals.filter((g) => g.status !== "cancelled" && g.status !== "completed").map((g) => ({ value: `goals/${idOf(g.path)}`, label: g.title }))]}
+              />
+            </Field>
+          )}
           <Field label="Status" hint={form.status === "archived" ? "Stays on past timesheets, but nobody can log new time against it." : "Anyone can pick this project on their timesheet."}>
             <div className="inline-flex rounded-lg border p-0.5">
               {(["active", "archived"] as const).map((s) => (

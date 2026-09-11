@@ -57,7 +57,12 @@ export const found = new Hono<AppEnv>()
   const fp = cfg.found_page;
   if (!fp?.enabled) return c.notFound();
   const row = (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, uuid)).limit(1))[0];
-  if (!row) return c.notFound();
+  // A RETIRED asset is no longer ours, and this page is the one surface that answers without a session.
+  // Retiring is what the app records when hardware is sold, scrapped or handed on - and the sticker goes with
+  // it. Left unfiltered, that sticker kept resolving to a live page publishing the org's name and a return
+  // address for a machine somebody else now owns, indefinitely and to anyone who scanned it. `retired` is the
+  // terminal state in the status enum (assets are hard-deleted, so there is no delete_time to check).
+  if (!row || row.status === "retired") return c.notFound();
   const org = await getSettingValue<{ name?: string }>(deps, "organization", {});
   const contact = fp.contact?.trim();
   const body =

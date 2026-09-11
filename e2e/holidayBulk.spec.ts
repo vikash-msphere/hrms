@@ -60,8 +60,14 @@ test.describe("holidays in bulk", () => {
     await expect(form.getByText("2 to add · 1 line to fix")).toBeVisible();
 
     await form.getByRole("button", { name: /^Add 2 holidays/ }).click();
-    await expect(toast(page, "Added 2 holidays")).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+    // The toast is the app SAYING it wrote them; the closed dialog and the rows below are it having written
+    // them. A toast expires on its own timer, so on a lane slow enough for the write to take a while it can be
+    // gone by the time anything asks - which is a missed notification, not a failed paste. So it is given a
+    // short look and the outcome is proven by what the calendar holds: both pasted rows, and a second paste
+    // that finds them already there.
+    await toast(page, "Added 2 holidays").waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 60_000 });
+    await expect(page.getByText(second).first()).toBeVisible({ timeout: 30_000 });
 
     // On the calendar behind the dialog, in the year they were dated - a paste that landed in the wrong year
     // would be invisible here and wrong everywhere else.

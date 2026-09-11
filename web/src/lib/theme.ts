@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { readPref, writePref } from "@/lib/prefs";
+import { readLocal, writeLocal } from "@/lib/localPref";
 
 // Theme preference. The server (per-user `preferences/theme` row, read through the shared prefs snapshot in
 // lib/prefs.ts) is the cross-device source of truth;
@@ -32,7 +33,7 @@ export async function syncThemeFromServer() {
   const t = stored?.theme;
   if (isTheme(t)) {
     if (t !== getStoredTheme()) {
-      localStorage.setItem(STORAGE_KEY, t);
+      writeLocal(STORAGE_KEY, t);
       applyResolved(resolveTheme(t), true);
       window.dispatchEvent(new Event("themechange"));
     }
@@ -44,8 +45,13 @@ export async function syncThemeFromServer() {
 
 const mql = () => window.matchMedia("(prefers-color-scheme: dark)");
 
+// Guarded, and it has to be: `useTheme` calls this from a `useState` INITIALIZER, so a browser with site data
+// blocked (Safari "Block All Cookies", enterprise policy, some webviews) threw a SecurityError during render
+// and the whole app came up as the crash boundary. "No stored theme" and "no storage at all" are the same
+// answer here - fall back to `system` and let the OS decide - which is what the inline theme-init.js in
+// web/index.html has always done.
 export function getStoredTheme(): Theme {
-  const v = localStorage.getItem(STORAGE_KEY);
+  const v = readLocal(STORAGE_KEY);
   return v === "light" || v === "dark" || v === "system" ? v : "system";
 }
 
@@ -95,7 +101,9 @@ export function useTheme() {
   }, []);
 
   const setTheme = useCallback((next: Theme) => {
-    localStorage.setItem(STORAGE_KEY, next);
+    // The write may be refused (storage blocked); the theme still applies for this page, and the server pref
+    // below is what carries it across devices anyway.
+    writeLocal(STORAGE_KEY, next);
     const r = resolveTheme(next);
     applyResolved(r, true);
     setThemeState(next);

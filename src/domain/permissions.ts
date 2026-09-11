@@ -70,10 +70,14 @@ export const LVL: Record<Level, number> = { read: 1, write: 2, admin: 3 };
 
 // my-dept = the caller's employee code minus its own last segment (the dept subtree prefix). Null if
 // the caller has no employee code or it has no dept segment.
+//
+// The `|| null` on the result is not belt-and-braces: a code beginning with `-` splits to a leading empty
+// segment, so `"-0kf"` yields the dept `""`. An empty scope prefix must never reach a containment test as if
+// it were a scope (see the header on codes.ts#isUnder) - it is a missing value, not "everything".
 function deptOf(employeeCode: string | null): string | null {
   if (!employeeCode) return null;
   const segs = segments(employeeCode);
-  return segs.length >= 2 ? segs.slice(0, -1).join("-") : null;
+  return (segs.length >= 2 ? segs.slice(0, -1).join("-") : "") || null;
 }
 
 // Match one pattern token against one concrete key token. `**` is handled by matchTokens, not here.
@@ -81,11 +85,18 @@ function matchToken(pt: string, kt: string, self: SelfContext): boolean {
   if (pt === "*") return true;
   // `me` matches the literal self token (path "/employees/me") OR a resource whose code is under the
   // caller's employee code (owned resources addressed by their code, e.g. "04-1c-0a9-0kf").
-  if (pt === "me") return kt === "me" || (self.employeeCode !== null && isUnder(self.employeeCode, kt));
+  // TRUTHINESS, not `!== null`. `employeeCode` is joined straight off `employees.code`, a nullable TEXT
+  // column with no CHECK - and `''` is not NULL, so a blank code passed the null guard and then asked
+  // `isUnder('', kt)`, which used to answer true for every code in the collection. A self-scoped grant
+  // silently became an org-wide one for exactly the caller whose record was least complete. isUnder now
+  // refuses an empty prefix as well, so this is the second of the two locks rather than the only one.
+  if (pt === "me") return kt === "me" || (!!self.employeeCode && isUnder(self.employeeCode, kt));
   if (pt === "my-dept") {
     const d = deptOf(self.employeeCode);
-    return d !== null && isUnder(d, kt);
+    return !!d && isUnder(d, kt);
   }
+  // `-*` would ask for the empty prefix; isUnder refuses it, so such a pattern matches nothing rather than
+  // everything. A grant that means "all codes" is written `*` or `**`, which never reach here.
   if (pt.endsWith("-*")) return isUnder(pt.slice(0, -2), kt); // explicit code prefix, e.g. "04-*"
   return pt === kt;
 }

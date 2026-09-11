@@ -8,6 +8,7 @@ import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import { useToast } from "@/components/ui/use-toast";
 import type { AttendanceSession, Me } from "@/types";
 import { getSetting } from "@/lib/settingsStore";
+import { setOrgTimezone } from "@/lib/orgDay";
 import { hasCapability } from "@/lib/perm";
 
 // Every session matching a query, following the server cursor: a list page is capped at 100 rows, and an
@@ -70,7 +71,13 @@ function ActiveProvider({ me, children }: { me: Me; children: ReactNode }) {
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => {
     getSetting<Partial<AttendanceSchedule>>("attendance")
-      .then((cfg) => { if (cfg.value) setSched({ ...DEFAULT_SCHEDULE, ...cfg.value }); })
+      .then((cfg) => {
+        if (!cfg.value) return;
+        setSched({ ...DEFAULT_SCHEDULE, ...cfg.value });
+        // The same read answers "what day is it for this org" for the whole SPA (lib/orgDay.ts). Handing it
+        // over here means the two can never disagree about the timezone, and costs nothing.
+        setOrgTimezone(cfg.value.timezone);
+      })
       .catch(() => { /* not configured -> defaults */ });
   }, []);
 

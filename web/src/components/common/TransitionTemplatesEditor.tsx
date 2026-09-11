@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2, Save, UserPlus, UserMinus } from "lucide-react";
-import { get, patch } from "@/api";
+import { get } from "@/api";
 import { idOf, humanize } from "@/lib/utils";
 import { useCollection } from "@/hooks/useCollection";
 import { DEFAULT_TRANSITION_TEMPLATES, DOC_TYPES, type TemplateTask, type TransitionTemplate, type BgCheckType, type DocType } from "@/lib/transitions";
@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { AccessAction } from "@/components/access/AccessAction";
 import { useToast } from "@/components/ui/use-toast";
 import { useUnsaved } from "@/components/common/UnsavedChanges";
-import { getSetting } from "@/lib/settingsStore";
+import { getSetting, saveSetting } from "@/lib/settingsStore";
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 const blankTask = (): TemplateTask => ({ title: "", assignee: { type: "employee" }, due_offset_days: 0 });
@@ -55,7 +55,7 @@ export function TransitionTemplatesEditor() {
     }
     setBusy(true);
     try {
-      await patch("settings/transition-templates", { value: { templates: out } });
+      await saveSetting("transition-templates", { value: { templates: out } });
       setTemplates(out);
       markSaved();
       toast({ title: "Templates saved", variant: "success" });

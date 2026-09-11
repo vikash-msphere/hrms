@@ -100,8 +100,13 @@ test("every tab on every page mounts, draws something and logs nothing", async (
       const name = ((await tab.textContent()) ?? `tab ${i + 1}`).trim() || `tab ${i + 1}`;
       current = `${route} · ${name}`;
       try {
-        await tab.click();
-        await expect(tab).toHaveAttribute("data-state", "active", { timeout: 20_000 });
+        // Re-pressed on a miss, not trusted to one press: these pages re-render as their reads land, and a
+        // click that arrives while the tab bar is being replaced selects nothing - which then reads as the
+        // tab failing to open. What this walks for is whether the panel MOUNTS once the tab is actually on.
+        await expect(async () => {
+          if ((await tab.getAttribute("data-state")) !== "active") await tab.click({ timeout: 5_000 });
+          await expect(tab).toHaveAttribute("data-state", "active", { timeout: 5_000 });
+        }).toPass({ timeout: 30_000 });
         // The panel, not the tab: a tab that highlights over an empty frame is what this walks for. `.first()`
         // because a panel can carry a tab bar of its own.
         const panel = page.getByRole("tabpanel").first();

@@ -60,6 +60,5 @@ lines.push(`UPDATE employees SET start_date = ${Date.UTC(a.getUTCFullYear() - 3,
 
 const file = "scripts/.timeline-demo.sql";
 writeFileSync(file, lines.join("\n") + "\n");
-d1; // (keep import used)
 execSync(`npx wrangler d1 execute hrms --local --file=${file}`, { stdio: "inherit" });
 console.log(`\nSeeded ${reqs.length} leaves + 2 holidays + 3 markers into ${new Date(day(0)).toISOString().slice(0, 10)} … ${new Date(day(13)).toISOString().slice(0, 10)}.`);

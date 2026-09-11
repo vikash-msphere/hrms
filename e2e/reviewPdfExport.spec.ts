@@ -46,16 +46,19 @@ test("a shared review is previewed and saved as a real PDF", async ({ as }) => {
     await gotoRoute(employee, "reviews", "Reviews");
     const card = employee.locator('[id^="review-"]').filter({ hasText: name }).first();
     await expect(card).toBeVisible({ timeout: 30_000 });
+    // Expanded AND pressed as one retried unit. The card is an accordion, so the Review PDF button only
+    // exists while it is open - and this list re-renders on any write to the reviews collection org-wide,
+    // which the rest of the suite's review specs do throughout a run, folding the card again. Retrying the
+    // press alone left nothing able to re-open it, so the press waited out its budget on a button that had
+    // left the DOM. `exact`, because the header is a button too and its accessible name is the review's own
+    // title - which for this spec's data ("E2E review pdf <stamp>") contains "Review PDF" as a substring.
     await expect(async () => {
       const header = card.getByRole("button").first();
-      await expect(header).toBeVisible();
-      if ((await header.getAttribute("aria-expanded")) !== "true") await header.click();
-      await expect(header).toHaveAttribute("aria-expanded", "true");
-    }).toPass({ timeout: 30_000 });
-
-    // `exact`, because the card's own accordion header is a button too and its accessible name is the review's
-    // title - which for this spec's data ("E2E review pdf <stamp>") contains "Review PDF" as a substring.
-    await card.getByRole("button", { name: "Review PDF", exact: true }).click();
+      await expect(header).toBeVisible({ timeout: 8_000 });
+      if ((await header.getAttribute("aria-expanded")) !== "true") await header.click({ timeout: 8_000 });
+      await expect(header).toHaveAttribute("aria-expanded", "true", { timeout: 8_000 });
+      await card.getByRole("button", { name: "Review PDF", exact: true }).click({ timeout: 8_000 });
+    }).toPass({ timeout: 45_000 });
     const dialog = employee.getByRole("dialog");
     const frame = dialog.getByTitle(/Performance review/);
     await expect(frame).toBeVisible({ timeout: 30_000 });

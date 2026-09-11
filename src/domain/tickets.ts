@@ -43,6 +43,19 @@ export const REPLAY_ID_RE = /^[0-9a-f]{32}$/;
 // is: without it a loop or an impatient reporter can grow a single row without bound.
 export const MAX_TICKET_RECORDINGS = 10;
 
+/**
+ * How many checklist items one call may add, and how many a predefined checklist may hold.
+ *
+ * ONE number for three schemas - the ticket's `initial_todos`, the card's, and the `ticket-checklists` catalogue
+ * they are both seeded from - because a catalogue entry longer than the add limit is a checklist that cannot be
+ * applied, and the two drifting apart is how that happens. Not a judgement about how long a checklist may
+ * usefully be: it is the shape of one request. The rows go in through `insertBatches`, so the parameter cap is
+ * handled either way; this is what keeps a single call from deciding how much work the Worker does.
+ */
+export const MAX_CHECKLIST_ITEMS = 100;
+/** Longest one checklist item may be. A checklist line is a label, not a description. */
+export const MAX_CHECKLIST_ITEM_LEN = 500;
+
 /** Parse the stored JSON, tolerating anything malformed - a bad blob must not take the ticket down with it. */
 export function parseRecordings(json: string | null | undefined): TicketRecording[] {
   try {

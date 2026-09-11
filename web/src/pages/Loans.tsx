@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { HandCoins, Plus, Check, X, Banknote, Trash2 } from "lucide-react";
-import { create, invoke, remove } from "@/api";
+import { create, invoke, remove, type ApiError } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatMoney, idOf } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
@@ -107,6 +107,24 @@ export default function Loans({ me }: { me: Me }) {
     try { await remove(`loans/${idOf(l.path)}`); toast({ title: "Request deleted", variant: "success" }); reload(); }
     catch (e) { toast({ title: "Couldn't delete the request", description: (e as Error).message, variant: "destructive" }); }
   }
+  // The server refuses a manual repayment identical to one recorded moments ago, because from the request
+  // alone a double-click and a second, separate payment of the same amount look the same - and it used to
+  // guess "double-click", answer 200, and record nothing. Only the person at the keyboard knows which it is,
+  // so the refusal comes back here as a question. Confirming resends it with `allow_duplicate`.
+  async function recordRepayment(l: Loan, amount: number) {
+    try {
+      await act(l, "recordRepayment", { amount }, true);
+    } catch (e) {
+      if (!((e as ApiError).problem?.type === "/errors/already-exists")) throw e;
+      const again = await confirm({
+        title: "Record this repayment again?",
+        description: `A repayment of ${money(amount)} was recorded on this loan moments ago. Record another one only if the employee really paid twice - otherwise cancel, the first one already counted.`,
+        confirmLabel: "Record anyway",
+      });
+      if (!again) return;
+      await act(l, "recordRepayment", { amount, allow_duplicate: true }, true);
+    }
+  }
   // Disbursal starts payroll deductions - worth a beat of confirmation.
   async function disburse(l: Loan) {
     if (!(await confirm({ title: "Mark this loan as disbursed?", description: `EMI of ${l.monthly_amount ? money(l.monthly_amount) : "the agreed amount"} will be deducted from payroll starting with the next run.`, confirmLabel: "Mark disbursed" }))) return;
@@ -197,7 +215,7 @@ export default function Loans({ me }: { me: Me }) {
       </DataState>
 
       {requesting && <RequestDialog onClose={() => setRequesting(false)} onCreated={() => { setRequesting(false); reload(); }} />}
-      {repay && <RepayDialog loan={repay} onClose={() => setRepay(null)} onSave={async (amount) => { await act(repay, "recordRepayment", { amount }, true); setRepay(null); }} />}
+      {repay && <RepayDialog loan={repay} onClose={() => setRepay(null)} onSave={async (amount) => { await recordRepayment(repay, amount); setRepay(null); }} />}
     </div>
   );
 }

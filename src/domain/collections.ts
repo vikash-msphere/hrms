@@ -12,7 +12,7 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   "api-keys",
   "employees", "departments", "leave-requests", "leave-types", "leave-balances", "holidays",
   "holiday-selections", "org-documents", "personal-documents", "announcements", "pay-components", "pay-grades", "salary-structures",
-  "pay-periods", "payroll-runs", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements",
+  "pay-periods", "payroll-runs", "payslips", "operations", "users", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "goal-templates",
   "leave-encashments", "reimbursements", "reimbursement-categories",
   // operational/company expenses: employee-owned expense (submitter-scoped) + flat vendor/category masters + finance budgets
   "expenses", "expense-categories", "vendors", "expense-budgets",
@@ -100,6 +100,21 @@ export const COLLECTIONS: ReadonlySet<string> = new Set([
   // encrypted per-employee tax blob). Sensitive (exposes declared prior salary), so private-by-default: super
   // via `**`, widened to hr/payroll via the ACL. The verify/reject action rides the existing employees.tax write.
   "tax-verifications",
+  // Custom cross-collection grids: the saved DEFINITION of one (base + columns + filters), owner-coded and
+  // shared through the ordinary object ACL. Running one reads every source under the runner's own scopes, so a
+  // shared view never carries the author's access with it.
+  "table-views",
+  // Virtual capability (no table, no rows): the builder's field catalogue, `GET /v1/table-fields`. Assembled
+  // from the schema + the org's own config (identity fields, pay components, leave types) and filtered to the
+  // collections the caller may list, exactly like `workflow-meta`.
+  "table-fields",
+  // Virtual capability (no table, no route of its own): `unmask.read` decides whether a custom grid serves the
+  // REAL value of a masked field (a full PAN, a full account number) rather than the masked form the profile
+  // shows. It grants no data access on its own - the per-field read on `employees.<code>.identity.<key>` still
+  // has to allow - it only decides whether what you may already read arrives masked. Private by default
+  // (super-only via `**` until an admin grants it), like `export` and `timeline`, and every unmasked run
+  // writes its own audit row.
+  "unmask",
   // Virtual capability (no table): `audit.read` gates the ORG-WIDE activity feed (GET /v1/activity with no
   // ?resource) — every audit row across all collections, including sensitive-read + denial rows. Sensitive
   // (all people, all actions), so private-by-default: NOT in COMMON_READ, super-only via `**`, admins widen

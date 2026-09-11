@@ -24,8 +24,13 @@ test("a page tile navigates and an action tile opens its flow, both from the das
   // The intent that made the trip worth taking: the tile didn't just land on the page, it opened the form.
   await expect(page.getByRole("dialog").getByRole("heading", { name: "Request leave" })).toBeVisible({ timeout: 30_000 });
   // The page underneath is asserted only once the dialog is gone: a modal takes the rest of the document out
-  // of the accessibility tree, so its h1 is unreachable by role while the form is open.
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
+  // of the accessibility tree, so its h1 is unreachable by role while the form is open. Escape has proven
+  // unreliable at actually closing a dialog under load elsewhere in this suite - retried rather than trusted
+  // to one press.
+  await expect(async () => {
+    if (!(await page.getByRole("dialog").count())) return;
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
   await expect(page.getByRole("heading", { level: 1, name: "Leaves" })).toBeVisible({ timeout: 30_000 });
 });

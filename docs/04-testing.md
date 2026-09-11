@@ -36,7 +36,7 @@ hook (`.husky/pre-commit`, installed by `npm install`) and in CI (`.github/workf
 | `wireRegistry` | a collection reachable by authz that is not wire-tokenized |
 | `seedDrift` / `manifestSeedDrift` / `searchDdlDrift` / `payslipTemplateDrift` / `ticketWorkflowDrift` | a generated artifact (seed rows, policy manifest, FTS DDL, templates, ticket workflow) not regenerated after its source changed |
 | `manifestCompleteness` / `webAccessCoverage` | a collection missing policy entries, or a page missing its access affordance |
-| `reparenting` | a hierarchical table missing from the code-cascade set |
+| `reparenting` | an owned-coded table missing from the code-cascade set (scanned from every `allocOwnedCode` call site, so the check runs in the direction that actually drifts), and a mixed owned/flat table cascading without an `ownedWhen` discriminator |
 | `changesEmbeds` | a serializer embedding another collection's rows without declaring it, which leaves the outer collection's stored copy stale in every browser forever |
 
 **Money and payroll** - `payroll` (totals, rounding, run state machine), `money`, `currency`, `moneyFlow`,
@@ -57,6 +57,24 @@ red), `documentAck`, `esign`, `employeeSignature`, `attendanceRegularizationFlow
 determinism, collection binding, tamper and length rejection), `encodeWireIds` / `decodeWireIds`,
 `stateMachines`, `richText`, `illustration`, `silhouette`, `activitySerialize`, `collectionFactory` (the
 lane itself: paging, `?id`, `If-Match`, `?force`, lifecycle verbs, overrides, decorate).
+
+**Scale limits** - the two failures a dev database can never show, because both need real volume:
+
+| Suite | What it holds |
+|---|---|
+| `searchFilterParamCap` | the text filter's id list, when a query matches more rows than D1 can bind |
+| `idListParamCap` | every other id-keyed read and multi-row insert: a page of board posts whose replies outnumber the cap, a full 100-id page of reads / reactions / poll tallies, a nightly purge of more expired access rules than one `DELETE` can name, and checklists longer than one `INSERT` can hold |
+
+D1 binds at most 100 parameters per statement (`lib/dbBatch.ts` `PARAM_CAP`), and a page is `clampPageSize` =
+100 ids — the cap exactly, with nothing left for the predicate beside it or for a scoped caller's own bound
+parameters. Every one of these read fine on an empty database and answered `D1_ERROR: too many SQL variables`
+in production. Chunk with `byIdChunks`, build multi-row inserts with `insertBatches`, and add a case here
+rather than trusting the next reader to remember the cap.
+
+`goalTemplates` carries the sibling rule for the SUBREQUEST budget: `:apply` must cost the same number of D1
+round trips whether it names three people or two hundred, because every round trip is a subrequest and the
+ceiling is 1,000 per invocation. It also compares an applied goal against one `createGoal` writes, field by
+field — that drift is the price of the verb not going through it.
 
 **`productionReadiness`** is the cross-cutting safety net: payroll `deleteRun` releasing every paid-by-run
 payout, leave reservation refusing to overdraw, the real auth + middleware + wire-id chain over
@@ -304,6 +322,27 @@ suite, where it is cheaper and stricter, and is deliberately not re-asserted her
 | `failedRead` | the third branch of every list - one collection's read broken in the browser while the rest of the page stays healthy: the panel says the read failed rather than showing an empty table, and "Try again" recovers it in place |
 | `eventInvite` | a department expanded into named attendees in the composer, one of them taken back out, and exactly that list landing on the event |
 | `delegationEnd` | ending a redirect of somebody's approvals: the question naming both sides, and the delegation really stopping rather than the row merely leaving the page |
+| `navMatrix` | the whole sidebar against the capabilities the server actually issued, for all five roles - gates read out of `web/src/nav.ts` and answered with the app's own `hasCapability`, so an entry offered to somebody who gets a wall (or hidden from somebody who holds it) fails; plus every hidden entry refused when its URL is typed |
+| `createGates` | the button half of hide-never-disable: every "New X" and custom-method button on fourteen pages is present exactly when the caller holds the capability `AccessAction` gates it on, for all five roles - with an admin sweep that fails if the table names a button the app no longer renders |
+| `aclUserGrant` | the Users tab of the rule editor, end to end: the person picker, the grant sentence, the level, the trash and its confirm - and the granted person's OWN browser gaining the page and losing it again |
+| `aclCustomMethodGrant` | the other path through the same modal: a method chip drills the editor into one verb, one person is allowed it, and the button that verb belongs to appears on their page while the create button stays hidden |
+| `aclScopeAndExpiry` | the two dimensions that are neither who nor how much - the scope chips (narrowest first, and tiers never conflated in one list) reaching the rule as `scope: self`, and a temporary role grant reading as "expires …" with the date on the row |
+| `subjectPermissions` | one person's whole permission sheet from Settings › Users: the collection filter, the level cell, the inherited-from-role line, the confirm that only appears when access is taken away, and the rule showing up on the "All rules" tab |
+| `everyoneRole` | the "allow everyone" primitive pressed for real: granting the reserved `everyone` row widens a bystander's live capability set without naming them, and revoking narrows it again |
+| `accessModeGating` | who is offered the keys at all - the access-management toggle appears exactly for `access-rules.write`, no key icons exist without it, and an admin can open the rules that govern who manages access |
+| `viewAsReadOnly` | the rail that makes simulation safe: mid-simulation the create buttons the admin would otherwise keep are gone, and a write carrying the view-as header is refused as read-only before it reaches a handler |
+| `disabledAccountRefused` | the promise the disable confirm makes, held to a live session: a working browser is locked out on its very next request, with no shell and no data behind it |
+| `piiTabAccess` | the field-precise split, from four other people's browsers: nobody but the owner and super is offered a colleague's Identity or Bank tabs, the URL is not a way round the tab bar, and the read behind them refuses |
+| `rowScoping` | the half of access that is not "may I open this page": an employee's claims and expenses are theirs alone on the page AND on the wire, while finance can read the row they cannot |
+| `approvalScope` | a manager's inbox is their own team's: a request from outside every department is not in it, and asking for that row by path is refused - approve included |
+| `virtualCapabilityGates` | the two capabilities that are not a collection - the Export control following `export.read` for every role, and the per-record activity icon appearing only once the independent activity gate is granted |
+| `settingsPanelGating` | Settings is not one permission: each panel's own capability decides its hub card AND its deep link, and a caller without `settings.write` gets the wall either way |
+| `apiKeyScope` | the scope the mint form promised, kept by the credential it produced - one request per control (collections, level ceiling, the off-by-default actions box), and a purged key refused on the very next call |
+| `documentAccessGates` | one shelf, two collections, three gates: Upload follows `org-documents.write` and Generate letter follows `personal-documents.write` for every role, and an employee cannot list a colleague's file |
+| `rowActionGates` | the finest gate there is, two cards on one board for one reader: the author's own kudo carries edit and delete, a colleague's post carries neither, the row hint the UI read says the same, and the edit is refused when asked for by path |
+| `permissionsMatrix` | the org-wide grid is a control, not a read-out: a cell writes the same rule the modal writes, reads back, opens that collection's editor from the key beside it, and takes the access away again |
+| `aclDenyTintAndPresets` | the two things the access UI draws purely to be looked at - the red key (and its tooltip) appearing over a target an explicit deny covers and going again when it is lifted, and a one-press preset authoring the whole Everyone bundle, readable and reversible as an ordinary rule |
+| `quickActionGates` | the "+" menu offers nobody an action they cannot perform (checked one-directionally, since the org also configures the menu), and every row on it is a registry action |
 
 Every page handed out by the `as` fixture fails its test if the app logs an error or throws. A spec that
 provokes one on purpose opts out narrowly with `allowConsoleErrors(page, /…/)`.
@@ -319,6 +358,23 @@ A spec that opens somebody's own record asks the API which person that is (`pers
 email the role signs in with). The id in `employees/<id>` is a WIRE id the edge decodes per request, so it
 cannot be taken from `scripts/seed.sql`, and matching on a first name is one seeded joiner away from driving
 the wrong person's record.
+
+**An access-control spec practises on a person of its own.** The five seeded logins are load-bearing for
+every other spec in the lane, so a rule granted to `emp@example.com` - even for the second it takes to read
+it back - changes what another worker's browser is being asked to prove at that moment. `makeThrowawayPerson`
+creates an employee (whose login is provisioned with it), `as({ email })` signs in as them through the same
+cookie lane the five roles use, `userPath` turns their email into the `users/<id>` an access rule names, and
+`retireThrowawayPerson` soft-deletes them afterwards - never `?force=true`, because the login beside them is
+an undeclared reference the purge would refuse. The rules themselves are swept in a `finally`, by subject,
+so a spec that dies mid-grant does not leave one behind. Pick the target collection with the same care: an
+`everyone` grant on a collection that owns a sidebar entry would change what `navMatrix` sees mid-run.
+
+**Expectations come from the server, not from `grants.ts`.** The seeded grant table is data, and it moves.
+An access spec reads `/v1/users/me` (`capabilitiesOf`) and answers with the app's own `hasCapability` -
+imported from `web/src/lib/perm.ts` rather than re-implemented - so what is asserted is that the RENDERED
+page agrees with the capabilities the caller actually holds. Gate tables are parsed out of the source they
+belong to (`web/src/nav.ts`, `web/src/settings/registry.ts`) for the same reason `everySetting` parses the
+settings registry: an entry added tomorrow is judged tomorrow.
 
 Traps worth knowing before writing another one:
 

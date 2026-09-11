@@ -132,7 +132,7 @@ export default function BankFormats({ toast }: { toast: Toast }) {
     JSON.stringify(draft) !== JSON.stringify(restingDraft) ||
     debitDraft.account.trim() !== "" ||
     debitDraft.currency_code !== (debit[sel]?.currency_code ?? "");
-  useUnsavedTracker(dirty, () => save());
+  useUnsavedTracker(dirty, () => save(), busy);
 
   async function onTemplate(file: File) {
     setBusy(true);

@@ -8,7 +8,7 @@
 // Why it exists: a list page caps at 100 rows and the client filters what it holds, so filtering a large
 // collection client-side searches a window. Pushing the text match to the server searches the whole
 // collection - and via FTS rather than a LIKE scan, so it costs an index lookup instead of a table scan.
-import { inArray, sql, type SQL } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import type { Deps } from "../deps";
 
@@ -41,6 +41,14 @@ export async function searchFilter(deps: Deps, collection: string, q: string | u
     where f."text" match ${match} and d."collection" = ${collection}
     limit ${sql.raw(String(MAX_MATCHES))}
   `);
-  if (rows.length === 0) return sql`1 = 0`;
-  return inArray(idCol, rows.map((r) => r.id));
+  // The id list goes in as LITERALS, not as bound parameters. D1 binds at most 100 per statement (see
+  // lib/dbBatch.ts PARAM_CAP) and `inArray` binds one per id, so a query matching more than ~90 rows blew the
+  // cap and the whole list failed with `D1_ERROR: too many SQL variables` - on the collections where a text
+  // search is most worth having, and on nothing smaller, so it only ever showed up once real data was in.
+  // The caller's own scope and pagination predicates spend from the same budget, which is what makes even
+  // MAX_MATCHES on its own too many. Ids are server-generated Crockford base32 (see domain/codes.ts), so
+  // there is no quote to escape; anything not of that shape is dropped rather than interpolated.
+  const ids = rows.map((r) => r.id).filter((id) => /^[0-9a-hjkmnp-tv-z]+$/.test(id));
+  if (ids.length === 0) return sql`1 = 0`;
+  return sql`${idCol} in (${sql.raw(ids.map((id) => `'${id}'`).join(", "))})`;
 }

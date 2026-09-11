@@ -19,23 +19,10 @@ export const PAGE_W = 595.28; // A4 at 72dpi
 export const PAGE_H = 841.89;
 
 // Coerce a string to characters the base (WinAnsi) font can encode, so an unusual glyph never crashes a
-// render job. Common typographic glyphs map to ASCII; anything else outside Latin-1 becomes "?".
-const GLYPHS: Record<string, string> = {
-  "₹": "INR ", "–": "-", "—": "-", "−": "-", "•": "*",
-  "‘": "'", "’": "'", "“": '"', "”": '"', "…": "...",
-};
-export function enc(s: string | number | undefined | null): string {
-  let out = "";
-  for (const ch of String(s ?? "")) {
-    if (GLYPHS[ch]) { out += GLYPHS[ch]; continue; }
-    const c = ch.codePointAt(0)!;
-    if (c >= 0x20 && c <= 0x7e) out += ch;
-    else if (c >= 0xa0 && c <= 0xff) out += ch;
-    else if (c === 0x09) out += " ";
-    else out += "?";
-  }
-  return out;
-}
+// render job. It lives in its own dependency-free module because the BROWSER needs it too - the asset-tag
+// sticker sheet is built client-side with the same standard fonts - and a second copy over there is how one
+// of the two ends up without the fix. Re-exported here so the PDF renderers keep importing one thing.
+export { enc } from "./winAnsi";
 
 // Indian-grouped amount at `decimals` places (default 2; e.g. 1234567.5 -> "12,34,567.50", or "12,34,568"
 // with decimals 0). Avoids Intl, which is not reliable in the Workers runtime. `decimals` comes from the

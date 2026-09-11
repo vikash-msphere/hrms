@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  computeSettlement, completedYearsOfService, gratuityAmount, gratuityExemption, leaveEncashmentExemption,
+  computeSettlement, completedYearsOfService, yearsOfService, gratuityAmount, gratuityExemption, leaveEncashmentExemption,
   DEFAULT_GRATUITY_CONFIG,
 } from "../src/domain/settlement";
 
@@ -90,6 +90,40 @@ describe("gratuity (pure)", () => {
 
   it("is disabled when the org settles gratuity outside payroll", () => {
     expect(gratuityAmount(52000, 10, { ...cfg, enabled: false })).toBe(0);
+  });
+
+  // REGRESSION. `yearsOfService` divided elapsed milliseconds by an average 365.25-day year, and a
+  // five-calendar-year span is 1826 or 1827 days: 1826 / 365.25 is 4.99932, so an employee who had served
+  // exactly five years measured under the five-year gate and was paid nothing. Which of the two lengths a span
+  // came out at depended on how many leap days it happened to contain, so three joining years in five were
+  // denied and two were paid - the commonest gratuity exit there is, decided by the joining year.
+  //
+  // Every anniversary must read as a whole number, whatever the leap days did.
+  it("counts a whole year on the anniversary, in every joining year", () => {
+    for (const year of [2020, 2021, 2022, 2023, 2024]) {
+      const start = Date.parse(`${year}-01-01T00:00:00Z`);
+      const fiveYearsOn = Date.parse(`${year + 5}-01-01T00:00:00Z`);
+      expect(yearsOfService(start, fiveYearsOn)).toBe(5);
+      expect(gratuityAmount(52000, completedYearsOfService(start, fiveYearsOn), cfg, yearsOfService(start, fiveYearsOn)))
+        .toBe(150000); // 52000/26 x 15 x 5
+    }
+  });
+
+  it("pays at exactly five years and not a day before", () => {
+    const start = Date.parse("2021-06-15T00:00:00Z");
+    const served = (to: string) => yearsOfService(start, Date.parse(`${to}T00:00:00Z`));
+    expect(served("2026-06-15")).toBe(5);
+    expect(served("2026-06-14")).toBeLessThan(5);
+    expect(gratuityAmount(52000, 5, cfg, served("2026-06-15"))).toBe(150000);
+    expect(gratuityAmount(52000, 5, cfg, served("2026-06-14"))).toBe(0);
+  });
+
+  // A 29 February anchor has no anniversary in a common year; it must land on one real day rather than drift
+  // a fraction short of the gate forever.
+  it("handles a 29 February joining date", () => {
+    const leapStart = Date.parse("2020-02-29T00:00:00Z");
+    expect(yearsOfService(leapStart, Date.parse("2025-03-01T00:00:00Z"))).toBe(5);
+    expect(yearsOfService(leapStart, Date.parse("2025-02-28T00:00:00Z"))).toBeLessThan(5);
   });
 
   it("exempts the least of received, the statutory formula and the ceiling", () => {

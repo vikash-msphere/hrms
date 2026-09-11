@@ -22,6 +22,34 @@ export function measuredPct(baseline: number | undefined, target: number | undef
   return Math.max(0, Math.min(100, Math.round(((current - from) / span) * 100)));
 }
 
+/**
+ * What a set of goals adds up to, as a percentage - the client's mirror of the review score.
+ *
+ * Mirrors `goalAttainment` in src/domain/performance.ts, and mirrors it because the Goals page states the same
+ * number in three places (a person's own scoreboard, each report's roll-up in the team band, an objective's
+ * figure in the drawer) and a page that disagrees with the review is a page nobody can plan against.
+ *
+ * WHAT THIS REPLACED, and why it mattered. Every one of those sites weighted by `(g.weight || 1)` - reading an
+ * unweighted goal as weight 1 - while the server read it as weight 0. `goals.weight` defaults to 0, so the two
+ * disagreed on the ordinary case, and they disagreed WORST where it counts: a person with five untouched goals
+ * and one weighted goal at 100% saw a sensible ~17% on this page and was scored 100% in their review, off the
+ * same rows. One rule, in one place, pinned by test/goalRollupDrift.test.ts.
+ *
+ * The rule: weight only when EVERY goal carries a weight, otherwise the plain mean, so no goal is ever left
+ * out of the number. Caller decides which goals are in the set (cancelled ones are the server's business to
+ * drop, and the pages filter to open goals for their own reasons).
+ */
+export function weightedProgress(goals: { weight?: number | null; progress?: number | null }[]): number {
+  if (!goals.length) return 0;
+  const clamp = (n: number) => Math.max(0, Math.min(100, n));
+  const weightOf = (g: { weight?: number | null }) => Math.max(0, g.weight || 0);
+  if (goals.every((g) => weightOf(g) > 0)) {
+    const total = goals.reduce((s, g) => s + weightOf(g), 0);
+    return Math.round(goals.reduce((s, g) => s + weightOf(g) * clamp(g.progress ?? 0), 0) / total);
+  }
+  return Math.round(goals.reduce((s, g) => s + clamp(g.progress ?? 0), 0) / goals.length);
+}
+
 /** A number the reader typed, or undefined when they typed nothing. "0" is a real value and must survive. */
 export const numOrNone = (s: string): number | undefined => (s.trim() === "" || Number.isNaN(Number(s)) ? undefined : Number(s));
 

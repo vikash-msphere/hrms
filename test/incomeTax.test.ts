@@ -47,6 +47,57 @@ describe("computeAnnualTax - new regime AY 2026-27", () => {
   });
 });
 
+// The cases above pin FIGURES at chosen incomes. This pins the SHAPE of the whole curve, which is what
+// marginal relief exists to protect and what a slab/surcharge edit is most likely to break: relief is the only
+// thing standing between a threshold and a cliff, and a cliff is invisible in any single-point assertion.
+describe("the tax curve has no cliffs", () => {
+  // Every income where relief has to do work: the 87A ceiling and each surcharge band, in GROSS terms (each
+  // threshold is stated on taxable income, so the standard deduction shifts it).
+  const thresholds = [1200000, 5000000, 10000000, 20000000].map((t) => t + NEW.standardDeduction);
+
+  it("never charges more tax on a smaller income", () => {
+    let prev = -1;
+    for (let gross = 0; gross <= 30_000_000; gross += 25_000) {
+      const { totalTax } = computeAnnualTax(gross, NEW);
+      expect(totalTax, `tax fell as income rose, at gross ${gross}`).toBeGreaterThanOrEqual(prev);
+      prev = totalTax;
+    }
+  });
+
+  it("never takes more than the rupees earned, plus the cess that rides on them", () => {
+    // The statutory guarantee is on the TAX: 87A and surcharge relief cap it at the income over the threshold.
+    // The 4% cess is then charged on that capped tax, so just inside a relief window the total moves by 104%
+    // of what was earned - which is what the department's own calculator produces (and what the 12,10,000 case
+    // above asserts). Anything ABOVE that is a genuine cliff.
+    const step = 1000;
+    const ceiling = step * (1 + NEW.cessRate / 100);
+    for (const t of thresholds) {
+      let prev = computeAnnualTax(t - 20_000, NEW).totalTax;
+      for (let gross = t - 20_000 + step; gross <= t + 120_000; gross += step) {
+        const cur = computeAnnualTax(gross, NEW).totalTax;
+        expect(cur - prev, `earning ${step} more at gross ${gross} cost ${cur - prev}`).toBeLessThanOrEqual(ceiling);
+        prev = cur;
+      }
+    }
+  });
+
+  it("never taxes more than the income it is charged on", () => {
+    for (let gross = 0; gross <= 30_000_000; gross += 50_000) {
+      const b = computeAnnualTax(gross, NEW);
+      if (b.taxableIncome > 0) expect(b.totalTax).toBeLessThanOrEqual(b.taxableIncome);
+    }
+  });
+
+  it("explains itself: the slab rows add up to the slab tax", () => {
+    for (let gross = 0; gross <= 30_000_000; gross += 50_000) {
+      const b = computeAnnualTax(gross, NEW);
+      const rowSum = b.slabRows.reduce((s, r) => s + r.amount, 0);
+      // Each row is rounded to the rupee, so the sum may differ by at most a rupee per row.
+      expect(Math.abs(rowSum - b.incomeTax)).toBeLessThanOrEqual(b.slabRows.length);
+    }
+  });
+});
+
 describe("monthlyTds - distribute the balance over remaining months, clamp at 0", () => {
   it("spreads remaining tax evenly", () => {
     expect(monthlyTds(120000, 0, 12)).toBe(10000);

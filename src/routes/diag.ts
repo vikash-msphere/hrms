@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
+import { readCappedBody } from "../services/documentsCommon";
+import { counter } from "../lib/isolateRate";
 
 // Diagnostics relay: the browser posts its telemetry envelope here and the Worker forwards it to the error
 // tracker, server to server.
@@ -35,6 +37,13 @@ import type { AppEnv } from "../env";
 // sends - runs well under this.
 const MAX_ENVELOPE_BYTES = 1_000_000;
 
+// A FLOOR, not the rate limit - see lib/isolateRate.ts for what that distinction is and why the floor exists
+// anyway. This is the sharpest of the unauthenticated routes: every POST forwards up to a megabyte to the
+// tracker as a real outbound request, and the DSN it is checked against is baked into the public bundle, so
+// burning the org's event quota needs no credential at all. It never rejects a real client: the SDK's own
+// transport sends far below this, and a rejection returns 429 with Retry-After, which is what it backs off on.
+const relay = counter(600);
+
 /** The ingest origin and project id a DSN points at, or null if it is not a DSN we can parse. */
 function parseDsn(dsn: string): { origin: string; projectId: string } | null {
   try {
@@ -54,13 +63,27 @@ diag.post("/", async (c) => {
   const configured = c.env.SENTRY_DSN && parseDsn(c.env.SENTRY_DSN);
   if (!configured) return c.notFound(); // relay not configured: indistinguishable from no such route
 
+  // Counted BEFORE the body is read, so a throttled request costs neither the buffer nor the outbound call.
+  if (relay.throttled(Date.now())) {
+    return c.text("too many reports", 429, { "Retry-After": String(relay.retryAfterSeconds) });
+  }
+
   // BYTES, not text. An envelope is only newline-delimited JSON at the top level: a session-replay item's
   // payload is zlib-compressed binary (the SDK compresses recordings in a Web Worker), and reading the body
   // with `c.req.text()` UTF-8-decodes it, turning every byte that is not valid UTF-8 into U+FFFD. Errors are
   // pure JSON and survive that; replays arrive corrupt and are dropped by the tracker, which looks exactly
   // like "replay is not working" with a perfectly healthy client holding a valid replay id.
-  const body = new Uint8Array(await c.req.arrayBuffer());
-  if (body.byteLength > MAX_ENVELOPE_BYTES) return c.text("payload too large", 413);
+  //
+  // CAPPED AS IT IS READ, not measured afterwards. `c.req.arrayBuffer()` reads to the end of the stream, so
+  // the size check below it fired after the payload was already in isolate memory - and nothing upstream
+  // stopped it: middleware/bodyLimit decides from `Content-Length`, which a `Transfer-Encoding: chunked`
+  // request does not send, and the inbound wire-id edge only caps JSON content types, which an envelope is
+  // not. This is the one route in the app that needs no credential, so it was the cheapest way to spend a
+  // 128 MB isolate - shared by every unrelated request the isolate was serving - against a 1 MB ceiling. The
+  // rate floor above bounds how OFTEN, not how big; one request was enough.
+  const raw = await readCappedBody(c.req.raw, MAX_ENVELOPE_BYTES);
+  if (!raw) return c.text("payload too large", 413);
+  const body = new Uint8Array(raw);
 
   // An envelope's FIRST line is a JSON header carrying the DSN the SDK was configured with, and that is the
   // only thing here that decides where the bytes go. Only this line is decoded; the rest is never inspected.
@@ -98,11 +121,16 @@ diag.post("/", async (c) => {
   }
 
   // Rate-limit headers are the one thing the SDK reads back: without them it cannot honour a 429 and will
-  // keep sending into a closed door. Everything else upstream returns is dropped.
+  // keep sending into a closed door. Everything else upstream returns is dropped - including the BODY, which
+  // this used to pass straight through while the header above claimed it did not. The SDK's transport reads
+  // the status and those two headers and nothing else, so relaying the tracker's own JSON bought nothing and
+  // made an unauthenticated endpoint a window onto whatever a third party chose to answer with. The stream is
+  // cancelled rather than read, so dropping it costs less than forwarding it did.
   const headers = new Headers();
   for (const h of ["X-Sentry-Rate-Limits", "Retry-After"]) {
     const v = upstream.headers.get(h);
     if (v) headers.set(h, v);
   }
-  return new Response(await upstream.text(), { status: upstream.status, headers });
+  await upstream.body?.cancel();
+  return new Response(null, { status: upstream.status, headers });
 });

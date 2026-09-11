@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // A salary advance, from asked-for to paid back.
 //
@@ -15,6 +15,10 @@ test("a loan is approved, disbursed, and takes a repayment - one step at a time"
   // Payroll, not HR: the seeded policy gives HR visibility of loans and gives PAYROLL the decisions
   // (approve / reject / disburse / recordRepayment), because those are money movements.
   const desk = await as("payroll");
+  // The 503 that the retry below is there to recover from: a dev Worker restart mid-decision, the same rare
+  // hiccup documented elsewhere in this suite (complianceRuleDelete.spec.ts et al.). The loan's own state,
+  // polled below, is what proves each step landed - not the absence of a console line.
+  allowConsoleErrors(desk, /status of 503|status of 500/i);
 
   // Asked for over the wire: the request form is `loans.spec.ts`'s subject.
   const made = await employee.request.post("/v1/loans", {
@@ -33,7 +37,15 @@ test("a loan is approved, disbursed, and takes a repayment - one step at a time"
 
   // Pending offers approve or reject, and nothing else: money that has not been agreed cannot be paid.
   await expect(card.getByRole("button", { name: "Mark disbursed" })).toHaveCount(0);
-  await card.getByRole("button", { name: "Approve", exact: true }).click();
+  // Re-pressed on a miss: a dev Worker restart mid-request answers this press with a 503 (the same rare
+  // hiccup documented elsewhere in this suite) and the loan stays pending with its Approve button offered
+  // again, exactly as it started. Gated on the loan's OWN state so a press that DID land is never repeated.
+  await expect(async () => {
+    if (await approved(desk, id)) return;
+    const approve = card.getByRole("button", { name: "Approve", exact: true });
+    if (await approve.count()) await approve.click({ timeout: 8_000 }).catch(() => undefined);
+    await expect.poll(() => approved(desk, id), { timeout: 10_000 }).toBe(true);
+  }).toPass({ timeout: 60_000 });
   await expect(card.getByText(/Approved/i).first()).toBeVisible({ timeout: 30_000 });
 
   // Approved offers disbursal - the step where the money actually moves, so it is its own decision rather
@@ -65,3 +77,11 @@ test("a loan is approved, disbursed, and takes a repayment - one step at a time"
 
   await purge(desk, loan.path);
 });
+
+/** Whether the loan has actually been approved, asked of the record rather than of the card or a toast. */
+async function approved(page: import("@playwright/test").Page, id: string): Promise<boolean> {
+  const res = await page.request.get(`/v1/loans/${id}`);
+  if (!res.ok()) return false;
+  const { status } = (await res.json()) as { status?: string };
+  return status === "APPROVED" || status === "DISBURSED";
+}

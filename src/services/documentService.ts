@@ -24,6 +24,7 @@ import { readIdentityValues } from "./identityDetails";
 import { getProvider, assertProviderConfigured } from "./esign";
 import { DEFAULT_ESIGN, type EsignConfig } from "../domain/esign";
 import { stampSignature, type SignAnchor } from "../lib/pdfStamp";
+import { orgToday } from "./orgDay";
 
 // Audience the publisher picked for an org-document (refs are wire-decoded inbound to internal ids).
 type NotifyAudienceInput = { kind: "everyone" | "department" | "employees" | "none"; department?: string | null; employees?: string[] };
@@ -32,6 +33,16 @@ type Cfg = { table: any; collection: string; singular: string; owned: boolean; a
 // Personal-document create carries an `employee` owner ref (gated by the middleware owner-ref, P1.5).
 // `requires_ack` (org-documents only) toggles the acknowledgement requirement.
 type CreateInput = DocumentInput & { employee?: string | null; requires_ack?: boolean; ack_method?: "internal" | "cashfree" | null; sign_anchor?: SignAnchor | null; published?: boolean; notify_audience?: NotifyAudienceInput };
+
+// Expiry in, as a Date or nothing. `new Date(...)` on its own turns anything unparseable into an Invalid
+// Date, which the timestamp_ms column then stores as NaN - a row whose expiry no reader can compare. Reject
+// it at the door instead, the way apiKeys.ts does. A bare YYYY-MM-DD parses to UTC midnight on that day,
+// which is exactly what the wire contract asks writers to send.
+function parseExpireTime(value: string): Date {
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) throw invalidArgument("expire_time must be an RFC 3339 timestamp");
+  return new Date(ms);
+}
 
 // An ack-required org document must declare how it's signed (method) and where (a single box). Validate the
 // pair together so a doc can never require acknowledgement without a placement.
@@ -91,7 +102,7 @@ export function makeDocumentService(cfg: Cfg) {
     const employeeId = owned ? idFromPath(employee) : undefined;
     const where = employeeId ? and(scoped, eq(table.employeeId, employeeId)) : scoped;
     const all = visibleByDelete(await deps.db.select().from(table).where(where), showDeleted);
-    const page = paginate(all, maxPageSize, pageToken, (r: any) => +new Date(r.createdAt), (r: any) => r.uuid);
+    const page = await paginate(all, maxPageSize, pageToken, (r: any) => +new Date(r.createdAt), (r: any) => r.uuid, "desc", { codec: deps.idCodec, collection });
     return { items: await decorate(deps, actor, page.items), nextPageToken: page.nextPageToken };
   }
 
@@ -114,7 +125,7 @@ export function makeDocumentService(cfg: Cfg) {
       r2Key,
       contentType: input.content_type?.trim() || null,
       sizeBytes: input.size_bytes ?? null,
-      expireTime: input.expire_time ? new Date(input.expire_time) : null,
+      expireTime: input.expire_time ? parseExpireTime(input.expire_time) : null,
     };
     if (acknowledgeable && input.requires_ack !== undefined) base.requiresAck = !!input.requires_ack;
     if (acknowledgeable && !!input.requires_ack) {
@@ -178,7 +189,7 @@ export function makeDocumentService(cfg: Cfg) {
     if (has("document_type")) set.documentType = patch.document_type;
     if (has("content_type")) set.contentType = patch.content_type?.trim() || null;
     if (has("size_bytes")) set.sizeBytes = patch.size_bytes ?? null;
-    if (has("expire_time")) set.expireTime = patch.expire_time ? new Date(patch.expire_time) : null;
+    if (has("expire_time")) set.expireTime = patch.expire_time ? parseExpireTime(patch.expire_time) : null;
     if (acknowledgeable && has("requires_ack")) {
       // Turning ack on demands a PDF source (the signature is stamped in place on it). Block it if a
       // non-PDF file is already attached; with no file yet, the later upload enforces it.
@@ -275,7 +286,12 @@ export function makeDocumentService(cfg: Cfg) {
       // The on-file signature image is mandatory (it is what gets stamped). Employee uploads it on their profile.
       if (!emp.signatureKey) throw failedPrecondition("upload a signature image to your profile before acknowledging documents");
       const sigBuf = await deps.docs.get(emp.signatureKey);
-      const stamped = await stampSignature(orgBytes, sigBuf ? new Uint8Array(sigBuf) : undefined, anchor, { name: legalName, date: new Date(+deps.clock.now()).toISOString().slice(0, 10) });
+      // The date printed ON the signature is the ORG's calendar day, not UTC. This is the last place in the
+      // app that derived a "today" from the UTC clock (services/orgDay.ts explains why the rest moved off
+      // it), and it is the worst one to leave: the stamp is baked into a PDF that is then LOCKED, so an
+      // acknowledgement signed before 05:30 in IST carried yesterday's date on the face of the document, for
+      // good, on the one record whose whole purpose is to say when somebody signed.
+      const stamped = await stampSignature(orgBytes, sigBuf ? new Uint8Array(sigBuf) : undefined, anchor, { name: legalName, date: await orgToday(deps) });
       await deps.docs.put(copyKey, stamped, "application/pdf");
       await deps.db.insert(schema.personalDocuments).values({
         uuid: copyId, code: await allocOwnedCode(deps, schema.personalDocuments, schema.personalDocuments.employeeId, employeeId),

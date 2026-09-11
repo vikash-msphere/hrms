@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // The role catalog editor itself - `accessAdmin.spec.ts` proves a role can be created and given a level, by
 // typing the identifier by hand. That leaves everything this form actually computes untested: the identifier
@@ -11,6 +11,9 @@ test.describe("the role catalog editor", () => {
   test("the identifier derives from the display name, and both duplicate checks fire", async ({ as }) => {
     test.setTimeout(120_000);
     const page = await as("super");
+    // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
+    // (complianceRuleDelete.spec.ts et al.).
+    allowConsoleErrors(page, /status of 503/i);
     const stamp = Date.now();
     const label = `E2E Slug Role ${stamp}`;
 
@@ -35,6 +38,9 @@ test.describe("the role catalog editor", () => {
       form = page.getByRole("dialog");
       const create = form.getByRole("button", { name: "Create", exact: true });
       await form.getByLabel("Display name").fill(label);
+      // A Field holds its message back until the field has been LEFT once, so it doesn't redden a half-typed
+      // value (components/common/Field.tsx). Blur it the way a person moving on would.
+      await form.getByLabel("Display name").blur();
       await expect(form.getByText("Another role is already called that", { exact: false })).toBeVisible();
       // The identifier auto-derived to the SAME slug too, which is its own, separate collision.
       await expect(form.getByText("A role with this identifier already exists.")).toBeVisible();

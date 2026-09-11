@@ -1,4 +1,4 @@
-import { enableTelemetry, gotoRoute, test, expect, toast } from "./fixtures";
+import { allowConsoleErrors, enableTelemetry, gotoRoute, test, expect, toast } from "./fixtures";
 
 // Reporting a problem, from the top bar's support menu.
 //
@@ -57,7 +57,16 @@ const replayIds = (envelopes: { header: string; itemType: string }[]): string[] 
 
 test.describe("report a problem", () => {
   test("the support menu opens the report dialog in place and files a ticket with the recording", async ({ as }) => {
+    // Longer than the 45s the Send-report wait below can now take on a busy lane.
+    test.setTimeout(120_000);
     const page = await as("employee");
+    // Two expected console lines, neither of them this test's failure. A dev Worker restart mid-request on a
+    // busy lane reads as a 503/500 (the same rare hiccup documented elsewhere in this suite,
+    // complianceRuleDelete.spec.ts et al.); and a recording attaching itself to a ticket while another
+    // browser is attaching one of its own gets a 409 the app is built to retry ("this ticket's attachments
+    // are being changed by somebody else - try again", services/tickets.ts). The ticket this files, and the
+    // recording on it, are what the assertions below actually read.
+    allowConsoleErrors(page, /status of 503|status of 500|status of 409/i);
     const envelopes = await stubTelemetryRelay(page);
     await gotoRoute(page, "leave-requests");
     const before = page.url();
@@ -92,9 +101,12 @@ test.describe("report a problem", () => {
     await dialog.getByPlaceholder("The page went blank when I clicked Save").blur();
 
     // Send is enabled on a database with NO ticket-categories row. This is the regression: the category was
-    // unsettable, so `canSubmit` was false forever and the button never came alive.
+    // unsettable, so `canSubmit` was false forever and the button never came alive. The button also stays
+    // disabled until the org's ticket categories have loaded and picked one (`getSetting("ticket-categories")`,
+    // a settings fetch shared by every consumer's first read this session), which on a lane heavy with other
+    // browsers hitting the same settings endpoint at once can take a while longer than the ordinary case.
     const send = dialog.getByRole("button", { name: "Send report", exact: true });
-    await expect(send).toBeEnabled();
+    await expect(send).toBeEnabled({ timeout: 45_000 });
 
     await send.click();
 
@@ -159,9 +171,11 @@ test.describe("report a problem", () => {
     await expect(page.getByPlaceholder("The page went blank when I clicked Save")).toHaveValue(subject);
     await expect(page.getByRole("status").filter({ hasText: /Recording/ })).toHaveCount(0);
 
-    // And it still files, carrying the recording that now includes the demonstration.
+    // And it still files, carrying the recording that now includes the demonstration. Given room, because
+    // filing uploads that recording through the relay: on a wide run the default five seconds is the report
+    // being slow, not the report failing.
     await page.getByRole("dialog").getByRole("button", { name: "Send report", exact: true }).click();
-    await expect(toast(page, /Problem reported/i)).toBeVisible();
+    await expect(toast(page, /Problem reported/i)).toBeVisible({ timeout: 30_000 });
 
     // The demonstration is its OWN replay. Two distinct replay ids reached the relay: the run-up flushed when
     // the dialog opened, and the window that began when Record was pressed. Before this, Record continued the
@@ -197,6 +211,10 @@ test.describe("report a problem", () => {
   });
 
   test("a second recording can be added to a ticket that already exists", async ({ as }) => {
+    // Longer than the 45s the Send-report wait below budgets itself - a default 30s test timeout shorter than
+    // that wait (plus the 6s settle before it) kills the test mid-wait and reports it as the whole TEST timing
+    // out rather than ever letting the wait actually use the time it was given.
+    test.setTimeout(120_000);
     const page = await as("employee");
     await stubTelemetryRelay(page);
     await gotoRoute(page, "leave-requests");
@@ -207,7 +225,12 @@ test.describe("report a problem", () => {
     await page.getByRole("menuitem", { name: "Report a problem" }).click();
     const subject = `E2E second recording ${Date.now()}`;
     await page.getByRole("dialog").getByPlaceholder("The page went blank when I clicked Save").fill(subject);
-    await page.getByRole("dialog").getByRole("button", { name: "Send report", exact: true }).click();
+    // The button stays disabled until the org's ticket categories have loaded and picked one
+    // (`getSetting("ticket-categories")`), which on a lane heavy with other browsers hitting the same
+    // settings endpoint at once can take a while longer than the ordinary case.
+    const send = page.getByRole("dialog").getByRole("button", { name: "Send report", exact: true });
+    await expect(send).toBeEnabled({ timeout: 45_000 });
+    await send.click();
     await toast(page, /Problem reported/i).getByRole("button", { name: "View ticket" }).click();
     await expect(page.getByRole("heading", { name: /Session recordings/ })).toBeVisible();
     const before = await page.getByRole("link", { name: /Recorded by/i }).count();

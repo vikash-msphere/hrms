@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Tag, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -48,6 +48,7 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
   const [err, setErr] = useState<string | null>(null);
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "category" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   function openCreate() {
     setEditing(null);
@@ -81,6 +82,9 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
         const next = { name: "", tagCode: "", requiresSerial: form.requiresSerial };
         setForm(next);
         guard.markSaved(next);
+        // The just-cleared Name loses focus the instant its own Create button disables with it - see
+        // ReimbursementCategories' identical fix.
+        nameRef.current?.focus();
       } else {
         guard.markSaved();
         setOpen(false);
@@ -154,7 +158,7 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
           </DialogHeader>
           <FormError error={err} />
           <Field label="Name">
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Laptop" autoFocus />
+            <Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Laptop" autoFocus />
           </Field>
           <Field label="Tag code" hint="Left blank, the first three letters of the name are used - numbered (LAP2) when another category already answers to them. Assets already tagged keep the tag they are wearing.">
             <Input value={form.tagCode} onChange={(e) => setForm({ ...form, tagCode: e.target.value.toUpperCase() })} placeholder="e.g. LAP" className="max-w-32 font-mono" maxLength={8} />

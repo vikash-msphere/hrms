@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Plus, Trash2, ChevronUp, ChevronDown, Bell, Clock, Hourglass, Zap, Globe, Boxes, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -6,6 +6,9 @@ import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Field } from "@/components/common/Field";
+import { useCollection } from "@/hooks/useCollection";
+import { idOf } from "@/lib/utils";
+import type { Department } from "@/types";
 import { TemplatedInput } from "./TemplatedInput";
 import type { Action, WaitArm, WorkflowMeta, Variable } from "./types";
 import { variablesFor } from "./useWorkflowMeta";
@@ -28,6 +31,22 @@ const LABEL: Record<Action["kind"], string> = {
   notify: "Notify", notifyManager: "Notify manager", notifyAudience: "Broadcast", apiCall: "API call",
   emitEvent: "Emit event", wait: "Wait", waitFor: "Wait for", webhook: "Webhook", email: "Email", emailAudience: "Email audience",
 };
+
+// The department a "broadcast to an audience" action targets. Stored as a `departments/<id>` ref, like every
+// other resource reference on the wire, so the inbound edge decodes the wire token to the internal id before
+// the engine resolves the audience - a raw id typed into a text box reached the engine still tokenised and
+// matched nobody. Mounted only while the audience IS a department, so the list is fetched on demand.
+function DepartmentPicker({ value, onChange }: { value: string; onChange: (ref: string) => void }) {
+  const { rows } = useCollection<Department>("departments");
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger className="h-9 flex-1" aria-label="Department"><SelectValue placeholder="Pick a department" /></SelectTrigger>
+      <SelectContent>
+        {rows.map((d) => <SelectItem key={d.path} value={`departments/${idOf(d.path)}`}>{d.display_name}</SelectItem>)}
+      </SelectContent>
+    </Select>
+  );
+}
 
 // Captured names produced by the actions BEFORE index `i` (for the variable picker's "earlier steps").
 function capturesBefore(actions: Action[], i: number): string[] {
@@ -103,10 +122,12 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
               <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
               <SelectContent><SelectItem value="everyone">Everyone</SelectItem><SelectItem value="department">A department</SelectItem><SelectItem value="employees">Specific employees</SelectItem></SelectContent>
             </Select>
-            {a.audience.kind === "department" && <Input className="h-9 flex-1" value={a.audience.department} onChange={(e) => onChange({ ...a, audience: { kind: "department", department: e.target.value } })} placeholder="department id" />}
+            {a.audience.kind === "department" && <DepartmentPicker value={a.audience.department} onChange={(department) => onChange({ ...a, audience: { kind: "department", department } })} />}
           </div>
-          <Field label="Title"><TemplatedInput value={a.title} onChange={(title) => onChange({ ...a, title })} vars={vars} /></Field>
-          <Field label="Body"><TemplatedInput value={a.body ?? ""} onChange={(body) => onChange({ ...a, body })} vars={vars} textarea /></Field>
+          {/* Placeholders, like the email twin below: two stacked templated inputs with nothing in them are
+              told apart only by their labels, and a label alone is easy to miss at a glance. */}
+          <Field label="Title"><TemplatedInput value={a.title} onChange={(title) => onChange({ ...a, title })} vars={vars} placeholder="Notification title" /></Field>
+          <Field label="Body"><TemplatedInput value={a.body ?? ""} onChange={(body) => onChange({ ...a, body })} vars={vars} textarea placeholder="Notification body (optional)" /></Field>
         </div>
       );
     case "apiCall":
@@ -199,7 +220,7 @@ function ActionEditor({ action, onChange, meta, triggerType, vars }: { action: A
               <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
               <SelectContent><SelectItem value="everyone">Everyone</SelectItem><SelectItem value="department">A department</SelectItem><SelectItem value="employees">Specific employees</SelectItem></SelectContent>
             </Select>
-            {a.audience.kind === "department" && <Input className="h-9 flex-1" value={a.audience.department} onChange={(e) => onChange({ ...a, audience: { kind: "department", department: e.target.value } })} placeholder="department id" />}
+            {a.audience.kind === "department" && <DepartmentPicker value={a.audience.department} onChange={(department) => onChange({ ...a, audience: { kind: "department", department } })} />}
           </div>
           <Field label="Subject"><TemplatedInput value={a.subject} onChange={(subject) => onChange({ ...a, subject })} vars={vars} placeholder="Email subject" /></Field>
           <Field label="Body (HTML)"><TemplatedInput value={a.html} onChange={(html) => onChange({ ...a, html })} vars={vars} textarea placeholder="<p>…</p>" /></Field>
@@ -223,10 +244,31 @@ function rowsToBody(rows: BodyRow[]): Record<string, unknown> | undefined {
 
 function ApiCallEditor({ action, onChange, meta, vars }: { action: Extract<Action, { kind: "apiCall" }>; onChange: (a: Action) => void; meta: WorkflowMeta | null; vars: Variable[] }) {
   const resources = meta?.resources ?? [];
-  // Infer mode from the current shape.
-  const mode = action.method.toUpperCase() === "POST" && !action.path.includes("{{") && /^\/v1\/[a-z-]+$/.test(action.path) ? "create" : action.path.includes("{{") ? "record" : "raw";
-  const rows = bodyToRows(action.body);
-  const setRows = (r: BodyRow[]) => onChange({ ...action, body: rowsToBody(r) });
+  // The shape a saved call was written in - the mode to OPEN on. It is only the opening guess: kept as the
+  // live value, typing a variable into a raw call's path ("/v1/{{subject}}:prioritize" - a custom method on
+  // the record a rule fired on) re-read as "Act on a record" and swapped the editor out from under the
+  // caret, so a raw call to a templated path could not be authored at all. Once the reader has said which
+  // kind of call this is, that answer stands until they change it.
+  const inferred = action.method.toUpperCase() === "POST" && !action.path.includes("{{") && /^\/v1\/[a-z-]+$/.test(action.path) ? "create" : action.path.includes("{{") ? "record" : "raw";
+  const [mode, setMode] = useState<"create" | "record" | "raw">(inferred);
+  // The rows are state of their own rather than a read of `action.body`, because a body is an OBJECT: a row
+  // whose key has not been typed yet has nowhere to live in it. Derived, "Add field" looked broken - the
+  // empty row it appended was dropped by `rowsToBody` on the way out and never came back, so a rule's body
+  // could only ever be authored in the seed. Re-seeded only when the body changes from outside this editor
+  // (a different action moved into this slot), never in response to our own write.
+  const [rows, setRowsState] = useState<BodyRow[]>(() => bodyToRows(action.body));
+  const emitted = useRef(JSON.stringify(action.body ?? null));
+  const incoming = JSON.stringify(action.body ?? null);
+  if (incoming !== emitted.current) {
+    emitted.current = incoming;
+    setRowsState(bodyToRows(action.body));
+  }
+  const setRows = (r: BodyRow[]) => {
+    setRowsState(r);
+    const body = rowsToBody(r);
+    emitted.current = JSON.stringify(body ?? null);
+    onChange({ ...action, body });
+  };
   const resourceOf = (path: string) => path.replace("/v1/", "").split(/[/:]/)[0] ?? "";
 
   const bodyForm = (
@@ -253,8 +295,8 @@ function ApiCallEditor({ action, onChange, meta, vars }: { action: Extract<Actio
         <Select
           value={mode}
           onValueChange={(m) => {
-            if (m === "create") onChange({ ...action, method: "POST", path: "/v1/" });
-            else if (m === "record") onChange({ ...action, method: "PATCH", path: "/v1/{{subject}}" });
+            setMode(m as typeof mode);
+            if (m === "record") onChange({ ...action, method: "PATCH", path: "/v1/{{subject}}" });
             else onChange({ ...action, method: "POST", path: "/v1/" });
           }}
         >

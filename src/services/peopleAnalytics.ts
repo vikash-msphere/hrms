@@ -2,6 +2,7 @@ import { and, or, eq, ne, gte, lte, lt, inArray, isNull, isNotNull, sql, asc, ty
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import { applyScope } from "./listScope";
+import { STALE_AFTER_DAYS } from "../domain/goals";
 import { getSettingValue } from "./settings";
 import type { ListScope } from "../domain/access";
 import type { Deps } from "../deps";
@@ -88,8 +89,12 @@ export type AnalyticsResult = {
  *  whole window (the alternative is a timezone database in SQL); a zone that changes offset mid-window can
  *  therefore misfile a punch within an hour of local midnight on the changeover day. */
 function tzOffsetMs(tz: string, at: number): number {
+  // `hourCycle: "h23"` is load-bearing here, not tidiness. `hour12: false` leaves the hour cycle to the locale,
+  // and h24 renders midnight as `24:00:00` - which makes the string below `...T24:00:00Z`, which `Date.parse`
+  // answers NaN to. The offset is then NaN and every day bucket in the report is built from it. Naming the
+  // cycle keeps that off a runtime whose ICU resolves the other way.
   const local = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
   }).format(new Date(at));
   return Date.parse(`${local.replace(" ", "T")}Z`) - at;
 }
@@ -346,6 +351,40 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
         completed: cond("completed", and(eq(t.goals.status, "completed"), gte(t.goals.updatedAt, fromDate), lt(t.goals.updatedAt, toExclusiveDate))!),
         overdue: cond("overdue", and(inArray(t.goals.status, ["not_started", "in_progress"]), isNotNull(t.goals.dueDate), lt(t.goals.dueDate, today))!),
         progressSum: expr("progressSum", sql<number>`coalesce(sum(case when ${t.goals.status} in ('not_started', 'in_progress') then ${t.goals.progress} else 0 end), 0)`),
+        // Attainment: what the window ASKED for (goals due inside it) against what was delivered, weighted the
+        // same way a review scores it - see domain/performance.ts#goalAttainment. Cancelled goals are out
+        // whole; the unweighted pair is the fallback for an org that leaves weights at zero.
+        //
+        // `dueUnweighted` is what makes it the SAME rule rather than a similar one: the weighted arithmetic
+        // applies only when every goal in the window carries a weight. `goals.weight` defaults to 0, and a
+        // weight-0 goal adds nothing to either side of Σ(weight x progress) / Σweight - so on a `dueWeight > 0`
+        // test it vanished from the report exactly as it used to vanish from the review score, and one weighted
+        // goal beside five untouched ones reported that goal's progress as the person's attainment.
+        // Written with the window as RAW literals rather than bound values, and that is deliberate rather than
+        // stylistic: the roster chunk is sized at 80 ids against D1's 100-parameter ceiling, and the margin is
+        // what every aggregate's own window dates spend. Three more bound parameters on this statement put a
+        // 122-person report over the cap (test/peopleAnalytics.test.ts pins exactly that), so this aggregate
+        // adds none. The values are epoch milliseconds this function computed - never caller text - so there
+        // is nothing here that interpolation could subvert.
+        dueUnweighted: expr("dueUnweighted", sql<number>`coalesce(sum(case when ${t.goals.status} <> 'cancelled' and ${t.goals.dueDate} >= ${sql.raw(String(+fromDate))} and ${t.goals.dueDate} < ${sql.raw(String(+toExclusiveDate))} and max(${t.goals.weight}, 0) <= 0 then 1 else 0 end), 0)`),
+        dueWeight: expr("dueWeight", sql<number>`coalesce(sum(case when ${t.goals.status} <> 'cancelled' and ${t.goals.dueDate} >= ${+fromDate} and ${t.goals.dueDate} < ${+toExclusiveDate} then max(${t.goals.weight}, 0) else 0 end), 0)`),
+        dueEarned: expr("dueEarned", sql<number>`coalesce(sum(case when ${t.goals.status} <> 'cancelled' and ${t.goals.dueDate} >= ${+fromDate} and ${t.goals.dueDate} < ${+toExclusiveDate} then max(${t.goals.weight}, 0) * min(max(${t.goals.progress}, 0), 100) else 0 end), 0)`),
+        dueCount: cond("dueCount", and(ne(t.goals.status, "cancelled"), gte(t.goals.dueDate, fromDate), lt(t.goals.dueDate, toExclusiveDate))!),
+        dueProgress: expr("dueProgress", sql<number>`coalesce(sum(case when ${t.goals.status} <> 'cancelled' and ${t.goals.dueDate} >= ${+fromDate} and ${t.goals.dueDate} < ${+toExclusiveDate} then min(max(${t.goals.progress}, 0), 100) else 0 end), 0)`),
+        // The two early signals, as of NOW rather than the window (like tasks_open): a goal 25 points behind
+        // the straight line from when it was set to when it is due - or one its owner has flagged - and a goal
+        // nobody has touched in three weeks. Mirrors domain/goals.ts#goalPace / #staleDays, in SQL because
+        // this counts every person's goals in one grouped statement.
+        atRisk: expr("atRisk", sql<number>`coalesce(sum(case
+          when ${t.goals.status} in ('not_started', 'in_progress') and (
+            ${t.goals.confidence} in ('at_risk', 'off_track')
+            or (${t.goals.dueDate} is not null and (${t.goals.dueDate} + 86400000) > ${t.goals.createdAt}
+              and min(max(${t.goals.progress}, 0), 100)
+                - (min(max((${+now} - ${t.goals.createdAt}) * 1.0 / ((${t.goals.dueDate} + 86400000) - ${t.goals.createdAt}), 0), 1) * 100) <= -25)
+          ) then 1 else 0 end), 0)`),
+        stale: expr("stale", sql<number>`coalesce(sum(case
+          when ${t.goals.status} in ('not_started', 'in_progress') and (${+now} - ${t.goals.updatedAt}) >= ${STALE_AFTER_DAYS} * 86400000
+          then 1 else 0 end), 0)`),
       })
       .from(t.goals)
       .where(scoped("goals", isNull(t.goals.deleteTime), inArray(t.goals.employeeId, ids)))
@@ -538,6 +577,14 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     put("goals_overdue", num(g?.overdue));
     // Averaged over the goals in flight - the same set `progressSum` added up, so `active` is its denominator.
     put("avg_goal_progress", num(g?.active) ? Math.round(num(g?.progressSum) / num(g?.active)) : null);
+    // Weighted attainment over the goals the window was FOR, falling back to their plain mean when the org
+    // sets no weights - the same two-step a review scores with, so the report and the review agree.
+    put("goal_attainment",
+      num(g?.dueWeight) && !num(g?.dueUnweighted) ? Math.round(num(g?.dueEarned) / num(g?.dueWeight))
+        : num(g?.dueCount) ? Math.round(num(g?.dueProgress) / num(g?.dueCount))
+        : null);
+    put("goals_at_risk", num(g?.atRisk));
+    put("goals_stale", num(g?.stale));
 
     const r = rating.get(p.uuid);
     put("latest_rating", r?.rating == null ? null : Number(r.rating));

@@ -64,7 +64,12 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
   const { toast } = useToast();
   const crons = useCollection<CronRun>("cron-runs", { max: 200 });
   const jobs = useCollection<Operation>("operations", { max: 200 });
-  const now = useMemo(() => new Date(), [crons.rows, jobs.rows]); // refresh "next run" when data reloads
+  // A deliberate TRIGGER, not a reference: the factory reads neither list, it just needs a fresh clock each
+  // time the data reloads so "next run" is computed against now rather than against page-open. The linter
+  // cannot tell that apart from a stale dependency, so it is silenced here with the reason rather than
+  // "fixed" by dropping the deps - which would freeze the clock at mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are the reload trigger; see above
+  const now = useMemo(() => new Date(), [crons.rows, jobs.rows]);
   const [running, setRunning] = useState<string | null>(null);
   const [runningJob, setRunningJob] = useState<string | null>(null);
 
@@ -204,7 +209,7 @@ export default function Operations({ embedded }: { me?: Me; embedded?: boolean }
                     const id = idOf(j.path);
                     const runnable = md.status === "queued" || md.status === "running" || md.status === "error";
                     return (
-                      <tr key={j.path} className="border-b last:border-0">
+                      <tr key={j.path} id={`op-job-${id}`} className="border-b last:border-0">
                         <td className="px-4 py-2.5 font-medium">{md.kind ? humanize(md.kind.replace(/\./g, " ")) : "-"}</td>
                         <td data-label="Status" className="px-4 py-2.5">{md.status ? <StatusBadge state={md.status} /> : "-"}</td>
                         <td data-label="Started" className="px-4 py-2.5 text-muted-foreground" title={absUtc(md.create_time)}>{rel(md.create_time)}</td>

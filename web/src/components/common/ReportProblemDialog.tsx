@@ -40,6 +40,13 @@ const EMPTY = { subject: "", description: "", category: "" };
 // the SDK keeps its own replay session, so the two survive (and expire with) the same tab.
 const RECORDING_UNTIL = "problem-recording-until";
 
+// The desk a problem report goes to without being asked. Which team fixes the software is the org's routing
+// decision, not something the person hitting the bug should have to work out, so this is the "app" category
+// that ships as a default (domain/tickets.ts) and only falls back to asking if the org has removed or renamed
+// it. A single configured category is likewise no choice at all.
+const presetOf = (list: TicketCategory[]): TicketCategory | undefined =>
+  list.find((c) => c.key === APP_ISSUES_CATEGORY_KEY) ?? (list.length === 1 ? list[0] : undefined);
+
 export function ReportProblemDialog() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
@@ -75,18 +82,24 @@ export function ReportProblemDialog() {
 
   // Loaded when the dialog first opens, not on mount: this component is rendered on every page for every user,
   // and most sessions never report a problem. Nothing is fetched until somebody does.
+  // The desk is chosen in the SAME update that lands the categories, rather than left to the effect below to
+  // notice afterwards: that effect fires on a change to `form.category`, and a state it writes which is never
+  // committed on its own (a keystroke in the same batch) is a change it never sees.
+  const applyCategories = (list: TicketCategory[]) => {
+    setCategories(list);
+    const p = presetOf(list);
+    if (p) setForm((f) => (f.category ? f : { ...f, category: p.key }));
+  };
+
   useEffect(() => {
     if (!open || categories.length) return;
     getSetting<{ categories?: TicketCategory[] }>("ticket-categories")
-      .then((s) => setCategories(s.value?.categories ?? DEFAULT_TICKET_CATEGORIES.categories))
-      .catch(() => setCategories(DEFAULT_TICKET_CATEGORIES.categories));
+      .then((s) => applyCategories(s.value?.categories ?? DEFAULT_TICKET_CATEGORIES.categories))
+      .catch(() => applyCategories(DEFAULT_TICKET_CATEGORIES.categories));
   }, [open, categories.length]);
 
-  // Pick the desk rather than asking. Which team fixes the software is the org's routing decision, not
-  // something the person hitting the bug should have to work out, so this lands on the "app" category that
-  // ships as a default (domain/tickets.ts) and only falls back to asking if the org has removed or renamed it.
-  // A single configured category is likewise no choice at all.
-  const preset = categories.find((c) => c.key === APP_ISSUES_CATEGORY_KEY) ?? (categories.length === 1 ? categories[0] : undefined);
+  // Whether the desk was chosen for this reader - which is also what decides whether the picker is offered.
+  const preset = presetOf(categories);
 
   // Drop a category the org no longer has, BEFORE the preset below fills the gap. WriteDialog restores the
   // whole form from a saved draft (`draftKey`), category included, and a draft outlives the configuration it
@@ -186,11 +199,18 @@ export function ReportProblemDialog() {
       onSubmit={submit}
       submitAccess={(b) => <AccessAction collection="tickets" create label="Report a problem">{b}</AccessAction>}
     >
+      {/* Functional updates, not `{ ...form, … }`: the category is filled in by an effect the moment the
+          org's categories land (`preset`, above), and a keystroke that spreads a render's own `form` snapshot
+          overwrites that write with the value the field had before it. React commits the two together, so the
+          intermediate state the preset effect wrote is never committed - its `form.category` dep never
+          changes, it does not run again, and the category stays empty for good. Which is a dead end and not
+          just a lost keystroke: a valid preset HIDES the picker, so Send sits disabled saying "Pick who this
+          should reach" with no control on screen to pick with. */}
       <Field label="What went wrong?">
-        <Input autoFocus placeholder="The page went blank when I clicked Save" value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
+        <Input autoFocus placeholder="The page went blank when I clicked Save" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} />
       </Field>
       <Field label="What were you doing? (optional)" hint="Anything you remember. The recording below usually covers the steps.">
-        <Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        <Textarea rows={3} value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
       </Field>
       {/* Only when the desk could not be chosen above. Note it still renders with NO categories, where the
           picker is empty: hiding it there left a disabled Send button explaining itself in terms of a control

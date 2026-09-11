@@ -98,6 +98,10 @@ type Entry = {
   // A forced read that arrived while `inflight` was already running, waiting for its turn - see ensureFetch.
   queuedForce: Promise<void> | null;
   subs: Set<() => void>;
+  // When these rows were last edited LOCALLY (an optimistic guess, or a write's own reserialized row folded
+  // back in). A list answer whose request left before that moment describes the state the caller has already
+  // moved on from, so it must not be adopted - see ensureFetch.
+  patchedAt: number;
   fromDisk?: boolean; // adopted from the stored copy and not re-read since - see syncChanges
   // The server's validator for these exact rows. Sent back on the next revalidation, which is what turns a
   // lapsed freshness window from a page of rows into one indexed row (see ensureFetch).
@@ -124,6 +128,11 @@ const ephemeral = (e: Entry) => !!e.opts.q || !!e.opts.deletedOnly;
 function dropEntry(e: Entry) {
   entries.delete(e.key);
   hasMoreByCollection.delete(e.key);
+  // The collection's flag is derived from the keys that still EXIST, so dropping the truncated one has to
+  // re-derive it. Without this, a search that returned a full page (`q` keys are dropped on their last
+  // unsubscribe) left the collection marked truncated for the rest of the page life - so every table of it
+  // went on claiming to show a window of a larger set after the search that was truncated had gone.
+  recomputeTruncated(e.collection);
 }
 
 /**
@@ -149,21 +158,25 @@ function evictIfNeeded(keep: string) {
 const hasMoreByCollection = new Map<string, boolean>(); // entry key -> has a cursor
 const truncatedCollections = new Set<string>(); // collections with at least one truncated entry
 
-function indexHasMore(e: Entry) {
-  const has = Boolean((e.snap.meta as { next_page_token?: string } | undefined)?.next_page_token);
-  if (has) hasMoreByCollection.set(e.key, true);
-  else hasMoreByCollection.delete(e.key);
-  // Recompute the collection's flag from its own keys only (a handful), never the whole map.
+// Recompute one collection's flag from the keys that still exist (a handful), never the whole map.
+function recomputeTruncated(collection: string) {
   let any = false;
   for (const other of entries.values()) {
-    if (other.collection !== e.collection) continue;
+    if (other.collection !== collection) continue;
     if (hasMoreByCollection.get(other.key)) {
       any = true;
       break;
     }
   }
-  if (any) truncatedCollections.add(e.collection);
-  else truncatedCollections.delete(e.collection);
+  if (any) truncatedCollections.add(collection);
+  else truncatedCollections.delete(collection);
+}
+
+function indexHasMore(e: Entry) {
+  const has = Boolean((e.snap.meta as { next_page_token?: string } | undefined)?.next_page_token);
+  if (has) hasMoreByCollection.set(e.key, true);
+  else hasMoreByCollection.delete(e.key);
+  recomputeTruncated(e.collection);
 }
 
 // `m` mirrors the page size api.ts actually sends (capped at the server's 100), so two callers that differ only
@@ -175,7 +188,7 @@ function getEntry(collection: string, opts: ListOpts): Entry {
   const key = keyOf(collection, opts);
   let e = entries.get(key);
   if (!e) {
-    e = { key, collection, opts, snap: { rows: [], state: "loading", error: null }, ts: 0, inflight: null, queuedForce: null, subs: new Set() };
+    e = { key, collection, opts, snap: { rows: [], state: "loading", error: null }, ts: 0, inflight: null, queuedForce: null, subs: new Set(), patchedAt: 0 };
     entries.set(key, e);
     evictIfNeeded(key);
     // First touch in this page life: adopt whatever the last page life left on disk. A copy still inside its
@@ -491,8 +504,30 @@ export function ensureFetch(collection: string, opts: ListOpts, force = false): 
   const validator = e.snap.state === "ready" && e.etag ? e.etag : undefined;
   // `force` is always a read prompted by a write (or by the reader asking outright), so it must not be handed
   // a request that was already on the wire before it - see the note on `fresh` in lib/getCoalescer.ts.
+  // The other half of that ordering problem: an ordinary revalidation already on the wire when a write happens
+  // answers with the state BEFORE the write. Nothing forces a re-read after it (a reaction, a vote, a read
+  // receipt all invalidate nothing by design - the verb hands its own reserialized row back and the page folds
+  // it in), so adopting that answer rolls the card back to the pre-write shape and leaves it there until
+  // something unrelated reloads the collection. That is how a reaction switched away from could reappear on the
+  // board, minutes after the server had cleared it. So: remember when this request left, and refuse its answer
+  // if the rows were written locally in the meantime - reading again in its place, since an answer merely
+  // dropped would leave the entry at the age it already had and nothing would correct it.
+  //
+  // Narrowly, though: only a REVALIDATION can roll anything back, because only it has rows to roll back TO. A
+  // first load holds nothing, so there is nothing for a local write to lose and no reason to spend a second
+  // request - it adopts the answer, exactly as it did before, and the write's own invalidation (where it has
+  // one) reads again anyway. Boot is all first loads, and a forced re-read there is a request per raced
+  // collection on a plan that counts them (see `docs/` on D1 reads).
+  const startedAt = Date.now();
+  const hadRows = e.snap.state === "ready" && e.snap.rows.length > 0;
   e.inflight = listConditional<unknown>(collection, opts, validator, force)
     .then((answer) => {
+      if (hadRows && e.patchedAt >= startedAt) {
+        // Queued rather than called straight: this request's own `finally` has not cleared `inflight` yet, so a
+        // direct call would be parked behind it as a queued force anyway - same read, one step less.
+        void Promise.resolve().then(() => ensureFetch(collection, opts, true));
+        return;
+      }
       e.ts = Date.now();
       if (answer.notModified) {
         // The rows we hold ARE the answer. Re-stamp them so the window starts again, and store that - a
@@ -510,7 +545,7 @@ export function ensureFetch(collection: string, opts: ListOpts, force = false): 
       writeDisk(e); // so the next page life can skip this read entirely
       // Passive cross-tab share: whichever tab fetched hands the fresh rows to every sibling, so a subscribed
       // sibling adopts them (below) with NO request of its own. Free - the fetch already happened here.
-      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, meta, etag: e.etag } satisfies RowsMsg);
+      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, startedAt, meta, etag: e.etag } satisfies RowsMsg);
     })
     .catch((err) => {
       setSnap(e, { state: "error", error: (err as Error).message });
@@ -535,7 +570,11 @@ export function loadMoreRows(collection: string, opts: ListOpts): Promise<void> 
       const { results, ...meta } = resp as { results?: unknown[] } & Record<string, unknown>;
       const rows = [...e.snap.rows, ...(results ?? [])];
       setSnap(e, { rows, state: "ready", error: null, meta });
-      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, meta } satisfies RowsMsg);
+      // Carries THIS entry's validator, unchanged: a follow-on page does not mint one (the etag describes the
+      // first page, which is still what a revalidation asks about). Sending the message without it set the
+      // sibling's etag to undefined, so the sibling then re-read a whole page where this tab spends one
+      // indexed row - and lost the pages it had just adopted whenever nothing had changed.
+      publish(TOPIC_ROWS, { key: keyOf(collection, opts), rows, ts: e.ts, meta, etag: e.etag } satisfies RowsMsg);
     })
     .catch((err) => {
       setSnap(e, { state: "error", error: (err as Error).message });
@@ -562,8 +601,10 @@ export function getSnapshot(collection: string, opts: ListOpts): Snapshot {
 }
 
 // Optimistic local edit shared across every subscriber of this exact key (e.g. flip a notification to read).
+// Stamped, because these rows are now AHEAD of anything already on the wire: see `patchedAt` in ensureFetch.
 export function patchRows(collection: string, opts: ListOpts, updater: (prev: unknown[]) => unknown[]) {
   const e = getEntry(collection, opts);
+  e.patchedAt = Date.now();
   setSnap(e, { rows: updater(e.snap.rows) });
 }
 
@@ -661,11 +702,14 @@ export function subscribePurge(cb: () => void): () => void {
 //                 keys (one of us reads, then shares via TOPIC_ROWS). Applied WITHOUT re-broadcasting (no loop).
 const TOPIC_ROWS = "rs:rows";
 const TOPIC_INVAL = "rs:inval";
-type RowsMsg = { key: string; rows: unknown[]; ts: number; meta?: Record<string, unknown>; etag?: string };
+// `startedAt` is when the SIBLING's request left, not when it landed: a receiving tab that has written to these
+// rows since then is ahead of the answer, however recently the answer arrived (same ordering as ensureFetch).
+type RowsMsg = { key: string; rows: unknown[]; ts: number; startedAt?: number; meta?: Record<string, unknown>; etag?: string };
 
-subscribeTopic<RowsMsg>(TOPIC_ROWS, ({ key, rows, ts, meta, etag }) => {
+subscribeTopic<RowsMsg>(TOPIC_ROWS, ({ key, rows, ts, startedAt, meta, etag }) => {
   const e = entries.get(key);
   if (!e || ts <= e.ts) return; // not observed here, or we already hold equal/newer rows
+  if (e.patchedAt >= (startedAt ?? ts)) return; // a read that left before our own write is behind us, not ahead
   e.ts = ts;
   e.etag = etag; // the sibling's validator describes these exact rows, so it is ours to revalidate with
   setSnap(e, { rows, state: "ready", error: null, meta });

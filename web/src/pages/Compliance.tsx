@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { formatDate, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import type { ComplianceEvent, ComplianceRule, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
@@ -35,9 +36,12 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { cn } from "@/lib/utils";
+import { addMonthsUtc } from "../../../src/domain/calendar";
 
 // Local calendar date - toISOString() would report yesterday until UTC rolls over, mis-bucketing due/overdue.
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const FREQS = [
   { value: "one_time", label: "One-time" },
@@ -50,12 +54,13 @@ const NONE = "__none__";
 const EMPTY = { title: "", category: "", frequency: "monthly", due_date: "", period_label: "", status: "pending", filed_date: "", reference: "", assignee: NONE, notes: "", document: "" };
 const EMPTY_RULE = { title: "", category: "", frequency: "monthly", due_day: "15", anchor_month: "4", assignee: NONE, notes: "", active: true };
 
+// The next due date for a one-off obligation, one frequency step on. Clamped to the target month's length
+// (domain/calendar.ts), which the rule engine that generates recurring occurrences has always done
+// (domain/complianceRecurrence.ts) - a bare `setUTCMonth` turned "due the 31st of March" into 3 May, moving a
+// statutory deadline past the month it belongs to.
 function advance(dateStr: string, freq: string): string {
   const d = new Date((dateStr || todayStr()) + "T00:00:00Z");
-  if (freq === "quarterly") d.setUTCMonth(d.getUTCMonth() + 3);
-  else if (freq === "annual") d.setUTCFullYear(d.getUTCFullYear() + 1);
-  else d.setUTCMonth(d.getUTCMonth() + 1);
-  return d.toISOString().slice(0, 10);
+  return addMonthsUtc(d, freq === "quarterly" ? 3 : freq === "annual" ? 12 : 1).toISOString().slice(0, 10);
 }
 
 function StatusBadge({ c }: { c: ComplianceEvent }) {
@@ -642,8 +647,9 @@ function MonthView({ events, onOpen, onAdd, onMove }: {
   const cells = useMemo(() => Array.from({ length: 42 }, (_, i) => new Date(+gridStart + i * DAY_MS)), [gridStart]);
   const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
   const month = cursor.getUTCMonth();
-  // Local date for the "today" ring - toISOString() would mark yesterday until UTC rolls over.
-  const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+  // The ORG's date for the "today" ring. Local parts were right to avoid UTC and wrong about whose day it
+  // is - the ring should mark the day the rest of the app, and the server, call today.
+  const today = todayStr();
   return (
     <Card>
       <CardContent className="p-0 sm:p-0">

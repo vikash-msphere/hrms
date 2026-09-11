@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Calculator, Plus } from "lucide-react";
 import { get, create } from "@/api";
 import { formatMoney } from "@/lib/utils";
+import { todayStr as todayYmd } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Settlement } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,7 +17,6 @@ import { AccessScope } from "@/components/access/AccessScope";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 
-const todayYmd = () => new Date().toISOString().slice(0, 10);
 
 // Full & final settlement (FnF): compute a snapshot at exit + view the breakdown. The FnF letter renders the
 // most recent snapshot. HR + super only (gated by the caller).
@@ -32,7 +32,8 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "settlement inputs" });
   const money = (n: number) => formatMoney(n, latest?.currency_code || org.default_currency, currencyDecimals(latest?.currency_code, org));
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       const r = await get<{ results: Settlement[] }>(`settlements?employee=${encodeURIComponent("employees/" + employeeId)}`);
       setLatest(r.results?.[0] ?? null);
@@ -41,10 +42,10 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
     } finally {
       setLoaded(true);
     }
-  }
+  }, [employeeId, toast]);
   useEffect(() => {
     void load();
-  }, [employeeId]);
+  }, [load]);
 
   async function compute() {
     setBusy(true);

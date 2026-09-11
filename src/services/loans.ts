@@ -10,7 +10,8 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { emitEvent } from "./eventBus";
-import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
+import { invalidArgument, notFound, aborted, alreadyExists, failedPrecondition } from "../lib/errors";
+import { genId } from "../lib/idCodec";
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { installmentAmount, isFullyRepaid, outstandingOf } from "../domain/loans";
@@ -27,7 +28,7 @@ export type LoanInput = {
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 import { round2 } from "../domain/money";
-import type { BatchStmt, CheckedStmt } from "../lib/dbBatch";
+import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 const MANUAL_REPAY_DEDUP_MS = 60_000; // an identical manual repayment within 60s = accidental double-submit
 
 export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false) {
@@ -107,7 +108,7 @@ export async function approveLoan(deps: Deps, actor: AppUser, id: string) {
   const monthly = round2(row.principal / Math.max(1, row.installments));
   const updated = await setStatus(deps, id, { status: "APPROVED", monthlyAmount: monthly, decidedBy: actor.uuid, ...(row.startDate ? {} : { startDate: new Date() }) }, "PENDING");
   if (!updated) throw failedPrecondition("only a pending loan can be approved");
-  await audit(deps, actor, "loan.approve", "loans", id, stateMeta(row.status, "APPROVED", { employee: `employees/`, diff: { status: { from: row.status, to: "APPROVED" }, monthlyAmount: { from: row.monthlyAmount, to: monthly } } }), updated);
+  await audit(deps, actor, "loan.approve", "loans", id, stateMeta(row.status, "APPROVED", { employee: `employees/${row.employeeId}`, diff: { status: { from: row.status, to: "APPROVED" }, monthlyAmount: { from: row.monthlyAmount, to: monthly } } }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.approved", title: `${row.kind === "advance" ? "Advance" : "Loan"} approved`, body: `Your ${row.kind} was approved (monthly ${monthly}).`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.approved", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal, emiAmount: monthly, installments: row.installments } });
   return updated;
@@ -117,7 +118,7 @@ export async function rejectLoan(deps: Deps, actor: AppUser, id: string) {
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be rejected");
   const updated = await setStatus(deps, id, { status: "REJECTED", decidedBy: actor.uuid }, "PENDING");
   if (!updated) throw failedPrecondition("only a pending loan can be rejected");
-  await audit(deps, actor, "loan.reject", "loans", id, stateMeta(row.status, "REJECTED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "loan.reject", "loans", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.rejected", title: `${row.kind === "advance" ? "Advance" : "Loan"} rejected`, body: `Your ${row.kind} request was rejected.`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.rejected", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal } });
   return updated;
@@ -127,7 +128,7 @@ export async function disburseLoan(deps: Deps, actor: AppUser, id: string) {
   if (row.status !== "APPROVED") throw failedPrecondition("only an approved loan can be disbursed");
   const updated = await setStatus(deps, id, { status: "DISBURSED" }, "APPROVED");
   if (!updated) throw failedPrecondition("only an approved loan can be disbursed");
-  await audit(deps, actor, "loan.disburse", "loans", id, stateMeta(row.status, "DISBURSED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "loan.disburse", "loans", id, stateMeta(row.status, "DISBURSED", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "loan.disbursed", title: `${row.kind === "advance" ? "Advance" : "Loan"} disbursed`, body: `Your ${row.kind} was disbursed.`, link: "loans", actorId: actor.employeeId });
   await emitEvent(deps, actor, "loan.disbursed", { subject: `loans/${id}`, employeeId: row.employeeId, payload: { amount: row.principal } });
   return updated;
@@ -135,26 +136,57 @@ export async function disburseLoan(deps: Deps, actor: AppUser, id: string) {
 // Record a MANUAL repayment against a disbursed loan; closes it once fully repaid. Writes a loan_repayments
 // ledger row (runId null = manual, not tied to a payroll run) BEFORE advancing the loan, so every repayment -
 // manual or payroll - is auditable through the ledger and the outstanding can be reconciled by summing it.
-export async function recordLoanRepayment(deps: Deps, actor: AppUser, id: string, amount: number) {
+export async function recordLoanRepayment(deps: Deps, actor: AppUser, id: string, amount: number, allowDuplicate = false) {
   const row = await load(deps, id);
   if (row.status !== "DISBURSED") throw failedPrecondition("only a disbursed loan can take repayments");
   if (!(amount > 0)) throw invalidArgument("amount must be greater than 0");
   const applied = round2(Math.min(amount, row.principal - row.repaid)); // never over-repay past the principal
-  // Idempotency for accidental double-submit: an identical manual (runId null) repayment of the same amount
-  // recorded within the window is treated as the same entry and skipped, so a retry doesn't advance `repaid`
-  // twice. A fully-repaying retry is already caught above (the loan is CLOSED, no longer DISBURSED).
+  // Guard against an accidental double-submit: an identical manual (runId null) repayment of the same amount
+  // within the window is almost always the same entry arriving twice (a double-click, a client retry).
+  //
+  // It REFUSES rather than silently succeeding. It used to `return row` - HTTP 200, the pre-repayment figures,
+  // no repayment recorded - which is the right answer for a double-click and the wrong one for the case it
+  // cannot tell apart: two genuine repayments of the same amount, minutes apart, which happens whenever an
+  // employee pays two equal installments together or two people clear a batch of them. That one was swallowed
+  // and reported as done, so money the employee paid was never recorded and the loan went on collecting it.
+  // Since the two are indistinguishable from the request alone, the second one is the CALLER's to confirm:
+  // 409, and `allow_duplicate` records it for real. A fully-repaying retry never reaches here (the loan is
+  // CLOSED by then, so the status check above answers first).
   const cutoff = new Date(+deps.clock.now() - MANUAL_REPAY_DEDUP_MS);
-  const recent = await deps.db
-    .select()
-    .from(schema.loanRepayments)
-    .where(and(eq(schema.loanRepayments.loanId, id), isNull(schema.loanRepayments.runId), gte(schema.loanRepayments.at, cutoff)));
-  if (recent.some((r) => round2(r.amount) === applied)) return row;
-  await deps.db.insert(schema.loanRepayments).values({ loanId: id, runId: null, amount: applied, at: new Date() });
+  if (!allowDuplicate) {
+    const recent = await deps.db
+      .select()
+      .from(schema.loanRepayments)
+      .where(and(eq(schema.loanRepayments.loanId, id), isNull(schema.loanRepayments.runId), gte(schema.loanRepayments.at, cutoff)));
+    if (recent.some((r) => round2(r.amount) === applied)) {
+      throw alreadyExists(`a repayment of ${applied} was recorded on this loan moments ago; if this is a second, separate repayment, confirm it to record it anyway`);
+    }
+  }
   // Advance `repaid` by the delta in SQL (repaidCreditStmt), never by an absolute total computed from the read
   // above: a payroll build committing an installment in between would otherwise be erased, leaving the
   // employee owing an installment they already paid.
-  await repaidCreditStmt(deps, id, applied, new Date());
-  await audit(deps, actor, "loan.recordRepayment", "loans", id, { employee: `employees/`, diff: { repaid: { from: round2(row.repaid), to: round2(row.repaid + applied) } } }, row);
+  //
+  // THE LEDGER ROW AND THE CREDIT GO TOGETHER, in one batch = one D1 transaction, the way the payroll build
+  // already writes the same pair (loanRepaymentWrites). Written as two awaited statements, a failure between
+  // them left a `loan_repayments` row that `loans.repaid` did not reflect - so the ledger said the employee
+  // had paid and the loan said they still owed, and the next payroll build collected the installment again.
+  // The ledger is the source of truth for reconciliation, so the two must never disagree.
+  //
+  // The credit is CHECKED for the same reason the build checks it: it is guarded on the loan still being
+  // collectible, and a loan that closed between the read above and this write must not take another
+  // repayment. A guard matching zero rows is not an error to SQL, so the batch commits regardless - hence
+  // the compensating delete, which is why the ledger row's id is minted here rather than defaulted.
+  const at = new Date();
+  const repaymentId = genId();
+  const short = await runBatchChecked(deps.db, [
+    deps.db.insert(schema.loanRepayments).values({ uuid: repaymentId, loanId: id, runId: null, amount: applied, at }),
+    { stmt: repaidCreditStmt(deps, id, applied, at).returning({ uuid: schema.loans.uuid }), expect: 1, label: "loan credit" },
+  ]);
+  if (short.length) {
+    await deps.db.delete(schema.loanRepayments).where(eq(schema.loanRepayments.uuid, repaymentId));
+    throw failedPrecondition("this loan stopped being collectible while the repayment was being recorded; re-read it and try again");
+  }
+  await audit(deps, actor, "loan.recordRepayment", "loans", id, { employee: `employees/${row.employeeId}`, diff: { repaid: { from: round2(row.repaid), to: round2(row.repaid + applied) } } }, row);
   return await load(deps, id);
 }
 

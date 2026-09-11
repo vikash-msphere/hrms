@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listTransitionTasks, getTransitionTask, completeTransitionTask, reopenTransitionTask, uploadTransitionTaskDocument } from "../services/transitionTasks";
+import { requireCappedBody } from "../services/documentsCommon";
 import { toTransitionTaskResource } from "../http/serialize";
 
 // Onboarding / offboarding checklist items. A task is created by its transition (appendTask) and closed by a
@@ -32,7 +33,7 @@ export const transitionTasks = collectionRoutes({
     // Supporting document for the task (an ID scan, a signed form): binary in, the updated task out.
     upload: {
       run: async (deps, user, id, _body, c) =>
-        uploadTransitionTaskDocument(deps, user, id, await c.req.arrayBuffer(), {
+        uploadTransitionTaskDocument(deps, user, id, await requireCappedBody(c.req.raw), {
           fileName: c.req.query("file_name"),
           contentType: c.req.query("content_type"),
         }),

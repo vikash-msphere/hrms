@@ -9,6 +9,9 @@ import { gotoRoute, inDays, purge, expect, test } from "./fixtures";
 // before it is sent.
 test.describe("time off admin", () => {
   test("a notice period is recorded against an employee", async ({ as }) => {
+    // Longer than the 45s the picker retry below budgets itself: at the default, that retry would be killed
+    // mid-flight and reported as the whole test timing out rather than ever using the time it was given.
+    test.setTimeout(120_000);
     const page = await as("hr");
     const note = `E2E notice ${Date.now()}`;
 
@@ -16,9 +19,17 @@ test.describe("time off admin", () => {
     await page.getByRole("button", { name: "Record notice" }).first().click();
     const form = page.getByRole("dialog");
 
-    await form.getByLabel("Employee").click();
-    await page.getByPlaceholder(/Search|Select/).last().fill("Eve");
-    await expect(page.getByRole("button", { name: /Eve Employee/ })).toBeVisible();
+    // Re-typed on a miss, and given room: the picker's search is debounced and answered by a fetch, which on
+    // a lane with sixteen browsers on it takes longer than the 5s a bare expect allows - and a keystroke that
+    // landed while the list was still mounting is swallowed, leaving nothing to wait for at all.
+    const eve = page.getByRole("button", { name: /Eve Employee/ });
+    await expect(async () => {
+      if (!(await eve.count())) {
+        await form.getByLabel("Employee").click({ timeout: 8_000 }).catch(() => undefined);
+        await page.getByPlaceholder(/Search|Select/).last().fill("Eve", { timeout: 8_000 });
+      }
+      await expect(eve).toBeVisible({ timeout: 8_000 });
+    }).toPass({ timeout: 45_000 });
     await page.keyboard.press("Enter");
     // A notice period is an EXIT: it needs the last working day, and the form refuses to record one
     // without it (and refuses a day before the notice was given).

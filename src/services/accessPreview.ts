@@ -5,6 +5,7 @@
 // path: the middleware keeps making every real decision per request.
 import { inArray, eq } from "drizzle-orm";
 import * as schema from "../db/schema";
+import { byIdChunks } from "../lib/dbBatch";
 import type { Deps } from "../deps";
 import { decide, matchingPattern, capabilitiesOf, type Grant, type Level } from "../domain/permissions";
 import { mergeGrants, rulesToGrant, deriveNarrowing, type ScopeKind } from "../domain/compileGrants";
@@ -82,38 +83,42 @@ export async function previewAccess(deps: Deps, body: PreviewBody): Promise<Prev
   type Subject = { ref: string; userUuid: string | null; email: string; role: string; status: string; employeeCode: string | null; firstName: string | null; lastName: string | null };
   const userIds = parsed.filter((p) => p.kind === "account").map((p) => p.id);
   const empIds = parsed.filter((p) => p.kind === "person").map((p) => p.id);
-  const userRows = userIds.length
-    ? await deps.db
-        .select({
-          uuid: schema.users.uuid,
-          email: schema.users.email,
-          role: schema.users.role,
-          status: schema.users.status,
-          employeeCode: schema.employees.code,
-          firstName: schema.employees.firstName,
-          lastName: schema.employees.lastName,
-        })
-        .from(schema.users)
-        .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
-        .where(inArray(schema.users.uuid, userIds))
-    : [];
-  const empRows = empIds.length
-    ? await deps.db
-        .select({
-          empUuid: schema.employees.uuid,
-          empCode: schema.employees.code,
-          firstName: schema.employees.firstName,
-          lastName: schema.employees.lastName,
-          workEmail: schema.employees.workEmail,
-          userUuid: schema.users.uuid,
-          email: schema.users.email,
-          role: schema.users.role,
-          status: schema.users.status,
-        })
-        .from(schema.employees)
-        .leftJoin(schema.users, eq(schema.users.employeeId, schema.employees.uuid))
-        .where(inArray(schema.employees.uuid, empIds))
-    : [];
+  // Chunked, because MAX_SUBJECTS is 100 and D1 binds at most 100 parameters per statement (PARAM_CAP): a
+  // caller previewing 100 accounts spent the entire allowance on the IN list, leaving none for anything else
+  // the statement might come to bind. `byIdChunks` returns [] for an empty list without issuing a query, so
+  // the length guards these reads used to carry are gone rather than duplicated.
+  const userRows = await byIdChunks(userIds, (group) =>
+    deps.db
+      .select({
+        uuid: schema.users.uuid,
+        email: schema.users.email,
+        role: schema.users.role,
+        status: schema.users.status,
+        employeeCode: schema.employees.code,
+        firstName: schema.employees.firstName,
+        lastName: schema.employees.lastName,
+      })
+      .from(schema.users)
+      .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
+      .where(inArray(schema.users.uuid, group)),
+  );
+  const empRows = await byIdChunks(empIds, (group) =>
+    deps.db
+      .select({
+        empUuid: schema.employees.uuid,
+        empCode: schema.employees.code,
+        firstName: schema.employees.firstName,
+        lastName: schema.employees.lastName,
+        workEmail: schema.employees.workEmail,
+        userUuid: schema.users.uuid,
+        email: schema.users.email,
+        role: schema.users.role,
+        status: schema.users.status,
+      })
+      .from(schema.employees)
+      .leftJoin(schema.users, eq(schema.users.employeeId, schema.employees.uuid))
+      .where(inArray(schema.employees.uuid, group)),
+  );
   const byUserId = new Map(userRows.map((u) => [u.uuid, u]));
   const byEmpId = new Map(empRows.map((e) => [e.empUuid, e]));
   const subjectsResolved: Subject[] = parsed.map((p) => {

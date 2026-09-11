@@ -30,7 +30,28 @@ export type EmailContent = {
 const DEFAULT_ACCENT = BRAND.primary;
 const BRAND_GRADIENT = BRAND.gradient;
 const isHttpUrl = (s: string | undefined): s is string => !!s && /^https?:\/\//i.test(s);
-const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** Text -> HTML text. Exported because `bodyHtml` is raw by contract, so every caller that folds a VALUE into
+ *  it (a name, a title, an author's prose) needs the same escaping the shell itself uses. */
+export const escapeHtml = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const esc = escapeHtml;
+
+/**
+ * Author-written PROSE as an email body: escaped, and split into paragraphs on blank lines with single
+ * newlines kept as breaks.
+ *
+ * For the callers whose body is text rather than markup. `bodyHtml` is raw by contract, so handing it plain
+ * text does two wrong things at once - HTML collapses the newlines, so the whole message arrives as one
+ * run-on block, and anything angle-bracketed in what the author typed is markup by the time it is read.
+ */
+export function textParagraphs(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => `<p style="margin:0 0 12px;">${esc(p).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+}
 
 // Load the org's email brand from the organization settings row (name / address / logo / optional accent).
 export async function loadEmailBrand(deps: Deps): Promise<EmailBrand> {

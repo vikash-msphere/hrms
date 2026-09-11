@@ -13,19 +13,21 @@ const empRef = (e: Employee) => `employees/${idOf(e.path)}`;
 // A filtered multi-select of employees (department + name search), as a modal. Used to pick review-cycle
 // participants and to nominate 360 feedback givers. `exclude` drops employees that shouldn't be selectable.
 // `suggested` (ranked employee refs) floats likely picks to the top and offers them as one-click chips.
-export function EmployeePicker({ title, confirmLabel, employees, departments, exclude, suggested, onClose, onConfirm }: {
+export function EmployeePicker({ title, confirmLabel, employees, departments, exclude, suggested, initial, onClose, onConfirm }: {
   title: string;
   confirmLabel: string;
   employees: Employee[];
   departments: Department[];
   exclude?: string[]; // employee refs to omit (e.g. the reviewee, already-picked)
   suggested?: string[]; // employee refs, best first (e.g. same team, recent collaborators)
+  /** Already-picked refs, for a picker that EDITS a set rather than adding to one (removing a name withdraws it). */
+  initial?: string[];
   onClose: () => void;
   onConfirm: (refs: string[]) => void;
 }) {
   const [dept, setDept] = useState("all");
   const [q, setQ] = useState("");
-  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [picked, setPicked] = useState<Set<string>>(() => new Set((initial ?? []).map((r) => idOf(r))));
   const excluded = useMemo(() => new Set((exclude ?? []).map((r) => idOf(r))), [exclude]);
   const suggestedRank = useMemo(() => new Map((suggested ?? []).map((r, i) => [idOf(r), i])), [suggested]);
 
@@ -106,7 +108,9 @@ export function EmployeePicker({ title, confirmLabel, employees, departments, ex
         <DialogFooter className="items-center">
           {picked.size > 0 && <span className="mr-auto text-sm text-muted-foreground">{picked.size} selected</span>}
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={() => onConfirm([...picked])} disabled={picked.size === 0}>{confirmLabel}</Button>
+          {/* A picker that EDITS a set may legitimately be emptied - removing every name withdraws them all -
+              where one that ADDS to a set has nothing to do with no names in it. */}
+          <Button onClick={() => onConfirm([...picked])} disabled={picked.size === 0 && !initial}>{confirmLabel}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -54,7 +54,18 @@ export function base32ToBytes(s: string, byteLen: number): Uint8Array<ArrayBuffe
       out[n++] = (value >>> bits) & 0xff;
     }
   }
-  return n === byteLen ? out : null;
+  if (n !== byteLen) return null;
+  // CANONICAL ONLY. base32 carries 5 bits per character, so a byte count whose bit length is not a multiple of
+  // 5 leaves a remainder in the final character: 16 bytes is 128 bits spread over 26 characters = 130, so 2
+  // bits of the last character are not part of the value (an 8-byte id over 13 characters leaves 1). `encode`
+  // always emits them as zero, but decoding discarded them unread - so four different strings decoded to the
+  // same 16-byte token, and all four were accepted. The tag still authenticated the recovered id, so this was
+  // never a forgery route; what it did mean is that one row had four valid spellings on the wire, which breaks
+  // anything treating the token as an identity: a cache key, an idempotency key, a log grep, or simply
+  // comparing two references to the same record for equality. Rejecting a non-zero remainder makes the
+  // encoding a bijection, so a token has exactly one spelling.
+  if (bits > 0 && (value & ((1 << bits) - 1)) !== 0) return null;
+  return out;
 }
 
 // A new internal id: 8 random bytes -> 13-char base32 string (the PK / FK value, internal only).
@@ -74,6 +85,25 @@ export type IdCodec = {
   encode(collection: string, id: string): Promise<string>;
   decode(collection: string, token: string): Promise<string | null>;
 };
+
+// ONE codec per key per isolate.
+//
+// `makeIdCodec` memoizes its derived subkeys on the INSTANCE, so a fresh instance re-derives them - two HKDF
+// deriveBits plus two importKey - on its first use. `makeDeps` builds a Deps per request (middleware/
+// dbContext.ts), so every request was paying that derivation again the moment the outbound edge encoded its
+// first id, which is essentially every response. src/index.ts already memoized a codec for the inbound edge
+// and said so; that memo simply never reached `deps.idCodec`, which is the one nearly all the work goes
+// through. Keying the memo on the key material rather than parking it in index.ts keeps deps.ts free of an
+// import cycle and means both edges land on the same instance by construction.
+//
+// The map is keyed by the base64 key, so a test that swaps WIRE_ID_KEY gets its own codec rather than a
+// stale one, and `makeIdCodec` stays available for a caller that genuinely wants an unshared instance.
+const CODECS = new Map<string, IdCodec>();
+export function codecFor(keyBase64: string): IdCodec {
+  let c = CODECS.get(keyBase64);
+  if (!c) CODECS.set(keyBase64, (c = makeIdCodec(keyBase64)));
+  return c;
+}
 
 export function makeIdCodec(keyBase64: string): IdCodec {
   const keyBytes = new Uint8Array(Buffer.from(keyBase64, "base64"));

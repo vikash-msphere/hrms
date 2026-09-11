@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -88,6 +88,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
   const [err, setErr] = useState<string | null>(null);
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "pay component" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   // EPF/ESI: the server keeps one component per side (a second would double-charge that side). Which side is
   // already held - by whom - so the dialog can offer it as taken instead of letting the save 400.
@@ -152,6 +153,9 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
         const next = { ...EMPTY, kind: form.kind };
         setForm(next);
         guard.markSaved(next);
+        // The just-cleared Name loses focus the instant its own Create button disables with it - see
+        // ReimbursementCategories' identical fix.
+        nameRef.current?.focus();
       } else {
         guard.markSaved();
         setOpen(false);
@@ -257,7 +261,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
           <DialogBody>
           <FormError error={err} />
           <Field label="Name">
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Base Salary" autoFocus />
+            <Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Base Salary" autoFocus />
           </Field>
           <FieldRow>
             <Field label="Kind">

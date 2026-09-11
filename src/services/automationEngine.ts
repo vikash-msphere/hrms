@@ -23,9 +23,11 @@ import type { Action, Automation, EvalContext, RecipientSpec, WaitArm, Schedule,
 import type { EmailAttachment } from "../ports";
 import { evalCondition, resolveField, scheduleDueOn, SCHEDULE_TRIGGER } from "../domain/automations";
 import { computeEmployeeMetrics, NEVER_TAKEN_LEAVE } from "./scheduledMetrics";
+import { orgToday, dayStartMs } from "./orgDay";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { buildBankFile } from "./bankFile";
-import { renderEmail, loadEmailBrand } from "../lib/emailLayout";
+import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
+import { fanOutEmail } from "./emailFanOut";
 
 export { systemActor };
 
@@ -39,12 +41,23 @@ const MAX_EVENT_DEPTH = 5;
 // super. The counter lives on the shared Deps (reused by apiCall re-dispatch), so it accumulates across the
 // whole synchronous fan-out and fails closed once exhausted.
 //
-// The unit it bounds is ONE ORIGINATING ACTION - a request, or one cron subtask. That distinction matters
-// because the scheduled handler builds a single Deps for the whole nightly tick, so an unreset counter made
-// this a budget for the entire NIGHT: past the fiftieth event, every later per-employee emission (probation,
-// anniversary, document expiry, asset custody) and every subtask after the one that exhausted it were dropped.
-// `withDispatchBudget` below is what re-arms it per subtask.
-const MAX_TOTAL_DISPATCHES = 50;
+// The unit it bounds is ONE ORIGINATING ACTION - a request, or one cron subtask, or one drained job. That
+// distinction matters because the scheduled handler builds a single Deps for the whole nightly tick, so an
+// unreset counter made this a budget for the entire NIGHT: past the fiftieth event, every later per-employee
+// emission (probation, anniversary, document expiry, asset custody) and every subtask after the one that
+// exhausted it were dropped. `withDispatchBudget` below is what re-arms it.
+//
+// WHY 250, AND WHAT IT MUST STAY ABOVE. This guard exists to stop a RUNAWAY - a rule that re-triggers itself
+// without bound. It must never refuse a fan-out the app itself authored with a known ceiling. At 50 it did:
+// `assets:batchCreate` accepts up to `ASSET_BATCH_MAX` (100) assets in one act and emits one `asset.created`
+// per asset, so with any rule on that trigger the first fifty assets fired the rule and the last fifty were
+// silently dropped - a 200 response, the full inventory written, and half the automations missing. The number
+// therefore has to sit above the largest BOUNDED bulk act in the app; test/dispatchBudget.test.ts pins that
+// relationship so a new bulk verb with a bigger ceiling cannot quietly reintroduce it. Exported for that test.
+//
+// It is still a hard bound, and the runaway case it was written for is unaffected: a self-triggering apiCall
+// loop hits 250 as surely as it hit 50, one tick later.
+export const MAX_TOTAL_DISPATCHES = 250;
 
 /**
  * Run `fn` with a FRESH dispatch budget, and report how many events the budget refused.
@@ -124,6 +137,22 @@ function template(value: unknown, ctx: EvalContext): unknown {
     return out;
   }
   return value;
+}
+
+/**
+ * The same templating for a value that is going into an email's HTML BODY, with every substitution escaped.
+ *
+ * The markup is the rule author's, and authoring a rule is super-only - but the values folded into it are
+ * ordinary user data: a person's own name, a ticket title they typed, the reason on a leave request. Through
+ * plain `template` those arrive as markup, so anyone who can fill in one of those fields could write a link
+ * (or a tracking image) into a mail the company sends under its own brand, to an audience the rule chooses.
+ * The author's HTML is left exactly as written; only what is substituted in is escaped.
+ */
+function templateHtml(value: string, ctx: EvalContext): string {
+  return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, e: string) => {
+    const v = resolveField(ctx, e.trim());
+    return v == null ? "" : escapeHtml(String(v));
+  });
 }
 
 // Resolve an action's recipient spec to an employee uuid (notifications are employee-owned).
@@ -283,7 +312,7 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       if (!to) return { kind: action.kind, status: "skipped", detail: "recipient has no email" };
       const subject = String(template(action.subject, ctx));
       const atts = await resolveAttachments(deps, ctx, action.attachments);
-      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: String(template(action.html, ctx)) }, await loadEmailBrand(deps));
+      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: templateHtml(action.html, ctx) }, await loadEmailBrand(deps));
       await deps.email.send(to, subject, html, atts);
       return { kind: action.kind, status: "done", detail: `emailed ${to}${atts.length ? ` (+${atts.length} attachment)` : ""}` };
     }
@@ -293,18 +322,14 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       if (!ids.length) return { kind: action.kind, status: "skipped", detail: "empty audience" };
       const subject = String(template(action.subject, ctx));
       // Wrap the body in the branded shell once (same message for every recipient); load the brand once.
-      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: String(template(action.html, ctx)) }, await loadEmailBrand(deps));
-      // One read for the addresses; then fan out (best-effort per recipient - a bad address never aborts the rest).
-      let sent = 0;
-      const CHUNK = 90; // D1 binds ~100 params per statement
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        const emps = await deps.db.select({ workEmail: schema.employees.workEmail }).from(schema.employees).where(inArray(schema.employees.uuid, ids.slice(i, i + CHUNK)));
-        for (const e of emps) {
-          if (!e.workEmail) continue;
-          try { await deps.email.send(e.workEmail, subject, html); sent++; } catch (err) { console.error("[automationEngine] emailAudience send failed (non-fatal)", err); }
-        }
-      }
-      return { kind: action.kind, status: "done", detail: `emailed ${sent} recipient(s)` };
+      const html = renderEmail({ heading: subject, preheader: subject, bodyHtml: templateHtml(action.html, ctx) }, await loadEmailBrand(deps));
+      // BOUNDED per invocation, remainder to the queue. `{kind:"everyone"}` is the whole active roster, and
+      // every send is an outbound fetch off this invocation's subrequest budget - so a rule with an org-wide
+      // audience used to run the budget out mid-roster and take the rest of the action list down with it.
+      // See services/emailFanOut.ts.
+      const sent = await fanOutEmail(deps, { recipients: ids, subject, html, label: `emailAudience ${event.type}` });
+      const queued = ids.length - sent;
+      return { kind: action.kind, status: "done", detail: `emailed ${sent} recipient(s)${queued > 0 ? `, ${queued} queued` : ""}` };
     }
     default:
       return { kind: (action as Action).kind, status: "error", detail: "unknown action kind" };
@@ -540,8 +565,13 @@ export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventI
 // notifyAudience / apiCall broadcasts). Returns how many firings ran their actions. Never throws.
 export async function runScheduledAutomations(deps: Deps): Promise<number> {
   const now = deps.clock.now();
-  const today = new Date(+now);
-  const todayStr = today.toISOString().slice(0, 10);
+  // The org's calendar day, anchored at UTC midnight. `scheduleDueOn` and the `weekday`/`dayOfMonth` payload
+  // below read this Date with getUTC*, so anchoring the ORG-LOCAL day here makes those read the day the org is
+  // actually living in - the tick fires at 02:00 UTC, which is the previous evening west of UTC, and a
+  // UTC-derived day therefore ran every "every Monday" rule on Sunday for those orgs. `todayStr` is also the
+  // per-day claim stamp, so it has to name the same day the rule was judged against.
+  const todayStr = await orgToday(deps);
+  const today = new Date(dayStartMs(todayStr));
   const scheduled = (await loadEnabled(deps)).filter((r) => r.triggerType === SCHEDULE_TRIGGER && r.scheduleJson);
   let fired = 0;
   // Metrics + roster are shared across perEmployee rules and computed lazily (only if one is actually due).
@@ -595,7 +625,23 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
         subject: `employees/${emp.uuid}`,
         actorId: null,
         employeeId: emp.uuid,
-        payload: { ...base, pendingApprovals: m?.pendingApprovals ?? 0, daysSinceLastLeave: m?.daysSinceLastLeave ?? NEVER_TAKEN_LEAVE, leaveBalanceDays: m?.leaveBalanceDays ?? 0, goalsDueSoon: m?.goalsDueSoon ?? 0, goalsOverdue: m?.goalsOverdue ?? 0 },
+        payload: {
+          ...base,
+          pendingApprovals: m?.pendingApprovals ?? 0,
+          daysSinceLastLeave: m?.daysSinceLastLeave ?? NEVER_TAKEN_LEAVE,
+          leaveBalanceDays: m?.leaveBalanceDays ?? 0,
+          goalsDueSoon: m?.goalsDueSoon ?? 0,
+          goalsOverdue: m?.goalsOverdue ?? 0,
+          goalsAtRisk: m?.goalsAtRisk ?? 0,
+          goalsStale: m?.goalsStale ?? 0,
+          tasksDueSoon: m?.tasksDueSoon ?? 0,
+          tasksOverdue: m?.tasksOverdue ?? 0,
+          tasksBlocked: m?.tasksBlocked ?? 0,
+          selfReviewsDue: m?.selfReviewsDue ?? 0,
+          teamReviewsDue: m?.teamReviewsDue ?? 0,
+          goalSettingMissing: m?.goalSettingMissing ?? 0,
+          teamGoalSettingMissing: m?.teamGoalSettingMissing ?? 0,
+        },
         occurredAt: now,
       });
     }

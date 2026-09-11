@@ -24,11 +24,11 @@ export const positions = collectionRoutes({
   serialize: toPositionResource,
   softDelete: false,
   overrides: { create: (deps, actor, input) => changeRole(deps, actor, input) },
-  list: (c) => {
+  list: (c, page) => {
     // Optional ?employee=employees/<token> filter. The inbound edge (decodeWireIds) already decoded the
     // query ref to its internal id, so just take the id segment - do NOT decode again (that fails, dropping
-    // the filter). This list is unpaged: a role history is short by nature.
+    // the filter).
     const emp = c.req.query("employee");
-    return listPositions(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined).then((items) => ({ items, nextPageToken: undefined }));
+    return listPositions(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, emp ? emp.split("/").pop()! : undefined);
   },
 });

@@ -85,14 +85,19 @@ describe("assembleProjection - income months vs collection months", () => {
   };
 
   // The year a projection is LABELLED with comes from the payroll window, never from the slab table's
-  // vintage stamp. They differ whenever the loaded Budget is a year behind the year being run - which is the
-  // normal state for most of a financial year - and reading the label off `cfg` captions a FY 2026-27
-  // projection "FY 2025-26" while every number on it is right.
+  // vintage stamp. They differ whenever the loaded config is a year behind the year being run - which is the
+  // normal state for the months of a financial year before that year's Budget is loaded - and reading the
+  // label off `cfg` captions a FY 2026-27 projection "FY 2025-26" while every number on it is right.
+  //
+  // The stamp is passed in DELIBERATELY WRONG rather than taken from DEFAULT_TAX_CONFIG. Asserting that the
+  // shipped stamp differs from the window is not a test of this behaviour, it is a test of what year it is:
+  // it passed only while the two happened to disagree, and the annual vintage bump - which changes the stamp
+  // and nothing else - made it fail while leaving the labelling it exists to pin completely untested.
   it("labels the projection from the FY window, not the config's slab vintage", () => {
-    const p = assembleProjection({ ...base, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 });
-    expect(p.financialYear).toBe("2026-27");
+    const staleStamp = { ...DEFAULT_TAX_CONFIG, financialYear: "2019-20", assessmentYear: "2020-21" };
+    const p = assembleProjection({ ...base, cfg: staleStamp, employedMonths: 12, paidGross: 0, paidTax: 0, collectMonths: 9, projectedGross: 2400000 });
+    expect(p.financialYear).toBe("2026-27"); // fy's window, not staleStamp's
     expect(p.assessmentYear).toBe("2027-28");
-    expect(DEFAULT_TAX_CONFIG.financialYear).toBe("2025-26"); // the stamp it must NOT have used
   });
   it("projects income over unpaid EMPLOYED months but spreads tax over calendar collectMonths", () => {
     // Employed all year (12), zero runs finalized, asOf July -> 9 collectible months.

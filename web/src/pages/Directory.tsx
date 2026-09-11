@@ -8,6 +8,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr, thisMonthStr } from "@/lib/orgDay";
 import { navigate } from "@/router";
 import type { Department, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -31,6 +32,7 @@ import { WriteDialog } from "@/components/common/WriteDialog";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { monthlyTotals } from "@/lib/chartTheme";
+import { readLocal, writeLocal } from "@/lib/localPref";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox } from "@/components/ui/combobox";
 import { useToast } from "@/components/ui/use-toast";
@@ -61,7 +63,7 @@ function fullName(e: Employee) {
 
 // A start date still ahead: onboarding to prepare, not a colleague you can find at a desk.
 function isJoiningSoon(e: Employee) {
-  return !e.delete_time && !!e.start_date && e.start_date > new Date().toISOString().slice(0, 10);
+  return !e.delete_time && !!e.start_date && e.start_date > todayStr();
 }
 // Probation ending inside the window (or already past it, unconfirmed): a review somebody owes.
 function isProbationDue(e: Employee) {
@@ -261,15 +263,15 @@ export default function Directory({ me }: { me: Me }) {
 
   // View mode (table vs card grid) + grid grouping, remembered locally. Both views render the same
   // already-loaded rows - switching never refetches.
-  const [view, setView] = useState<ViewMode>(() => (localStorage.getItem("directory:view") === "grid" ? "grid" : "table"));
+  const [view, setView] = useState<ViewMode>(() => (readLocal("directory:view") === "grid" ? "grid" : "table"));
   const setViewMode = (v: ViewMode) => {
     setView(v);
-    try { localStorage.setItem("directory:view", v); } catch { /* ignore */ }
+    writeLocal("directory:view", v);
   };
-  const [grouped, setGrouped] = useState(() => localStorage.getItem("directory:grouped") === "1");
+  const [grouped, setGrouped] = useState(() => readLocal("directory:grouped") === "1");
   const toggleGrouped = () => {
     setGrouped((g) => {
-      try { localStorage.setItem("directory:grouped", g ? "0" : "1"); } catch { /* ignore */ }
+      writeLocal("directory:grouped", g ? "0" : "1");
       return !g;
     });
   };
@@ -285,7 +287,7 @@ export default function Directory({ me }: { me: Me }) {
     if (focus === "joining") return live.filter(isJoiningSoon);
     if (focus === "probation") return live.filter(isProbationDue);
     if (focus === "noManager") return live.filter((e) => !e.manager);
-    const month = new Date().toISOString().slice(0, 7);
+    const month = thisMonthStr();
     return live.filter((e) => (e.start_date ?? "").slice(0, 7) === month);
   }, [visibleRows, focus, clockedIn]);
 
@@ -334,7 +336,7 @@ export default function Directory({ me }: { me: Me }) {
 
   const stats = useMemo(() => {
     const live = rows.filter((e) => !e.delete_time);
-    const month = new Date().toISOString().slice(0, 7);
+    const month = thisMonthStr();
     return {
       total: live.length,
       clockedIn: live.filter((e) => clockedIn.has(idOf(e.path))).length,
@@ -365,7 +367,7 @@ export default function Directory({ me }: { me: Me }) {
         values: sorted.map((d) => d.n),
       },
       deptIds: sorted.map((d) => d.id),
-      joiners: monthlyTotals(live.filter((e) => e.start_date).map((e) => ({ date: e.start_date!, value: 1 })), 12, new Date().toISOString().slice(0, 10)),
+      joiners: monthlyTotals(live.filter((e) => e.start_date).map((e) => ({ date: e.start_date!, value: 1 })), 12, todayStr()),
     };
   }, [rows, deptName]);
   const setDeptFilter = (id: string | null) => setDeptChip((c) => (c === id ? null : id));

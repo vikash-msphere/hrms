@@ -1,6 +1,6 @@
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 // WORKFLOW resource template (custom methods :approve/:reject/:cancel).
-import { eq, and, gte, sql } from "drizzle-orm";
+import { eq, ne, and, gte, lte, inArray, sql } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
@@ -17,6 +17,7 @@ import { dateWindow } from "./dateWindow";
 import { leaveDays } from "../domain/leave";
 import { holidayApplies } from "./holidays";
 import { getSettingValue } from "./settings";
+import { orgToday } from "./orgDay";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance";
 import { refHolidays } from "../lib/refData";
 
@@ -65,6 +66,53 @@ export type LeaveRequestInput = {
 };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
+
+// A day maps to two half-day slots, so an overlap test can distinguish "ends the morning of the 3rd" from
+// "starts the afternoon of the 3rd" - which is what lets those two abut rather than collide.
+const slotOf = (ms: number, session: number) => Math.round(ms / 86_400_000) * 2 + (session === 2 ? 1 : 0);
+
+/**
+ * The employee's LIVE leave (pending or approved) that could touch `[startMs, endMs]`, at day granularity.
+ *
+ * Bounded in SQL on both axes - state AND the date window. It used to read every leave request the person had
+ * ever filed and filter in JS, on the hot create path, and the probation cap below did the same again: two
+ * whole-history scans per submission, over a table that only ever grows, on a database that bills rows read.
+ * The window is the same predicate the JS loop applied, so nothing is decided differently here; the half-day
+ * slot refinement stays with the caller because it is finer than a date column can express.
+ *
+ * `exceptUuid` drops one row from the answer - the row the caller has just inserted, when it is asking whether
+ * anyone landed on top of it.
+ */
+function liveLeaveInWindow(deps: Deps, employeeId: string, startMs: number, endMs: number, exceptUuid?: string) {
+  return deps.db
+    .select()
+    .from(schema.leaveRequests)
+    .where(
+      and(
+        eq(schema.leaveRequests.employeeId, employeeId),
+        inArray(schema.leaveRequests.state, ["PENDING", "APPROVED"]),
+        gte(schema.leaveRequests.endDate, new Date(startMs)),
+        lte(schema.leaveRequests.startDate, new Date(endMs)),
+        ...(exceptUuid ? [ne(schema.leaveRequests.uuid, exceptUuid)] : []),
+      ),
+    );
+}
+
+type LeaveRow = typeof schema.leaveRequests.$inferSelect;
+
+/** The first of `rows` that really overlaps `[startSlot, endSlot]` once half-day sessions are honoured. */
+const overlapping = (rows: LeaveRow[], startSlot: number, endSlot: number) =>
+  rows.filter((r) => startSlot <= slotOf(+new Date(r.endDate), r.endSession) && slotOf(+new Date(r.startDate), r.startSession) <= endSlot);
+
+/**
+ * Did `a` get here before `b`? A TOTAL order over rows - creation instant, `uuid` to break a same-millisecond
+ * tie - which is what makes "the later one gives way" decidable by each competitor on its own, with no lock and
+ * no shared state. Ordering on `uuid` alone is not enough: it says nothing about who arrived first, so when one
+ * writer's re-check ran before the other had even inserted, the one that saw nothing kept its row AND the one
+ * that saw it could still "win" the comparison and keep its own. Both survived, which is the bug.
+ */
+const arrivedFirst = (a: LeaveRow, b: LeaveRow) =>
+  +new Date(a.createdAt) !== +new Date(b.createdAt) ? +new Date(a.createdAt) < +new Date(b.createdAt) : a.uuid < b.uuid;
 
 // Org leave-request policy (generic settings key "leave-requests"). Default preserves the prior behaviour
 // (back-dating allowed); HR can turn it off in Settings.
@@ -135,7 +183,12 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   if (!onBehalf) {
     const { allow_backdated } = await getSettingValue(deps, "leave-requests", DEFAULT_LEAVE_REQUEST_CONFIG);
     if (!allow_backdated) {
-      const todayMs = dayMs(new Date(+deps.clock.now()).toISOString().slice(0, 10));
+      // "Today" in the ORG's timezone, not the Worker's UTC. The requested `start` is a date-only value
+      // anchored at UTC midnight, and so is this once it is parsed back - but WHICH calendar day it names is
+      // now the one the employee is living in. Derived in UTC, this refused a request starting today for
+      // anyone west of UTC after their evening rollover, and let a genuinely back-dated one through for the
+      // first hours of the local day east of it. See services/orgDay.ts.
+      const todayMs = dayMs(await orgToday(deps));
       if (start < todayMs) throw failedPrecondition("back-dated leave requests aren't allowed - pick today or a future date");
     }
   }
@@ -143,15 +196,10 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   // No overlapping leave for the same person (including self): a new request can't intersect an existing
   // PENDING/APPROVED leave for this employee. Half-day sessions are respected by mapping each endpoint to a
   // half-day slot, so a morning-ending leave can still abut an afternoon-starting one on the same day.
-  const slotOf = (ms: number, session: number) => Math.round(ms / 86_400_000) * 2 + (session === 2 ? 1 : 0);
   const newStartSlot = slotOf(start, startSession);
   const newEndSlot = slotOf(end, endSession);
-  const activeForEmployee = (await deps.db.select().from(schema.leaveRequests).where(eq(schema.leaveRequests.employeeId, employeeId)))
-    .filter((r) => r.state === "PENDING" || r.state === "APPROVED");
-  for (const r of activeForEmployee) {
-    if (newStartSlot <= slotOf(+new Date(r.endDate), r.endSession) && slotOf(+new Date(r.startDate), r.startSession) <= newEndSlot) {
-      throw failedPrecondition("this overlaps an existing leave request for these dates");
-    }
+  if (overlapping(await liveLeaveInWindow(deps, employeeId, start, end), newStartSlot, newEndSlot).length) {
+    throw failedPrecondition("this overlaps an existing leave request for these dates");
   }
 
   // A disabled (or deleted) leave type can't be used for new requests.
@@ -182,9 +230,20 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   }
 
   // Probation usage cap: total days of this type TAKEN during probation may not exceed probationCapDays.
+  // Every condition in SQL: this was the second whole-history scan of the create path, and the probation
+  // window is a bound the column can express (a request STARTING on or before probation end).
   if (duringProbation && lt.probationCapDays != null) {
-    const prior = (await deps.db.select().from(schema.leaveRequests).where(and(eq(schema.leaveRequests.employeeId, employeeId), eq(schema.leaveRequests.leaveTypeId, leaveTypeId))))
-      .filter((r) => (r.state === "PENDING" || r.state === "APPROVED") && +new Date(r.startDate) <= probationEndMs!);
+    const prior = await deps.db
+      .select({ days: schema.leaveRequests.days })
+      .from(schema.leaveRequests)
+      .where(
+        and(
+          eq(schema.leaveRequests.employeeId, employeeId),
+          eq(schema.leaveRequests.leaveTypeId, leaveTypeId),
+          inArray(schema.leaveRequests.state, ["PENDING", "APPROVED"]),
+          lte(schema.leaveRequests.startDate, new Date(probationEndMs!)),
+        ),
+      );
     const used = prior.reduce((s, r) => s + r.days, 0);
     if (used + days > lt.probationCapDays + 1e-9) {
       throw failedPrecondition(`exceeds the probation cap of ${lt.probationCapDays} day(s) for this leave type (already used ${used})`);
@@ -196,6 +255,25 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
     .insert(schema.leaveRequests)
     .values({ code: await allocOwnedCode(deps, schema.leaveRequests, schema.leaveRequests.employeeId, employeeId), employeeId, leaveTypeId, startDate: new Date(start), endDate: new Date(end), days, startSession, endSession, reason: input.reason?.trim() || null, state: "PENDING" })
     .returning()))[0]!;
+
+  // INSERT, THEN LOOK AGAIN. The check above is a read, and two submissions for the same dates - a double-
+  // clicked button, or the same person on two devices - both pass it before either writes, so the same days
+  // were booked twice and the balance debited twice for them. The balance debit below already defends itself
+  // with a conditional decrement; this is the same defence for the invariant next to it.
+  //
+  // It has to run AFTER the insert: only once both rows exist can a competitor see the other at all. The rule
+  // is THE LATER ROW GIVES WAY, ordered by `arrivedFirst` - and it has to be arrival order rather than a bare
+  // id comparison, because the two checks do not have to be simultaneous. Whichever way they interleave, every
+  // row that finds an earlier one steps back and the earliest never does, so exactly one survives: never both
+  // (the earliest sees only later rows and keeps its place) and never none (nothing is earlier than the
+  // earliest). Unwinding is a delete of the row we just made, before the balance has been touched, so a loser
+  // leaves nothing behind to reconcile.
+  const clashes = overlapping(await liveLeaveInWindow(deps, employeeId, start, end, row.uuid), newStartSlot, newEndSlot);
+  if (clashes.some((c) => arrivedFirst(c, row))) {
+    await deps.db.delete(schema.leaveRequests).where(eq(schema.leaveRequests.uuid, row.uuid));
+    throw failedPrecondition("this overlaps an existing leave request for these dates");
+  }
+
   // Reserve the balance at request time; released if later rejected/cancelled. For a paid (entitlement) type
   // decrement CONDITIONALLY (WHERE balance_days >= days) so two concurrent requests can't both clear the
   // read-time check above and overdraw the balance - the loser matches 0 rows and we unwind the just-created
@@ -254,7 +332,16 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   // hasn't started yet (so an employee can call off an upcoming approved leave and get the balance back).
   if (to === "CANCELLED") {
     if (row.state !== "PENDING" && row.state !== "APPROVED") throw failedPrecondition("only pending or approved leave can be cancelled");
-    if (row.state === "APPROVED" && +new Date(row.startDate) <= +deps.clock.now()) throw failedPrecondition("approved leave that has already started cannot be cancelled");
+    // "Has already started" is a question about CALENDAR DAYS, and both sides have to be the same kind of
+    // thing. `start_date` is date-only, anchored at UTC midnight; comparing it against the raw instant asked
+    // whether the UTC clock had passed that midnight, which is a different question everywhere but UTC. East
+    // of UTC it stayed answerable "no" into the morning of the leave itself (until 05:30 in IST), so an
+    // employee could cancel - and be refunded - a day they were already on. West of UTC it flipped to "yes"
+    // the evening BEFORE, refusing to cancel leave that had not begun. Both sides are days now, read in the
+    // org's timezone, the same way the back-dating gate above reads its "today". See services/orgDay.ts.
+    if (row.state === "APPROVED" && +new Date(row.startDate) <= dayMs(await orgToday(deps))) {
+      throw failedPrecondition("approved leave that has already started cannot be cancelled");
+    }
   } else if (row.state !== "PENDING") {
     throw failedPrecondition("request is not pending");
   }

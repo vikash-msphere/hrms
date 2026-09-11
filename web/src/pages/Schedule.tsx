@@ -5,6 +5,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useClock } from "@/lib/clock";
 import { usePermission } from "@/lib/perm";
 import { cn, idOf } from "@/lib/utils";
+import { todayStr, addDaysYmd, weekStartYmd, weekdayOf } from "@/lib/orgDay";
 import type { Department, Employee, Holiday, Me, Shift, ShiftAssignment } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageSettings } from "@/components/common/SettingsButton";
@@ -22,16 +23,11 @@ import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, Dia
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 
-const DAY = 86_400_000;
-// Local calendar date - toISOString() would shift local midnight into the previous UTC day
-// (in IST the whole week grid would be labeled one day off).
-const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-function mondayOf(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); // back to Monday
-  return x;
-}
+// The roster's week is a run of seven DAY STRINGS, and every control that moves it steps those strings
+// (lib/orgDay). It used to hold a local `Date` for the week start and format it with a local `ymd`, which is
+// two problems in one: the week the page opened on was the BROWSER's week rather than the org's - so a
+// manager abroad rostered against a different Monday to everyone else - and `+weekStart + i * DAY` is only a
+// calendar day until a DST boundary falls inside the week, after which the grid repeats or skips a date.
 const WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const dayNum = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
@@ -58,22 +54,26 @@ export default function Schedule({ me }: { me: Me }) {
   const [dept, setDept] = useState("all");
   const [shiftFilter, setShiftFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
-  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => ymd(new Date(+weekStart + i * DAY))), [weekStart]);
+  const [weekStart, setWeekStart] = useState(() => weekStartYmd(todayStr()));
+  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysYmd(weekStart, i)), [weekStart]);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState<{ employee: string; date: string; existing?: ShiftAssignment } | null>(null);
 
+  // The window's edges as named values, because `days[0]` inside a dependency array is an expression the
+  // linter cannot check - it has to take on trust that it means what the body reads. Named here, the fetch
+  // and its dependencies are the same two strings by construction.
+  const [from, to] = [days[0]!, days[6]!];
   const load = useCallback(async () => {
     try {
-      const r = await get<{ results: ShiftAssignment[] }>(`shift-assignments?from=${days[0]}&to=${days[6]}&max_page_size=500`);
+      const r = await get<{ results: ShiftAssignment[] }>(`shift-assignments?from=${from}&to=${to}&max_page_size=500`);
       setAssignments(r.results ?? []);
     } catch (e) {
       toast({ title: "Couldn't load the roster", description: (e as Error).message, variant: "destructive" });
     } finally {
       setLoaded(true);
     }
-  }, [days[0], days[6]]);
+  }, [from, to, toast]);
   useEffect(() => { void load(); }, [load]);
 
   const shiftById = useMemo(() => new Map(shifts.map((s) => [idOf(s.path), s])), [shifts]);
@@ -140,7 +140,7 @@ export default function Schedule({ me }: { me: Me }) {
 
   const weekLabel = `${dayNum(days[0])} - ${dayNum(days[6])}`;
   const filtersActive = dept !== "all" || shiftFilter !== "all" || search.trim() !== "";
-  const today = ymd(new Date());
+  const today = todayStr();
 
   return (
     // The route key ("schedule") is not a collection; the roster's data is shift-assignments. Rebind the
@@ -150,12 +150,12 @@ export default function Schedule({ me }: { me: Me }) {
       <PageHeader accessCollection="shift-assignments" title="Schedule" description={canManage ? "Click any cell to assign or change a shift." : undefined} actions={<PageSettings me={me} host="schedule" />} />
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w - 7 * DAY))} aria-label="Previous week"><ChevronLeft className="h-4 w-4" /></Button>
+        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => addDaysYmd(w, -7))} aria-label="Previous week"><ChevronLeft className="h-4 w-4" /></Button>
         {/* 12rem of reserved label plus two 32px steppers plus "This week" is 330px before the filter
             group on the right gets a pixel, so the bar wraps and the label's floor relaxes on a phone. */}
         <span className="min-w-[8rem] text-center text-sm font-medium tabular-nums sm:min-w-[12rem]">{weekLabel}</span>
-        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w + 7 * DAY))} aria-label="Next week"><ChevronRight className="h-4 w-4" /></Button>
-        <Button variant="ghost" size="sm" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</Button>
+        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => addDaysYmd(w, 7))} aria-label="Next week"><ChevronRight className="h-4 w-4" /></Button>
+        <Button variant="ghost" size="sm" onClick={() => setWeekStart(weekStartYmd(todayStr()))}>This week</Button>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <Input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search people…" className="h-8 w-40" />
@@ -290,7 +290,11 @@ export default function Schedule({ me }: { me: Me }) {
             // day is patched when it already has an assignment and created when it doesn't.
             for (const d of dates) {
               const at = cellFor(editing.employee, d);
-              if (at) await patch(`shift-assignments/${idOf(at.path)}`, { shift: shiftRef, note: note || null }, at.etag);
+              // An emptied note is `""`, never `null`: a body carries VALUES, and every service reads the
+              // empty string as "clear it". `null` fails contract validation at the Prism proxy the dev
+              // server goes through - a 422 the worker never sees, so spreading a shift across the week did
+              // nothing at all there. See the "No nulls on the wire" note in web/src/api.ts.
+              if (at) await patch(`shift-assignments/${idOf(at.path)}`, { shift: shiftRef, note: note || "" }, at.etag);
               else await create("shift-assignments", { employee: editing.employee, shift: shiftRef, date: d, note: note || undefined });
             }
             toast({ title: dates.length > 1 ? `${dates.length} days scheduled` : editing.existing ? "Shift updated" : "Shift assigned", variant: "success" });
@@ -356,7 +360,7 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
   const chosen = shift ? shiftById.get(idOf(shift)) : undefined;
   const toggleDay = (d: string) => setDates((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
   const others = weekDays.filter((d) => d !== date);
-  const workingOthers = others.filter((d) => workDays.includes(new Date(d + "T00:00:00").getDay()));
+  const workingOthers = others.filter((d) => workDays.includes(weekdayOf(d)));
   const spread = dates.length > 1;
   const dirty = shift !== (existing?.shift ? `shifts/${idOf(existing.shift)}` : "") || note.trim() !== (existing?.note ?? "") || spread || !!newShift;
   // Days already carrying a different shift that this save would overwrite - worth naming before it happens. The
@@ -367,7 +371,7 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
     return !!at && !!at.shift && !!shift && idOf(at.shift) !== idOf(shift);
   });
   // Selected days nobody is meant to be working: a company holiday, or a day outside the org's working week.
-  const offDays = dates.filter((d) => !!holidayOn(d) || !workDays.includes(new Date(d + "T00:00:00").getDay()));
+  const offDays = dates.filter((d) => !!holidayOn(d) || !workDays.includes(weekdayOf(d)));
   const close = () => guardClose(dirty, onClose)(false);
   const save = async () => {
     setSaving(true); setError(null);
@@ -466,7 +470,7 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
                 const at = assignedOn(d);
                 const atShift = at?.shift ? shiftById.get(idOf(at.shift)) : undefined;
                 const hol = holidayOn(d);
-                const off = !workDays.includes(new Date(d + "T00:00:00").getDay());
+                const off = !workDays.includes(weekdayOf(d));
                 return (
                   <button key={d} type="button" aria-pressed={on} onClick={() => toggleDay(d)}
                     title={[`${WEEKDAY[i]}`, atShift?.name, hol?.display_name ?? (off ? "Not a working day" : undefined)].filter(Boolean).join(" · ")}

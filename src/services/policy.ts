@@ -13,6 +13,7 @@ import { paginate } from "../http/pagination";
 
 export async function listPolicies(deps: Deps, maxPageSize = 50, pageToken?: string) {
   const rows = await deps.db.select().from(schema.policy);
+  // No `wire`: a policy row's identity IS its key (`/v1/policy/<key>`) - see the note in services/roles.ts.
   return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.updatedAt), (r) => r.key);
 }
 

@@ -51,6 +51,25 @@ describe("insertBatches", () => {
     expect(new Set(seen).size).toBe(23);
   });
 
+  it("measures the DEFINED keys, so an `undefined` one cannot make a row look cheaper than it is", () => {
+    // A key set to `undefined` is a key that binds nothing: drizzle writes `default` for it. So key COUNT is
+    // not parameter count, and two rows can carry the same number of keys and bind a different number of
+    // parameters. Sizing by key count - keeping the first on a tie - could land on the cheaper row and then
+    // fill the group with the dearer one, which is `D1_ERROR: too many SQL variables` on a list whose rows all
+    // looked the same width.
+    const thin = (i: number) => ({ uuid: `u${i}`, code: `c${i}`, assetTag: `t${i}`, name: "n", tagSecret: "s", custodySince: new Date(0), notes: undefined, serialNumber: undefined });
+    const fat = (i: number) => ({ uuid: `u${i}`, code: `c${i}`, assetTag: `t${i}`, name: "n", tagSecret: "s", custodySince: new Date(0), notes: "n", categoryId: null });
+    // Same key count, different parameter count - the premise the old measure got wrong.
+    expect(Object.keys(thin(0)).length).toBe(Object.keys(fat(0)).length);
+    expect(params(db.insert(schema.assets).values([fat(0)]))).toBeGreaterThan(params(db.insert(schema.assets).values([thin(0)])));
+
+    // The thin row comes FIRST, which is what used to win the tie and set the group size.
+    const rows = [thin(0), ...Array.from({ length: 99 }, (_, i) => fat(i + 1))];
+    const stmts = insertBatches(rows as never[], (group) => db.insert(schema.assets).values(group as never));
+    expect(stmts.length).toBeGreaterThan(1);
+    for (const s of stmts) expect(params(s)).toBeLessThanOrEqual(PARAM_CAP);
+  });
+
   it("is a no-op on an empty list (and never compiles a values([]) statement)", () => {
     expect(insertBatches([], () => db.insert(schema.assets).values([assetRow(0)]))).toEqual([]);
   });

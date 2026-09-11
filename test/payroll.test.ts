@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeRunItem, canTransition, isEditable, overtimePay, wholeMonthsBetween, ctcLines, splitCtc, employerCostLines, pfWagesOf, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG } from "../src/domain/payroll";
+import { computeRunItem, canTransition, isEditable, overtimePay, ctcLines, splitCtc, employerCostLines, pfWagesOf, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG } from "../src/domain/payroll";
 import { monthlyRecurringGross } from "../src/services/taxProjection";
 import { grantFor } from "../src/domain/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
@@ -14,15 +14,6 @@ describe("overtime pay (pure)", () => {
   });
   it("is 0 for no minutes", () => {
     expect(overtimePay(0, 40000, DEFAULT_OVERTIME_CONFIG)).toBe(0);
-  });
-});
-
-describe("whole months between (arrears sizing)", () => {
-  const ms = (s: string) => Date.parse(s + "T00:00:00Z");
-  it("counts calendar months, 0 when not backdated", () => {
-    expect(wholeMonthsBetween(ms("2026-04-01"), ms("2026-06-01"))).toBe(2);
-    expect(wholeMonthsBetween(ms("2026-06-10"), ms("2026-06-01"))).toBe(0);
-    expect(wholeMonthsBetween(ms("2025-12-01"), ms("2026-02-01"))).toBe(2);
   });
 });
 

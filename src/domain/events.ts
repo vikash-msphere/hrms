@@ -212,6 +212,13 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // progress - e.g. congratulate on completion, or nudge a stalled goal).
   { type: "goal.progressUpdated", label: "Goal progress updated", module: "Performance", subjectCollection: "goals", fields: [{ name: "progress", type: "number" }, { name: "status", type: "string" }] },
   { type: "goal.completed", label: "Goal completed", module: "Performance", subjectCollection: "goals", fields: [{ name: "progress", type: "number" }] },
+  // The owner's own call turning. Progress events say what happened; this one says what the person closest to
+  // the work expects to happen, which is the earlier signal and the one worth escalating on.
+  // The goal-setting handshake. `goal.agreed` is the one a rule can hang a "your goals are set" welcome on,
+  // and the one an audit of "were these ever agreed?" starts from.
+  { type: "goal.proposed", label: "Goal submitted for approval", module: "Performance", subjectCollection: "goals", fields: [{ name: "title", type: "string" }, { name: "weight", type: "number" }] },
+  { type: "goal.agreed", label: "Goal agreed", module: "Performance", subjectCollection: "goals", fields: [{ name: "title", type: "string" }, { name: "weight", type: "number" }] },
+  { type: "goal.confidenceChanged", label: "Goal confidence changed", module: "Performance", subjectCollection: "goals", fields: [{ name: "confidence", type: "string" }, { name: "previous", type: "string" }, { name: "progress", type: "number" }] },
 
   // Performance: agile kanban cards. `board` is the board ref, `column` the destination column key. These are
   // the feedback-loop hooks: notify on delivery, escalate a blocked card, or (with board goal roll-up) chain
@@ -227,7 +234,7 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // Scheduled (time-driven) trigger. Not emitted by a service - a daily cron scanner synthesizes it when a
   // rule's recurrence matches today (see domain/automations.ts SCHEDULE_TRIGGER). The fields below are what a
   // "perEmployee" firing carries: `weekday`/`dayOfMonth` place the firing in time, and the derived metrics
-  // (pendingApprovals/daysSinceLastLeave/leaveBalanceDays/goalsDueSoon/goalsOverdue) let conditions be genuinely smart - e.g. "every
+  // (the derived metrics in services/scheduledMetrics.ts) let conditions be genuinely smart - e.g. "every
   // Monday, per employee, if pendingApprovals > 0 -> nudge" - without the pure evaluator learning to query.
   { type: "schedule.recurring", label: "On a schedule", module: "Scheduled", fields: [
     { name: "weekday", type: "number", label: "Weekday (0=Sun)" },
@@ -237,6 +244,22 @@ export const EVENT_TYPES: EventTypeDef[] = [
     { name: "leaveBalanceDays", type: "number", label: "Total leave balance (days)" },
     { name: "goalsDueSoon", type: "number", label: "Open goals due within 7 days" },
     { name: "goalsOverdue", type: "number", label: "Open goals past due" },
+    // The two that arrive BEFORE a date is missed: a goal a quarter of the way behind its own pace (or one its
+    // owner has flagged), and a goal nobody has touched in three weeks.
+    { name: "goalsAtRisk", type: "number", label: "Goals at risk" },
+    { name: "goalsStale", type: "number", label: "Goals with no update in 3 weeks" },
+    // Board work, counted off the ASSIGNEE: the queue a task is actually sitting in is the one it gets
+    // chased out of. Blocked is its own number because the move that clears it is somebody else's.
+    { name: "tasksDueSoon", type: "number", label: "Open tasks due within 7 days" },
+    { name: "tasksOverdue", type: "number", label: "Open tasks past due" },
+    { name: "tasksBlocked", type: "number", label: "Open tasks blocked" },
+    // Review season, in an ACTIVE cycle only. Who owes what is the review's own state: SELF is theirs to
+    // write, MANAGER is their manager's. Goal-setting counts a cycle that named a date for goals against
+    // somebody who has filed none.
+    { name: "selfReviewsDue", type: "number", label: "Self-assessments they owe" },
+    { name: "teamReviewsDue", type: "number", label: "Reviews they owe as a manager" },
+    { name: "goalSettingMissing", type: "number", label: "Active cycles they have set no goals in" },
+    { name: "teamGoalSettingMissing", type: "number", label: "Reports who have set no goals" },
   ] },
 ];
 

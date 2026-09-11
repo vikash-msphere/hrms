@@ -4,6 +4,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { AppEnv } from "../env";
 import { customMethod } from "../http/customMethod";
 import { listBankFormats, getBankFormat, saveBankFormat, storeBankTemplate, type BankFormat } from "../services/bankFormats";
+import { requireCappedBody } from "../services/documentsCommon";
 import { notFound } from "../lib/errors";
 
 // Per-bank bulk-payment Excel formats: column mappings (settings table key `bank-formats`) + the bank's blank
@@ -36,7 +37,7 @@ export const bankFormats = new Hono<AppEnv>()
   .post("/:bank", async (c) => {
     const { id: bank, verb } = customMethod(c);
     if (verb === "uploadTemplate") {
-      const bytes = new Uint8Array(await c.req.arrayBuffer());
+      const bytes = new Uint8Array(await requireCappedBody(c.req.raw));
       const out = await storeBankTemplate(c.get("deps"), c.get("user"), bank, bytes, c.req.query("file_name"));
       return c.json(out);
     }

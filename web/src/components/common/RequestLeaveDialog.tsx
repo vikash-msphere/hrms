@@ -3,6 +3,7 @@ import { Paperclip, Users, X } from "lucide-react";
 import { create, get, upload } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { chargeableDays } from "@/lib/leaveDays";
 import { bestBridge, breakAround } from "@/lib/holidayBreaks";
 import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, Me } from "@/types";
@@ -23,7 +24,8 @@ import { draftKey } from "@/components/common/dialogGuard";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
 // Weekday of a ymd date, parsed as UTC so the label never shifts with the viewer's offset.
-const weekdayOf = (ymd: string) => new Date(ymd + "T00:00:00Z").toLocaleDateString(undefined, { weekday: "long", timeZone: "UTC" });
+// Named `…LongOf` so it cannot be mistaken for orgDay's `weekdayOf`, which answers a NUMBER.
+const weekdayLongOf = (ymd: string) => new Date(ymd + "T00:00:00Z").toLocaleDateString(undefined, { weekday: "long", timeZone: "UTC" });
 const fmtDays = (n: number) => String(Math.round(n * 2) / 2);
 // Local calendar dates for the quick picks (toISOString would flip to UTC's date late in the evening).
 const ymdIn = (days: number) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toLocaleDateString("en-CA"); };
@@ -93,14 +95,16 @@ export function RequestLeaveDialog({
       .then((s) => { if (typeof s.value?.allow_backdated === "boolean") setAllowBackdated(s.value.allow_backdated); })
       .catch(() => {});
   }, []);
-  const minDate = allowBackdated ? undefined : new Date().toLocaleDateString("en-CA");
+  // The ORG's day. The server refuses a back-dated start against `services/orgDay.ts`, so a `min` computed
+  // from the browser's day is a floor the server does not share: west of UTC it offered a date that came
+  // back rejected, east of it the picker blocked a start the server would have taken.
+  const minDate = allowBackdated ? undefined : todayStr();
 
   // Sessions: 1 = first half (morning), 2 = second half (afternoon). Defaults 1/2 = full days.
   const [form, setForm] = useState({ leave_type: "", start_date: "", end_date: "", reason: "", startSession: 1, endSession: 2 });
   // Seed the dates/sessions whenever the dialog (re)opens with a draft.
   useEffect(() => {
     if (open) setForm((f) => ({ ...f, leave_type: initial?.leaveType ?? f.leave_type, start_date: initial?.from ?? f.start_date, end_date: initial?.to ?? f.end_date, startSession: initial?.startSession ?? 1, endSession: initial?.endSession ?? 2, reason: initial?.reason ?? f.reason }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initial?.from, initial?.to, initial?.startSession, initial?.endSession, initial?.leaveType, initial?.reason]);
 
   // A half-written request survives a reload, a tab switch, or an accidental close: the dialog is the only
@@ -119,7 +123,6 @@ export function RequestLeaveDialog({
     } catch {
       // A corrupt draft is not worth a crash - it just doesn't restore.
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initial]);
   useEffect(() => {
     if (!open) return;
@@ -150,7 +153,7 @@ export function RequestLeaveDialog({
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const meEmployee = useMemo(() => (me.employee_id ? employees.find((e) => idOf(e.path) === me.employee_id) : undefined), [employees, me.employee_id]);
-  const todayYmd = new Date().toLocaleDateString("en-CA");
+  const todayYmd = todayStr();
   const onProbation = !!meEmployee?.probation_end_date && meEmployee.probation_end_date.slice(0, 10) >= todayYmd;
   // Whose desk this lands on: the requester's manager, or whoever is standing in for them today. "Goes to
   // Priya" beats a request that vanishes into an unnamed queue.
@@ -186,7 +189,7 @@ export function RequestLeaveDialog({
     const d = new Date(ymd + "T00:00:00Z");
     if (Number.isNaN(+d)) return undefined;
     const off = !workDays.includes(d.getUTCDay()) || holidaySet.has(ymd);
-    return `${weekdayOf(ymd)}${off ? " · already a day off" : halfHolidaySet.has(ymd) ? " · half-day holiday" : ""}`;
+    return `${weekdayLongOf(ymd)}${off ? " · already a day off" : halfHolidaySet.has(ymd) ? " · half-day holiday" : ""}`;
   };
 
   const balanceByType = useMemo(() => {
@@ -560,7 +563,11 @@ export function RequestLeaveDialog({
         </div>
         <FieldRow>
           <Field label="Reason (optional)">
-            <Textarea rows={3} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} />
+            {/* Masked AND ignored in session replay (web/src/instrument.ts): masking hides the text, `ignore`
+                stops the keystrokes being recorded as they are typed - which matters here more than anywhere,
+                because what somebody types into this box is routinely a diagnosis or a bereavement, and they
+                are typing it into a form, not choosing to publish it. The label stays readable. */}
+            <Textarea rows={3} data-sentry-mask data-sentry-ignore value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} />
           </Field>
           <Field label="Supporting document (optional)" hint="A sick note or travel paperwork, attached to this request when it is filed.">
             <input

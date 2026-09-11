@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Network, Building2, ChevronDown, ChevronRight, ChevronUp, Crosshair, Search, Users, X, GripVertical, CornerDownRight, ArrowUpToLine, ZoomIn, ZoomOut, Maximize2, Minimize2, LocateFixed, ListTree, Briefcase, CalendarClock, ImageDown, Printer } from "lucide-react";
 import { patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -6,7 +6,9 @@ import { usePermission } from "@/lib/perm";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
 import { idOf, cn, tenureLabel } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
+import { readLocal, writeLocal } from "@/lib/localPref";
 import { navigate } from "@/router";
 import type { Me, Employee, Department, LeaveRequest, JobRequisition } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -62,8 +64,8 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   // first-time reader, who has nothing stored, passed the range check with index 0 and met the org chart at
   // half size, every control on it half-sized with it. Found by measuring the page in a fresh browser
   // profile, where "nothing stored yet" is the normal case rather than the rare one.
-  const [zi, setZi] = useState(() => { const raw = localStorage.getItem("orgchart.zoom"); const v = Number(raw ?? NaN); return Number.isInteger(v) && v >= 0 && v < ZOOMS.length ? v : 3; });
-  useEffect(() => localStorage.setItem("orgchart.zoom", String(zi)), [zi]);
+  const [zi, setZi] = useState(() => { const raw = readLocal("orgchart.zoom"); const v = Number(raw ?? NaN); return Number.isInteger(v) && v >= 0 && v < ZOOMS.length ? v : 3; });
+  useEffect(() => writeLocal("orgchart.zoom", String(zi)), [zi]);
   // A phone opens in the outline layout. The tree is a two-dimensional canvas - a node is 12rem wide and a
   // sibling row of six is most of a metre - so on a 360px screen the first thing a reader gets is one card
   // and two scrollbars, while the outline says the same thing in indented rows that only ever scroll down.
@@ -71,11 +73,11 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   // sticks, and this only decides the first visit. Read as a one-off rather than through `useMedia` on
   // purpose - the layout is a preference from here on, not something a rotation should overwrite.
   const [layout, setLayout] = useState<"tree" | "list">(() => {
-    const stored = localStorage.getItem("orgchart.layout");
+    const stored = readLocal("orgchart.layout");
     if (stored === "list" || stored === "tree") return stored;
     return typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches ? "list" : "tree";
   });
-  useEffect(() => localStorage.setItem("orgchart.layout", layout), [layout]);
+  useEffect(() => writeLocal("orgchart.layout", layout), [layout]);
   const [full, setFull] = useState(false);
   const [flashId, setFlashId] = useState<string | null>(null); // just-located node, briefly ringed
   const [matchIdx, setMatchIdx] = useState(0); // which search match is "current"
@@ -97,8 +99,10 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
 
   const empById = useMemo(() => new Map(employees.filter((e) => !e.delete_time).map((e) => [idOf(e.path), e] as const)), [employees]);
   const deptById = useMemo(() => new Map(departments.filter((d) => !d.delete_time).map((d) => [idOf(d.path), d] as const)), [departments]);
-  const deptName = (ref?: string) => (ref ? deptById.get(idOf(ref))?.display_name : undefined);
-  const empName = (ref?: string) => { const e = ref ? empById.get(idOf(ref)) : undefined; return e ? `${e.first_name} ${e.last_name}` : undefined; };
+  // `useCallback` because the tree memo below builds every node's label with them: each one's identity moves
+  // with the lookup map it reads, which is what that memo already depends on.
+  const deptName = useCallback((ref?: string) => (ref ? deptById.get(idOf(ref))?.display_name : undefined), [deptById]);
+  const empName = useCallback((ref?: string) => { const e = ref ? empById.get(idOf(ref)) : undefined; return e ? `${e.first_name} ${e.last_name}` : undefined; }, [empById]);
   const deptColor = (ref?: string) => (ref ? leaveColor(undefined, idOf(ref)) : undefined);
 
   // Direct head-count per department (members whose `department` is that dept).
@@ -142,7 +146,7 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     for (const n of nodes.values()) n.childIds.sort((a, b) => nodes.get(a)!.search.localeCompare(nodes.get(b)!.search));
     const roots = [...nodes.values()].filter((n) => !n.parentId).map((n) => n.id).sort((a, b) => nodes.get(a)!.search.localeCompare(nodes.get(b)!.search));
     return { nodes, roots };
-  }, [view, empById, deptById]);
+  }, [view, empById, deptById, empName, deptName]);
 
   // Total descendants per node (rich rollup), computed once per tree.
   const totalDesc = useMemo(() => {
@@ -229,8 +233,9 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
   const onLeaveToday = useMemo(() => {
     const s = new Set<string>();
     if (!showLeave) return s;
-    const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    // Whether someone is on leave today is the ORG's question - the leave rows were approved against its
+    // calendar, not against the reader's.
+    const today = todayStr();
     for (const l of leaves) {
       if ((l.state ?? "").toUpperCase() !== "APPROVED" || !l.employee) continue;
       if (l.start_date.slice(0, 10) <= today && today <= l.end_date.slice(0, 10)) s.add(idOf(l.employee));
@@ -275,13 +280,29 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
       if (mode === "png") {
         const a = document.createElement("a");
         a.href = url;
-        a.download = `org-chart-${view}-${new Date().toISOString().slice(0, 10)}.png`;
+        a.download = `org-chart-${view}-${todayStr()}.png`;
         a.click();
       } else {
         const w = window.open("", "_blank");
         if (!w) { toast({ variant: "destructive", title: "Popup blocked", description: "Allow popups for this site to print the chart." }); return; }
-        w.document.write(`<!doctype html><title>Org chart</title><img src="${url}" alt="Org chart" style="max-width:100%" onload="setTimeout(()=>{print();close()},60)">`);
-        w.document.close();
+        // Built with DOM calls and an ATTACHED listener - never an `onload="…"` attribute in written markup.
+        // The popup is `about:blank`, so it inherits this document's CSP, and web/public/_headers sets
+        // `script-src 'self' 'wasm-unsafe-eval'` with no `'unsafe-inline'`: an inline handler there is refused,
+        // and the window then sits on the image forever, never printing and never closing. It looked fine in
+        // development only because the dev server serves no _headers, so the one place this feature is used is
+        // the one place it was never exercised. A listener attached from here is ordinary script running in an
+        // already-executing context, which script-src does not gate.
+        w.document.title = "Org chart";
+        const img = w.document.createElement("img");
+        img.alt = "Org chart";
+        img.style.maxWidth = "100%";
+        // The delay is the browser's chance to lay the image out before the print dialog snapshots the page;
+        // printing straight off `load` yields a blank sheet in Safari and Firefox.
+        img.addEventListener("load", () => setTimeout(() => { w.focus(); w.print(); w.close(); }, 60));
+        // A data: URL that will not decode leaves an empty popup the user has to notice and close by hand.
+        img.addEventListener("error", () => { w.close(); toast({ variant: "destructive", title: "Print failed", description: "The chart image could not be rendered." }); });
+        img.src = url;
+        w.document.body.append(img);
       }
     } catch (e) {
       toast({ variant: "destructive", title: "Export failed", description: (e as Error).message });
@@ -349,11 +370,13 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     try {
       if (view === "people") {
         const e = empById.get(id)!;
-        await patch(e.path, { manager: targetId ? empById.get(targetId)!.path : null }, e.etag);
+        // `""` clears the reference, never `null` - see the "No nulls on the wire" note in web/src/api.ts:
+        // a null fails contract validation at the Prism proxy the dev server goes through.
+        await patch(e.path, { manager: targetId ? empById.get(targetId)!.path : "" }, e.etag);
         reloadEmp();
       } else {
         const d = deptById.get(id)!;
-        await patch(d.path, { parent: targetId ? deptById.get(targetId)!.path : null }, d.etag);
+        await patch(d.path, { parent: targetId ? deptById.get(targetId)!.path : "" }, d.etag);
         reloadDept();
       }
       toast({ title: "Reporting line updated", variant: "success" });

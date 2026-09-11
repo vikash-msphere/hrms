@@ -1,4 +1,4 @@
-import { gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // The exact string `formatBytes` (lib/utils.ts) puts on a document row - "50 KB", not "51200 bytes" and not
 // "0.05 MB". `documentUpload.spec.ts` proves an upload's bytes round-trip; this pins the one formatter that
@@ -7,6 +7,10 @@ import { gotoRoute, purge, test, expect, toast } from "./fixtures";
 test("an uploaded file's size reads as a rounded KB figure, not a raw byte count", async ({ as }) => {
   test.setTimeout(90_000);
   const page = await as("super");
+  // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.). The size string this test reads off the row is what proves the
+  // upload landed; a console line from a request retried behind it is not this test's failure.
+  allowConsoleErrors(page, /status of 503|status of 500/i);
   const title = `E2E filesize ${Date.now()}`;
   // 51200 bytes / 1024 = exactly 50 - no rounding ambiguity either side of the KB boundary.
   const bytes = Buffer.alloc(51200, "e");

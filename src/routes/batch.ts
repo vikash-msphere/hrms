@@ -64,6 +64,23 @@ export const batch = new Hono<AppEnv>().post("/", zValidator("json", schema), as
       }
       const headers = new Headers({ "X-Requested-By": "hrms-spa" });
       if (r.etag) headers.set("If-None-Match", r.etag);
+      // THE CLIENT METADATA TRAVELS WITH THE SUB-REQUEST.
+      //
+      // A sub-request re-enters the whole chain, so middleware/authz sets `user.reqMeta` from the headers IT
+      // sees - and it used to see a request built from these two lines alone. `cf-connecting-ip` and
+      // `user-agent` were not among them, so every audit row a batched read wrote recorded `ip: null,
+      // user_agent: null` (lib/audit.ts stamps reqMeta). That is not a rare path: web/src/lib/getCoalescer.ts
+      // is a UNIVERSAL GET coalescer, so essentially every read the SPA makes arrives here. The row it cost
+      // most is `access.denied`, which exists to be the abuse signal and was being written without the half
+      // that says where the probing came from.
+      //
+      // Copied rather than synthesized: `cf-connecting-ip` is the address the edge observed on the envelope,
+      // which is the same connection every sub-request rides. Only these two - a sub-request must not inherit
+      // the envelope's `Authorization`, `Content-Type` or conditional headers.
+      for (const h of ["cf-connecting-ip", "user-agent"]) {
+        const v = c.req.header(h);
+        if (v) headers.set(h, v);
+      }
       // A SHALLOW COPY of the caller per sub-request, not the one object twenty times.
       //
       // The sub-requests run concurrently (Promise.all), and the authz middleware WRITES to the user it is
@@ -78,7 +95,12 @@ export const batch = new Hono<AppEnv>().post("/", zValidator("json", schema), as
       // `c.executionCtx` THROWS when the context has none (the test runner, and any in-process dispatch) rather
       // than returning undefined, so it cannot be read inline - see the same guard in middleware/auth.ts. The
       // sub-dispatch needs no waitUntil of its own, so passing undefined is the correct fallback.
-      let ctx: ExecutionContext | undefined;
+      // Typed off `app.fetch`'s OWN third parameter rather than naming `ExecutionContext` here. The two are not
+      // always the same type: `@cloudflare/workers-types` v5 made the global generic and added members
+      // (`tracing`, `abort`) that Hono's narrower context does not declare, so a hand-written annotation stops
+      // compiling on a types bump while the code is still correct. Deriving it means this line says "whatever
+      // the thing I am about to call accepts", which is the only property it actually needs.
+      let ctx: Parameters<typeof app.fetch>[2];
       try {
         ctx = c.executionCtx;
       } catch {

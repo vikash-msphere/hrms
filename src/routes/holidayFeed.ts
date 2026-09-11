@@ -31,7 +31,12 @@ export const holidayFeed = new Hono<AppEnv>().get("/holidays/:token", async (c) 
   const cfg = await getSettingValue<{ feed_enabled?: boolean }>(deps, "holidays", {});
   if (!cfg.feed_enabled) return c.notFound();
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
-  if (!emp || emp.deleteTime) return c.notFound();
+  // A LEAVER's subscription stops here. This is the one surface that answers with no session at all: the URL
+  // lives on in whatever calendar client they pasted it into, so nothing else ever revokes it. Offboarding
+  // stamps `terminated` (services/transitions.ts), which is what says the subscription is no longer theirs -
+  // checking only `delete_time` kept a departed employee's feed live indefinitely. Same rule /found applies to
+  // a retired asset, and the same one payroll's roster reads.
+  if (!emp || emp.deleteTime || emp.status === "terminated") return c.notFound();
 
   // Their work location decides which regional holidays are theirs (current position row = the open one).
   const positions = await deps.db

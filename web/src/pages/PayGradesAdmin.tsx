@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -48,6 +48,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
   // A ladder is entered as a ladder - L1 through L5 in one sitting - so the level auto-advances on each save.
   const [again, setAgain] = useState(false);
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "pay grade" });
+  const nameRef = useRef<HTMLInputElement>(null);
 
   const money = (n: number, cc?: string) => formatMoney(n, cc || org.default_currency, currencyDecimals(cc, org));
 
@@ -110,6 +111,9 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
         const next = { ...EMPTY, level: String((Number(form.level) || 0) + 1), currency_code: form.currency_code };
         setForm(next);
         guard.markSaved(next);
+        // The just-cleared Name loses focus the instant its own Create button disables with it - see
+        // ReimbursementCategories' identical fix.
+        nameRef.current?.focus();
       } else {
         guard.markSaved();
         setOpen(false);
@@ -192,7 +196,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
           <DialogBody>
           <FormError error={err} />
           <div className="grid grid-cols-[1fr_auto] gap-4">
-            <Field label="Grade name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. L3 or Senior Engineer" autoFocus /></Field>
+            <Field label="Grade name"><Input ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. L3 or Senior Engineer" autoFocus /></Field>
             <Field label="Level" hint="Orders the ladder (lower = junior)."><Input type="number" className="w-24" value={form.level} onChange={(e) => setForm({ ...form, level: e.target.value })} /></Field>
           </div>
           <Field label="Salary band" hint="Annual CTC range. Leave any blank for an open end." error={bandError}>

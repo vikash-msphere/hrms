@@ -314,6 +314,14 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
   const filterQuery = () => ({ q: submittedQ.trim() || undefined, tone: tone !== "all" ? tone : undefined, entity: global && entity !== "all" ? entity : undefined, actor: global && actor !== "all" ? actor : undefined });
 
   // Initial (unfiltered) load. Establishes whether the log is paginated.
+  //
+  // KEYED ON `scope` ALONE, deliberately. This effect is the RESET - it clears the rows, the search box, every
+  // filter and the pagination flag - and the only thing that should cause it is the feed being pointed at a
+  // different subject. `pageSize` and `initialEntity` are read for their value AT THAT MOMENT and have their
+  // own paths: changing the page size reloads page 1 in the effect below (without wiping the filters), and
+  // `initialEntity` is a starting position, not a live input. Listing them here would turn "show 50 per page"
+  // into "throw away what I had filtered". `params` reads only the props `scope` is derived from, so it is
+  // covered by `scope` already. The array is narrower than what the body reads, and that is the intent.
   useEffect(() => {
     let live = true;
     setState("loading"); setRows(null); setNextToken(undefined); setPaginated(false); setQ(""); setSubmittedQ(""); setTone("all"); setEntity(initialEntity ?? "all"); setActor("all");
@@ -322,6 +330,7 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
       .then((p) => { if (!live) return; setRows(p.results); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}||all|all|all|${!!p.next_page_token}`; setState("ready"); })
       .catch(() => { if (live) setState("error"); });
     return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset-on-scope-change; see the note above
   }, [scope]);
 
   // Server-side re-filter, but ONLY when paginated (a single page filters client-side below). Debounced.
@@ -338,7 +347,10 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
         .catch(() => { if (live) setState("error"); });
     }, 300);
     return () => { live = false; clearTimeout(h); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The array is the FILTER STATE this refetch is for; `params`/`filterQuery` are read inside and are pure
+    // over exactly these values plus the scope props, and `pageSize` has its own effect below. `fetchKey`
+    // dedupes against whatever the initial load already fetched.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filter-change refetch; see above
   }, [submittedQ, tone, entity, actor, paginated, scope]);
 
   // Page-size change: reload page 1 at the new size (preserving filters); recompute pagination.
@@ -350,7 +362,9 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
       .then((p) => { if (!live) return; setRows(p.results); setNextToken(p.next_page_token); setPaginated(!!p.next_page_token); fetchKey.current = `${scope}|${submittedQ.trim()}|${tone}|${entity}|${actor}|${!!p.next_page_token}`; setState("ready"); })
       .catch(() => { if (live) setState("error"); });
     return () => { live = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Page size ONLY: the current filters are read inside so the reload preserves them, and depending on them
+    // here would re-run this on every filter change - which is the effect above's job.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- page-size reload; see above
   }, [pageSize]);
 
   async function loadMore() {
@@ -416,7 +430,10 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     if (Array.isArray(m.changed) && m.changed.length) bits.push(<span key="c" className="text-muted-foreground">{m.changed.map((k) => fieldLabel(String(k))).join(", ")}</span>);
     // Write-backstop rows (services with no inline diff): the touched field NAMES, so a bare update/create still
     // reads as "updated · title, status". Suppressed when a real diff/changed is present (avoid duplication).
-    if (Array.isArray(m.fields) && m.fields.length && !m.diff && !Array.isArray(m.changed)) bits.push(<span key="fl" className="text-muted-foreground">{(m.fields as string[]).map((k) => fieldLabel(String(k))).join(", ")}</span>);
+    // A `fields` entry is usually a column name, but a few verbs list the RECORDS they touched instead (the
+    // peers nominated onto a review, the reviewees added to a cycle) - those arrive as `<collection>/<token>`
+    // refs, and running them through `fieldLabel` would print the token. Resolve those to a name.
+    if (Array.isArray(m.fields) && m.fields.length && !m.diff && !Array.isArray(m.changed)) bits.push(<span key="fl" className="text-muted-foreground">{(m.fields as string[]).map((k) => (refOf(k) ? fmt(k) : fieldLabel(String(k)))).join(", ")}</span>);
     // Subject + day, for rows about someone else's record on a given date (e.g. an attendance regularization:
     // "for Asha Rao on 2026-07-14"). `employee` is a ref → resolved to a name; `date` is a plain YYYY-MM-DD.
     // Name the subject employee, unless they ARE the actor (a self-filed row) - "Asha requested for Asha" is noise.
@@ -515,7 +532,9 @@ export function ActivityFeed({ resource, global = false, initialEntity, apiKey, 
     const paths = [...new Set(
       Object.values(detail.meta?.diff ?? {})
         .flatMap((v) => [v.from, v.to])
-        .concat(Object.values(detail.meta ?? {}))
+        // Flattened one level: a few verbs list the records they touched as an ARRAY of refs (`fields` on a
+        // review nomination), and those need naming exactly as much as a scalar ref does.
+        .concat(Object.values(detail.meta ?? {}).flatMap((v) => (Array.isArray(v) ? v : [v])))
         .map((v) => refOf(v))
         .filter((m): m is RegExpExecArray => !!m && m[1] !== "employees")
         .map((m) => m[0]),

@@ -492,8 +492,8 @@ describe("payroll: loan recovery does not garnish a reimbursement payout", () =>
   });
 });
 
-describe("loans: manual repayment double-submit is idempotent", () => {
-  it("an identical manual repayment within the window is a no-op", async () => {
+describe("loans: an identical manual repayment is refused, not swallowed", () => {
+  it("blocks the double-submit, and records it when the caller confirms it is a second payment", async () => {
     const emp = await seedEmployee();
     const actor = await seedActor(emp);
     const loan = await createLoan(deps, actor, { start_date: "2026-01-01", employee: `employees/${emp}`, principal: 50000, installments: 10 });
@@ -501,12 +501,19 @@ describe("loans: manual repayment double-submit is idempotent", () => {
     await disburseLoan(deps, actor, loan.uuid);
 
     await recordLoanRepayment(deps, actor, loan.uuid, 5000);
-    await recordLoanRepayment(deps, actor, loan.uuid, 5000); // retry (double-submit)
+    // The retry REFUSES. It used to return the loan unchanged with no error, which is right for a
+    // double-click and silently loses a genuine second payment of the same amount - and the two are
+    // indistinguishable from the request. So the caller is asked instead of guessed at.
+    await expect(recordLoanRepayment(deps, actor, loan.uuid, 5000)).rejects.toMatchObject({ httpStatus: 409 });
+    const afterRefusal = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!;
+    expect(afterRefusal.repaid).toBe(5000); // advanced once, not twice
+    expect(await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.loanId, loan.uuid))).toHaveLength(1);
 
+    // Confirmed (`allow_duplicate`), the same amount is a second, real repayment: ledger and running total move together.
+    await recordLoanRepayment(deps, actor, loan.uuid, 5000, true);
     const after = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!;
-    expect(after.repaid).toBe(5000); // advanced once, not twice
-    const ledger = await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.loanId, loan.uuid));
-    expect(ledger).toHaveLength(1);
+    expect(after.repaid).toBe(10000);
+    expect(await deps.db.select().from(schema.loanRepayments).where(eq(schema.loanRepayments.loanId, loan.uuid))).toHaveLength(2);
   });
 });
 

@@ -1,8 +1,8 @@
 // SSRF guard for outbound automation webhook URLs. An automation `webhook` action carries an author-supplied
 // URL; before any egress we require https, the default https PORT, and a PUBLIC host, blocking loopback,
-// link-local, private ranges, and internal-only suffixes. This is enforced regardless of whether a
-// WebhookSender is wired, so enabling egress later cannot turn an authored rule into an SSRF/exfiltration
-// primitive.
+// link-local, private ranges, the cloud metadata endpoints that sit outside them, and internal-only suffixes.
+// This is enforced regardless of whether a WebhookSender is wired, so enabling egress later cannot turn an
+// authored rule into an SSRF/exfiltration primitive.
 //
 // The host is PARSED INTO AN ADDRESS before it is judged, rather than prefix-matched as a string. Every blocked
 // address has several spellings - `[::ffff:127.0.0.1]` is loopback, `0x7f.0.0.1` and `0177.0.0.1` are 127.0.0.1,
@@ -12,6 +12,13 @@
 // KNOWN LIMIT, deliberately not claimed above: a hostname that RESOLVES to a private address (DNS rebinding)
 // passes. A Worker cannot resolve DNS itself, so there is nothing to check against; what this guard rules out
 // is an author naming an internal address directly.
+//
+// AND WHAT THE CALLER STILL OWES: this judges ONE url. `fetch` follows redirects by default, so a host that
+// passes here can answer 302 and send the request somewhere that never would - the guard sees the first hop
+// only. Anything fetching a URL this blessed must either pass `redirect: "manual"` or re-check every hop
+// through here (see services/esign/cashfree.ts#downloadSigned). The same applies to credentials: only
+// `Authorization` is stripped across an origin change, so a custom auth header follows a redirect to whoever
+// answers it, and a redirect target must be fetched without one.
 
 /** Parse one IPv4 octet in any of the notations `inet_aton` accepts (decimal, 0x-hex, leading-zero octal). */
 function octet(s: string): number | null {
@@ -44,13 +51,23 @@ function ipv4Value(host: string): number | null {
 function blockedIpv4(v: number): boolean {
   const a = (v >>> 24) & 0xff;
   const b = (v >>> 16) & 0xff;
+  const c = (v >>> 8) & 0xff;
+  const d = v & 0xff;
   return (
     a === 0 || // 0.0.0.0/8 "this network"
     a === 10 || // private
     a === 127 || // loopback
-    (a === 100 && b >= 64 && b <= 127) || // 100.64/10 carrier-grade NAT
+    // 100.64/10 carrier-grade NAT: 100.64.0.0 - 100.127.255.255. This also covers Alibaba Cloud's instance
+    // metadata service at 100.100.100.200, which is the one major provider that does not answer on the
+    // link-local alias below - worth knowing, because the address looks public until the /10 is worked out.
+    (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) || // link-local, incl. the 169.254.169.254 metadata alias
     (a === 172 && b >= 16 && b <= 31) || // private
+    // 192.0.0.0/24 is IETF protocol assignments - not a host anyone routes to on purpose, and it carries
+    // Oracle Cloud Classic's metadata endpoint at 192.0.0.192. It is the one metadata address in common use
+    // that no other line here covers: it is not link-local, not RFC1918, and not inside the /10 above, so it
+    // read as an ordinary public address. Blocked as the whole /24, since nothing in it is a webhook target.
+    (a === 192 && b === 0 && c === 0) ||
     (a === 192 && b === 168) || // private
     (a === 198 && (b === 18 || b === 19)) || // benchmarking
     a >= 224 // multicast + reserved

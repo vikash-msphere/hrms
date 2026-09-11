@@ -16,6 +16,7 @@ import {
   UserPlus,
   ScrollText,
   ReceiptText,
+  Table2,
   type LucideIcon,
 } from "lucide-react";
 import { RupeeCircle } from "./components/icons/RupeeCircle";
@@ -111,6 +112,9 @@ export const NAV: NavGroup[] = [
         tabs: [
           { key: "boards", label: "Boards", perm: "boards.read", collection: "boards" },
           { key: "goals", label: "Goals", perm: "goals.read", collection: "goals" },
+          // A manager's triage of their reports' OPEN goals, not a step in a review cycle - it reads `goals`
+          // and presses goal verbs. Named for what it is, next to the reviews tab that scores them later.
+          { key: "team-goals", label: "Team goals", perm: "goals.read", collection: "goals" },
           { key: "reviews", label: "Reviews", perm: "reviews.read", collection: "reviews" },
           { key: "check-ins", label: "1:1s", perm: "check-ins.read", collection: "check-ins" },
         ],
@@ -213,6 +217,9 @@ export const NAV: NavGroup[] = [
   {
     label: "Admin",
     items: [
+      // Custom grids. Private by default (no seeded grant names `table-views`), so the item only appears for
+      // somebody an admin has granted it to.
+      { key: "tables", label: "Tables", icon: Table2, perm: "table-views.read" },
       { key: "workflows", label: "Workflows", icon: Workflow, perm: "automations.read" },
       { key: "activity", label: "Activity", icon: ScrollText, perm: "audit.read" },
       { key: "settings", label: "Settings", icon: Settings, perm: "settings.write" },

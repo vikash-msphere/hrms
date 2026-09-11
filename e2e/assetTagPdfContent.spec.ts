@@ -26,7 +26,10 @@ test("printing a real asset's tag draws that asset's own tag code onto the sheet
     await expect(page.getByRole("heading", { name: "Print asset tags" })).toBeVisible();
 
     await page.getByPlaceholder("Search tag, name, serial…").fill(name);
-    const row = page.locator("div").filter({ hasText: name }).last();
+    // Both filters: the row is the innermost div that names this asset AND carries its Add button. On
+    // `hasText` alone `.last()` lands on whichever nested div is deepest - a leaf holding only the name -
+    // and the click below then waits out its timeout on a button that was never inside what was picked.
+    const row = page.locator("div").filter({ hasText: name }).filter({ has: page.getByRole("button", { name: "Add" }) }).last();
     await expect(row).toBeVisible({ timeout: 15_000 });
     await row.getByRole("button", { name: "Add" }).click();
 

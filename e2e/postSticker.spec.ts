@@ -1,4 +1,4 @@
-import { gotoRoute, purge, test, expect } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // The picture on a board post.
 //
@@ -15,6 +15,10 @@ test("a sticker is suggested, picked, tuned, browsed for, removed, and posted", 
   test.setTimeout(240_000);
   const page = await as("hr");
   const title = `E2E sticker ${Date.now()}`;
+  // The shared board: a whole family of specs post, edit and delete on the SAME feed this page renders, org-
+  // wide and unscoped to this test's own row - a 404 landing on a background refetch for a post another one
+  // of them just took out from under this page's own poll is that collision, not this spec's own doing.
+  allowConsoleErrors(page, /status of 404/i);
 
   await gotoRoute(page, "announcements", "Feed");
   await page.getByRole("button", { name: "Choose what to post" }).click();

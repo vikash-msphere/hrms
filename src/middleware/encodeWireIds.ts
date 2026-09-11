@@ -14,8 +14,8 @@ export const ENCODABLE = new Set<string>([
   "leave-requests", "leave-balances", "org-documents", "personal-documents", "announcements", "pay-components", "pay-periods",
   "payroll-runs", "payslips", "compensation", "positions", "bonuses", "assets", "asset-categories", "asset-requests", "stocktakes", "settlements", "leave-encashments", "operations", "reimbursements", "reimbursement-categories",
   "expenses", "expense-categories", "vendors", "expense-budgets",
-  "attendance", "attendance-regularizations", "cron-runs", "tickets", "ticket-checklists", "events", "goals", "boards", "cards", "sprints", "review-cycles", "reviews", "review-feedback", "transitions", "transition-tasks", "check-ins", "benefit-plans", "dependents", "benefit-enrollments", "shifts", "shift-assignments", "projects", "time-entries", "loans", "tax-declarations", "pay-grades", "salary-structures", "document-acknowledgements", "compliance-events", "compliance-rules", "background-checks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications", "referrals", "job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers",
-  "letter-templates", "letterheads",
+  "attendance", "attendance-regularizations", "cron-runs", "tickets", "ticket-checklists", "events", "goals", "goal-templates", "boards", "cards", "sprints", "review-cycles", "reviews", "review-feedback", "transitions", "transition-tasks", "check-ins", "benefit-plans", "dependents", "benefit-enrollments", "shifts", "shift-assignments", "projects", "time-entries", "loans", "tax-declarations", "pay-grades", "salary-structures", "document-acknowledgements", "compliance-events", "compliance-rules", "background-checks", "overtime-requests", "remote-work-requests", "approval-delegations", "notice-periods", "suggestions", "notifications", "referrals", "job-requisitions", "candidates", "applications", "interviews", "interview-feedback", "offers",
+  "letter-templates", "letterheads", "table-views",
   "automations", "event-log", "automation-runs", "workflow-instances",
 ]);
 

@@ -90,15 +90,19 @@ vi.mock("@/api", () => ({
     listed.push(collection);
     return Promise.resolve({ results: [] });
   },
-  listConditional: (collection: string, _opts: unknown, etag?: string) => {
+  listConditional: (collection: string, opts: { q?: string } | undefined, etag?: string) => {
     listed.push(collection);
     if (answerNotModified && etag) return Promise.resolve({ notModified: true as const });
-    return Promise.resolve({ response: { results: [{ path: `${collection}/fetched` }] }, etag: 'W/"fresh"' });
+    // A read whose page came back full answers with a cursor, which is what marks the rows a WINDOW rather
+    // than the collection. Keyed off a sentinel query so only the test that is about truncation gets one.
+    const response: Record<string, unknown> = { results: [{ path: `${collection}/fetched` }] };
+    if (opts?.q === "truncated") response.next_page_token = "next";
+    return Promise.resolve({ response, etag: 'W/"fresh"' });
   },
   changesSince: () => (changesAnswer instanceof Error ? Promise.reject(changesAnswer) : Promise.resolve(changesAnswer)),
 }));
 
-const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted, persistable } =
+const { freshnessMs, setResourceStoreUser, getSnapshot, invalidateCollections, subscribe, entryCount, ensureFetch, storedCopiesTrusted, persistable, collectionHasMore } =
   await import("@/lib/resourceStore");
 const { flushNow, put } = await import("@/lib/clientStore");
 
@@ -243,6 +247,20 @@ describe("resource store retention: the entry map does not grow for the whole se
     // produces. Unbounded, this climbed to 400.
     for (let i = 0; i < 400; i++) getSnapshot("tickets", { params: { state: `s${i}` } });
     expect(entryCount()).toBeLessThanOrEqual(100);
+  });
+
+  // "Is this collection truncated" is derived from the keys the store still holds, so DROPPING the truncated
+  // one has to re-derive it. It did not: a search that filled a page left the collection flagged for the rest
+  // of the page life, and every table of it went on saying it was showing a window of a larger set.
+  it("stops reporting a collection as truncated once the truncated read is dropped", async () => {
+    setResourceStoreUser("a@x.test");
+    const unsub = subscribe("employees", { q: "truncated" }, () => {});
+    await ensureFetch("employees", { q: "truncated" });
+    expect(collectionHasMore("employees")).toBe(true);
+    // The search is cleared. Its entry is ephemeral, so it dies with its last reader - and with it the only
+    // reason anything was calling this collection a window.
+    unsub();
+    expect(collectionHasMore("employees")).toBe(false);
   });
 
   it("keeps a subscribed entry even when the map is over the cap", () => {

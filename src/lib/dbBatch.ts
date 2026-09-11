@@ -60,11 +60,54 @@ export const PARAM_CAP = 100;
  */
 export function insertBatches<T extends object>(rows: T[], build: (group: T[]) => BatchStmt): BatchStmt[] {
   if (!rows.length) return [];
-  // The widest row decides: a group is bound by whichever of its members carries the most fields.
-  const widest = rows.reduce((a, b) => (Object.keys(b).length > Object.keys(a).length ? b : a), rows[0]!);
-  const measured = build([widest]) as unknown as { toSQL?: () => { params: unknown[] } };
+  // Measured off the union of the rows' DEFINED keys, not off whichever row has the most keys.
+  //
+  // What drizzle actually emits is the whole table's column list once, and per row a parameter for every value
+  // the row HAS and the literal `default` for the rest. So a row's cost is its own count of defined values -
+  // and `Object.keys().length` is not that count: a key set to `undefined` is a key that binds nothing. Two
+  // rows can therefore carry the same number of keys and bind a different number of parameters (measured on
+  // `assets`: 8 keys each, 9 against 11), and picking by key count - keeping the first on a tie, as `reduce`
+  // with `>` does - can land on the CHEAPER row. The group is then sized for 9 and filled with rows that bind
+  // 11: `D1_ERROR: too many SQL variables`, on a list whose rows all looked the same width.
+  //
+  // The probe carries every key that is defined ANYWHERE in the list, so its measurement is at least what the
+  // widest row binds. Keys that are `undefined` in every row are left out, because drizzle leaves them out of
+  // the real statement too. Erring high costs an extra statement in a batch that is still one subrequest;
+  // erring low costs the whole batch.
+  const probe = {} as Record<string, unknown>;
+  for (const row of rows) for (const [k, v] of Object.entries(row)) if (v !== undefined && !(k in probe)) probe[k] = v;
+  const measured = build([probe as T]) as unknown as { toSQL?: () => { params: unknown[] } };
   const perRow = Math.max(1, measured.toSQL?.().params.length ?? PARAM_CAP);
   return chunk(rows, Math.max(1, Math.floor(PARAM_CAP / perRow))).map(build);
+}
+
+/**
+ * Ids per `IN` list, for a read whose WHERE also binds a few parameters of its own.
+ *
+ * `inArray` spends one bound parameter per id against PARAM_CAP, so a list sized AT the cap leaves nothing for
+ * anything else in the same statement - and the predicates that ride alongside an id list are exactly the ones
+ * that bind: `applyScope` spends one for a dept/own breadth and two per per-object share or deny, a date window
+ * spends two. That made the failure depend on WHO was asking: an `all`-breadth admin bound nothing extra and
+ * was fine, while a department-scoped caller on a full page got `D1_ERROR: too many SQL variables`. The margin
+ * is what those predicates are allowed to cost.
+ */
+export const ID_CHUNK = 90;
+
+/**
+ * Run one id-keyed read in cap-sized chunks and concatenate the rows.
+ *
+ * Takes a BUILDER rather than a table + column, for the same reason `insertBatches` does: the query stays the
+ * caller's, so each reader keeps its own extra predicates - `isNull(delete_time)`, a scope, a date window - and
+ * keeps drizzle's inferred row type instead of being widened to a generic. A list inside the cap runs as one
+ * statement exactly as before; past it, chunks run in sequence, because two subrequests for a page of a hundred
+ * is the right price for a statement that executes at all.
+ */
+export async function byIdChunks<T>(ids: string[], run: (group: string[]) => PromiseLike<T[]>): Promise<T[]> {
+  if (!ids.length) return [];
+  if (ids.length <= ID_CHUNK) return run(ids);
+  const out: T[] = [];
+  for (const group of chunk(ids, ID_CHUNK)) out.push(...(await run(group)));
+  return out;
 }
 
 /** Split `items` into runs of at most `size` (D1 param-cap chunking for IN lists / multi-row inserts). */

@@ -68,7 +68,19 @@ test("copies one role's rules onto another and shows the whole copy as one act",
     await expect(page.locator("li").filter({ hasText: /Copied 2 rules/ })).toBeVisible();
     // The grid re-reads: the two roles are now identical, which is the copy landing rather than merely
     // being reported. A stale table here would tell an admin the copy did nothing.
-    await expect(gap).toHaveText(/^0 of \d+ collections differ/);
+    //
+    // Re-picked on a miss. That count comes from a PAGED read of `access-rules` across every subject, and
+    // this suite writes rules for other subjects the whole time it runs - so one page of that read can be
+    // answered before this copy and a later one after it, and the panel then reports a difference that no
+    // longer exists. Reproduced by running this spec beside the other permissions specs: "2 of 89 collections
+    // differ", for a copy the server had already applied (the rules are checked against the server below).
+    // Re-picking the pair is what re-reads it.
+    await expect(async () => {
+      if (/^0 of/.test(((await gap.textContent()) ?? "").trim())) return;
+      await pickRole(0, srcLabel);
+      await pickRole(1, dstLabel);
+      await expect(gap).toHaveText(/^0 of \d+ collections differ/, { timeout: 5_000 });
+    }).toPass({ timeout: 60_000 });
     await page.keyboard.press("Escape");
 
     // The target really holds them as its own rules, at the level the source had.

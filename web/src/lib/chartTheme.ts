@@ -8,6 +8,7 @@
 //
 // Identity is never carried by colour ALONE anywhere in the app: every chart that uses more than one series
 // names them in a legend, and every chart carries the same numbers in a screen-reader table (see Chart.tsx).
+import { round2 } from "./utils";
 
 export const CHART_SERIES = ["#2a78d6", "#1baf7a", "#eda100", "#008300", "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"];
 export const CHART_SERIES_DARK = ["#3987e5", "#199e70", "#c98500", "#008300", "#9085e9", "#e66767", "#d55181", "#d95926"];
@@ -108,10 +109,12 @@ export function topSlices<T>(rows: T[], keyOf: (row: T) => string, valueOf: (row
   const head = sorted.slice(0, top);
   const tail = sorted.slice(top);
   const labels = head.map(([k]) => k);
-  const values = head.map(([, v]) => Math.round(v * 100) / 100);
+  // `round2` (lib/utils), never an inline `Math.round(v * 100) / 100`: these are money totals, and a chart
+  // sitting beside the table that lists the same rows must not round a half-case the other way from it.
+  const values = head.map(([, v]) => round2(v));
   if (tail.length) {
     labels.push(`Other (${tail.length})`);
-    values.push(Math.round(tail.reduce((s, [, v]) => s + v, 0) * 100) / 100);
+    values.push(round2(tail.reduce((s, [, v]) => s + v, 0)));
   }
   return { labels, values };
 }

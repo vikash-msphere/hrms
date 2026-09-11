@@ -15,6 +15,7 @@ import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { useLifecycle } from "@/hooks/useLifecycle";
 import { usePermission, useCapabilities, canSeeActivity, useCanSeeActivity } from "@/lib/perm";
 import { cn, formatBytes, formatDate, humanize, idOf } from "@/lib/utils";
+import { todayStr, addDaysYmd } from "@/lib/orgDay";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PhotoAvatar } from "@/components/common/PhotoAvatar";
 import { RupeeCircle } from "@/components/icons/RupeeCircle";
@@ -55,8 +56,13 @@ import { useToast } from "@/components/ui/use-toast";
 const TYPES = ["CONTRACT", "ID", "PAYSLIP", "POLICY", "LETTER", "INSURANCE", "OTHER"];
 const TYPE_ICON: Record<string, typeof File> = { CONTRACT: ScrollText, ID: FileBadge, PAYSLIP: RupeeCircle, POLICY: FileLock, LETTER: FileSignature, INSURANCE: ShieldPlus, OTHER: File };
 // Local calendar date - toISOString() would call a doc that expires today "valid" until UTC catches up.
-const pad2 = (n: number) => String(n).padStart(2, "0");
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+// `todayStr` comes from lib/orgDay: the ORG's day. This file used to define its own from the browser's
+// local parts, which is a different day for part of every day and a different day again from the one the
+// server validates against.
+// `expire_time` is a date-time on the wire but a calendar day to every reader here, so a day picked in the
+// form goes out as UTC midnight: that is the one stamp whose `slice(0, 10)` reads back as the same day in
+// every timezone. A local-midnight or end-of-day stamp would land on the neighbouring day off UTC.
+const dayToExpireTime = (day: string) => `${day}T00:00:00Z`;
 
 const ORG = "__org__"; // sentinel: not tied to an employee = organization-wide
 
@@ -145,8 +151,17 @@ export default function Documents({ me }: { me: Me }) {
   const sd = (d: DocumentResource) => (docCollection(d) === "personal-documents" ? sdPersonal : sdOrg);
   const lc = (d: DocumentResource) => (docCollection(d) === "personal-documents" ? lcPersonal : lcOrg);
 
-  const writable = usePermission("org-documents.write") || usePermission("personal-documents.write");
-  const canPurge = usePermission("org-documents.admin") || usePermission("personal-documents.admin");
+  // Each `usePermission` is read into its own const before the booleans are combined. `||` and `&&`
+  // SHORT-CIRCUIT, so `usePermission(a) || usePermission(b)` skips the second hook whenever the first is true -
+  // and the moment `a` flips (capabilities arrive after the first paint, and change on a grant edit) the
+  // component renders a different number of hooks than last time, which React refuses. Same hazard, same fix,
+  // in PayrollRuns and Profile.
+  const orgWrite = usePermission("org-documents.write");
+  const personalWrite = usePermission("personal-documents.write");
+  const orgAdmin = usePermission("org-documents.admin");
+  const personalAdmin = usePermission("personal-documents.admin");
+  const writable = orgWrite || personalWrite;
+  const canPurge = orgAdmin || personalAdmin;
   const caps = useCapabilities(); // for per-document activity gating (a doc may be org- or personal-scoped)
   // Letter generation is HR + super only (personal-documents.write distinguishes them from employees, who
   // hold only read on their own docs). The server enforces the real gate (personal-documents.generateLetter).
@@ -271,7 +286,7 @@ export default function Documents({ me }: { me: Me }) {
       document_type: form.type,
       employee: form.employee === ORG ? "" : form.employee,
       // `expire_time` is `format: date-time`, and "" is not one - an empty expiry is left out.
-      ...(form.expire ? { expire_time: form.expire } : {}),
+      ...(form.expire ? { expire_time: dayToExpireTime(form.expire) } : {}),
       // Acknowledgement applies to org-wide documents of any type; the server ignores it on personal docs.
       requires_ack: form.employee === ORG ? form.requireAck : false,
       // Ack signing method + signature-box placement (required together with requires_ack, server-enforced).
@@ -325,11 +340,16 @@ export default function Documents({ me }: { me: Me }) {
   // date that just lapsed - so renewing an insurance card that expired in March lands next March, not next
   // month. From today when the previous window can't be worked out.
   function renewedExpiry(d: DocumentResource): string {
-    const prev = d.expire_time ? new Date(d.expire_time.slice(0, 10) + "T00:00:00") : new Date();
-    const base = new Date(Math.max(+prev, Date.parse(`${todayStr()}T00:00:00`)));
-    const next = new Date(base);
-    next.setFullYear(next.getFullYear() + 1);
-    return `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+    // `prev` already falls back to today when there was no previous expiry to measure from - comparing it
+    // against today again here (the bug this replaced) meant ANY already-lapsed document - the only kind
+    // "Renew" is ever offered on - renewed to "a year from today" regardless of when it actually expired,
+    // silently dropping the whole point of measuring from the lapsed date.
+    // Day strings throughout, anchored at UTC: the old form parsed local midnight and read the LOCAL parts
+    // back, so a renewal set from a machine east of UTC landed on the day before the anniversary.
+    const prev = d.expire_time ? d.expire_time.slice(0, 10) : todayStr();
+    const next = new Date(`${prev}T00:00:00Z`);
+    next.setUTCFullYear(next.getUTCFullYear() + 1);
+    return next.toISOString().slice(0, 10);
   }
 
   async function onReplaceFile(f: File | null) {
@@ -349,7 +369,7 @@ export default function Documents({ me }: { me: Me }) {
         // The whole point of a renewal: the new paperwork AND the date it runs to, in one action. Before this
         // it was an upload, then a trip through the edit dialog to move a date nobody remembered to move.
         const expire = renewedExpiry(d);
-        await patch(d.path, { expire_time: expire });
+        await patch(d.path, { expire_time: dayToExpireTime(expire) });
         toast({ title: "Renewed", description: `${d.display_name} now expires ${formatDate(expire)}.`, variant: "success" });
       } else {
         toast({ title: "File uploaded", variant: "success" });
@@ -371,7 +391,7 @@ export default function Documents({ me }: { me: Me }) {
 
   const today = todayStr();
   // Expiry tracking: a doc is "Expiring soon" within 30 days of its expire_time, "Expired" once past.
-  const soonCutoff = (() => { const d = new Date(Date.now() + 30 * 86400000); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  const soonCutoff = addDaysYmd(today, 30);
   const expiryBucket = (d: DocumentResource): "" | "Expired" | "Expiring soon" | "Valid" => {
     if (!d.expire_time) return "";
     const day = d.expire_time.slice(0, 10);

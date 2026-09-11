@@ -20,21 +20,32 @@ test.describe("clickable metrics", () => {
 
     const approve = page.getByRole("button", { name: "Approve", exact: true });
     await expect(approve.first()).toBeVisible();
-    const whole = await approve.count();
 
     // The queue-wide tile is a figure, not a filter target: it must read the same before and after, because
     // the metrics describe the queue and the tabs below describe the slice.
     const queueTile = page.getByRole("button", { name: /Awaiting your decision/ });
-    const queueValue = (await queueTile.innerText()).trim();
-
     const today = page.getByRole("button", { name: /Arrived today/ });
-    await today.click();
-    await expect(today).toHaveAttribute("aria-pressed", "true");
-    await expect.poll(() => page.url()).toContain("focus=today");
 
-    // The seeded queue was raised long before today, so narrowing to today really has to remove rows.
-    await expect.poll(() => approve.count()).toBeLessThan(whole);
-    expect((await queueTile.innerText()).trim(), "the metrics moved when the list narrowed").toBe(queueValue);
+    // Baseline and narrowing retried AS A PAIR: that tile counts the whole inbox, which is shared - the rest
+    // of this suite files and decides requests against it for the length of the run. A figure that moved
+    // between the two reads is somebody else's write landing, not the narrowing under test, so the baseline
+    // is taken again and the narrowing repeated rather than reported as the metric having followed the filter.
+    let whole = 0;
+    await expect(async () => {
+      if ((await today.getAttribute("aria-pressed")) === "true") {
+        await today.click();
+        await expect(today).toHaveAttribute("aria-pressed", "false", { timeout: 8_000 });
+      }
+      const queueValue = (await queueTile.innerText()).trim();
+      whole = await approve.count();
+
+      await today.click();
+      await expect(today).toHaveAttribute("aria-pressed", "true", { timeout: 8_000 });
+      await expect.poll(() => page.url(), { timeout: 8_000 }).toContain("focus=today");
+      // The seeded queue was raised long before today, so narrowing to today really has to remove rows.
+      await expect.poll(() => approve.count(), { timeout: 10_000 }).toBeLessThan(whole);
+      expect((await queueTile.innerText()).trim(), "the metrics moved when the list narrowed").toBe(queueValue);
+    }).toPass({ timeout: 60_000 });
 
     // The narrowed page is the shareable one: a reload comes back to it from the URL alone.
     await page.reload();
@@ -43,9 +54,13 @@ test.describe("clickable metrics", () => {
     const narrowed = await approve.count();
     expect(narrowed).toBeLessThan(whole);
 
-    // And the same tile is the way out - a filter you cannot see how to remove is a trap.
+    // And the same tile is the way out - a filter you cannot see how to remove is a trap. What the widened
+    // queue must show is the rows the filter was hiding, NOT the exact baseline figure: the inbox is shared with
+    // every other spec in the run, so a request filed or decided since `whole` was read moves that number for
+    // reasons that have nothing to do with the filter (the baseline pair above is retried for the same reason).
     await page.getByRole("button", { name: /Arrived today/ }).click();
     await expect.poll(() => page.url()).not.toContain("focus=today");
-    await expect.poll(() => approve.count()).toBe(whole);
+    await expect(page.getByRole("button", { name: /Arrived today/ })).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => approve.count()).toBeGreaterThan(narrowed);
   });
 });

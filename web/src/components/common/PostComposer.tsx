@@ -224,6 +224,7 @@ export function PostComposer({
   onOpenChange,
   editing,
   initialKind,
+  initialRecipient,
   employees,
   departments,
   levels,
@@ -238,6 +239,8 @@ export function PostComposer({
   onOpenChange: (open: boolean) => void;
   editing: Announcement | null; // null = composing something new
   initialKind: Kind; // what a fresh composer opens on (the caller decides from the grants / the quick action)
+  /** Who a fresh KUDOS composer opens on - a completed goal offers "say well done" about a known person. */
+  initialRecipient?: string;
   employees: Employee[];
   departments: Department[];
   levels: KudosLevel[];
@@ -312,7 +315,8 @@ export function PostComposer({
     // A composer reopened after a failure starts clean rather than showing the last attempt's message.
     setError(null);
     const seed: Form = !editing
-      ? { ...EMPTY, kind: kinds.includes(initialKind) ? initialKind : kinds[0] ?? initialKind, level: levels[0]?.name ?? "" }
+      // A kudos opened ABOUT somebody (from their completed goal) starts with them already picked.
+      ? { ...EMPTY, kind: kinds.includes(initialKind) ? initialKind : kinds[0] ?? initialKind, level: levels[0]?.name ?? "", recipient: initialRecipient ?? "" }
       : {
           ...EMPTY,
           title: editing.title,

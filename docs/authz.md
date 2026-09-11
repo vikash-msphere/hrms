@@ -375,12 +375,21 @@ A `WHERE` runs in the data layer, but the **decision** it encodes is made in the
   service, and the list service calls `applyScope(scope, table.code, table.owner)`
   (`listScope.ts`), which only **binds** the decision to columns: `(breadth-predicate OR code in a shared
   subtree) AND code NOT in a denied subtree`, where the breadth predicate is `all` -> no filter, `dept` ->
-  `code LIKE '<deptCode>-%'` (boundary-anchored), `own` -> `owner = <ownerId>`. Each share/deny on code `C`
-  binds as its **subtree** `(code = C OR code LIKE 'C-%')` - the same `isUnder` the item path decides with, so
+  `code GLOB '<deptCode>-*'` (boundary-anchored), `own` -> `owner = <ownerId>`. Each share/deny on code `C`
+  binds as its **subtree** `(code = C OR code GLOB 'C-*')` - the same `isUnder` the item path decides with, so
   a share on a PARENT object lists its descendants (not just the exact node). The trailing `-` is the
   delimiter guard: `04-002` lists `04-002` + `04-002-*` but never the prefix-collision neighbour `04-0029`.
+  **`GLOB`, not `LIKE`, and that is a performance requirement rather than a preference.** SQLite only turns a
+  prefix pattern into an index range scan when the comparison is case-**sensitive**; under the default
+  `case_sensitive_like=OFF`, `code LIKE 'C-%'` is a full table SCAN even though `code` is uniquely indexed, and
+  D1 offers no way to set that pragma. `EXPLAIN QUERY PLAN` on the exact predicate: the `LIKE` form reports
+  `SCAN`, the `GLOB` form `SEARCH ... USING COVERING INDEX (code>? AND code<?)`. This predicate runs for `dept`
+  breadth and for **every** share and deny - and denies apply even at `all` breadth, so an admin's list scanned
+  too. `GLOB` is case-sensitive where `LIKE` was not, which is strictly tighter and changes no result: codes come
+  from the lowercase Crockford alphabet, so no code has a case variant to match.
   A denied subtree removes its rows even under `all` (deny-wins). Codes are server-generated base32 + `-`
-  (no LIKE wildcards), so the pattern needs no escaping; `test/listScope.test.ts` covers the collision case.
+  (no glob metacharacters - no `*`, `?` or `[`), so the pattern needs no escaping; `test/listScope.test.ts`
+  covers the collision case and asserts the operator, since which operator is emitted is the whole point.
 - **Scope unset -> `1 = 0`** (empty result, fail-closed). The service makes no access decision; forgetting to
   set a scope returns nothing, never everything.
 
@@ -525,12 +534,12 @@ Every place the system could be unsure, it denies:
 3. **Opaque wire tokens are defense in depth, not the guard.** Invariant 1 is the guard.
 4. **Ownership on create is gated, not trusted** (owner refs, section 11).
 5. **List scope fails closed by construction** (section 12). Its subtree binding uses a **boundary-anchored**
-   `LIKE 'C-%'` (the trailing `-`), the same safe form as the dept predicate - never a bare prefix - and only
+   `GLOB 'C-*'` (the trailing `-`), the same safe form as the dept predicate - never a bare prefix - and only
    widens VISIBILITY (a too-tight bind over-hides, never over-shows); the item-path decision is unaffected.
 6. **The compiler and the exact-IN narrowing (the DECISION path) are security-critical: no SQL prefix match,
    differentially tested against the engine.** A per-object pattern uses a literal code token, so it never
    leaks across a prefix collision (`04-002` vs `04-0029`) - on the item path (exact-IN) and the list path
-   (anchored subtree LIKE), both covered by tests.
+   (anchored subtree GLOB), both covered by tests.
 
 These are proven by the suite: `compileGrants.test` (compiler == engine, prefix collision), `bola.test`
 (cross-employee / cross-dept), `grantExceptions.test` (per-object share/deny, narrowing == full set),

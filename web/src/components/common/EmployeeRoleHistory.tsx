@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, Briefcase, Plus } from "lucide-react";
 import { get, create } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
+import { todayStr as todayYmd } from "@/lib/orgDay";
 import type { Department, Position } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,7 +15,6 @@ import { WriteDialog } from "@/components/common/WriteDialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 
-const todayYmd = () => new Date().toISOString().slice(0, 10);
 const NONE = "__none__";
 
 // Role history (designation / department / location) + a "Change role" action - the promotion/transfer
@@ -33,7 +33,8 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
     return (p?: string) => (p ? m.get(idOf(p)) ?? idOf(p) : "-");
   }, [departments]);
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       const r = await get<{ results: Position[] }>(`positions?employee=${encodeURIComponent("employees/" + employeeId)}`);
       setRows(r.results ?? []);
@@ -42,10 +43,10 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
     } finally {
       setLoaded(true);
     }
-  }
+  }, [employeeId, toast]);
   useEffect(() => {
     void load();
-  }, [employeeId]);
+  }, [load]);
 
   const current = rows.find((r) => r.current);
 

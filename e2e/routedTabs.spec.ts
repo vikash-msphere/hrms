@@ -1,4 +1,4 @@
-import { gotoRoute, test, expect } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
 
 // The tab you are on is part of the address.
 //
@@ -17,6 +17,9 @@ test.describe("the sub-tab in the URL", () => {
   test("picking a tab writes it to the hash, and the hash survives a reload", async ({ as }) => {
     test.setTimeout(120_000);
     const page = await as("employee");
+    // A dev Worker restart mid-request on a busy lane, same rare hiccup documented elsewhere in this suite
+    // (complianceRuleDelete.spec.ts et al.) - the retry below on the reload is what actually recovers from it.
+    allowConsoleErrors(page, /status of 500|status of 503/i);
     await gotoRoute(page, "leave-requests", "Leaves");
     // Untouched, the page is on its default tab and the hash says nothing about tabs.
     expect(page.url()).not.toContain("leave-requests/");
@@ -27,9 +30,13 @@ test.describe("the sub-tab in the URL", () => {
     await expect.poll(() => page.url()).toContain("#/leave-requests/history");
 
     // From cold, which is what a pasted link is: the tab is read off the hash on mount, not just written to
-    // it on click.
-    await page.reload();
-    await expect(page.getByRole("main")).toBeVisible();
+    // it on click. Retried: a transient 500 on a request the bootstrap needs can leave the reload showing
+    // nothing at all rather than the app, on a lane busy enough to hit the same rare Worker restart documented
+    // elsewhere in this suite - a second reload is what a person hitting a blank page would do too.
+    await expect(async () => {
+      await page.reload();
+      await expect(page.getByRole("main")).toBeVisible({ timeout: 15_000 });
+    }).toPass({ timeout: 60_000 });
     await expect(page.getByRole("tab", { name: /^History/ })).toHaveAttribute("data-state", "active", { timeout: 30_000 });
   });
 

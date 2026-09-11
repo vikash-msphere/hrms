@@ -1,6 +1,7 @@
 import { allocOwnedCode } from "./codeAlloc";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -25,11 +26,21 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
 // One employee's role history (newest first), or - unfiltered - everything the caller may see.
-export async function listPositions(deps: Deps, scope: ListScope, employeeId?: string) {
+//
+// PAGED IN SQL, on `effective_from`. One employee's history is short by nature, but the UNFILTERED list is
+// org-wide and grows with headcount x every promotion, transfer and relocation the org ever records - and it
+// was returning all of it with `nextPageToken: undefined`, so there was no cursor to follow even when the
+// answer was truncated by nothing but the Worker's memory. `effective_from` is `notNull`, so it is a valid
+// keyset key for every matching row.
+export async function listPositions(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employeeId?: string) {
   const conds = [applyScope(scope, schema.positions.code, schema.positions.employeeId)];
   if (employeeId) conds.push(eq(schema.positions.employeeId, employeeId));
-  const rows = await deps.db.select().from(schema.positions).where(conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as any)) : undefined);
-  return rows.sort((a, b) => +new Date(b.effectiveFrom) - +new Date(a.effectiveFrom) || b.uuid.localeCompare(a.uuid));
+  const where = conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as SQL[])) : undefined;
+  return keysetPage<typeof schema.positions.$inferSelect>(deps, schema.positions, "positions", where, {
+    max: maxPageSize,
+    pageToken,
+    order: { expr: sql`${schema.positions.effectiveFrom}`, value: (r) => +new Date(r.effectiveFrom) },
+  });
 }
 
 // The standard lane for this collection is list + get only: `changeRole` below is its create (see

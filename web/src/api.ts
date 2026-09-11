@@ -1,7 +1,8 @@
 // Single API client. /v1 base, Access cookie, CSRF header, RFC 9457 error parsing.
-import { publish, subscribeTopic } from "@/lib/crossTabBus";
+import { publishToAll, subscribeTopic } from "@/lib/crossTabBus";
 import { getViewAs, stopViewAs } from "@/lib/viewAsStore";
 import { problemText } from "@/lib/problemText";
+import { purgeCachedData } from "@/lib/clientStore";
 
 // `message` is the HUMAN sentence for this failure, translated once here from the problem details (see
 // lib/problemText). Every toast, pinned form error and stray `(e as Error).message` in the app therefore reads
@@ -46,16 +47,32 @@ let sessionExpiredHandler: (() => void) | null = null;
 export function setSessionExpiredHandler(fn: (() => void) | null) {
   sessionExpiredHandler = fn;
 }
-function onAuthDead() {
-  if (sessionExpiredHandler) sessionExpiredHandler();
-  else redirectToLogin();
-}
 function handle401(): never {
-  // Broadcast so every sibling tab of this user reacts to the lapsed session at once, instead of each
-  // discovering it via its own doomed request.
-  publish("auth", { op: "dead" });
+  // Broadcast so every sibling tab reacts to the lapsed session at once, instead of each discovering it via
+  // its own doomed request. `publishToAll`, because the session is the BROWSER's: a tab running a "view as"
+  // simulation answers as somebody else, and the ordinary identity-scoped publish would leave it sitting on a
+  // dead session (see lib/crossTabBus.ts).
+  publishToAll("auth", { op: "dead" });
   onAuthDead();
   throw new ApiError("unauthenticated", 401, null);
+}
+// The cached copies of server data come OFF THE DISK when the session dies, not only when somebody chooses
+// "Sign out" from the menu. That menu item was the sole caller of a purge, so the ordinary exits - a 12-hour
+// TTL lapsing, a browser closed and reopened tomorrow - left every collection this person had opened, and every
+// colleague's photo, in IndexedDB for the seven days `MAX_AGE_MS` allows. On a shared machine that is the exact
+// situation the sign-out purge exists to prevent, reached by the door most people use.
+//
+// `purgeCachedData`, not `purgeAll`: a 401 arrives mid-sentence rather than being asked for, so the person's own
+// unsaved writing (the `draft` class) stays. See the note on that function for the split.
+//
+// Fired from `onAuthDead` so BOTH lapse paths are covered - the redirect and the in-place overlay - and so a
+// sibling tab told "dead" over the bus purges too. Not awaited: nothing downstream depends on it, and an
+// expired session must not wait on storage. It is idempotent, so the repeat calls a broadcast can produce cost
+// one empty transaction each.
+function onAuthDead() {
+  void purgeCachedData();
+  if (sessionExpiredHandler) sessionExpiredHandler();
+  else redirectToLogin();
 }
 subscribeTopic<{ op: string }>("auth", (m) => {
   if (m.op === "dead") onAuthDead();
@@ -248,7 +265,7 @@ export function patch<T>(path: string, body: Record<string, unknown>, etag?: str
   }));
 }
 
-import { coalescedGet, NOT_MODIFIED, etagOf } from "@/lib/getCoalescer";
+import { coalescedGet, coalescedGetDetailed, NOT_MODIFIED } from "@/lib/getCoalescer";
 
 // ---- AEP-shaped helpers -----------------------------------------------------
 
@@ -323,9 +340,11 @@ export async function listConditional<T>(
   fresh = false,
 ): Promise<{ notModified: true } | { notModified?: false; response: ListResponse<T>; etag?: string }> {
   const path = listPath(collection, opts);
-  const body = await coalescedGet<ListResponse<T> | typeof NOT_MODIFIED>(path, etag, fresh);
-  if (body === NOT_MODIFIED) return { notModified: true };
-  return { response: body, etag: etagOf(path) };
+  // The validator comes back WITH this response, never from a path lookup afterwards - two concurrent reads of
+  // one path would otherwise hand each other's etag over (see the note on `Answer` in lib/getCoalescer.ts).
+  const answer = await coalescedGetDetailed<ListResponse<T> | typeof NOT_MODIFIED>(path, etag, fresh);
+  if (answer.body === NOT_MODIFIED) return { notModified: true };
+  return { response: answer.body, etag: answer.etag };
 }
 
 /** Follow the cursor to the end: EVERY row of a collection (the server caps a page at 100). For pickers
@@ -427,7 +446,7 @@ export function invoke<T>(path: string, verb: string, etag?: string, body?: Reco
   }));
 }
 
-type BinaryOpts = { verb?: string; params?: Record<string, string>; body?: Record<string, unknown> };
+type BinaryOpts = { verb?: string; params?: Record<string, string>; body?: Record<string, unknown>; signal?: AbortSignal };
 
 /** POST a binary-returning custom method and hand back the raw bytes. Shared by `download` (save to disk) and
  *  `blobUrl` (view inline), so both speak the same auth/CSRF/Problem-error contract. */
@@ -437,15 +456,29 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
   guardReadOnly(`/${path}`, { method: "POST" });
   const qs = opts.params ? `?${new URLSearchParams(opts.params).toString()}` : "";
   let res: Response;
-  try {
-    res = await fetch(`/v1/${path}:${opts.verb ?? "download"}${qs}`, {
-      method: "POST",
-      headers: { "X-Requested-By": "hrms-spa", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
-      credentials: "include",
-      ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
-    });
-  } catch {
-    throw networkError(); // a download is the request most likely to be attempted on a bad connection
+  // RETRIED on a transient status, exactly as a read is in `api` above. A binary method is a POST for transport
+  // reasons only - it renders bytes (a payslip, a letterhead preview, a bank file) and files nothing - so asking
+  // again is as free as re-reading a list, and NOT asking again is expensive: these are the requests that carry
+  // a whole PDF render behind them, and a gateway blip on one used to dead-end the screen that asked (the
+  // letterhead designer showing "the server had a problem" with no preview and no way back to one until the
+  // design was edited again).
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await fetch(`/v1/${path}:${opts.verb ?? "download"}${qs}`, {
+        method: "POST",
+        headers: { "X-Requested-By": "hrms-spa", ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+        credentials: "include",
+        ...(opts.signal ? { signal: opts.signal } : {}),
+        ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
+      });
+    } catch (e) {
+      if (opts.signal?.aborted) throw e; // cancelled on purpose - let the caller's own abort handling see it, not a network-error toast
+      if (attempt >= READ_ATTEMPTS) throw networkError(); // a download is the request most likely to be attempted on a bad connection
+      await settle(attempt);
+      continue;
+    }
+    if (!TRANSIENT.has(res.status) || attempt >= READ_ATTEMPTS || opts.signal?.aborted) break;
+    await settle(attempt);
   }
   if (res.status === 401) handle401();
   if (!res.ok) {

@@ -38,7 +38,7 @@ export async function listCheckIns(deps: Deps, scope: ListScope, maxPageSize: nu
   // Paged on `createdAt` (what the cursor carries), newest first. Sorting the whole set by MEETING date and then
   // seeking on `createdAt` was two different orders, and a 1:1 logged out of order fell through the gap between
   // pages. The meeting date is a presentation order, so it orders the page that came back.
-  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "check-ins" });
   return {
     ...page,
     items: page.items.sort((a, b) => +new Date(b.meetingDate ?? b.createdAt) - +new Date(a.meetingDate ?? a.createdAt) || a.uuid.localeCompare(b.uuid)),

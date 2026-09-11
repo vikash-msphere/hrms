@@ -6,17 +6,39 @@ import { gotoRoute, purge, test, expect } from "./fixtures";
 // ever created one: the preview line that names the next three actual dates it will generate on - computed
 // client-side, the same math a cron applies later - has never been checked against real dates.
 test("a recurring expense previews its next three occurrences and lands on its own tab", async ({ as }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(220_000);
   const page = await as("super");
   const amount = 1500 + Math.floor(Math.random() * 400);
 
   await gotoRoute(page, "expenses", "Expenses");
-  // The general "New expense" dialog, not the Recurring tab's own empty-state button - that one only exists
-  // while the tab has nothing on it yet, and this org may already have a schedule from an earlier run.
-  await page.getByRole("button", { name: "New expense" }).first().click();
   const form = page.getByRole("dialog");
-  await form.locator("#recurring").click();
-  await expect(form.getByText("Recurring expense (auto-generated on a schedule)")).toBeVisible();
+  // Retried as one whole unit, the OPEN included: the form re-renders as its own category/vendor lists
+  // resolve, and a click can land on the checkbox a beat before one of those re-renders replaces it out from
+  // under the press - and, on a busier lane, the "New expense" press itself can just as easily miss (a route
+  // transition still settling). Retrying only the checkbox click left that second case with nothing to
+  // recover it: no dialog ever opened, so `#recurring` was never going to appear no matter how long the wait.
+  await expect(async () => {
+    // The general "New expense" dialog, not the Recurring tab's own empty-state button - that one only
+    // exists while the tab has nothing on it yet, and this org may already have a schedule from an earlier
+    // run.
+    // Opened at most ONCE, and only from a page with nothing open. `count()` taken while the first dialog is
+    // still animating in reads 0, so a retry pressed "New expense" again and left two stacked dialogs - the
+    // second one's full-screen overlay then sits above the first and swallows every click aimed at the form
+    // underneath ("<div ... intercepts pointer events"). A reload is the one thing that clears a stray layer.
+    if ((await form.count()) > 1) await page.reload();
+    if (!(await form.count())) {
+      await page.getByRole("button", { name: "New expense" }).first().click({ timeout: 8_000 });
+      await expect(form.first()).toBeVisible({ timeout: 8_000 });
+    }
+    const box = form.locator("#recurring");
+    await expect(box).toBeVisible({ timeout: 8_000 });
+    // Ticked only when it is not already ticked, and confirmed on a field that the tick REVEALS. A retry that
+    // clicked it blind turned recurring back off, and "Recurring expense (auto-generated on a schedule)" is the
+    // checkbox's own label - present either way - so the loop passed with the schedule fields gone and the fill
+    // below then waited out its timeout on a "Next occurrence" that was never going to render.
+    if (!(await box.isChecked())) await box.click({ timeout: 8_000 });
+    await expect(form.getByLabel("Next occurrence")).toBeVisible({ timeout: 8_000 });
+  }).toPass({ timeout: 150_000 });
 
   await form.getByLabel("Amount").fill(String(amount));
   // Monthly is the default rule; a known start date makes the preview's three dates exact.

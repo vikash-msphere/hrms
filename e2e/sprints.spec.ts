@@ -1,4 +1,4 @@
-import { SPA_HEADERS, allowConsoleErrors, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // A scrum board: the product backlog, one time-box, and what closing the box does to the work left in it.
 //
@@ -14,13 +14,15 @@ test("a sprint is planned from the backlog, started, charted, and completed", as
   test.setTimeout(300_000);
   // `sprints` ships private with no seeded role grants, so super is the only caller who can run this.
   const page = await as("super");
-  // A DEFECT this spec found and does not test: every re-render that moves a task tile between the backlog
-  // and a sprint column (the menu move, and the sprint's own activate/complete) raises
-  // "Cannot read properties of undefined (reading 'nodeName' / 'parentNode')" from React's own removal of a
-  // CardTile - the tile is covered in Radix Tooltips and one of them is open under the cursor when its host
-  // unmounts. It reaches production as a Sentry error on a board nobody thinks is broken. Opted out narrowly
-  // so the rest of this spec runs; take the opt-out away with the fix.
-  allowConsoleErrors(page, /reading '(nodeName|parentNode)'/);
+  // This spec once carried an opt-out for "Cannot read properties of undefined (reading 'nodeName' /
+  // 'parentNode')", thrown while React removed a CardTile that still had an open Radix Tooltip on it - a tile
+  // is covered in them. The opt-out is gone because the throw is: re-checked deliberately, hovering a tile's
+  // own tooltip trigger, letting the tip open, and then unmounting the tile out from under it through the
+  // move menu, plus this whole spec run serially and repeated - not one console line either way.
+  //
+  // Nothing here is tolerated, then. The gate in fixtures.ts fails this spec on any console error or throw,
+  // which is a better guard than an exception for a symptom that no longer appears: if it comes back, on this
+  // path or another, it comes back as a failure with the panel that raised it named.
   const stamp = Date.now();
   const task = `E2E sprint task ${stamp}`;
 

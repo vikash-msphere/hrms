@@ -29,9 +29,9 @@ export const settlements = collectionRoutes<SettlementInput, typeof schema.settl
     // The create is the whole FnF computation (services/settlements.ts), audited as `settlement.compute`.
     create: (deps, actor, input) => computeAndStoreSettlement(deps, actor, input),
   },
-  list: (c) => {
+  list: (c, page) => {
     // The inbound edge (decodeWireIds) already decoded the query ref to its internal id; just take the id.
     const emp = c.req.query("employee");
-    return listSettlements(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined).then((items) => ({ items, nextPageToken: undefined }));
+    return listSettlements(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, emp ? emp.split("/").pop()! : undefined);
   },
 });

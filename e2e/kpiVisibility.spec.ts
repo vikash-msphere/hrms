@@ -89,7 +89,8 @@ test.describe("KPI card visibility", () => {
   });
 
   test("a whole band is switched off org-wide", async ({ as }) => {
-    test.setTimeout(240_000);
+    // Two 90s re-save retries (the config row is contested - see below), plus the reader's own reloads.
+    test.setTimeout(420_000);
     const admin = await as("super");
     const employee = await as("employee");
     const clean = withoutThisSpecsMarks(await dashboardConfig(admin));
@@ -104,18 +105,61 @@ test.describe("KPI card visibility", () => {
     await gotoRoute(admin, "settings/dashboard");
     const band = admin.getByRole("checkbox", { name: "Show Needs attention band" });
     await expect(band).toBeVisible({ timeout: 30_000 });
-    await band.click();
+    // Pressed against the CHECKBOX's own state, not once and hoped for: this editor re-renders as the
+    // dashboard config it is bound to settles, and a press that landed on the control mid-render toggles
+    // nothing - after which the "Hidden" marks below can never appear.
+    await expect(async () => {
+      if (await band.isChecked()) await band.click({ timeout: 5_000 });
+      await expect(band).not.toBeChecked({ timeout: 5_000 });
+    }).toPass({ timeout: 30_000 });
     // The band reads as off in the editor before anything is saved, and its per-card rules stop mattering.
-    await expect(admin.getByText("Hidden").first()).toBeVisible();
-    await admin.getByRole("button", { name: "Save KPIs" }).click();
+    await expect(admin.getByText("Hidden").first()).toBeVisible({ timeout: 15_000 });
+    // Saved, and CONFIRMED on the org's own config row before the reader's dashboard is asked about it. The
+    // band's state is one entry in `hiddenKpiCategories` there, so it says which way the switch really went -
+    // a Save pressed while this editor was still settling writes the config unchanged, and then every read
+    // below is asking the wrong question.
+    //
+    // RE-SAVED on a miss, because this row is contested: the whole `settings/dashboard` blob is read at
+    // page-mount and written back entire (the deliberate single-admin last-write-wins - see
+    // docs/settings-lost-update.md), so another dashboard spec saving its own edit in between drops this one.
+    // A reload re-reads the blob as it now stands before the switch is thrown again, so the retry cannot
+    // re-send a stale copy of somebody else's row.
+    await expect(async () => {
+      if (await bandHidden(admin)) return;
+      await admin.reload();
+      await expect(band).toBeVisible({ timeout: 15_000 });
+      // Waited on until it AGREES WITH THE RECORD before it is touched. The panel paints its defaults and
+      // fills them in from the stored blob a moment later, so a state read taken straight after a reload is
+      // the default rather than the org's - and acting on it saves the config the panel is still holding.
+      await expect.poll(() => band.isChecked().catch(() => null), { timeout: 20_000 }).toBe(true);
+      await band.click({ timeout: 10_000 });
+      await expect(band).not.toBeChecked({ timeout: 10_000 });
+      await admin.getByRole("button", { name: "Save KPIs" }).click({ timeout: 10_000 });
+      await expect.poll(() => bandHidden(admin), { timeout: 20_000 }).toBe(true);
+    }).toPass({ timeout: 120_000 });
 
     await employee.reload();
     await expect(employee.getByRole("main")).toBeVisible();
     await expect(employee.getByText("Needs attention")).toHaveCount(0, { timeout: 30_000 });
     await expect(employee.getByText("Open tickets", { exact: true })).toHaveCount(0);
 
-    await band.click();
-    await admin.getByRole("button", { name: "Save KPIs" }).click();
+    // And back on, against the record for the same reason the switch-off is: a click that lands mid-render
+    // toggles nothing, Save then writes the config unchanged, and the band the reader is waiting for never
+    // comes back however long the wait.
+    await expect(async () => {
+      if (!(await bandHidden(admin))) return;
+      await admin.reload();
+      await expect(band).toBeVisible({ timeout: 15_000 });
+      // The same wait as the switch-off, and the reason this restore could not make progress: the band ships
+      // VISIBLE, so the freshly painted control reads "checked" for a band the record has hidden. Read
+      // immediately, that says there is nothing to turn on - the switch is left alone, Save writes the hidden
+      // blob straight back, and every retry repeats it until the budget is gone.
+      await expect.poll(() => band.isChecked().catch(() => null), { timeout: 20_000 }).toBe(false);
+      await band.click({ timeout: 10_000 });
+      await expect(band).toBeChecked({ timeout: 10_000 });
+      await admin.getByRole("button", { name: "Save KPIs" }).click({ timeout: 10_000 });
+      await expect.poll(() => bandHidden(admin), { timeout: 20_000 }).toBe(false);
+    }).toPass({ timeout: 120_000 });
     await employee.reload();
     await expect(employee.getByRole("main")).toBeVisible();
     await expect(employee.getByText("Needs attention")).toBeVisible({ timeout: 30_000 });
@@ -197,6 +241,13 @@ function withoutThisSpecsMarks(cfg: Record<string, unknown>): Record<string, unk
   delete kpis.open_tickets;
   const bands = ((cfg.hiddenKpiCategories as string[]) ?? []).filter((c) => c !== "attention");
   return { ...cfg, kpis, hiddenKpiCategories: bands };
+}
+
+/** Whether the "Needs attention" band is switched off ORG-WIDE - one entry in the config's own hidden list,
+ *  which is the only place that says what a Save actually wrote. */
+async function bandHidden(page: import("@playwright/test").Page): Promise<boolean> {
+  const hidden = (await dashboardConfig(page)).hiddenKpiCategories as string[] | undefined;
+  return (hidden ?? []).includes("attention");
 }
 
 /** The org's dashboard config as it stands, so a spec can put back exactly what it found. */

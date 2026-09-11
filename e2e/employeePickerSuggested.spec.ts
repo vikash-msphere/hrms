@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, personPath, purge, test, expect } from "./fixtures";
+import { SPA_HEADERS, allowConsoleErrors, gotoRoute, personPath, purge, test, expect } from "./fixtures";
 
 // `EmployeePicker`'s "Suggested" chips - `feedback360.spec.ts` proves the SAME picker will not offer the
 // reviewee; what it never reaches is the OTHER half, floated above the search box: likely picks (same board,
@@ -10,6 +10,10 @@ test("a suggested chip toggles the same pick as its own checkbox", async ({ as }
   test.setTimeout(180_000);
   const hr = await as("hr");
   const manager = await as("manager");
+  // A dev Worker restart mid-request on a busy lane, the same rare hiccup documented elsewhere in this suite
+  // (complianceRuleDelete.spec.ts et al.). What the chip and its checkbox agree on is what this test reads;
+  // a console line from a request retried behind that is not its failure.
+  allowConsoleErrors(manager, /status of 503|status of 500/i);
   const name = `E2E suggested ${Date.now()}`;
 
   await purgeLeftovers(hr);

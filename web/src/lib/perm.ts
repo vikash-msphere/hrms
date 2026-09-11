@@ -29,6 +29,16 @@ export function usePermission(perm: string): boolean {
   return hasCapability(useCapabilities(), perm);
 }
 
+// Holds the `**` wildcard - the only grant collection stripScope never touches, so it is the one capability
+// string no scoped grant (self, dept, or an explicit all-scope field grant) can also produce. Needed wherever
+// a check must mean "every record, not just mine": e.g. "employees.bank-account.write" is true for EVERY
+// role via its own self-service PII grant, so it can't tell a super_admin viewing a colleague's record apart
+// from that colleague viewing their own - only the wildcard can.
+export function useIsSuperAdmin(): boolean {
+  const caps = useCapabilities();
+  return caps.includes("**.write") || caps.includes("**.**");
+}
+
 // May the caller see the per-entity ACTIVITY trail — the broad `activity.read` cap (any collection) OR the
 // per-collection `activity.<collection>.read` cap. UX only: the server still ANDs this with reading the record
 // (a narrowed holder who opens the wrong record just gets an empty feed). Pass the record's collection (the

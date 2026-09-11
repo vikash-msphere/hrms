@@ -8,7 +8,8 @@
 //     answering with the shell turns "feed disabled" or "forged token" into a 200 page.
 //   - anything else is a client-side route and must get the shell, or deep links and refreshes 404.
 import { describe, expect, it } from "vitest";
-import { WORKER_OWNED_PREFIXES } from "../src/index";
+import { app, WORKER_OWNED_PREFIXES } from "../src/index";
+import type { Bindings } from "../src/env";
 
 // Inlined at build time rather than read with node:fs: these run inside workerd, which has no filesystem.
 // Same approach the migration suite uses to pull in its .sql files.
@@ -76,5 +77,25 @@ describe("SPA fallback", () => {
     expect(owned("/v1beta/x")).toBe(false);
     expect(owned("/calendars")).toBe(false);
     expect(owned("/notifications")).toBe(false);
+  });
+
+  // The shell's OWN status, not a hardcoded 200. A client-side route is answered by fetching index.html
+  // through the ASSETS binding, and that fetch can fail - the file missing after a bad build, the asset layer
+  // unwell. Returning 200 around whatever came back is how an error page becomes a "healthy" app route to
+  // every monitor, crawler and browser cache that sees it.
+  const dispatch = (path: string, shell: Response) =>
+    app.fetch(new Request(`https://hrms.example.com${path}`), { ASSETS: { fetch: async () => shell } } as unknown as Bindings);
+
+  it("serves a client-side route with the shell, at the shell's status", async () => {
+    const ok = await dispatch("/notifications", new Response("<!doctype html>", { status: 200, headers: { "Content-Type": "text/html" } }));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("<!doctype html>");
+  });
+
+  it("passes a failed shell fetch through instead of dressing it as a 200", async () => {
+    const missing = await dispatch("/notifications", new Response("not found", { status: 404 }));
+    expect(missing.status).toBe(404);
+    const broken = await dispatch("/notifications", new Response("bad gateway", { status: 502 }));
+    expect(broken.status).toBe(502);
   });
 });

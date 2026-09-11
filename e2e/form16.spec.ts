@@ -137,13 +137,15 @@ test.describe("Form 16", () => {
     await expect(form.getByText("Nobody is selected.")).toBeVisible();
 
     // Nothing is run: a year-end batch writes a document for every employee, which is not something to leave
-    // behind on a shared database.
-    await page.keyboard.press("Escape");
-    const discard = page.getByRole("dialog");
-    if (await discard.getByRole("button", { name: /Discard|Leave/ }).count()) {
-      await discard.getByRole("button", { name: /Discard|Leave/ }).click();
-    }
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // behind on a shared database. Escape has proven unreliable at actually closing a dialog under load
+    // elsewhere in this suite - retried rather than trusted to one press.
+    await expect(async () => {
+      if (!(await page.getByRole("dialog").count())) return;
+      await page.keyboard.press("Escape");
+      const discard = page.getByRole("dialog").getByRole("button", { name: /Discard|Leave/ });
+      if (await discard.count()) await discard.click();
+      await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 5_000 });
+    }).toPass({ timeout: 30_000 });
   });
 
   test("an ordinary employee is offered neither Form 16 action on their own record", async ({ as }) => {

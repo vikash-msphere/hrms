@@ -80,7 +80,12 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   const { rows: periods, reload: reloadPeriods } = useCollection<PayPeriod>("pay-periods");
   // A quick monthly run creates the period AND the run in one go, so it needs both rights. Only super_admin
   // holds both (HR defines periods, payroll runs them) - so this convenience is, by design, super-only.
-  const canQuick = usePermission("pay-periods.write") && usePermission("payroll-runs.write");
+  // Both hooks are read unconditionally and combined after. `&&` short-circuits, so writing this as one
+  // expression skips the second `usePermission` whenever the first is false - and capabilities arrive after
+  // the first paint, so that flip changes the hook count mid-life and React throws.
+  const canWritePeriods = usePermission("pay-periods.write");
+  const canWriteRuns = usePermission("payroll-runs.write");
+  const canQuick = canWritePeriods && canWriteRuns;
   const { toast } = useToast();
   const confirm = useConfirm();
   const { org } = useOrg();
@@ -652,7 +657,15 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
       {/* Per-employee breakdown - the review surface */}
       <Dialog open={!!reviewRun} onOpenChange={(o) => { if (!o) { reviewFor.current = null; setReviewRun(null); } }}>
         {/* 85vh from `sm` up; a phone keeps the shared keyboard-aware sheet height (see ui/dialog.tsx). */}
-        <DialogContent className="flex max-w-4xl flex-col overflow-hidden sm:max-h-[85vh]">
+        {/* `scrollBody`, so the panel has ONE scroller and the header stays put above it. Hand-rolled before
+            - a flex column that clipped (`overflow-hidden`) with a table box bounded to its own slice of the
+            viewport - and the arithmetic could not hold: the staleness notice above the table names every
+            affected employee, so on a 100-person run it took the whole panel and the table underneath was
+            squeezed to NOTHING. Its rows were still in the DOM (and still found by anything looking for
+            them), just zero pixels tall, with the chart below them collecting the clicks meant for the row
+            buttons. One scroller means the notice, the table and the chart each keep their own height and
+            the reader scrolls between them. */}
+        <DialogContent scrollBody className="max-w-4xl sm:max-h-[85vh]">
           <AccessScope collection="payroll-runs" objectPath={reviewRun?.path}>
           <DialogHeader>
             <DialogTitle>Payroll breakdown · {periodName(reviewRun?.pay_period)}</DialogTitle>
@@ -663,6 +676,10 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
               {reviewPeriod ? ` Pays for ${formatDate(reviewPeriod.period_start)} - ${formatDate(reviewPeriod.period_end)}, on ${formatDate(reviewPeriod.pay_date)}.` : ""}
             </DialogDescription>
           </DialogHeader>
+          {/* `scroll-pt-10` is the height of the table's own sticky header row: it pins to THIS scroller, so
+              anything that scrolls a row into view here has to leave room for it or the row lands underneath
+              it, unreadable and unclickable. */}
+          <DialogBody className="scroll-pt-10">
           {reviewStale?.stale && (
             <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
               <div className="flex items-start gap-2 text-warning-foreground dark:text-warning">
@@ -723,7 +740,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
           ) : items.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">No lines yet. Build the run to compute payroll, then review it here.</p>
           ) : (
-            <div className="flex min-h-0 flex-col gap-2">
+            <div className="flex flex-col gap-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 {items.length > 8 ? (
                   <Input placeholder="Find an employee…" value={itemQuery} onChange={(e) => setItemQuery(e.target.value)} className="max-w-xs" />
@@ -766,12 +783,11 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
                   })()}
                 </p>
               )}
-            {/* Bounded from `sm` up so the `sticky` header below actually pins: a sticky element pins inside
-                its nearest SCROLLING ancestor, and a scroll box with no height ceiling never scrolls - it just
-                grows, and the headings run off the top of a 200-employee run with the page. Left unbounded on
-                a phone, where the rows are stacked labelled blocks with no header row to keep and a nested
-                scroller would only fight the page's own. */}
-            <div className="overflow-auto sm:max-h-[70dvh]">
+            {/* No scroller of its own: the dialog body is the one scroller (see `scrollBody` above), and the
+                `sticky` header below pins to it. A nested box here is what used to bound the table to a slice
+                of the viewport the dialog could not actually spare. `overflow-x-auto` stays, for a run wide
+                enough to need it on a narrow window - a horizontal scroller does not bound the height. */}
+            <div className="scroll-shadow-x [--scroll-ground:hsl(var(--card))] overflow-x-auto">
               {/* Five money columns per employee: on a phone each row becomes a labelled block (the expand
                   row it opens is a `colSpan` note, which stacks as a plain block under it). */}
               <table className="table-stack w-full text-sm">
@@ -950,6 +966,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
               settled - each with the approval that authorised the money, which no payslip links back to. */}
           {reviewRun && <ActivitySection resource={reviewRun.path} className="border-t pt-3" label="Changes to this run" />}
           {reviewRun && <ActivitySection caseRoot={reviewRun.path} label="What this run paid, and who approved it" />}
+          </DialogBody>
           </AccessScope>
         </DialogContent>
       </Dialog>

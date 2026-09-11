@@ -41,7 +41,12 @@ const designFor = (row: { designJson: string | null; printDesignJson: string | n
   letterheadDesignOrStock(media === "print" ? row.printDesignJson ?? row.designJson : row.designJson);
 
 /** Validate a written design and store it canonically; `null` (or an empty design) clears it to the stock page. */
-function encodeDesign(design: LetterheadDesign | null | undefined): string | null {
+// `keepEmpty` is what separates the two pages. For the SCREEN design an empty object means "no design of its
+// own" - the stock page - so it collapses to null. For the PRINT page the object's mere existence is the
+// fact being stored ("this letterhead has a print version"), and a print version that keeps every stock
+// setting is a real answer, not an absent one: collapsing it to null silently dropped the version the
+// designer had just added, and the letter engine then printed on the screen page.
+function encodeDesign(design: LetterheadDesign | null | undefined, keepEmpty = false): string | null {
   if (design == null) return null;
   let parsed;
   try {
@@ -49,7 +54,7 @@ function encodeDesign(design: LetterheadDesign | null | undefined): string | nul
   } catch (e) {
     throw invalidArgument(`letterhead design: ${(e as Error).message}`);
   }
-  return Object.keys(parsed).length ? JSON.stringify(parsed) : null;
+  return keepEmpty || Object.keys(parsed).length ? JSON.stringify(parsed) : null;
 }
 
 // Every OTHER generated document picks its letterhead the same way, but has no per-document dialog and (bar the
@@ -402,7 +407,7 @@ export const letterheadSpec: CrudSpec<LetterheadInput, typeof schema.letterheads
     return {
       label: input.label.trim(),
       ...(input.design !== undefined ? { designJson: encodeDesign(input.design) } : {}),
-      ...(input.print_design !== undefined ? { printDesignJson: encodeDesign(input.print_design) } : {}),
+      ...(input.print_design !== undefined ? { printDesignJson: encodeDesign(input.print_design, true) } : {}),
     };
   },
   patch: (patch) => {
@@ -412,7 +417,7 @@ export const letterheadSpec: CrudSpec<LetterheadInput, typeof schema.letterheads
     // stored one wholesale (a deep merge would make a band impossible to empty). `print_design: null` drops
     // the print page, which means printing goes back to using the screen one.
     if (has(patch, "design")) set.designJson = encodeDesign(patch.design);
-    if (has(patch, "print_design")) set.printDesignJson = encodeDesign(patch.print_design);
+    if (has(patch, "print_design")) set.printDesignJson = encodeDesign(patch.print_design, true);
     return set;
   },
 };

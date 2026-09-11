@@ -10,6 +10,8 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, removedMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, forbidden } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
+import { applyScope } from "./listScope";
+import type { ListScope } from "../domain/access";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
@@ -62,9 +64,17 @@ function assertMayAuthorActions(actor: AppUser, actions: Action[] | undefined): 
   if (privileged.length) throw forbidden(`only a super admin may author automations with ${privileged.join("/")} action(s)`);
 }
 
-export async function listAutomations(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string) {
-  const all = await deps.db.select().from(schema.automations);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+// The caller's list scope is BOUND, like every other list in the app, rather than assumed away.
+//
+// Authoring automations is admin-only today, and that was the argument for reading the table unfiltered - which
+// makes the guarantee a property of the current grant data rather than of this code. The middleware decides a
+// scope for every collection request; a list that ignores it answers the whole table to whoever the decision let
+// through, so the day someone grants `automations` read at a department or own breadth (a team lead who should
+// see their own rules), that grant silently means "every rule in the org". `applyScope` decides nothing - it
+// binds what the middleware already settled - so for the admin case it is the same query it always was.
+export async function listAutomations(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
+  const all = await deps.db.select().from(schema.automations).where(applyScope(scope, schema.automations.code, undefined));
+  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "automations" });
 }
 
 // Not exported: the factory's generic get answers the item read (services/crud.ts); this is the internal

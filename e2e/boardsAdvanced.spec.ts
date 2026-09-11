@@ -95,6 +95,14 @@ test("a board's WIP limit, swimlanes and flow metrics", async ({ as }) => {
       await expect(page.getByRole("dialog")).toHaveCount(0);
     }
     await page.getByRole("tab", { name: /Analytics/ }).click({ timeout: 15_000 });
+    if (!(await page.getByText("Lead time (p50)").count())) {
+      // These numbers are one request (`boards/<id>:metrics`), and the runtime refuses one now and then - a
+      // 503 whose body says the Worker restarted mid-request (see fixtures.ts). Pressing a tab that is
+      // ALREADY active remounts nothing, so no later pass of this retry would ever ask again; a reload is
+      // what re-issues it.
+      await page.reload();
+      await page.getByRole("tab", { name: /Analytics/ }).click({ timeout: 15_000 });
+    }
     await expect(page.getByText("Lead time (p50)")).toBeVisible({ timeout: 20_000 });
   }).toPass({ timeout: 120_000 });
   await expect(page.getByText("Throughput")).toBeVisible();

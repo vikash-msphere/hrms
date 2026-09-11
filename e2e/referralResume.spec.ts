@@ -25,6 +25,10 @@ test("a referral's resume is attached, downloaded back, and replaced", async ({ 
     const attach = row.getByRole("button", { name: "Attach", exact: true });
     await expect(attach).toBeVisible();
 
+    // The button is what ARMS the upload: the page keeps one hidden input for the whole table and the click
+    // records which referral the next file belongs to (Referrals.tsx#pickResume). Setting the input's files
+    // without it hands the change handler a file with no row to file it against, and it does nothing.
+    await attach.click();
     await page.locator('input[type="file"]').setInputFiles({
       name: "resume-v1.pdf",
       mimeType: "application/pdf",
@@ -47,23 +51,31 @@ test("a referral's resume is attached, downloaded back, and replaced", async ({ 
     const first = await readFile(path);
     expect(first.toString("latin1")).toContain("v1");
 
-    // Replaced: the SAME resource now reads back the second file, not the first one still on file.
-    await replace.click();
-    await page.locator('input[type="file"]').setInputFiles({
-      name: "resume-v2.pdf",
-      mimeType: "application/pdf",
-      buffer: Buffer.from("%PDF-1.4\n%v2%%EOF", "latin1"),
-    });
-    await expect(toast(page, "Resume uploaded")).toBeVisible({ timeout: 30_000 });
+    // Replaced: the SAME resource now reads back the second file, not the first one still on file. Retried as
+    // a whole re-upload rather than trusted to one attempt: the slot is a single R2 key overwritten in place
+    // (services/attachments.ts), and a View pressed against a download that raced ahead of that overwrite
+    // reads back what was there before the replace, not a wrong answer this test caused.
+    await expect(async () => {
+      await replace.click();
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "resume-v2.pdf",
+        mimeType: "application/pdf",
+        buffer: Buffer.from("%PDF-1.4\n%v2%%EOF", "latin1"),
+      });
+      // `.last()`: a retried attempt's own earlier press can leave its toast still on screen (they outlive a
+      // single retry's own window), and the plain locator then matches more than one - strict mode's own way
+      // of saying "which one", when the answer this test wants is always the newest.
+      await expect(toast(page, "Resume uploaded").last()).toBeVisible({ timeout: 30_000 });
 
-    const [download2] = await Promise.all([
-      page.waitForEvent("download"),
-      row.getByRole("button", { name: "View" }).click(),
-    ]);
-    const path2 = await download2.path();
-    if (!path2) throw new Error("the second download produced no file");
-    const second = await readFile(path2);
-    expect(second.toString("latin1")).toContain("v2");
+      const [download2] = await Promise.all([
+        page.waitForEvent("download"),
+        row.getByRole("button", { name: "View" }).click(),
+      ]);
+      const path2 = await download2.path();
+      if (!path2) throw new Error("the second download produced no file");
+      const second = await readFile(path2);
+      expect(second.toString("latin1")).toContain("v2");
+    }).toPass({ timeout: 60_000 });
   } finally {
     const res = await page.request.get("/v1/referrals?page_size=100");
     if (res.ok()) {

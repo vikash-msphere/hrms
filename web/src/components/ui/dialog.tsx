@@ -79,6 +79,23 @@ function useHistoryClose(node: HTMLElement | null) {
   }, []);
 }
 
+// Radix locks the page behind a modal layer by setting `pointer-events: none` on <body>, and lifts it when
+// that layer closes. When a dialog is opened FROM another layer - the common row-menu -> "Edit" path - the
+// menu's lock can outlive the dialog that replaced it, and the page is then dead to the mouse: every click
+// lands on <html> and nothing responds until some later layer happens to close cleanly. So on unmount, once
+// no modal layer is left open, lift the lock. A no-op whenever Radix has already done it.
+function useReleasePointerLock() {
+  React.useEffect(
+    () => () => {
+      setTimeout(() => {
+        if (document.querySelector('[data-state="open"][role="dialog"], [data-state="open"][role="alertdialog"], [data-state="open"][role="menu"]')) return;
+        if (document.body.style.pointerEvents === "none") document.body.style.pointerEvents = "";
+      }, 0);
+    },
+    [],
+  );
+}
+
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
@@ -100,6 +117,7 @@ const DialogContent = React.forwardRef<
   // The content node is needed to aim the synthetic Escape at, and callers may still pass their own ref.
   const [node, setNode] = React.useState<HTMLDivElement | null>(null);
   useHistoryClose(node);
+  useReleasePointerLock();
   const keyboard = useKeyboardInset();
   const setRefs = React.useCallback(
     (el: HTMLDivElement | null) => {

@@ -46,8 +46,13 @@ describe("isUnder (delimiter-boundary aware)", () => {
     expect(isUnder("04", "041-1c")).toBe(false);
     expect(isUnder("04-1", "04-1c")).toBe(false);
   });
-  it("empty prefix matches everything", () => {
-    expect(isUnder("", "04-1c-0a9")).toBe(true);
+  // An empty prefix is a MISSING scope, never "all scopes" - and this function is only ever asked its
+  // question on behalf of an access decision, so the missing case has to deny. "All" has its own spelling
+  // (`*` / `**` in a grant pattern) and is resolved before anything reaches here. See the header on isUnder
+  // for the three fail-open paths the old `true` opened in the matcher.
+  it("empty prefix matches nothing", () => {
+    expect(isUnder("", "04-1c-0a9")).toBe(false);
+    expect(isUnder("", "")).toBe(false);
   });
 });
 

@@ -1,6 +1,6 @@
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 // FSM + LRO resource template. Uses the verified pure domain logic in domain/payroll.ts.
-import { and, eq, ne, isNull, inArray, gt, sql } from "drizzle-orm";
+import { and, eq, ne, isNull, inArray, gt, gte, lte, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -16,12 +16,12 @@ import { loanPerquisiteMonthly, DEFAULT_LOAN_PERQUISITE_CONFIG, type LoanPerquis
 import { allStructureLines } from "./salaryStructures";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
-import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthKey, compAsOf, compGrossPricer, unpaidEarningMonths, projectedGrossForMonths, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations, verifiedDeductions, EMPTY_FINALIZED_TOTALS } from "./taxProjection";
+import { tdsComponent, loadTaxConfig, finalizedTotals, fyWindow, monthKey, compAsOf, compGrossPricer, unpaidEarningMonths, projectedGrossForMonths, employedMonthsInFy, collectibleMonths, assembleProjection, readDeclarations, verifiedDeductionsAll, EMPTY_FINALIZED_TOTALS } from "./taxProjection";
 import { reimbursementPayoutMode, approvedUnpaidReimbursementsAll, resetReimbursementsPaidByRun, markReimbursementsPaidByRun } from "./reimbursements";
 import { approvedUnpaidEncashmentsAll, resetEncashmentsPaidByRun, markEncashmentsPaidByRun } from "./leaveEncashments";
 import { unpaidBonusesAll, markBonusesPaidByRun, resetBonusesPaidByRun } from "./bonuses";
 import { dueLoanInstallmentsAll, outstandingLoansAll, loanRepaymentWrites, resetLoanRepaymentStmts } from "./loans";
-import { runBatch, runBatchChecked, chunk, insertBatches, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
+import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
 import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
 import type { LetterheadSpec } from "../lib/letterPdf";
@@ -36,16 +36,32 @@ import { paginate } from "../http/pagination";
 import { refDepartments, refHolidays, refPayComponents, refPayPeriods } from "../lib/refData";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
+//
+// Both reads are BY ID. They used to select the whole `users` table and the whole `employees` table and filter
+// in JS - for the two or three ids a run's `submitted_by` / `approved_by` actually name - and the employee
+// match was `empIds.includes(e.uuid)` inside the row loop, so the work was rows x ids. That is the pattern the
+// D1 read budget is spent on: every payroll-run read, list and verb paid for two full-table scans to put two
+// names on a page. Only the columns needed, only the rows named, chunked under the bound-parameter cap.
 async function userDisplayNames(deps: Deps, ids: (string | null | undefined)[]): Promise<Map<string, string>> {
-  const wanted = new Set(ids.filter(Boolean) as string[]);
+  const wanted = [...new Set(ids.filter(Boolean) as string[])];
   const out = new Map<string, string>();
-  if (!wanted.size) return out;
-  const users = (await deps.db.select().from(schema.users)).filter((u) => wanted.has(u.uuid));
-  const empIds = users.map((u) => u.employeeId).filter(Boolean) as string[];
+  if (!wanted.length) return out;
+  const users = await byIdChunks(wanted, (group) =>
+    deps.db
+      .select({ uuid: schema.users.uuid, email: schema.users.email, employeeId: schema.users.employeeId })
+      .from(schema.users)
+      .where(inArray(schema.users.uuid, group)),
+  );
+  const empIds = [...new Set(users.map((u) => u.employeeId).filter((e): e is string => !!e))];
   const empName = new Map<string, string>();
   if (empIds.length) {
-    for (const e of await deps.db.select().from(schema.employees)) {
-      if (empIds.includes(e.uuid)) empName.set(e.uuid, `${e.firstName} ${e.lastName}`);
+    for (const e of await byIdChunks(empIds, (group) =>
+      deps.db
+        .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName })
+        .from(schema.employees)
+        .where(inArray(schema.employees.uuid, group)),
+    )) {
+      empName.set(e.uuid, `${e.firstName} ${e.lastName}`);
     }
   }
   for (const u of users) out.set(u.uuid, (u.employeeId && empName.get(u.employeeId)) || u.email);
@@ -84,7 +100,18 @@ export async function getRun(deps: Deps, id: string) {
 export async function listRunItems(deps: Deps, runId: string) {
   await getRun(deps, runId); // 404 if the run doesn't exist
   const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
-  const emps = new Map((await deps.db.select().from(schema.employees)).map((e) => [e.uuid, e]));
+  // By id, and only the three columns this surface renders. A run's items name a bounded set of employees -
+  // usually a subset of the org, always at most all of it - so reading the whole `employees` table (every
+  // column, including the PII blobs) to label them cost more the larger the org got, on a page that shows a
+  // name and a code.
+  const emps = new Map(
+    (await byIdChunks([...new Set(items.map((it) => it.employeeId))], (group) =>
+      deps.db
+        .select({ uuid: schema.employees.uuid, code: schema.employees.code, firstName: schema.employees.firstName, lastName: schema.employees.lastName })
+        .from(schema.employees)
+        .where(inArray(schema.employees.uuid, group)),
+    )).map((e) => [e.uuid, e]),
+  );
   return items
     .map((it) => {
       const e = emps.get(it.employeeId);
@@ -111,7 +138,7 @@ export async function listRunItems(deps: Deps, runId: string) {
 
 export async function listRuns(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
   const all = await deps.db.select().from(schema.payrollRuns).where(applyScope(scope, schema.payrollRuns.code, schema.payrollRuns.code));
-  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "payroll-runs" });
   return { items: await withNames(deps, slice), nextPageToken };
 }
 function assertEtag(row: { updatedAt: Date }, ifMatch?: string) {
@@ -143,15 +170,27 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= startMs && +new Date(h.date) <= endMs)
       .map((h) => localDay(+new Date(h.date), tz)),
   );
+  // EVERY READ BELOW IS BOUND TO THE PERIOD IN SQL. All three used to read their whole table and keep the
+  // one month that mattered: approved leave, attendance punches, count-as-work events. Like the ESI probe
+  // further down, the cost grew with HISTORY rather than headcount - invisible on a fresh database, and on a
+  // real one `attendance_sessions` alone is two rows per employee per working day, all of them read (and
+  // billed) on every payroll build. The JS predicates are kept exactly as they were; the SQL windows are the
+  // same bounds, only decided by the database. `state` joins them because it is the same one-column filter.
   const leaveByEmp = new Map<string, { start: string; end: string }[]>();
-  for (const l of await deps.db.select().from(schema.leaveRequests)) {
+  for (const l of await deps.db
+    .select()
+    .from(schema.leaveRequests)
+    .where(and(eq(schema.leaveRequests.state, "APPROVED"), gte(schema.leaveRequests.endDate, new Date(startMs)), lte(schema.leaveRequests.startDate, new Date(endMs))))) {
     if (l.state !== "APPROVED" || +new Date(l.endDate) < startMs || +new Date(l.startDate) > endMs) continue;
     const arr = leaveByEmp.get(l.employeeId) ?? [];
     arr.push({ start: localDay(+new Date(l.startDate), tz), end: localDay(+new Date(l.endDate), tz) });
     leaveByEmp.set(l.employeeId, arr);
   }
   const workedByEmp = new Map<string, Map<string, number>>(); // employee -> day -> worked minutes
-  for (const s of await deps.db.select().from(schema.attendanceSessions)) {
+  for (const s of await deps.db
+    .select()
+    .from(schema.attendanceSessions)
+    .where(and(gte(schema.attendanceSessions.clockIn, new Date(startMs)), lte(schema.attendanceSessions.clockIn, new Date(endMs + 86_400_000))))) {
     const ms = +new Date(s.clockIn);
     if (ms < startMs || ms > endMs + 86_400_000) continue;
     const day = localDay(ms, tz);
@@ -165,7 +204,10 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   // know which days the employee actually punched - which is what workedByEmp's keys already record.
   const nowMs = +deps.clock.now();
   const eventsByEmp = new Map<string, WorkEvent[]>();
-  for (const e of await deps.db.select().from(schema.events)) {
+  for (const e of await deps.db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.countAsWork, true), isNull(schema.events.deleteTime), gte(schema.events.endTime, new Date(startMs - 86_400_000)), lte(schema.events.startTime, new Date(endMs + 86_400_000))))) {
     if (e.deleteTime || !e.countAsWork) continue;
     if (+new Date(e.endTime) < startMs - 86_400_000 || +new Date(e.startTime) > endMs + 86_400_000) continue;
     const ev: WorkEvent = { startMs: +new Date(e.startTime), endMs: +new Date(e.endTime), allDay: !!e.allDay, requiresClockIn: !!e.requiresClockIn };
@@ -298,6 +340,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // Interest concession on a cheap employer loan is a taxable perquisite (Rule 3(7)(i)) - opt-in policy data.
   const perqCfg = await getSettingValue<LoanPerquisiteConfig>(deps, "loan-perquisite", DEFAULT_LOAN_PERQUISITE_CONFIG);
   const perqLoansByEmp = perqCfg.enabled ? await outstandingLoansAll(deps) : new Map<string, { principal: number; installments: number; monthlyAmount: number; repaid: number }[]>();
+  // Verified Chapter VI-A declarations for the run's financial year, for EVERY employee, in one read. This was
+  // the one thing the loop below still went to the DB for (`verifiedDeductions(deps, e.uuid, ...)`), which made
+  // the paragraph above false: the build was one subrequest per employee and stopped working at a few dozen
+  // people. Read here with the rest of the prefetch so the loop is what it claims to be. Only read when a TDS
+  // component is configured, because nothing else consults it.
+  const declaredByEmp = tds ? await verifiedDeductionsAll(deps, fy.financialYear) : new Map<string, Record<string, number>>();
 
   // What the loop decides, collected for the single write batch after it.
   const paidEncashIds: string[] = [];
@@ -353,19 +401,41 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // ESI is "sticky" within a contribution period (Apr-Sep / Oct-Mar): a worker eligible at the period start
   // keeps contributing to period-end even after a raise past the ceiling. Practical proxy: anyone who already
   // had an ESI line in a FINALIZED run earlier in THIS contribution period keeps contributing now. Built once.
+  //
+  // NARROWED IN SQL, both halves. This probe used to read the WHOLE of `payroll_runs` and then the WHOLE of
+  // `payroll_run_items` and filter both in JS - `JSON.parse`-ing every line array the app has ever stored to
+  // look for one code. The `priorRunIds` set that bounds the second read was already being built right here
+  // and simply not used in the query. Unlike the per-employee loop below, the cost grew with HISTORY rather
+  // than headcount, so it was invisible on a fresh database and unbounded on a real one: D1 bills rows read,
+  // and `lines_json` for a full run is the largest text this file parses, so it was also the first thing to
+  // spend the invocation's CPU. The pay-date window is applied to the CACHED period list (refPayPeriods) and
+  // bound as an id list, so both reads now touch only the contribution period they are about.
   const esiContributing = new Set<string>();
   if (esiComp && period) {
     const cp = esiContributionPeriod(period.payDate);
-    const periodsById = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
-    const priorRunIds = new Set(
-      (await deps.db.select().from(schema.payrollRuns))
-        .filter((r) => (r.state === "APPROVED" || r.state === "PUBLISHED") && r.uuid !== runId)
-        .filter((r) => { const p = periodsById.get(r.payPeriodId); return !!p && +new Date(p.payDate) >= cp.start && +new Date(p.payDate) < cp.end; })
-        .map((r) => r.uuid),
-    );
-    if (priorRunIds.size) {
-      for (const it of await deps.db.select().from(schema.payrollRunItems)) {
-        if (!priorRunIds.has(it.runId) || esiContributing.has(it.employeeId)) continue;
+    const periodIdsInWindow = (await refPayPeriods(deps))
+      .filter((p) => +new Date(p.payDate) >= cp.start && +new Date(p.payDate) < cp.end)
+      .map((p) => p.uuid);
+    const priorRunIds = periodIdsInWindow.length
+      ? (
+          await byIdChunks(periodIdsInWindow, (group) =>
+            deps.db
+              .select({ uuid: schema.payrollRuns.uuid })
+              .from(schema.payrollRuns)
+              .where(and(inArray(schema.payrollRuns.payPeriodId, group), inArray(schema.payrollRuns.state, ["APPROVED", "PUBLISHED"]), ne(schema.payrollRuns.uuid, runId))),
+          )
+        ).map((r) => r.uuid)
+      : [];
+    if (priorRunIds.length) {
+      // Two columns, not the whole row: the employee and the line array are all the probe reads, and the row
+      // also carries every total it computed.
+      for (const it of await byIdChunks(priorRunIds, (group) =>
+        deps.db
+          .select({ employeeId: schema.payrollRunItems.employeeId, linesJson: schema.payrollRunItems.linesJson })
+          .from(schema.payrollRunItems)
+          .where(inArray(schema.payrollRunItems.runId, group)),
+      )) {
+        if (esiContributing.has(it.employeeId)) continue;
         if ((JSON.parse(it.linesJson) as Line[]).some((l) => l.code === "ESI")) esiContributing.add(it.employeeId);
       }
     }
@@ -486,8 +556,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const encashTotal = encashments.reduce((s, r) => s + r.amount, 0);
     if (encashTotal > 0) {
       lines.push({ code: "ENCASH", name: `Leave encashment (${round2(encashDays)} day(s))`, kind: "earning", amount: round2(encashTotal) });
-      paidEncashIds.push(...encashments.map((r) => r.uuid));
     }
+    // Marked paid whenever the QUEUE is non-empty, not only when it comes to money - the same rule the bonus
+    // block below already follows. Inside the amount guard, an approved encashment of zero days (or one an
+    // encashment rate priced at nothing) was never settled: it stayed in the approved-unpaid queue, was read
+    // again by every later build, and quietly widened the staleness surface for a payable nobody could clear.
+    paidEncashIds.push(...encashments.map((r) => r.uuid));
 
     // Bonuses (individual + group awards): each unpaid award is a TAXABLE earning line, so it lifts the TDS
     // base below; then mark them paid by this run. One line per award, labelled by its kind.
@@ -507,8 +581,11 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       if (otAmt > 0) {
         const h = Math.floor(otMinutes / 60), m = otMinutes % 60;
         lines.push({ code: "OT", name: `Overtime (${h}h${m ? ` ${m}m` : ""})`, kind: "earning", amount: otAmt });
-        paidOtIds.push(...ot.map((r) => r.uuid));
       }
+      // Settled on the queue, not on the amount - see the encashment note above. Overtime the current config
+      // prices at zero (a multiplier of 0, or minutes under the rounding floor) is still overtime this run
+      // consumed, and leaving it queued means every future build re-reads it forever.
+      paidOtIds.push(...ot.map((r) => r.uuid));
     }
 
     // Backdated-increment arrears: every UNPAID arrears amount the employee has accrued, paid once as a TAXABLE
@@ -524,8 +601,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     const arrearsPfWages = round2(unpaidArrears.reduce((s, c) => s + c.arrearsBaseAmount, 0));
     if (arrearsTotal > 0) {
       lines.push({ code: "ARREARS", name: "Salary arrears", kind: "earning", amount: arrearsTotal });
-      paidArrearIds.push(...unpaidArrears.map((c) => c.uuid));
     }
+    // Settled on the QUEUE, not on the amount - the same rule the encashment, overtime and reimbursement
+    // blocks above follow. Every row here has `arrearsAmount > 0`, but the total is rounded to the paise, so a
+    // set of sub-paise arrears rows priced at 0.00 was left unmarked: still unpaid, re-read by every later
+    // build, and never clearable by anything short of a hand edit. Consuming them here closes the queue.
+    paidArrearIds.push(...unpaidArrears.map((c) => c.uuid));
 
     // Reimbursement payouts: non-taxable earning (paid in net, excluded from the income-tax base).
     if (payViaPayroll) {
@@ -533,8 +614,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       const total = claims.reduce((s, r) => s + r.amount, 0);
       if (total > 0) {
         lines.push({ code: "REIMB", name: "Reimbursement", kind: "earning", amount: round2(total), taxable: false });
-        paidReimbIds.push(...claims.map((r) => r.uuid));
       }
+      // Settled on the queue, not on the amount - see the encashment note above.
+      paidReimbIds.push(...claims.map((r) => r.uuid));
     }
 
     // ---- Statutory contribution bases -------------------------------------------------------------------
@@ -620,7 +702,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
           grossFor,
         ),
         currentRunGross: taxableEarnings, decl,
-        declaredDeductions: await verifiedDeductions(deps, e.uuid, fy.financialYear),
+        declaredDeductions: declaredByEmp.get(e.uuid) ?? {},
       });
       tax = proj.monthlyTds;
       if (tax > 0) lines.push({ code: "TDS", name: tds.name, kind: "deduction", amount: tax });
@@ -770,22 +852,37 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   const drift = await splitDriftFor(deps, items.map((i) => i.employeeId));
   let split_drift: SplitDrift | undefined;
   if (drift.stale.length || drift.skipped.length) {
-    const named = new Map((await deps.db.select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName }).from(schema.employees))
-      .map((e) => [e.uuid, `${e.firstName} ${e.lastName}`]));
+    // Only the people who actually drifted, which is normally a handful and often one - not the whole table.
+    const named = new Map(
+      (await byIdChunks([...new Set([...drift.stale, ...drift.skipped])], (group) =>
+        deps.db
+          .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName })
+          .from(schema.employees)
+          .where(inArray(schema.employees.uuid, group)),
+      )).map((e) => [e.uuid, `${e.firstName} ${e.lastName}`]),
+    );
     const names = (ids: string[]) => ids.map((id) => named.get(id) ?? id).sort();
     split_drift = { stale: names(drift.stale), skipped: names(drift.skipped) };
   }
   // Each source: does any row's updatedAt post-date the build? `updatedAt` also bumps on create + soft-delete
   // + enable/disable, so joiners, removals and toggles are all covered by the same comparison.
-  const sources: { label: string; table: { updatedAt: unknown } }[] = [
+  // `ownRun`: the column by which a row says THIS run paid it. Those rows are the build's own markers, and a
+  // build that pays a payable is not an input moving under the run - so they are excluded by WHO WROTE THEM
+  // rather than by when. The build stamp is taken after those statements are constructed for the same reason
+  // (see buildRunItems), but that only holds while every marker's `updated_at` is stamped at construction:
+  // one stamped a millisecond later - a busy machine crossing a millisecond boundary between constructing the
+  // statement and the driver stamping it - post-dates the build and the run reports ITSELF stale. Which is
+  // the permanent false alarm on the one banner that exists to be believed, and no clock comparison can rule
+  // it out. `paid_run_id` can.
+  const sources: { label: string; table: { updatedAt: unknown }; ownRun?: unknown }[] = [
     { label: "Employee records (joiners, tax verifications, EPF, status)", table: schema.employees },
-    { label: "Compensation revisions", table: schema.compensation },
+    { label: "Compensation revisions", table: schema.compensation, ownRun: schema.compensation.arrearsPaidRunId },
     { label: "Pay components", table: schema.payComponents },
     { label: "Salary structures", table: schema.salaryStructures },
-    { label: "Bonuses", table: schema.bonuses },
-    { label: "Leave encashments", table: schema.leaveEncashments },
-    { label: "Reimbursements", table: schema.reimbursements },
-    { label: "Overtime requests", table: schema.overtimeRequests },
+    { label: "Bonuses", table: schema.bonuses, ownRun: schema.bonuses.paidRunId },
+    { label: "Leave encashments", table: schema.leaveEncashments, ownRun: schema.leaveEncashments.paidRunId },
+    { label: "Reimbursements", table: schema.reimbursements, ownRun: schema.reimbursements.paidRunId },
+    { label: "Overtime requests", table: schema.overtimeRequests, ownRun: schema.overtimeRequests.paidRunId },
     { label: "Loans", table: schema.loans },
     // A verified investment declaration reduces withholding, so it moves the TDS on an already-built run.
     { label: "Investment / tax declarations", table: schema.taxDeclarations },
@@ -808,7 +905,11 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   // Bound as epoch millis, not as a Date: these columns are `timestamp_ms`, and outside a column-aware
   // comparison there is nothing to tell the driver which encoding this parameter wants.
   const since = +builtAt;
-  const probes = sources.map((s, i) => sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${since} limit 1) as "c${sql.raw(String(i))}"`);
+  const probes = sources.map((s, i) => {
+    // A row this very run marked paid is the build's own write, whatever its stamp says.
+    const notOurs = s.ownRun ? sql` and (${s.ownRun as never} is null or ${s.ownRun as never} <> ${run.uuid})` : sql``;
+    return sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${since}${notOurs} limit 1) as "c${sql.raw(String(i))}"`;
+  });
   const [row] = await deps.db.all<Record<string, number>>(sql`select ${sql.join(probes, sql`, `)}`);
   const changes = sources.filter((_, i) => !!row?.[`c${i}`]).map((s) => s.label);
   return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}) };

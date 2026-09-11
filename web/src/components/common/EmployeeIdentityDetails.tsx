@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IdCard, Paperclip, Download } from "lucide-react";
 import { IconEdit } from "@/components/common/IconEdit";
 import { get, patch, upload, download } from "@/api";
@@ -26,16 +26,17 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
   const fileRef = useRef<HTMLInputElement>(null);
   const docTarget = useRef<string | null>(null);
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       setData(await get<IdentityDetails>(`employees/${employeeId}/identity`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
-  }
-  useEffect(() => {
-    load();
   }, [employeeId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   function pickDoc(fieldKey: string) {
     docTarget.current = fieldKey;

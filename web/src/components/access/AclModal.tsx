@@ -15,7 +15,7 @@ import { api, create, invoke, listAll, remove } from "@/api";
 import { fetchAllAccessRules, scopeText, permText, accessTone, type AccessRule } from "./permMatrix";
 import { ruleSentence, expiryLabel, denyBlocking } from "./ruleLogic";
 import { usePaged, Pager } from "@/components/common/Pager";
-import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
+import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import type { Employee, User } from "@/types";
 import type { AccessTargetRef } from "./AccessModeProvider";
 import { ruleScopeFor, ruleMatchesTarget } from "./accessRuleScope";
@@ -28,7 +28,7 @@ import { usePermission } from "@/lib/perm";
 
 // The rule shape is the shared one (permMatrix) - roles and users are the same primitive, and the matrix,
 // the fine-rules editor and this modal all read the same fields, lifecycle included.
-type Role = { path: string; name: string };
+type Role = { path: string; name: string; label?: string | null };
 
 // One audit entry about an access rule, for "added by X, 2w ago" and the recent-changes strip. Read from the
 // audit trail the server already writes on every rule create/delete/approve - no new bookkeeping.
@@ -170,7 +170,15 @@ export function AclModal({
           ),
         );
       }
-      if (showRoles) tasks.push(listAll<Role>("roles").then(setRoles));
+      if (showRoles)
+        tasks.push(
+          listAll<Role>("roles").then((rs) => {
+            // An org's own roles carry their own label; a rule only ever stores the name, so teach the shared
+            // lookup what these are before anything renders a subject.
+            registerRoleLabels(rs);
+            setRoles(rs);
+          }),
+        );
       await Promise.all(tasks);
       // Every rule mutation funnels through reload(), so this counter is the modal's "rules changed" signal -
       // it re-runs the preview panel's check for whoever is on screen (a stale verdict misreports the edit).

@@ -35,8 +35,17 @@ test("a view whose collection is truncated says so, and one that is not says not
     const requests = body?.requests ?? [];
     if (!requests.some((r) => (r.path ?? "").includes("/leave-requests"))) return route.fallback();
 
-    const upstream = await route.fetch();
-    const json = (await upstream.json()) as { responses?: { status: number; body: unknown }[] };
+    // The real answer, doctored below - and it can go away underneath this handler: the page reloads and
+    // navigates while the notice is being read, and Playwright DISPOSES an in-flight response along with the
+    // request that is no longer wanted ("apiResponse.json: Response has been disposed"). There is nothing to
+    // doctor then, and nothing about this test's claim in it either, so the real one is let through.
+    let json: { responses?: { status: number; body: unknown }[] };
+    try {
+      const upstream = await route.fetch();
+      json = (await upstream.json()) as { responses?: { status: number; body: unknown }[] };
+    } catch {
+      return route.fallback().catch(() => undefined);
+    }
     const responses = (json.responses ?? []).map((r, i) => {
       if (!(requests[i]?.path ?? "").includes("/leave-requests")) return r;
       // The one field that means "there is more of this": the store keeps it on the collection's meta, and

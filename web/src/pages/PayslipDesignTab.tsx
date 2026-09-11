@@ -60,7 +60,7 @@ export default function PayslipDesignTab({ toast }: { toast: Toast }) {
   }, []);
 
   const dirty = !!template && JSON.stringify(template) !== saved;
-  useUnsavedTracker(dirty, () => save());
+  useUnsavedTracker(dirty, () => save(), saving);
 
   // ── Live preview: the DRAFT rendered on sample figures (never a real employee's pay) ────────────────
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);

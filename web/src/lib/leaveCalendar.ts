@@ -3,18 +3,20 @@
 // and counts out.
 
 import type { LeaveRequest } from "@/types";
+import { addDaysYmd, daysBetweenYmd } from "./orgDay";
 
 export const DAY_MS = 86_400_000;
 export const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export const ymdUtc = (d: Date) => d.toISOString().slice(0, 10);
 export const parseYmd = (s: string) => Date.parse(s.slice(0, 10) + "T00:00:00Z");
-/** The viewer's LOCAL calendar date (toISOString would flip to UTC's date around midnight). */
-export const todayYmd = () => new Date().toLocaleDateString("en-CA");
+// `todayYmd` used to live here, answering the VIEWER's calendar date. Today is not this module's to define -
+// it belongs to the org, and lib/orgDay owns it. Callers import `todayStr` from there.
 export const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 export const ymOf = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-export const addDays = (ymd: string, n: number) => ymdUtc(new Date(parseYmd(ymd) + n * DAY_MS));
-export const daysApart = (a: string, b: string) => Math.round((parseYmd(b) - parseYmd(a)) / DAY_MS);
+// Re-exported under this module's own names rather than reimplemented: one calendar-step, in lib/orgDay.
+export const addDays = addDaysYmd;
+export const daysApart = daysBetweenYmd;
 export const dmy = (s?: string) => { if (!s) return ""; const [y, m, d] = s.slice(0, 10).split("-"); return `${d}/${m}/${y}`; };
 export const longDate = (ymd: string) =>
   new Date(parseYmd(ymd)).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });

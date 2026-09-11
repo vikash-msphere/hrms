@@ -1,9 +1,11 @@
 import * as XLSX from "xlsx";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
+import { byIdChunks } from "../lib/dbBatch";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getBankFormats, getBankTemplate, getPayrollDebit, type BankFormatColumn } from "./bankFormats";
+import { sameBankName, type BankField } from "./bankDetails";
 import { getSettingValue } from "./settings";
 import { decimalsFor, roundMoney, type CurrencyDecimals } from "../domain/currency";
 
@@ -11,7 +13,11 @@ import { decimalsFor, roundMoney, type CurrencyDecimals } from "../domain/curren
 // per employee, mapping each column to its configured source. Runs server-side only (it decrypts employee
 // account numbers + the employer debit account), behind the run's `bankFile` custom method.
 
-type StoredBank = { account_name?: string; account_number?: string; ifsc_code?: string; bank_name?: string; branch?: string };
+// The stored blob's shape, from the service that WRITES it - not a third hand-written copy. This file
+// declared its own, and it carried a `branch` that bank details never stored, so the `branch` column every
+// bank format can be configured with resolved to `undefined` on every row: a silently blank column in a file
+// the bank has already been handed, and a rejected batch wherever the branch is mandatory.
+type StoredBank = Partial<Record<BankField, string>>;
 
 async function decryptBank(deps: Deps, enc: string | null): Promise<StoredBank> {
   if (!enc) return {};
@@ -25,7 +31,10 @@ async function decryptBank(deps: Deps, enc: string | null): Promise<StoredBank> 
 const ddmmyyyy = (d: Date) => `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${d.getUTCFullYear()}`;
 
 type RunItem = typeof schema.payrollRunItems.$inferSelect;
-type Employee = typeof schema.employees.$inferSelect;
+// Only the columns a payment row is built from - the read below selects exactly these, so widening what a
+// column source may reach for is a compile error rather than a blank cell in a file the bank has already been
+// handed.
+type Employee = Pick<typeof schema.employees.$inferSelect, "uuid" | "code" | "firstName" | "lastName" | "workEmail" | "bankDetailsEnc">;
 type Ctx = { emp: Employee; it: RunItem; bank: StoredBank; debit: { debit_account_number?: string; currency_code?: string }; valueDate: string; sameBank: boolean; dp: number };
 
 function cellValue(col: BankFormatColumn, c: Ctx): string | number | undefined {
@@ -77,8 +86,28 @@ export async function buildBankFile(deps: Deps, runId: string, bank: string): Pr
   const dp = decimalsFor(debit.currency_code || org.default_currency, org.currency_decimals);
 
   // Run items joined to their employee, ordered by employee code for a stable sheet.
+  //
+  // BY ID, and only the six columns a payment row is built from. This read used to be the whole `employees`
+  // table - every column, the encrypted PII blobs included - to label the items of ONE run, so the cost of
+  // producing a payment file grew with the size of the org rather than with the size of the run. It is the
+  // same shape services/payroll.ts states its budget in (`byIdChunks`, only the rows named, chunked under the
+  // bound-parameter cap); this was the one money path still scanning.
   const items = await deps.db.select().from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId));
-  const emps = new Map((await deps.db.select().from(schema.employees)).map((e) => [e.uuid, e]));
+  const emps = new Map(
+    (await byIdChunks([...new Set(items.map((it) => it.employeeId))], (group) =>
+      deps.db
+        .select({
+          uuid: schema.employees.uuid,
+          code: schema.employees.code,
+          firstName: schema.employees.firstName,
+          lastName: schema.employees.lastName,
+          workEmail: schema.employees.workEmail,
+          bankDetailsEnc: schema.employees.bankDetailsEnc,
+        })
+        .from(schema.employees)
+        .where(inArray(schema.employees.uuid, group)),
+    )).map((e) => [e.uuid, e]),
+  );
   const ordered = items.filter((it) => emps.has(it.employeeId)).sort((a, b) => (emps.get(a.employeeId)!.code ?? "").localeCompare(emps.get(b.employeeId)!.code ?? ""));
 
   // A bulk-payment file must never carry a payment line with no destination account or a non-positive amount.
@@ -95,7 +124,13 @@ export async function buildBankFile(deps: Deps, runId: string, bank: string): Pr
       missingAccount.push(`${emp.firstName} ${emp.lastName}${emp.code ? ` (${emp.code})` : ""}`);
       continue;
     }
-    const sameBank = (bankDet.bank_name ?? "").trim() === bank.trim();
+    // THE same comparison the write gate uses (services/bankDetails.ts#sameBankName), so "the same bank" means
+    // one thing in both places. It was a raw `===` on trimmed strings, which made the classification sensitive
+    // to the CASE a name was stored in - and a row written before that gate existed can still differ only by
+    // case. A miss falls to the format's `inter` value, which is the safe direction (an inter-bank transfer to
+    // an internal account settles; the reverse can be rejected) but costs more, so getting the match right
+    // matters even though getting it wrong is not dangerous.
+    const sameBank = sameBankName(bankDet.bank_name, bank);
     rows.push(fmt.columns.map((col) => cellValue(col, { emp, it, bank: bankDet, debit, valueDate, sameBank, dp })));
   }
   if (missingAccount.length) {

@@ -159,7 +159,25 @@ const employee: Grant = {
     "asset-requests.me.cancel",
     "time-entries.me.submit",
     "goals.me.updateProgress",
+    // The owner's forward-looking call ("on track / at risk / off track"), which is the half of goal health
+    // nobody can derive: pace comes off the dates, this comes off the person doing the work. Its own narrow
+    // verb so it can be held without edit rights - and, like the watch eye below, a level grant carries no
+    // custom methods, so the picker on your OWN goal reached nobody but super_admin until this line.
+    "goals.me.setConfidence",
     "goals.me.comment", // answer the coaching on own goal - a thread only one side may write to is not one
+    // Hand your own draft goal to the manager to agree - the owner's half of the goal-setting handshake
+    // (services/goals.ts#proposeGoal). The manager's half is `goals.my-dept.approve` / `.requestChanges`.
+    // Same trap as setConfidence and watch above: a level grant carries no custom methods, so without this
+    // line the Submit button on your OWN goal reached nobody but super_admin and the handshake the propose /
+    // approve / requestChanges verbs exist for was unreachable for every role that ships.
+    "goals.me.propose",
+    // Follow a goal. A level grant carries no custom methods, so a verb has to be named even where the caller
+    // already writes the row - which is why the watch eye reached nobody but super_admin until this line.
+    // Scoped to own goals; following somebody ELSE's goal is a per-object ACL grant (`goals.<code>.watch`),
+    // deliberately, because the notifications carry that goal's title to whoever is following it.
+    "goals.me.watch",
+    "goals.me.unwatch",
+    "reviews.me.suggestFeedback", // name the people who saw your work; nominating from it stays the manager's
     "tax-declarations.me.upload", // attach/download own investment proofs
     "tax-declarations.me.download",
     "tickets.me.**", // every ticket verb on OWN tickets (comment/cancel/todos/...); others' via category shares
@@ -189,6 +207,12 @@ const employee: Grant = {
     "expenses.me.cancel",
     "expenses.me.upload", // attach an invoice to own expense
     "expenses.me.download", // download own expense's invoice
+    // Both halves of looking at your own payslip. `:preview` renders it inline and `:download` hands over a
+    // copy to keep - separate verbs so they can be granted apart (see routes/payslips.ts), and only
+    // `download` was ever seeded. That left the Payslips page showing its download buttons with the view
+    // buttons beside them hidden, which is the permission the wrong way round: keeping a permanent copy is
+    // the stronger act, and it was the one allowed.
+    "payslips.me.preview",
     "payslips.me.download",
     "personal-documents.me.download",
     "employees.upcomingCelebrations", // company-wide birthdays + work anniversaries feed (day+month only)
@@ -245,7 +269,19 @@ const manager: Grant = {
     "reviews.my-dept.nominate",
     "reviews.my-dept.nudge", // remind the current stage's owner on a stalled team review
     "reviews.my-dept.pdf", // record copy of a report's finished review
+    "goals.my-dept.setConfidence", // the same call on a goal the manager set for the team
     "goals.my-dept.comment", // coach on the team's goals - the thread under a goal is where that happens
+    "goals.my-dept.watch", // follow the team's goals
+    "goals.my-dept.unwatch",
+    // Credit a share of a team goal to whoever delivered it. The manager's call and not the owner's: a share
+    // scores in the CONTRIBUTOR's review, so it is a statement about somebody else's performance.
+    "goals.my-dept.setContributors",
+    // The manager's half of the goal-setting handshake: agree the goal a report submitted, or send it back
+    // with the reason (services/goals.ts#approveGoal / #requestGoalChanges). `my-dept` like every other
+    // decision verb here - `*` would let a manager agree any department's goals. A goal the manager SETS for
+    // a report lands AGREED at creation, so these are only ever the report-proposed path.
+    "goals.my-dept.approve",
+    "goals.my-dept.requestChanges",
     "expenses.my-dept.approve", // decide the dept's operational expenses (my-dept keeps it owned, not cross-dept)
     "expenses.my-dept.reject",
   ],
@@ -340,6 +376,11 @@ const hr_admin: Grant = {
     "ticket-checklists.**": "write",
     "assets.**": "write",
     "asset-categories.**": "write", // HR maintains the kinds of asset, and the tag code each one prints
+    // Inventory counts. A stocktake is the asset register being walked, by the same administrator who
+    // maintains the register - but nothing was seeded for it at ANY level, so the whole page was reachable
+    // only by super_admin while `assets` and `asset-categories` beside it were HR's. Not a withheld verb: a
+    // withheld collection, which is how the earlier role-grants gap looked too.
+    "stocktakes.**": "write",
     "events.**": "write", // org calendar
     "leave-encashments.**": "write", // HR records + decides encashments
     "loans.**": "read", // visibility only; decisions are payroll's verbs
@@ -381,6 +422,9 @@ const hr_admin: Grant = {
     "reviews.*.skipStage", // unblock a stuck review (stage owners keep their own verbs)
     "reviews.*.nudge", // remind the current stage's owner on any stalled review
     "reviews.*.pdf", // record copy of any finished review
+    // Hand one review to a different writer (a transfer mid-cycle, a manager on leave). HR's rather than the
+    // manager's: it reassigns who is accountable for the write-up, which is the cycle administrator's call.
+    "reviews.*.assignReviewer",
     "shifts.**",
     "shift-assignments.**",
     "projects.**",
@@ -388,6 +432,7 @@ const hr_admin: Grant = {
     "ticket-checklists.**",
     "assets.**",
     "asset-categories.**",
+    "stocktakes.**", // open a count, record what was found on the walk, close it (and restore one deleted)
     "events.**",
     "leave-encashments.**", // approve/reject/cancel
     "suggestions.*.respond", // HR triage (status + response) on any suggestion
@@ -464,6 +509,12 @@ const payroll_admin: Grant = {
     "payroll-runs.*.submit",
     "payroll-runs.*.build",
     "payroll-runs.*.publish",
+    // The PDF of a payslip payroll already reads: the level grant above answers the resource, and the bytes
+    // are behind these two verbs, which nothing had granted. Both are audited as sensitive reads. This is the
+    // run operator reading what the run produced - unlike the bank file and the statutory report below, which
+    // are withheld because of what ELSE they expose (the employer debit account, every account number).
+    "payslips.*.preview",
+    "payslips.*.download",
     "reimbursements.*.approve",
     "reimbursements.*.reject",
     "reimbursements.*.pay",

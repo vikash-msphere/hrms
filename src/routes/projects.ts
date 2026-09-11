@@ -8,6 +8,7 @@ const writeSchema = z.object({
   client: z.string().nullable().optional(),
   code: z.string().nullable().optional(),
   billable: z.boolean().optional(),
+  goal: z.string().nullable().optional(),
   status: z.enum(["active", "archived"]).optional(),
 }).strict();
 

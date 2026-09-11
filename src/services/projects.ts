@@ -9,8 +9,11 @@ export type ProjectInput = {
   client?: string | null;
   code?: string | null;
   billable?: boolean;
+  /** The goal this project's hours are FOR. Turns "140h logged" and "30% done" into one sentence. */
+  goal?: string | null;
   status?: "active" | "archived";
 };
+const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 
 export const projectSpec: CrudSpec<ProjectInput, typeof schema.projects> = {
   table: schema.projects,
@@ -26,6 +29,7 @@ export const projectSpec: CrudSpec<ProjectInput, typeof schema.projects> = {
       client: input.client?.trim() || null,
       projectCode: input.code?.trim() || null,
       billable: input.billable ?? true,
+      goalId: idFromPath(input.goal) ?? null,
       status: input.status === "archived" ? "archived" : "active",
     };
   },
@@ -38,6 +42,7 @@ export const projectSpec: CrudSpec<ProjectInput, typeof schema.projects> = {
     if (has(patch, "client")) set.client = patch.client?.trim() || null;
     if (has(patch, "code")) set.projectCode = patch.code?.trim() || null;
     if (has(patch, "billable")) set.billable = !!patch.billable;
+    if (has(patch, "goal")) set.goalId = idFromPath(patch.goal) ?? null;
     if (has(patch, "status")) set.status = patch.status === "archived" ? "archived" : "active";
     return set;
   },

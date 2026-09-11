@@ -209,7 +209,7 @@ export async function submitExpense(deps: Deps, actor: AppUser, id: string) {
     .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, "DRAFT")))
     .returning();
   if (!updated) throw failedPrecondition("only draft expenses can be submitted");
-  await audit(deps, actor, "expense.submit", "expenses", id, stateMeta(row.state, "SUBMITTED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "expense.submit", "expenses", id, stateMeta(row.state, "SUBMITTED", { employee: `employees/${row.employeeId}` }), updated);
   await emitEvent(deps, actor, "expense.submitted", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount, categoryId: row.categoryId, vendorId: row.vendorId, departmentId: row.departmentId } });
   await notifyManager(deps, row.employeeId, { type: "expense.requested", noun: "expense" });
   // Auto-approve small expenses when configured (threshold > 0).
@@ -244,7 +244,7 @@ export async function approveExpense(deps: Deps, actor: AppUser, id: string) {
     });
     await deps.db.update(schema.expenses).set({ reimbursementId: reimb.uuid, updatedAt: new Date() }).where(eq(schema.expenses.uuid, id));
   }
-  await audit(deps, actor, "expense.approve", "expenses", id, stateMeta(row.state, "APPROVED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "expense.approve", "expenses", id, stateMeta(row.state, "APPROVED", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "expense.approved", title: "Expense approved", body: "Your expense was approved.", link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "expense.approved", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount, reimbursable: row.reimbursable } });
   return (await deps.db.select().from(schema.expenses).where(eq(schema.expenses.uuid, id)).limit(1))[0]!;
@@ -262,7 +262,7 @@ export async function rejectExpense(deps: Deps, actor: AppUser, id: string, note
     .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, "SUBMITTED")))
     .returning();
   if (!updated) throw failedPrecondition("only submitted expenses can be rejected");
-  await audit(deps, actor, "expense.reject", "expenses", id, stateMeta(row.state, "REJECTED", { employee: `employees/`, ...(reason ? { reason } : {}) }), updated);
+  await audit(deps, actor, "expense.reject", "expenses", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}`, ...(reason ? { reason } : {}) }), updated);
   await notify(deps, { recipient: row.employeeId, type: "expense.rejected", title: "Expense rejected", body: reason ? `Your expense was rejected: ${reason}` : "Your expense was rejected.", link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "expense.rejected", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount, note: reason } });
   return updated;
@@ -277,7 +277,7 @@ export async function cancelExpense(deps: Deps, actor: AppUser, id: string) {
     .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, row.state)))
     .returning();
   if (!updated) throw failedPrecondition("only draft or submitted expenses can be cancelled");
-  await audit(deps, actor, "expense.cancel", "expenses", id, stateMeta(row.state, "CANCELLED", { employee: `employees/` }), updated);
+  await audit(deps, actor, "expense.cancel", "expenses", id, stateMeta(row.state, "CANCELLED", { employee: `employees/${row.employeeId}` }), updated);
   return updated;
 }
 
@@ -294,7 +294,7 @@ export async function payExpense(deps: Deps, actor: AppUser, id: string, input: 
     .where(and(eq(schema.expenses.uuid, id), eq(schema.expenses.state, "APPROVED")))
     .returning();
   if (!updated) throw failedPrecondition("only approved expenses can be marked paid");
-  await audit(deps, actor, "expense.pay", "expenses", id, stateMeta(row.state, "PAID", { employee: `employees/` }), updated);
+  await audit(deps, actor, "expense.pay", "expenses", id, stateMeta(row.state, "PAID", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "expense.paid", title: "Expense paid", body: "An approved expense was paid.", link: "expenses", subject: `expenses/${id}`, actorId: actor.employeeId });
   await emitEvent(deps, actor, "expense.paid", { subject: `expenses/${id}`, employeeId: row.employeeId, payload: { amount: row.amount, paymentMethod: updated.paymentMethod } });
   return updated;
@@ -320,6 +320,7 @@ export async function generateRecurringExpenses(deps: Deps, now: Date = new Date
       eq(schema.expenses.paused, false),
     ));
   let generated = 0;
+  let failed = 0;
   for (const t of templates) {
     if (!t.nextOccurrenceOn || !t.recurrenceRule) continue;
     const occurrenceOn = new Date(t.nextOccurrenceOn);
@@ -356,9 +357,24 @@ export async function generateRecurringExpenses(deps: Deps, now: Date = new Date
         await notifyManager(deps, clone.employeeId, { type: "expense.requested", noun: "recurring expense" });
       }
       generated++;
-    } catch {
-      // clone failed after the claim advanced the template: skip (next tick handles the following occurrence).
+    } catch (err) {
+      // The clone failed AFTER the claim advanced the template, so put the claim back: this occurrence is
+      // retried on the next tick instead of being skipped for good. Advancing and then swallowing the failure
+      // meant a recurring expense the org is committed to simply never existed, with nothing anywhere saying
+      // so - money missing, silently, which is the one outcome a payables schedule must not have.
+      //
+      // Guarded on the value this run wrote, so releasing cannot stamp over a claim somebody else has since
+      // taken (the same guard shape as the claim itself).
+      await deps.db
+        .update(schema.expenses)
+        .set({ nextOccurrenceOn: occurrenceOn, lastGeneratedOn: t.lastGeneratedOn, updatedAt: now })
+        .where(and(eq(schema.expenses.uuid, t.uuid), eq(schema.expenses.nextOccurrenceOn, advanced)));
+      failed++;
+      console.error(`[expenses] recurring generation failed for template ${t.uuid}; claim released for retry`, err);
     }
   }
+  // Loudly, not in a log nobody reads: the cron's subtask wrapper turns a throw into a `cron_runs` failure, so
+  // a night that could not file an expense shows as a failed tick in the Operations UI rather than a green one.
+  if (failed) throw new Error(`${failed} recurring expense(s) could not be generated (${generated} succeeded); each claim was released for the next tick`);
   return generated;
 }

@@ -7,6 +7,7 @@ import { useCollection } from "@/hooks/useCollection";
 import { useSoftDelete } from "@/hooks/useSoftDelete";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { leaveColor } from "@/lib/leaveColors";
 import type { Employee, Department, Event, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -17,6 +18,7 @@ import { metaColumns } from "@/components/common/metaColumns";
 import { SoftDeleteRowActions } from "@/components/common/SoftDeleteRowActions";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { useKpiFocus } from "@/lib/kpiFocus";
+import { readLocal, writeLocal } from "@/lib/localPref";
 import { EmployeePicker } from "@/components/common/EmployeePicker";
 import { Field } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -41,7 +43,6 @@ const EVENT_COLORS = [
   "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#a855f7", "#64748b",
 ];
 const empRef = (e: Employee) => `employees/${idOf(e.path)}`;
-const todayStr = () => new Date().toISOString().slice(0, 10);
 const pad = (n: number) => String(n).padStart(2, "0");
 // ISO instant -> "YYYY-MM-DDTHH:mm" in the viewer's local time, for <input type="datetime-local">.
 const toLocalInput = (iso: string) => {
@@ -97,8 +98,8 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
   const { toast } = useToast();
   const sd = useSoftDelete("events", "event", reload);
   // List or calendar. Remembered, because which one somebody wants is about their job, not about this visit.
-  const [view, setViewState] = useState<"table" | "month">(() => (localStorage.getItem("events:view") === "month" ? "month" : "table"));
-  const setView = (v: "table" | "month") => { setViewState(v); try { localStorage.setItem("events:view", v); } catch { /* private mode */ } };
+  const [view, setViewState] = useState<"table" | "month">(() => (readLocal("events:view") === "month" ? "month" : "table"));
+  const setView = (v: "table" | "month") => { setViewState(v); writeLocal("events:view", v); };
   // Which row's RSVP is in flight, so a double-tap can't send two answers.
   const [rsvping, setRsvping] = useState<string | null>(null);
   async function rsvp(ev: Event, response: "going" | "maybe" | "declined") {
@@ -158,6 +159,10 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
   }, [employees]);
 
   const toggle = (ref: string) => setAttendees((a) => (a.includes(ref) ? a.filter((x) => x !== ref) : [...a, ref]));
+  // Departments with somebody directly in them - `addDept` below matches by exact department, not subtree, so
+  // offering an umbrella department that only holds sub-departments would let this press add nobody with no
+  // sign anything went wrong.
+  const deptsWithMembers = useMemo(() => new Set(employees.filter((e) => e.department).map((e) => idOf(e.department!))), [employees]);
   // "Everyone" = select all current employees (the event stores an explicit list, so this is a snapshot).
   const allSelected = employees.length > 0 && employees.every((e) => attendees.includes(empRef(e)));
   // Add every employee of the chosen department to the attendees (union, no removal of existing picks).
@@ -517,7 +522,7 @@ export default function Events({ me, openId }: { me: Me; openId?: string }) {
                 <Select value={dept} onValueChange={addDept}>
                   <SelectTrigger className="h-8 w-52"><SelectValue placeholder="Add a whole department…" /></SelectTrigger>
                   <SelectContent>
-                    {departments.filter((d) => !d.delete_time).map((d) => (
+                    {departments.filter((d) => !d.delete_time && deptsWithMembers.has(idOf(d.path))).map((d) => (
                       <SelectItem key={d.path} value={d.path}>{d.display_name}</SelectItem>
                     ))}
                   </SelectContent>
@@ -627,8 +632,9 @@ function EventMonth({ events, me, onOpen, onAdd, onRsvp, rsvping }: {
   const cells = useMemo(() => Array.from({ length: 42 }, (_, i) => new Date(+gridStart + i * DAY_MS)), [gridStart]);
   const month = cursor.getUTCMonth();
   const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
-  // Local date for the "today" ring - toISOString() would mark yesterday until UTC rolls over.
-  const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+  // The ORG's date for the "today" ring. Local parts were right to avoid UTC and wrong about whose day it
+  // is - the ring should mark the day the rest of the app, and the server, call today.
+  const today = todayStr();
   const [dayOpen, setDayOpen] = useState<string | null>(null);
   const dayEvents = dayOpen ? byDay.get(dayOpen) ?? [] : [];
 

@@ -40,6 +40,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
+import { todayStr, weekStartYmd } from "@/lib/orgDay";
 import { useApprovals } from "@/lib/approvals";
 import { boardTime } from "@/lib/boardOrder";
 import { useNotifications, timeAgo } from "@/lib/notifications";
@@ -69,7 +70,6 @@ import { AccessAction } from "@/components/access/AccessAction";
 import { useOrg, currencyDecimals, orgAnniversary, CELEBRATION_WEEK_DAYS } from "@/lib/org";
 import { getSetting } from "@/lib/settingsStore";
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
 
 // Category colors: a legend-dot background and a matching card left-border accent, so a card's band reads at a
 // glance and ties back to its legend pill. For you = success, Attention = warning, Coming up = primary,
@@ -674,10 +674,12 @@ export default function Dashboard({ me }: { me: Me }) {
   // Hours logged on timesheets in the current week (Mon-Sun): the caller's OWN hours for the "For you" card,
   // and everyone-visible hours for the separate team card - a manager's team total must not masquerade as
   // their personal week.
+  // The week is derived from `today`, which is the ORG's day - not from a fresh `new Date()`. The two halves
+  // of this window used to come from different clocks: the upper bound was `todayStr()` and the lower was a
+  // local-parts Date serialized with `toISOString()`, which is UTC. In IST that put Monday one day early, so
+  // the count silently included the previous Sunday.
   const weekEntries = useMemo(() => {
-    const d = new Date();
-    const dow = (d.getDay() + 6) % 7; // 0 = Monday
-    const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - dow).toISOString().slice(0, 10);
+    const monday = weekStartYmd(today);
     return timeEntries.filter((t) => t.date && t.date >= monday && t.date <= today);
   }, [timeEntries, today]);
   const myHoursWeek = useMemo(
@@ -1569,11 +1571,16 @@ function MyDayTile({ icon: Icon, title, target, onClick, style, children }: { ic
 // team timeline (which read their own attendance snapshot) refresh too.
 function ClockWidget({ onClockChange }: { onClockChange?: () => void }) {
   const clockState = useClock();
-  // Nothing to punch without an employee record (the clock still reports who else is on it, for presence).
-  if (!clockState.enabled) return null;
   const open = clockState.mine ?? null;
   const busy = clockState.busy;
+  // BEFORE the early return, not after. `enabled` is derived from settings and the caller's employee record,
+  // both of which arrive asynchronously - so it flips false -> true on an ordinary page load. With the hook
+  // below the `return null`, that flip renders one more hook than the previous pass and React throws
+  // ("Rendered more hooks than during the previous render"), taking the dashboard down. The hook is cheap and
+  // idempotent with no argument: `useElapsedMinutes(undefined)` starts no interval and returns 0.
   const elapsed = useElapsedMinutes(open?.clock_in);
+  // Nothing to punch without an employee record (the clock still reports who else is on it, for presence).
+  if (!clockState.enabled) return null;
   async function clock(verb: "clockIn" | "clockOut") {
     await clockState.punch(verb);
     onClockChange?.();

@@ -4,7 +4,8 @@ import { get, create, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
-import type { Employee, Me, Project, TimeEntry, TimeEntryStatus } from "@/types";
+import { todayStr, addDaysYmd, weekStartYmd, weekdayOf } from "@/lib/orgDay";
+import type { Card as KanbanCard, Employee, Me, Project, TimeEntry, TimeEntryStatus } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { topSlices } from "@/lib/chartTheme";
@@ -23,18 +24,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Combobox } from "@/components/ui/combobox";
+import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
-const DAY = 86_400_000;
-// Local calendar date - toISOString() would shift local midnight into the previous UTC day
-// (in IST the whole week grid would be labeled one day off).
-const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-function mondayOf(d: Date) {
-  const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x;
-}
+// The grid's week is a run of seven DAY STRINGS, stepped with lib/orgDay. It used to hold a local `Date` for
+// the week start and format it with a local `ymd`: the week the page opened on was then the BROWSER's week
+// rather than the org's, and `+weekStart + i * DAY` stops being a calendar day the moment a DST boundary
+// falls inside the week - which is also how "copy last week" could land an entry on the wrong weekday.
 const WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const dayNum = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
 const fmt = (n: number) => (n % 1 === 0 ? String(n) : n.toFixed(2).replace(/0$/, ""));
@@ -65,8 +64,8 @@ export default function Timesheets({ me }: { me: Me }) {
   const canApprove = usePermission("time-entries.approve");
   const meRef = me.employee_id ? `employees/${me.employee_id}` : "";
 
-  const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
-  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => ymd(new Date(+weekStart + i * DAY))), [weekStart]);
+  const [weekStart, setWeekStart] = useState(() => weekStartYmd(todayStr()));
+  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysYmd(weekStart, i)), [weekStart]);
   const [mine, setMine] = useState<TimeEntry[]>([]);
   const [weekLoaded, setWeekLoaded] = useState(false);
   const [pending, setPending] = useState<TimeEntry[]>([]);
@@ -75,19 +74,33 @@ export default function Timesheets({ me }: { me: Me }) {
 
   const activeProjects = useMemo(() => projects.filter((p) => p.status !== "archived"), [projects]);
   const projectById = useMemo(() => new Map(projects.map((p) => [idOf(p.path), p])), [projects]);
+  // The caller's own undelivered board tasks, so an hour can name the task it went into. Read only once the
+  // log dialog is actually open - a timesheet grid has no use for it, and this app does not load a collection
+  // for a field nobody has looked at yet.
+  const { rows: cards } = useCollection<KanbanCard>("cards", { enabled: !!cell });
+  const myTasks = useMemo(
+    () => cards
+      .filter((c) => !c.delete_time && !c.deliver_time && (!meRef || c.assignee === meRef || c.employee === meRef))
+      .map((c) => ({ path: c.path, label: c.key ? `${c.key} · ${c.title}` : c.title }))
+      .sort((a, b) => a.label.localeCompare(b.label)),
+    [cards, meRef],
+  );
   const empName = useMemo(() => {
     const m = new Map(employees.map((e) => [idOf(e.path), `${e.first_name} ${e.last_name}`]));
     return (ref?: string) => (ref ? m.get(idOf(ref)) ?? "Employee" : "");
   }, [employees]);
 
+  // The week's edges as named values: `days[0]` inside a dependency array is an expression the linter cannot
+  // check, so the fetch and its dependencies are held together by hand. Named, they are the same two strings.
+  const [weekFrom, weekTo] = [days[0]!, days[6]!];
   const loadWeek = useCallback(async () => {
     if (!meRef) { setWeekLoaded(true); return; }
     try {
-      const r = await get<{ results: TimeEntry[] }>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${days[0]}&to=${days[6]}&max_page_size=500`);
+      const r = await get<{ results: TimeEntry[] }>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${weekFrom}&to=${weekTo}&max_page_size=500`);
       setMine(r.results ?? []);
     } catch (e) { toast({ title: "Couldn't load the week's entries", description: (e as Error).message, variant: "destructive" }); }
     finally { setWeekLoaded(true); }
-  }, [meRef, days[0], days[6]]);
+  }, [meRef, weekFrom, weekTo, toast]);
   const loadPending = useCallback(async () => {
     if (!canApprove) return;
     try { const r = await get<{ results: TimeEntry[] }>(`time-entries?status=SUBMITTED&max_page_size=200`); setPending((r.results ?? []).filter((e) => idOf(e.employee ?? "") !== me.employee_id)); }
@@ -185,12 +198,12 @@ export default function Timesheets({ me }: { me: Me }) {
     if (!meRef) return;
     setCopying(true);
     try {
-      const from = ymd(new Date(+weekStart - 7 * DAY));
-      const to = ymd(new Date(+weekStart - DAY));
+      const from = addDaysYmd(weekStart, -7);
+      const to = addDaysYmd(weekStart, -1);
       const r = await get<{ results: TimeEntry[] }>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${from}&to=${to}&max_page_size=500`);
       const source = (r.results ?? []).filter((e) => e.project && e.date);
       const todo = source
-        .map((e) => ({ e, date: ymd(new Date(+new Date(e.date! + "T00:00:00") + 7 * DAY)) }))
+        .map((e) => ({ e, date: addDaysYmd(e.date!, 7) }))
         .filter(({ e, date }) => days.includes(date) && !byCell.get(`${idOf(e.project!)}|${date}`));
       if (todo.length === 0) {
         toast({ title: source.length ? "Nothing to copy" : "Last week is empty", description: source.length ? "Every day last week already has an entry here." : undefined });
@@ -210,7 +223,10 @@ export default function Timesheets({ me }: { me: Me }) {
     try {
       await invoke(`time-entries/${idOf(e.path)}`, verb);
       toast({ title: verb === "approve" ? "Entry approved" : "Entry rejected", variant: "success" });
-      loadPending(); loadWeek();
+      // Awaited: `deciding` clears in `finally` right after this, which re-offers the Approve/Reject buttons -
+      // an un-awaited reload left the just-decided row on screen, inviting a second decide on an entry the
+      // server already settled.
+      await Promise.all([loadPending(), loadWeek()]);
     } catch (err) { toast({ title: verb === "approve" ? "Couldn't approve the entry" : "Couldn't reject the entry", description: (err as Error).message, variant: "destructive" }); }
     finally { setDeciding(null); }
   }
@@ -245,13 +261,13 @@ export default function Timesheets({ me }: { me: Me }) {
       )}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w - 7 * DAY))} aria-label="Previous week"><ChevronLeft className="h-4 w-4" /></Button>
+        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => addDaysYmd(w, -7))} aria-label="Previous week"><ChevronLeft className="h-4 w-4" /></Button>
         {/* "6 - 12 Oct" needs nothing like 12rem; that floor exists to stop the label jittering as the
             week changes. On a phone it is a third of the screen reserved for eight characters, so the
             floor only applies once there is room for it. */}
         <span className="min-w-[8rem] text-center text-sm font-medium tabular-nums sm:min-w-[12rem]">{dayNum(days[0])} - {dayNum(days[6])}</span>
-        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => new Date(+w + 7 * DAY))} aria-label="Next week"><ChevronRight className="h-4 w-4" /></Button>
-        <Button variant="ghost" size="sm" onClick={() => setWeekStart(mondayOf(new Date()))}>This week</Button>
+        <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setWeekStart((w) => addDaysYmd(w, 7))} aria-label="Next week"><ChevronRight className="h-4 w-4" /></Button>
+        <Button variant="ghost" size="sm" onClick={() => setWeekStart(weekStartYmd(todayStr()))}>This week</Button>
         {/* Most weeks repeat the last one, so the whole grid can be seeded in a click and then corrected. */}
         <AccessAction create label="Time entry">
           <Button variant="outline" size="sm" loading={copying} onClick={copyLastWeek}><CopyPlus className="h-3.5 w-3.5" /> Copy last week</Button>
@@ -316,7 +332,7 @@ export default function Timesheets({ me }: { me: Me }) {
                 <div className="grid grid-cols-7 gap-1">
                   {days.map((d, i) => (
                     <div key={d} className="min-w-0 text-center">
-                      <div className={cn("text-[10px] font-medium uppercase tracking-wide text-muted-foreground", d === ymd(new Date()) && "text-primary")}>{WEEKDAY[i]}</div>
+                      <div className={cn("text-[10px] font-medium uppercase tracking-wide text-muted-foreground", d === todayStr() && "text-primary")}>{WEEKDAY[i]}</div>
                       <div className="text-[10px] tabular-nums text-muted-foreground">{new Date(d + "T00:00:00").getDate()}</div>
                       {dayCell(p, d)}
                     </div>
@@ -340,7 +356,7 @@ export default function Timesheets({ me }: { me: Me }) {
                 <tr className="border-b bg-muted/40">
                   <th className="sticky left-0 z-10 bg-muted/40 px-3 py-2 text-left font-medium">Project</th>
                   {days.map((d, i) => (
-                    <th key={d} className={cn("px-2 py-2 text-center font-medium", d === ymd(new Date()) && "text-primary")}>
+                    <th key={d} className={cn("px-2 py-2 text-center font-medium", d === todayStr() && "text-primary")}>
                       <div>{WEEKDAY[i]}</div><div className="text-xs font-normal tabular-nums text-muted-foreground">{new Date(d + "T00:00:00").getDate()}</div>
                     </th>
                   ))}
@@ -388,14 +404,16 @@ export default function Timesheets({ me }: { me: Me }) {
           otherHours={dayTotal(cell.date) - (cell.existing?.hours ?? 0)}
           // What this person has written on this project before, so a repeated task is picked, not retyped.
           suggestions={descriptionsFor(cell.projectId)}
+          tasks={myTasks}
           // The next day of the week this project can still be edited on, for the keep-going path.
           nextDate={nextEditableDay(cell.projectId, cell.date)}
           onAdvance={(date) => setCell({ projectId: cell.projectId, date, existing: byCell.get(`${cell.projectId}|${date}`) })}
           onClose={() => setCell(null)}
           // Errors propagate to the dialog, which keeps them next to the field that caused them.
-          onSave={async (hours, description) => {
-            if (cell.existing) await patch(`time-entries/${idOf(cell.existing.path)}`, { hours, description: description || null }, cell.existing.etag);
-            else await create("time-entries", { project: `projects/${cell.projectId}`, date: cell.date, hours, description: description || undefined, billable: projectById.get(cell.projectId)?.billable ?? true });
+          onSave={async (hours, description, card) => {
+            // A cleared reference goes over the wire as "" rather than null (api.ts, "No nulls on the wire").
+            if (cell.existing) await patch(`time-entries/${idOf(cell.existing.path)}`, { hours, description: description || null, card: card || "" }, cell.existing.etag);
+            else await create("time-entries", { project: `projects/${cell.projectId}`, date: cell.date, hours, description: description || undefined, billable: projectById.get(cell.projectId)?.billable ?? true, ...(card ? { card } : {}) });
             loadWeek();
           }}
           onRemove={cell.existing ? async () => {
@@ -423,12 +441,12 @@ function AddProjectRow({ projects, onAdd }: { projects: Project[]; onAdd: (id: s
 const QUICK_HOURS = [0.5, 1, 2, 4, 8];
 const dayFull = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
 // Index into WEEKDAY (Monday-first), for naming the day a "save & next" button jumps to.
-const days7Index = (s: string) => (new Date(s + "T00:00:00").getDay() + 6) % 7;
+const days7Index = (s: string) => (weekdayOf(s) + 6) % 7;
 
 // Timesheet cell editor. Hours are the only real input, so they get the whole affordance: quick amounts, quarter-hour
 // steppers, and the running day total this entry lands in - typing "7.25" into a bare number box tells you nothing
 // about whether the day now adds up.
-function LogDialog({ project, date, existing, otherHours, suggestions, nextDate, onAdvance, onClose, onSave, onRemove }: {
+function LogDialog({ project, date, existing, otherHours, suggestions, tasks, nextDate, onAdvance, onClose, onSave, onRemove }: {
   project: Project;
   date: string;
   existing?: TimeEntry;
@@ -436,16 +454,21 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
   otherHours: number;
   // Descriptions this person has used on this project before.
   suggestions: string[];
+  /** Board tasks this hour could belong to: the caller's open cards, so "which task" is a pick, not a hunt. */
+  tasks: { path: string; label: string }[];
   // Next editable day of the week for this project, when there is one.
   nextDate?: string;
   onAdvance: (date: string) => void;
   onClose: () => void;
-  onSave: (hours: number, description: string) => Promise<void>;
+  onSave: (hours: number, description: string, card: string) => Promise<void>;
   onRemove?: () => Promise<void>;
 }) {
   const guardClose = useDiscardGuard();
   const [hours, setHours] = useState(existing ? String(existing.hours) : "");
   const [description, setDescription] = useState(existing?.description ?? "");
+  // Which task inside the project, when the work is tracked as one. Optional and secondary: the project is
+  // what the timesheet approves and what a client is billed for.
+  const [card, setCard] = useState(existing?.card ?? "");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -456,14 +479,14 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
   // land on a zero the form then rejects.
   const bump = (by: number) => setHours(String(Math.min(24, Math.max(0.25, Math.round(((Number.isNaN(n) ? 0 : n) + by) * 4) / 4))));
   const dayAfter = otherHours + (valid ? n : 0);
-  const dirty = hours !== (existing ? String(existing.hours) : "") || description.trim() !== (existing?.description ?? "");
+  const dirty = hours !== (existing ? String(existing.hours) : "") || description.trim() !== (existing?.description ?? "") || card !== (existing?.card ?? "");
   const close = () => guardClose(dirty, onClose)(false);
   // `advance` keeps the run going: save this cell, then reopen on the next editable day of the same project,
   // which is how a week of one project actually gets logged.
   const save = async (advance = false) => {
     setSaving(true); setError(null);
     try {
-      await onSave(n, description.trim());
+      await onSave(n, description.trim(), card);
       if (advance && nextDate) onAdvance(nextDate);
       else onClose();
     } catch (e) { setError((e as Error).message); }
@@ -471,7 +494,9 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
   };
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !busy) close(); }}>
-      <DialogContent onEnterSubmit={() => { if (!busy && valid) save(); }}>
+      {/* scrollBody: hours, the quick amounts, a description with its suggestions and the task picker add up
+          to more than a phone can show at once, and the Save button must stay reachable. */}
+      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && valid) save(); }}>
         <DialogHeader>
           <DialogTitle>{existing ? "Edit time" : "Log time"}</DialogTitle>
           <DialogDescription asChild>
@@ -484,6 +509,7 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
             </div>
           </DialogDescription>
         </DialogHeader>
+        <DialogBody>
         {/* `htmlFor` by hand: the field holds a stepper, the input and the quick-hour chips, and Field can
             only bind its label when there is a single control to bind it to - so without this the label named
             nothing. */}
@@ -518,7 +544,21 @@ function LogDialog({ project, date, existing, otherHours, suggestions, nextDate,
             <datalist id={`desc-${project.path}`}>{suggestions.map((s) => <option key={s} value={s} />)}</datalist>
           )}
         </Field>
+        {/* The board task these hours went into. Not checked against the project - a board is not tied to one -
+            so this only says which task, and gives "what did that task cost" an answer. */}
+        {tasks.length > 0 && (
+          <Field label="Task (optional)" hint="A board task these hours went into. The project is still what gets approved and billed.">
+            <Combobox
+              value={card}
+              onValueChange={setCard}
+              placeholder="No task"
+              searchPlaceholder="Search your tasks…"
+              options={[{ value: "", label: "No task" }, ...tasks.map((t) => ({ value: t.path, label: t.label }))]}
+            />
+          </Field>
+        )}
         <FormError error={error} />
+        </DialogBody>
         <DialogFooter className="items-center">
           {onRemove && (
             <Button variant="ghost" size="sm" className="mr-auto text-destructive" loading={removing} disabled={saving}

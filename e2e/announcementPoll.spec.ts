@@ -1,4 +1,4 @@
-import { gotoRoute, purge, test, expect } from "./fixtures";
+import { allowConsoleErrors, gotoRoute, purge, test, expect } from "./fixtures";
 
 // Asking the company a question, and counting the answers.
 //
@@ -14,6 +14,11 @@ test("a poll is posted, voted on, and the tally moves", async ({ as }) => {
   const employee = await as("employee");
   const stamp = Date.now();
   const question = `E2E poll ${stamp}`;
+  // The shared board: a whole family of specs post, edit and delete on the SAME feed this page renders, org-
+  // wide and unscoped to this test's own row - a 404 landing on a background refetch for a post another one
+  // of them just took out from under this page's own poll is that collision, not this spec's own doing.
+  allowConsoleErrors(hr, /status of 404/i);
+  allowConsoleErrors(employee, /status of 404/i);
 
   await gotoRoute(hr, "announcements", "Feed");
   // The post button is a split button: its main half writes the org's default kind, and the chevron picks

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { UserRound } from "lucide-react";
 import { get, patch } from "@/api";
 import type { PersonalDetails } from "@/types";
 import { formatDate } from "@/lib/utils";
+import { todayStr } from "@/lib/orgDay";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Field, FieldRow } from "@/components/common/Field";
@@ -16,7 +17,6 @@ import { useToast } from "@/components/ui/use-toast";
 const GENDERS = ["Male", "Female", "Other"];
 const MARITAL = ["Single", "Married", "Divorced", "Widowed"];
 const NONE = "__none__";
-const todayStr = () => new Date().toISOString().slice(0, 10);
 
 // Whole years between a date of birth and today - shown back as a sanity check, since a mistyped year is the
 // one data-entry error nobody notices until a birthday greeting goes out to a six-year-old.
@@ -47,16 +47,17 @@ export function EmployeeProfilePersonal({ employeeId, canEdit, onSaved }: { empl
   const dobError = dob && dob > todayStr() ? "That's in the future." : undefined;
   const dobWarn = !dobError && age != null && (age < 14 || age > 100);
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       setData(await get<PersonalDetails>(`employees/${employeeId}/personal-info`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
-  }
-  useEffect(() => {
-    load();
   }, [employeeId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   function openEdit() {
     setForm(data ?? {});

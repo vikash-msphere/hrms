@@ -30,7 +30,7 @@ export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPage
   // Paged on `createdAt`, which is what the cursor carries - sorting the whole roster by DATE and seeking on
   // `createdAt` were two different orders, so a shift added out of date order could fall between two pages.
   // The roster reads forwards through the week, so the page comes back in date order.
-  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid);
+  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "shift-assignments" });
   return { ...page, items: page.items.sort((a, b) => +new Date(a.date) - +new Date(b.date) || a.uuid.localeCompare(b.uuid)) };
 }
 

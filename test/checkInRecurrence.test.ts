@@ -11,9 +11,11 @@ import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { rollRecurringCheckIns, remindUpcomingCheckIns } from "../src/cron";
+import { orgToday, dayStartMs } from "../src/services/orgDay";
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;
+let todayMs = 0; // the org's today, as the epoch ms a date-only column stores it (set in beforeAll)
 const b = env as unknown as Bindings;
 
 beforeAll(async () => {
@@ -24,6 +26,11 @@ beforeAll(async () => {
     if (s) await b.DB.prepare(s).run();
   }
   deps = makeDeps(b);
+  // The fixtures below count days from the ORG's today, because that is what the code under test counts from
+  // (services/orgDay.ts). Anchored on UTC midnight instead, "tomorrow's 1:1" was a different row from the one
+  // `remindUpcomingCheckIns` looks for during the hours when the two calendars disagree - from 18:30 UTC for
+  // an IST org - so this suite failed every night on code that was correct.
+  todayMs = dayStartMs(await orgToday(deps));
 });
 
 const TABLES = [schema.checkIns, schema.notifications, schema.eventLog, schema.auditLog, schema.users, schema.employees, schema.roles];
@@ -33,12 +40,7 @@ beforeEach(async () => {
 
 const short = (p: string) => `${p}-${genId().slice(0, 6)}`;
 const dayMs = 86_400_000;
-const utcMidnight = () => {
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0);
-  return +d;
-};
-const daysFromToday = (n: number) => new Date(utcMidnight() + n * dayMs);
+const daysFromToday = (n: number) => new Date(todayMs + n * dayMs);
 
 async function mkEmployee(): Promise<string> {
   const uuid = genId();
@@ -55,6 +57,30 @@ async function mkEmployee(): Promise<string> {
 
 async function mkCheckIn(v: Partial<typeof schema.checkIns.$inferInsert> & { employeeId: string }) {
   return (await deps.db.insert(schema.checkIns).values({ code: short("05"), ...v }).returning())[0]!;
+}
+
+/**
+ * A `Deps` whose inserts INTO ONE TABLE fail, so the claim-release path can be tested for what it is: what
+ * happens after the guarded claim has already committed and the write it was claimed for does not land.
+ *
+ * A Proxy rather than a spread copy: `deps.db` is a drizzle instance whose methods live on its prototype, so
+ * `{...deps.db}` would lose all of them. Everything but the one insert passes straight through, which is what
+ * lets the release write itself succeed - the whole point of the branch.
+ */
+function refuseInsertsTo(target: Deps, table: unknown): Deps {
+  const db = new Proxy(target.db as unknown as Record<string | symbol, unknown>, {
+    get(t, prop, recv) {
+      if (prop === "insert") {
+        return (tbl: unknown) => {
+          if (tbl === table) throw new Error("insert refused (test)");
+          return (Reflect.get(t, prop, recv) as (x: unknown) => unknown)(tbl);
+        };
+      }
+      const v = Reflect.get(t, prop, recv);
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+  return { ...target, db: db as unknown as Deps["db"] };
 }
 
 describe("rollRecurringCheckIns", () => {
@@ -104,6 +130,46 @@ describe("rollRecurringCheckIns", () => {
     await mkCheckIn({ employeeId: emp, meetingDate: daysFromToday(3), cadence: "weekly" }); // future
     await mkCheckIn({ employeeId: emp, meetingDate: daysFromToday(-3), cadence: "weekly", deleteTime: new Date() }); // deleted
     expect(await rollRecurringCheckIns(deps)).toBe(0);
+  });
+
+  it("rolls the rest of the org when one row's action items are unreadable", async () => {
+    // The parse used to be bare, so ONE unreadable blob threw out of the whole subtask and every other
+    // recurring 1:1 in the org went unrolled that night.
+    const bad = await mkEmployee();
+    const good = await mkEmployee();
+    await mkCheckIn({ employeeId: bad, meetingDate: daysFromToday(-8), cadence: "weekly", actionItemsJson: "{not json" });
+    await mkCheckIn({ employeeId: good, meetingDate: daysFromToday(-8), cadence: "weekly", actionItemsJson: JSON.stringify([{ text: "carry me", done: false }]) });
+
+    expect(await rollRecurringCheckIns(deps)).toBe(2);
+    const rows = await deps.db.select().from(schema.checkIns);
+    expect(rows.length).toBe(4);
+    // The bad row still rolled - carrying nothing forward, which is the outcome that loses least.
+    const badNext = rows.find((r) => r.employeeId === bad && r.cadence === "weekly")!;
+    expect(badNext.actionItemsJson).toBeNull();
+    // And the good row carried its open item as it always did.
+    const goodNext = rows.find((r) => r.employeeId === good && r.cadence === "weekly")!;
+    expect(JSON.parse(goodNext.actionItemsJson!)).toEqual([{ text: "carry me", done: false }]);
+  });
+
+  it("puts the cadence AND the action items back when the successor cannot be written", async () => {
+    // The claim commits before the create, so a create that throws used to END THE SERIES: the recurring 1:1
+    // stopped existing with nothing anywhere saying so, and because the claim also marks the open action items
+    // done, those went with it. Both halves have to come back for the next tick to retry.
+    const emp = await mkEmployee();
+    const items = [{ text: "still open", done: false }];
+    const old = await mkCheckIn({ employeeId: emp, meetingDate: daysFromToday(-8), cadence: "weekly", actionItemsJson: JSON.stringify(items) });
+
+    await expect(rollRecurringCheckIns(refuseInsertsTo(deps, schema.checkIns))).rejects.toThrow(/could not be rolled/);
+
+    const rows = await deps.db.select().from(schema.checkIns);
+    expect(rows.length).toBe(1); // no half-written successor
+    expect(rows[0]!.uuid).toBe(old.uuid);
+    expect(rows[0]!.cadence).toBe("weekly"); // the claim was released
+    expect(JSON.parse(rows[0]!.actionItemsJson!)).toEqual(items); // and the open item is open again
+
+    // The next tick, with writes working again, rolls it exactly once.
+    expect(await rollRecurringCheckIns(deps)).toBe(1);
+    expect((await deps.db.select().from(schema.checkIns)).length).toBe(2);
   });
 });
 

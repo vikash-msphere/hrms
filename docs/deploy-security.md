@@ -9,6 +9,18 @@ API-key lane and direct Google sign-in.
 
 The Worker enforces no volumetric limits.
 
+**`npm run deploy` blocks until you say these rules exist.** `scripts/preflight.ts` cannot read the zone's WAF
+config, so it requires a dated acknowledgement instead:
+
+```
+WAF_RATE_LIMIT_CONFIRMED=2026-09-10 npm run deploy
+```
+
+The date is the day you last verified the rules below in the dashboard. It is an error to omit it for a
+production deploy, an error if it is not an ISO date or is in the future, and a warning once it is more than a
+year old — a rule deleted in a later cleanup should not stay covered by a claim made before it existed. Named
+preview environments (`--env staging`) get a warning rather than a block.
+
 **Plan tier decides which set of rules you get, and it is not only a rate-limiting question.**
 `wrangler.toml` ships `[limits] cpu_ms = 60000`, which is a Workers Standard (paid) feature. On the Free
 plan the fixed 10ms CPU cap breaks every server-side PDF path - payslips, letters, Form 16, e-sign stamping
@@ -73,6 +85,30 @@ Add the per-identity rules below (per-minute windows) alongside the sign-in rule
 | `POST /v1/automations/*:test`                   | rule dry-run                          | ~30 / min / user         |
 | `GET /found/*`, `GET /calendar/holidays/*`, `GET /readyz` | unauthenticated, each touches D1 | ~30 / min / IP     |
 | `POST /diag`                                    | unauthenticated; 1 MB in, outbound fetch out | ~60 / min / IP    |
+
+### What the app enforces on its own
+
+The Worker carries an **isolate-local floor** under both the unauthenticated lanes (`lib/isolateRate.ts`) and,
+per caller, inside `/v1` (`middleware/rateLimit.ts`). Neither is the rate limit and neither replaces the rules
+above: a Worker cannot see traffic an edge rule blocks, and a counter living in one isolate's memory is not a
+limit across a fleet of them — a caller spread over enough colos gets one allowance per isolate.
+
+What the `/v1` floor does buy is that authentication no longer implies *unlimited*. It is keyed on the API key
+where there is one and on the user otherwise (so a busy integration cannot spend its owner's browsing budget),
+it skips batch sub-requests (they were already charged to the envelope), and it refuses with `429` plus
+`Retry-After`. Four budgets, per caller per isolate-minute:
+
+| Budget    | Covers                                                                          | Limit |
+|-----------|---------------------------------------------------------------------------------|-------|
+| `render`  | `:generateLetter`, `:generateForm16`, `:previewLetter`, `:previewTemplate`, `:bankFile`, `:statutoryReport` | 40 |
+| `fan-out` | `/v1/search`, `/v1/people-analytics`, `/v1/dashboard-summary`, `/v1/approvals-summary`, `/v1/activity-counts`, `table-views/*:run`, `cron-runs:run` | 120 |
+| `batch`   | `POST /v1/batch:run`                                                             | 600 |
+| `api`     | everything else under `/v1`                                                      | 3000 |
+
+They are sized so a person driving the UI hard never reaches one — they bound automation and accidents, not
+people. The catch-all is deliberately very loose (50 req/s sustained from one credential is not a person):
+cost concentrates in the first two rows, and the budget is per *caller*, which the browser suite exercises as
+a single user against one isolate. Tighten them at the WAF, not here, if a real limit is what is wanted.
 
 ## 2. Secrets
 
@@ -213,6 +249,14 @@ than the happy path:
   *and* project id. Anything else is a 403. Without that check this is an open relay: a stranger's envelope
   would be forwarded with our egress, at our quota, or bounced at a third party.
 - **A body cap** (1 MB), so it cannot be used as a general upload endpoint. Replay segments sit well under it.
+- **An isolate-local ceiling** (600 relays per minute per isolate), counted before the body is read so a
+  throttled call costs neither the buffer nor the outbound request, and answered with 429 + `Retry-After`,
+  which is what the SDK already backs off on. It is a **floor, not the control**: a Worker cannot see traffic
+  an edge rule blocked, and a per-isolate counter is not a limit across a fleet of them. The WAF rule in §1 is
+  still the mechanism, and `npm run preflight` still blocks a production deploy until it is confirmed. What
+  this buys is that the sharpest of the unauthenticated routes is not *unbounded* while that is outstanding -
+  the DSN it forwards under is baked into the public bundle, so burning the org's event quota needs no
+  credential.
 - **No client IP.** The relayed request presents the Worker, so the tracker records that rather than the
   employee's address. Deliberate: an error report never needed one, and adding `X-Forwarded-For` would be
   choosing to send staff IPs to a third party.

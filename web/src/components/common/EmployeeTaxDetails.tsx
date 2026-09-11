@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CalendarClock, Landmark, Pencil, ShieldCheck } from "lucide-react";
 import { get, patch } from "@/api";
 import type { TaxDetails } from "@/types";
@@ -34,16 +34,17 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
   const guard = useDialogGuard(open, form, () => setOpen(false), { label: "declaration" });
   const [deciding, setDeciding] = useState(false);
 
-  async function load() {
+  // The loader is the effect's dependency (see the note in EmployeeBankDetails).
+  const load = useCallback(async () => {
     try {
       setData(await get<TaxDetails>(`employees/${employeeId}/tax`));
     } catch (e) {
       if ((e as { status?: number }).status === 403) setDenied(true);
     }
-  }
-  useEffect(() => {
-    load();
   }, [employeeId]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   function openEdit() {
     setForm({

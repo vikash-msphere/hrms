@@ -31,7 +31,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.notifications, schema.goals, schema.leaveRequests, schema.accessRules, schema.auditLog, schema.eventLog, schema.employees, schema.departments, schema.users, schema.roles];
+const TABLES = [schema.notifications, schema.goals, schema.leaveRequests, schema.accessRules, schema.auditLog, schema.eventLog, schema.jobs, schema.employees, schema.departments, schema.users, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
@@ -93,14 +93,121 @@ describe("re-parenting: move a department subtree", () => {
   });
 });
 
+describe("re-parenting: a flat code in a mixed table is not collateral", () => {
+  // `jobs` and `announcements` allocate an OWNED code when the act has an employee behind it and a FLAT one
+  // when it does not. `CODE_WIDTH.flat` and `CODE_WIDTH.dept` are both 2 over one alphabet, so a flat code is
+  // a WELL-FORMED department code - and the cascade's `code = oldPrefix` arm matched it. Reparenting the
+  // department whose code happened to equal some job's flat code rewrote that job onto the department's new
+  // code, on a UNIQUE column: either the row silently claimed a department it has nothing to do with, or the
+  // UPDATE threw and took the half-finished cascade with it.
+  it("reparenting a department leaves a flat-coded job alone and still moves the owned one", async () => {
+    const parent = await createDepartment(deps, actor, { display_name: "Parent" });
+    const dept = await createDepartment(deps, actor, { display_name: "Movable" });
+    const emp = await createEmployee(deps, actor, { first_name: "Ada", last_name: "L", work_email: "ada@test.example", department: `departments/${dept.uuid}` });
+    const empCode0 = await codeOfEmp(emp.uuid);
+
+    // The collision: a flat-coded operation whose code IS this department's code, owner null (the shape
+    // payroll's publishRun writes when the actor has no employee record).
+    const flatJob = genId();
+    await deps.db.insert(schema.jobs).values({ uuid: flatJob, code: dept.code!, kind: "payslip.generateRun", payload: "{}", employeeId: null });
+    // And an owned-coded operation under the employee, which MUST follow the move.
+    const ownedJob = genId();
+    await deps.db.insert(schema.jobs).values({ uuid: ownedJob, code: `${empCode0}-900`, kind: "payslip.generateRun", payload: "{}", employeeId: emp.uuid });
+
+    await updateDepartment(deps, actor, dept.uuid, { parent: `departments/${parent.uuid}` });
+
+    const codeOfJob = async (id: string) => (await deps.db.select({ code: schema.jobs.code }).from(schema.jobs).where(eq(schema.jobs.uuid, id)).limit(1))[0]!.code;
+    expect(await codeOfJob(flatJob)).toBe(dept.code); // untouched: it was never in the hierarchy
+    const empCode1 = await codeOfEmp(emp.uuid);
+    expect(empCode1).not.toBe(empCode0); // the employee did move
+    expect(await codeOfJob(ownedJob)).toBe(`${empCode1}-900`); // and its owned operation followed
+  });
+});
+
 describe("re-parenting: coverage tripwire", () => {
   it("HIERARCHICAL_TABLES are all real resource collections, unique, and include employees + departments", () => {
     const cols = HIERARCHICAL_TABLES.map((h) => h.collection);
     expect(new Set(cols).size).toBe(cols.length); // no duplicates
     expect(cols).toContain("employees");
     expect(cols).toContain("departments");
-    for (const c of cols) expect(RESOURCE_COLLECTIONS).toContain(c);
+    // A null collection is an INTERNAL table (comp_off_credits): its code is owner-embedded and must be
+    // rewritten, but it has no wire collection, so no access rule can name it.
+    for (const c of cols) if (c !== null) expect(RESOURCE_COLLECTIONS).toContain(c);
     // Tripwire: bump this when a new employee-owned (allocOwnedCode) collection is added AND wired into the cascade.
-    expect(cols.length).toBe(40);
+    expect(cols.length).toBe(44);
+  });
+
+  // THE DIRECTION THAT ACTUALLY DRIFTED. The assertion above checks that everything in the list is a real
+  // collection - which every entry always was. Nothing checked the inverse: that every table taking an
+  // OWNED code is IN the list. Four had fallen out (`asset-requests`, `approval-delegations`, `table-views`,
+  // `comp_off_credits`), so a reparent moved the employee and left those rows' codes on the old prefix. Authz
+  // scope is a code-prefix match, so the rows stayed in the old department's breadth and vanished from the
+  // new one's - and a `me`-scoped rule matches by code too, so the employee lost their own rows. A count
+  // tripwire cannot catch that: the number was correct for the list somebody wrote.
+  //
+  // A SOURCE scan, for the same reason test/listOwnerColumns.test.ts is one: the table is an argument at a
+  // call site, so there is no runtime value to assert against.
+  it("every table that allocates an OWNED code is wired into the cascade", () => {
+    const sources = import.meta.glob("../src/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    // `allocOwnedCode(deps, <schema.X | table>, schema.Y.<col>, ...)` - the table is named by whichever of the
+    // two is a schema reference (the factory form passes a generic `table` and names the column off schema).
+    const ALLOC = /allocOwnedCodes?(?:For)?\(\s*deps\s*,\s*(?:schema\.([A-Za-z0-9_]+)|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(?:schema\.([A-Za-z0-9_]+)\.|[A-Za-z_][A-Za-z0-9_]*\.)/g;
+    // The one call that names no schema table at all: services/documentService.ts is a factory over the two
+    // document resources and passes `table`/`table.employeeId`. Its owned branch is `personal-documents`,
+    // which the same file also allocates explicitly (the signed-copy insert), so the scan still covers it.
+    const UNATTRIBUTABLE = new Set(["src/services/documentService.ts"]);
+
+    const inCascade = new Set<string>();
+    for (const [prop, table] of Object.entries(schema)) {
+      if (HIERARCHICAL_TABLES.some((h) => h.table === table)) inCascade.add(prop);
+    }
+
+    const missing: string[] = [];
+    const unattributable: string[] = [];
+    const seen = new Set<string>();
+    for (const [path, src] of Object.entries(sources)) {
+      const file = path.replace("../", "");
+      src.split("\n").forEach((raw, i) => {
+        if (/^\s*(\*|\/\*|\/\/)/.test(raw)) return; // prose, not code
+        const line = raw.replace(/\/\/.*$/, "");
+        for (const m of line.matchAll(ALLOC)) {
+          const prop = m[1] ?? m[2];
+          if (!prop) {
+            if (!UNATTRIBUTABLE.has(file)) unattributable.push(`${file}:${i + 1}`);
+            continue;
+          }
+          seen.add(prop);
+          if (!inCascade.has(prop)) missing.push(`${file}:${i + 1} schema.${prop} takes an owned code but is not in HIERARCHICAL_TABLES`);
+        }
+      });
+    }
+    // A glob or a regex that matches nothing passes every assertion below it. Anchor the scan first: if this
+    // ever reads zero files or finds zero allocations, the tripwire is dead rather than green.
+    expect(Object.keys(sources).length).toBeGreaterThan(100);
+    expect(inCascade.size).toBe(HIERARCHICAL_TABLES.length);
+    expect(seen.size).toBeGreaterThan(30);
+    // An owned allocation the scan cannot attribute to a table is a hole in this tripwire, not a pass.
+    expect(unattributable).toEqual([]);
+    expect(missing).toEqual([]);
+  });
+
+  // A MIXED table allocates an owned code only when the act has an employee behind it, and a flat one
+  // otherwise - and a flat code shares the department namespace (`CODE_WIDTH.flat` and `.dept` are both 2 over
+  // one alphabet), so `code = <deptCode>` matched an unrelated flat row and rewrote it on a UNIQUE column.
+  // Every mixed table must therefore carry an `ownedWhen` discriminator.
+  it("every mixed-coding table in the cascade narrows to its owned rows", () => {
+    const sources = import.meta.glob("../src/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    const FLAT = /allocFlatCodes?\(\s*deps\s*,\s*schema\.([A-Za-z0-9_]+)/g;
+    const flatCoded = new Set<string>();
+    for (const src of Object.values(sources)) {
+      for (const m of src.matchAll(FLAT)) flatCoded.add(m[1]!);
+    }
+    expect(flatCoded.size).toBeGreaterThan(10); // the scan found the flat allocations, so a miss below is real
+    const propOf = new Map<unknown, string>(Object.entries(schema).map(([p, t]) => [t, p]));
+    const ungated = HIERARCHICAL_TABLES.filter((h) => {
+      const prop = propOf.get(h.table);
+      return prop && flatCoded.has(prop) && !h.ownedWhen;
+    }).map((h) => h.collection ?? "(internal)");
+    expect(ungated).toEqual([]);
   });
 });

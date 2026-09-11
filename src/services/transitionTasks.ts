@@ -23,7 +23,7 @@ export async function listTransitionTasks(deps: Deps, scope: ListScope, maxPageS
   // Paged on `createdAt` (the cursor's key) and, unlike the streams, OLDEST first: a joiner's checklist is read
   // forwards, and its first tasks are the ones due first. Due date orders the page, not the paging - sorting the
   // whole set by `dueDate` while seeking on `createdAt` is what let a task slip between two pages.
-  const page = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc");
+  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc", { codec: deps.idCodec, collection: "transition-tasks" });
   return {
     ...page,
     items: page.items.sort((a, b) => +new Date(a.dueDate ?? a.createdAt) - +new Date(b.dueDate ?? b.createdAt) || a.uuid.localeCompare(b.uuid)),
@@ -42,7 +42,7 @@ export async function completeTransitionTask(deps: Deps, actor: AppUser, id: str
   const set: SetOf<typeof schema.transitionTasks> = { status: "DONE", completedAt: new Date(), updatedAt: new Date() };
   if (note !== undefined) set.note = note?.trim() || null;
   const updated = (await deps.db.update(schema.transitionTasks).set(set).where(eq(schema.transitionTasks.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "transition-task.complete", "transition-tasks", id, stateMeta(row.status, "DONE", { employee: `employees/`, ...(note?.trim() ? { note: note.trim() } : {}) }), updated);
+  await audit(deps, actor, "transition-task.complete", "transition-tasks", id, stateMeta(row.status, "DONE", { employee: `employees/${row.subjectId}`, ...(note?.trim() ? { note: note.trim() } : {}) }), updated);
   return updated;
 }
 
@@ -51,7 +51,7 @@ export async function reopenTransitionTask(deps: Deps, actor: AppUser, id: strin
   if (!row) throw notFound("task not found");
   if (row.status !== "DONE") throw failedPrecondition("the task is not done");
   const updated = (await deps.db.update(schema.transitionTasks).set({ status: "TODO", completedAt: null, updatedAt: new Date() }).where(eq(schema.transitionTasks.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "transition-task.reopen", "transition-tasks", id, stateMeta(row.status, "TODO", { employee: `employees/` }), updated);
+  await audit(deps, actor, "transition-task.reopen", "transition-tasks", id, stateMeta(row.status, "TODO", { employee: `employees/${row.subjectId}` }), updated);
   return updated;
 }
 
@@ -70,6 +70,6 @@ export async function uploadTransitionTaskDocument(deps: Deps, actor: AppUser, i
   else docId = (await personalDocs.create(deps, actor, { employee: `employees/${row.subjectId}`, document_type: documentType, display_name: row.title })).uuid;
   await personalDocs.upload(deps, actor, docId, bytes, opts);
   const updated = (await deps.db.update(schema.transitionTasks).set({ documentId: docId, status: "DONE", completedAt: new Date(), updatedAt: new Date() }).where(eq(schema.transitionTasks.uuid, id)).returning())[0]!;
-  await audit(deps, actor, "transition-task.upload", "transition-tasks", id, { document: docId });
+  await audit(deps, actor, "transition-task.upload", "transition-tasks", id, { document: `personal-documents/${docId}` });
   return updated;
 }

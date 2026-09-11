@@ -1,5 +1,6 @@
 // Pure expense domain (NO I/O): budget-period keys/bounds, spend rollup, recurrence next-date. Shared by the
 // expense-budgets service (utilization), the cron (recurring generation + budget alerts), and tests.
+import { addMonthsUtc } from "./calendar";
 import { round2 } from "./money";
 
 export type RecurrenceRule = "monthly" | "quarterly" | "yearly";
@@ -36,17 +37,10 @@ export function periodBounds(type: PeriodType, key: string): { start: number; en
   return { start: Date.UTC(y, mo, 1), end: Date.UTC(y, mo + 1, 1) };
 }
 
-// Advance a UTC date by one recurrence step. Month arithmetic clamps end-of-month overflow (Jan 31 + 1mo ->
-// Feb 28/29) the way Date.UTC naturally rolls; we cap the day to the target month's length to avoid rollover.
+// Advance a UTC date by one recurrence step. The end-of-month clamp (Jan 31 + 1mo -> Feb 28/29) is the shared
+// primitive's - see domain/calendar.ts for why plain `setUTCMonth` cannot be used for this.
 export function advanceRecurrence(d: Date, rule: RecurrenceRule): Date {
-  const step = rule === "monthly" ? 1 : rule === "quarterly" ? 3 : 12;
-  const y = d.getUTCFullYear();
-  const mo = d.getUTCMonth() + step;
-  const targetY = y + Math.floor(mo / 12);
-  const targetMo = ((mo % 12) + 12) % 12;
-  const lastDay = new Date(Date.UTC(targetY, targetMo + 1, 0)).getUTCDate();
-  const day = Math.min(d.getUTCDate(), lastDay);
-  return new Date(Date.UTC(targetY, targetMo, day, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()));
+  return addMonthsUtc(d, rule === "monthly" ? 1 : rule === "quarterly" ? 3 : 12);
 }
 
 // Utilization from a cap + spent (+ spend still awaiting approval). `remaining` goes negative on overspend;

@@ -20,7 +20,7 @@ const cleanItems = (items?: string[]) => (items ?? []).map((s) => (s ?? "").trim
 export async function listTicketChecklists(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
   const all = visibleByDelete(await deps.db.select().from(schema.ticketChecklists), showDeleted);
   // Oldest first: a checklist template is read top-down, in the order its steps were written.
-  const { items: slice, nextPageToken } = paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc");
+  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc", { codec: deps.idCodec, collection: "ticket-checklists" });
   return { items: slice, nextPageToken };
 }
 

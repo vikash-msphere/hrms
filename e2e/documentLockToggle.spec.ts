@@ -1,4 +1,4 @@
-import { SPA_HEADERS, gotoRoute, purge, test, expect, toast } from "./fixtures";
+import { apiPost, gotoRoute, purge, test, expect, toast } from "./fixtures";
 
 // Locking an org document (the other half of Documents.tsx's row menu never exercised before this run's
 // `documentPublishToggle.spec.ts`) - and unlike publish/unpublish, locking has a real, visible effect on the
@@ -10,10 +10,10 @@ test("locking a document collapses its menu to Unlock alone, and unlocking resto
   const page = await as("super");
   const title = `E2E lock toggle ${Date.now() % 1_000_000}`;
 
-  const made = await page.request.post("/v1/org-documents", {
-    headers: SPA_HEADERS,
-    data: { display_name: title, document_type: "POLICY" },
-  });
+  // `apiPost`, not a bare request: this is the spec's SCAFFOLDING, and the runtime answers whatever is in
+  // flight with "Your worker restarted mid-request" when wrangler recycles the Worker under the lane. Nothing
+  // re-sends a POST, so the document was never created and the spec died before reaching its claim.
+  const made = await apiPost(page, "org-documents", { display_name: title, document_type: "POLICY" });
   expect(made.status(), await made.text()).toBe(200);
   const doc = (await made.json()) as { path: string };
 
@@ -28,11 +28,14 @@ test("locking a document collapses its menu to Unlock alone, and unlocking resto
     await page.getByRole("menuitem", { name: "Lock", exact: true }).click();
     await expect(toast(page, "Document locked")).toBeVisible({ timeout: 30_000 });
 
-    // Collapsed: the only thing a locked document offers is the way back out.
+    // Collapsed: the only thing a locked document offers is the way back out. Activity stays - it changes
+    // nothing about the document, and "who locked this, and when" is exactly what a locked row is asked.
     await row.getByRole("button", { name: "Actions" }).click();
     await expect(page.getByRole("menu")).toBeVisible();
-    await expect(page.getByRole("menuitem")).toHaveCount(1);
     await expect(page.getByRole("menuitem", { name: "Unlock", exact: true })).toBeVisible();
+    for (const gone of ["Edit details", "Replace file", "Publish", "Unpublish", "Disable", "Enable", "Delete"]) {
+      await expect(page.getByRole("menuitem", { name: gone, exact: true })).toHaveCount(0);
+    }
 
     const locked = await reread(page, title);
     expect(locked.locked).toBe(true);

@@ -3,10 +3,14 @@ import { addTicketCategory, dropTicketCategories } from "./ticketCategories";
 
 // "Create / update a record" - the most powerful action kind the builder offers (a rule that writes to any
 // collection) and, like every action kind besides "Notify someone", never composed or saved through the
-// dialog before this. "Act on a record" mode defaults to patching the event's own subject - this spec's own
-// ticket - so proving the engine executed the write is as simple as reading back one field it changed,
-// fenced the same way `workflowFires.spec.ts` fences its own rule.
-test("a rule with an apiCall action patches the triggering record itself", async ({ as }) => {
+// dialog before this. The call is aimed at the event's own subject - this spec's own ticket - so proving the
+// engine executed the write is as simple as reading back one field it changed, fenced the same way
+// `workflowFires.spec.ts` fences its own rule.
+//
+// Raw mode, and a ticket's own `:prioritize` method rather than "Act on a record" + Update: a ticket has no
+// PATCH at all (it moves through a state machine and accumulates comments - see src/routes/tickets.ts), so
+// the generic update the mode picker defaults to is a call the API would refuse.
+test("a rule with an apiCall action writes to the triggering record itself", async ({ as }) => {
   test.setTimeout(300_000);
   const page = await as("super");
   const stamp = Date.now() % 100000;
@@ -37,9 +41,8 @@ test("a rule with an apiCall action patches the triggering record itself", async
   // "Do", the mode picker, is the first control the new step renders - before it is set, the raw-call
   // fields underneath it (method/path) are also on screen and register their own combobox.
   await thenDo.getByRole("combobox").first().click();
-  await page.getByRole("option", { name: "Act on a record", exact: true }).click();
-  // "Which record" defaults to {{subject}} and the verb to Update, both already right for "patch the ticket
-  // this rule fired on" - only the field being changed needs a row of its own.
+  await page.getByRole("option", { name: "Raw API call", exact: true }).click();
+  await thenDo.getByPlaceholder("/v1/…").fill("/v1/{{subject}}:prioritize");
   await thenDo.getByRole("button", { name: "Add field" }).click();
   await thenDo.getByPlaceholder("field").fill("priority");
   await thenDo.getByPlaceholder("value").fill("high");
@@ -53,11 +56,21 @@ test("a rule with an apiCall action patches the triggering record itself", async
   await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
   await expect(page.getByText(ruleName).first()).toBeVisible({ timeout: 30_000 });
 
-  const made = await page.request.post("/v1/tickets", {
-    headers: SPA_HEADERS,
-    data: { subject: `E2E workflow apiCall trigger ${stamp}`, category, description: "Raised by the e2e suite to set an apiCall rule off.", priority: "low" },
-  });
-  expect(made.status(), await made.text()).toBe(200);
+  // Retried, re-adding the category on a miss: `ticketCategories.ts`'s own comment documents ten of these
+  // specs hammering one shared settings blob at once, and its compare-and-swap is what keeps a write from
+  // being lost outright - but a category this test's own addTicketCategory just confirmed can still read back
+  // "unavailable" a beat later if another writer's own successful (equally legitimate) CAS landed in between,
+  // rebuilding the list from a snapshot that raced this one's addition. `addTicketCategory` is idempotent, so
+  // re-adding costs nothing when it was never actually missing.
+  let made!: Awaited<ReturnType<typeof page.request.post>>;
+  await expect(async () => {
+    made = await page.request.post("/v1/tickets", {
+      headers: SPA_HEADERS,
+      data: { subject: `E2E workflow apiCall trigger ${stamp}`, category, description: "Raised by the e2e suite to set an apiCall rule off.", priority: "low" },
+    });
+    if (made.status() === 400) await addTicketCategory(page, category, `E2E workflow apiCall ${stamp}`);
+    expect(made.status(), await made.text()).toBe(200);
+  }).toPass({ timeout: 30_000 });
   const ticket = (await made.json()) as { path: string };
 
   // Not the Runs tab this time - the ticket's own priority field is the proof the write actually landed,

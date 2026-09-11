@@ -54,7 +54,11 @@ test("a nominated colleague declines, and the nomination stops reading as pendin
     // The refusal sits beside the answer, quieter but present - a queue with no way out is a queue people
     // leave unanswered instead.
     await expect(request.getByRole("button", { name: "Submit feedback" })).toBeVisible();
+    // Two presses, deliberately: the first opens a reason box (the manager writing the review is the one who
+    // has to nominate somebody else, and a bare "no" leaves them guessing), the second is the refusal itself.
     await request.getByRole("button", { name: "Decline", exact: true }).click();
+    await request.getByLabel("Reason for declining").fill("Not the right person for this one.");
+    await request.getByRole("button", { name: "Decline the request" }).click();
 
     // Off their queue, and recorded as declined rather than as never answered.
     await expect(peer.getByText(`Share feedback on ${reviewee}`)).toHaveCount(0, { timeout: 30_000 });

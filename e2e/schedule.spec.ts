@@ -17,7 +17,9 @@ test("a shift is created from the roster and assigned to a day", async ({ as }) 
   const shiftName = `E2E Shift ${Date.now() % 100000}`;
 
   // An EMPTY cell, named after the person and day it belongs to - so the assignment cannot land on the wrong
-  // row, and the dialog is the one that assigns rather than the one that edits.
+  // row, and the dialog is the one that assigns rather than the one that edits. `.first()`, matched by
+  // `scheduleSpread.spec.ts` picking `.last()` off the same grid - the two would otherwise pick the identical
+  // "first empty cell" and overwrite each other's assignment when they run at once.
   const cell = page.getByRole("button", { name: /, no shift$/ }).first();
   await expect(cell).toBeVisible();
   const cellName = (await cell.getAttribute("aria-label")) ?? "";

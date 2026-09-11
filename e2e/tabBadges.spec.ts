@@ -24,8 +24,16 @@ test.describe("new-activity badges", () => {
     await gotoRoute(page, "expenses", "Expenses");
     const vendors = page.getByRole("navigation", { name: "Sections in this workspace" }).getByRole("link", { name: /^Vendors/ });
     await expect(vendors).toBeVisible({ timeout: 30_000 });
-    await vendors.click();
-    await expect(page.getByRole("heading", { level: 1, name: "Vendors" })).toBeVisible({ timeout: 30_000 });
+    // Re-pressed on a miss: this bar re-renders as the badge counts for the whole workspace land, and a click
+    // that arrives while the link is being replaced navigates nowhere - after which waiting for the heading
+    // waits on a navigation nobody asked for. Both visits below go through here.
+    const heading = page.getByRole("heading", { level: 1, name: "Vendors" });
+    const openVendors = () =>
+      expect(async () => {
+        if (!(await heading.count())) await vendors.click({ timeout: 10_000 });
+        await expect(heading).toBeVisible({ timeout: 10_000 });
+      }).toPass({ timeout: 60_000 });
+    await openVendors();
     await gotoRoute(page, "expenses", "Expenses");
     await expect(vendors).toHaveText("Vendors", { timeout: 30_000 });
 
@@ -41,17 +49,25 @@ test.describe("new-activity badges", () => {
     await expect(vendors).toHaveText(/^Vendors\d+$/, { timeout: 30_000 });
 
     // Visiting is what clears it - there is no "mark as read" here, because looking at the tab IS reading it.
-    await vendors.click();
-    await expect(page.getByRole("heading", { level: 1, name: "Vendors" })).toBeVisible({ timeout: 30_000 });
+    await openVendors();
     const expenses = page.getByRole("navigation", { name: "Sections in this workspace" }).getByRole("link", { name: /^Expenses/ });
     await expect(expenses).toHaveText("Expenses");
 
     // And it stays cleared from cold: the reference the next visit measures against is stored, not held in
     // the page that cleared it.
-    await page.reload();
-    await expect(page.getByRole("main")).toBeVisible();
-    await gotoRoute(page, "expenses", "Expenses");
-    await expect(vendors).toHaveText("Vendors", { timeout: 30_000 });
+    //
+    // Retried as a whole visit-then-reload, because `vendors` is a SHARED collection - several specs create
+    // one while this runs (the catalog editors, the draft guard, the api-key scope check) - and a vendor
+    // written after this visit re-badges the tab legitimately, which is not this claim failing. Each pass
+    // clears the badge again and asks the same question of a fresh page.
+    await expect(async () => {
+      await openVendors();
+      await gotoRoute(page, "expenses", "Expenses");
+      await page.reload();
+      await expect(page.getByRole("main")).toBeVisible();
+      await gotoRoute(page, "expenses", "Expenses");
+      await expect(vendors).toHaveText("Vendors", { timeout: 10_000 });
+    }).toPass({ timeout: 90_000 });
 
     await purge(author, vendor.path);
   });
@@ -67,7 +83,12 @@ test.describe("new-activity badges", () => {
     await gotoRoute(desk, "tickets", "Support");
     const all = desk.getByRole("tab", { name: /^All/ });
     await expect(all).toBeVisible({ timeout: 30_000 });
-    await expect(all).toHaveText("All");
+    // The baseline is READ, not assumed to be zero: several specs share this desk and raise their own tickets
+    // (the same reason the assertion below counts rather than expecting "1"), so this tab can already be
+    // advertising somebody else's arrival before this test has done anything. What is being pinned is that
+    // THIS arrival moves the number, which is true whatever it started at.
+    const badge = async () => Number(((await all.textContent()) ?? "").replace(/^All/, "").trim() || "0");
+    const before = await badge();
     await gotoRoute(desk, "dashboard");
 
     const made = await requester.request.post("/v1/tickets", {
@@ -78,9 +99,9 @@ test.describe("new-activity badges", () => {
     const ticket = (await made.json()) as { path: string };
 
     await gotoRoute(desk, "tickets", "Support");
-    // A number, not "1": several specs share this desk and raise their own tickets, so what is asserted is
-    // that the arrival was counted at all.
-    await expect(all).toHaveText(/^All\d+$/, { timeout: 30_000 });
+    // Higher than it was, not "1": several specs share this desk and raise their own tickets, so what is
+    // asserted is that the arrival was counted at all.
+    await expect.poll(badge, { timeout: 30_000 }).toBeGreaterThan(before);
 
     // Visiting is what clears it - the tab this desk is now looking at cannot also be advertising that
     // something new landed on it. (What the table itself lists is `tickets.spec.ts`'s business.)

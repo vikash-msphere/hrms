@@ -9,6 +9,8 @@ import { parseScope, scopeToWire } from "../domain/keyScope";
 import { parseRecordings } from "../domain/tickets";
 import { parseAttachments } from "../domain/ticketAttachments";
 import { parseFound, parseScope as parseStocktakeScope } from "../domain/stocktake";
+import { competencyScore, goalAttainment, parseCompetencyKeys, type Competency, type GoalSnapshot } from "../domain/performance";
+import { goalPace, staleDays } from "../domain/goals";
 import { maskedToken } from "../lib/apiKeyToken";
 
 // Entities whose id resolves via uuidToCode (the same set the activity authz gate uses). An activity row's
@@ -440,17 +442,51 @@ export function toLeaveTypeResource(r: any): Wire<"leave-type"> {
   };
 }
 
+// Pace + silence for one goal row, as the wire states them. Split out so the shape stays readable and so the
+// "absent, not zero" rule is in one place: a goal with no pace to report emits no pace fields at all, rather
+// than a drift of 0 that reads as healthy.
+function goalHealth(r: any) {
+  const pace = goalPace(r);
+  const stale = staleDays(r, r._lastCommentAt);
+  return {
+    ...(pace ? { expected_progress: pace.expected, drift: pace.drift, pace: pace.state } : {}),
+    ...(stale != null ? { stale_days: stale } : {}),
+  };
+}
+
 export function toGoalResource(r: any): Wire<"goal"> {
   return {
     ...baseResource(r, "goals"),
     employee: ref("employees", r.employeeId),
     parent: ref("goals", r.parentId),
+    cycle: ref("review-cycles", r.cycleId),
+    // Objective or key result. `rolled_up` says the progress on this row came from its key results, so a
+    // client shows their numbers instead of offering a slider the next roll-up would overwrite.
+    kind: r.kind ?? "objective",
+    rolled_up: !!r._rolledUp,
     title: r.title,
     description: r.description ?? undefined,
     weight: r.weight ?? 0,
     progress: r.progress ?? 0,
     status: r.status,
+    // The agreement ladder, and who signed it off. `AGREED` on every goal in an org that has not turned the
+    // handshake on - setting a goal is agreeing it there.
+    stage: r.stage ?? "AGREED",
+    agreed_time: r.agreedAt ? iso(r.agreedAt) : undefined,
+    agreed_by: ref("employees", r.agreedById),
     due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
+    // The owner's own call, and the sentence behind it.
+    confidence: r.confidence ?? undefined,
+    confidence_note: r.confidenceNote ?? undefined,
+    // What it is waiting on (usually another team's goal), the department that owns it when a team does
+    // rather than a person, and the closing note written when it ends.
+    blocked_by: ref("goals", r.blockedById),
+    department: ref("departments", r.departmentId),
+    retro: r.retro ?? undefined,
+    // Health, derived here so there is one implementation of it: where the goal should be by now, how far off
+    // that is, and how long since anyone touched it. Absent where the question has no honest answer - see
+    // domain/goals.ts. `_lastCommentAt` is attached by the route (one grouped query per page).
+    ...goalHealth(r),
     // The measure, when the goal has one. `measured` says which side owns `progress`, so a client can show
     // "42 of 60 customers" and disable the slider rather than offering a number the next write would overwrite.
     unit: r.unit ?? undefined,
@@ -458,13 +494,31 @@ export function toGoalResource(r: any): Wire<"goal"> {
     target_value: r.targetValue ?? undefined,
     current_value: r.currentValue ?? undefined,
     measured: r.targetValue != null && r.currentValue != null,
+    // Approved hours booked against this goal, through the projects pointed at it. Absent when nothing is
+    // linked - a goal with no project attached has no effort story to tell, which is not the same as zero.
+    logged_hours: r._hours,
     // Linked board tasks, rolled up by the route's decorate (one grouped query per page). Always present, so a
     // client renders the delivery chip from the goal itself instead of reading and grouping every card.
     linked_tasks: r._tasks?.tasks ?? 0,
     delivered_tasks: r._tasks?.delivered ?? 0,
     task_points: r._tasks?.points ?? 0,
     delivered_task_points: r._tasks?.deliveredPoints ?? 0,
+    // Who else worked on this, and what share of it is credited to them - attached by the route. Their share
+    // scores in THEIR review, at this goal's weight scaled by it; the goal itself is unchanged.
+    contributors: ((r._contributors ?? []) as { employeeId: string; share: number; note: string | null }[])
+      .map((c) => ({ employee: `employees/${c.employeeId}`, share: c.share, note: c.note ?? undefined })),
+    // The split the linked tasks already imply: who delivered the work, and what share of the DELIVERED work
+    // was theirs. A suggestion for the contributor editor, never a credit - only `contributors` scores.
+    suggested_contributors: ((r._suggestedContributors ?? []) as { employeeId: string; share: number; deliveredPoints: number; deliveredTasks: number }[])
+      .map((c) => ({ employee: `employees/${c.employeeId}`, share: c.share, delivered_points: c.deliveredPoints, delivered_tasks: c.deliveredTasks })),
+    // Who is following this goal, and whether the caller is one of them - the state of the watch button,
+    // answered here rather than by a client matching ids against its own identity.
+    watcher_count: Array.isArray(r._watchers) ? (r._watchers as string[]).length : 0,
+    watching: Array.isArray(r._watchers) && !!r._viewerEmployeeId && (r._watchers as string[]).includes(r._viewerEmployeeId),
     comments: (r._comments ?? []).map(toGoalCommentResource), // attached by the item Get
+    // How progress actually moved, rebuilt from the audit trail by the item Get (never on a list). Two points
+    // for a goal set and moved once; the shape of the quarter for a goal that was worked.
+    history: ((r._history ?? []) as { at: Date | number; progress: number }[]).map((p) => ({ at_time: iso(p.at), progress: p.progress })),
   };
 }
 
@@ -512,6 +566,9 @@ export function toCardResource(r: any): Wire<"card"> {
     employee: ref("employees", r.employeeId),
     department: ref("departments", r.departmentId), // the card's department (defaults to the org default at create)
     assignee: ref("employees", r.assigneeId),
+    // Who filed it. Distinct from both of the above: the owner is accountable, the assignee is working on it,
+    // and this is who to go back to about it. Stamped at create, never editable.
+    reporter: ref("employees", r.reporterId),
     column_key: r.columnKey,
     swimlane_key: r.swimlaneKey ?? undefined,
     rank: r.rank ?? 0,
@@ -529,11 +586,27 @@ export function toCardResource(r: any): Wire<"card"> {
     commit_time: r.committedAt ? iso(r.committedAt) : undefined,
     start_time: r.startedAt ? iso(r.startedAt) : undefined,
     deliver_time: r.deliveredAt ? iso(r.deliveredAt) : undefined,
+    // Repeating work: the cadence the next one is filed on when this card is delivered.
+    cadence: r.cadence ?? undefined,
     comments: (r._comments ?? []).map(toCardCommentResource), // attached by the route on Get
     // Checklist: full items on the item Get (_todos); compact progress on the list (todoDone/todoTotal).
     ...(r._todos ? { todos: r._todos.map(toCardTodoResource) } : {}),
     todo_done: Array.isArray(r._todos) ? r._todos.filter((x: any) => x.done).length : (r.todoDone ?? 0),
     todo_total: Array.isArray(r._todos) ? r._todos.length : (r.todoTotal ?? 0),
+    // Who is following this card, and whether the caller is one of them - on the item Get only, where the
+    // watch button lives. `watching` is answered here rather than by a client matching a list of ids against
+    // its own identity, and the whole group is ABSENT on a list rather than defaulting to 0/false, which
+    // would read as "nobody is watching" when the truth is "this answer did not carry it".
+    ...(Array.isArray(r._watchers)
+      ? {
+        watchers: (r._watchers as string[]).map((id) => `employees/${id}`),
+        watcher_count: (r._watchers as string[]).length,
+        watching: !!r._viewerEmployeeId && (r._watchers as string[]).includes(r._viewerEmployeeId),
+      }
+      : {}),
+    // Approved hours booked against this task through its project's timesheets. Absent when none are, which
+    // is not the same as zero - see the goal resource's `logged_hours`, which works the same way.
+    logged_hours: r._hours,
   };
 }
 
@@ -609,10 +682,22 @@ export function toReviewCycleResource(r: any): Wire<"review-cycle"> {
     name: r.name,
     period_start: r.periodStart ? iso(r.periodStart).slice(0, 10) : undefined,
     period_end: r.periodEnd ? iso(r.periodEnd).slice(0, 10) : undefined,
+    goal_setting_due_date: r.goalSettingDueDate ? iso(r.goalSettingDueDate).slice(0, 10) : undefined,
     self_due_date: r.selfDueDate ? iso(r.selfDueDate).slice(0, 10) : undefined,
     manager_due_date: r.managerDueDate ? iso(r.managerDueDate).slice(0, 10) : undefined,
+    // Which framework competencies this cycle rates. Absent = all of them, so a probation review and an
+    // annual review can ask different questions off one org-wide framework.
+    competency_keys: parseCompetencyKeys(r.competencyKeysJson) ?? undefined,
     state: r.state,
     review_count: r._reviewCount, // attached by the route on list/get
+    // How many of those reviewees have at least one goal attached to this cycle - the gap between the two is
+    // the people whose review has nothing to score.
+    goal_coverage: r._goalCoverage,
+    // Present only on the `:variablePay` / `:award` answers: what each reviewee earned and what that is worth
+    // against their target. Nothing is stored - the run is arithmetic over the reviews and the compensation
+    // effective at the period end.
+    variable_pay: r._variablePay,
+    awarded: r._awarded,
   };
 }
 
@@ -624,6 +709,9 @@ export function toReviewResource(r: any): Wire<"review"> {
     ...baseResource(r, "reviews"),
     cycle: ref("review-cycles", r.cycleId),
     employee: ref("employees", r.employeeId),
+    // Who owes the write-up when it is not the employee's current manager. Absent means the manager chain,
+    // which is what every review had before an override existed.
+    reviewer: ref("employees", r.reviewerId),
     state: r.state,
     self_comment: r.selfComment ?? undefined,
     self_ratings: r.selfRatingsJson ? JSON.parse(r.selfRatingsJson) : undefined,
@@ -633,7 +721,25 @@ export function toReviewResource(r: any): Wire<"review"> {
     out.manager_comment = r.managerComment ?? undefined;
     out.overall_rating = r.overallRating ?? undefined;
     out.ratings = r.ratingsJson ? JSON.parse(r.ratingsJson) : {};
+    // The per-goal verdicts are the manager's assessment too, so they travel with it, not with the goals.
+    if (r.goalRatingsJson) out.goal_ratings = JSON.parse(r.goalRatingsJson);
+    // What those competency ratings add up to on the framework's own weights - derived here, from the
+    // catalogue the route attached, so the page, the PDF and the calibration grid quote one number. The
+    // manager's `overall_rating` is their own judgement and is never replaced by it.
+    if (r._competencies) out.competency_score = competencyScore(r._competencies as Competency[], out.ratings ?? {}) ?? undefined;
   }
+  // The cycle's goals, attached by the route: live before the review is shared, the frozen snapshot after.
+  // `goal_attainment` is derived from exactly the list that ships, so a client never re-derives it (and can
+  // never disagree with the PDF or the calibration grid about what this person delivered).
+  if (r._goals !== undefined) {
+    const goals = r._goals as GoalSnapshot[];
+    out.goals = goals;
+    out.goal_attainment = goalAttainment(goals) ?? undefined;
+    out.goals_frozen = !!r.goalsJson;
+  }
+  // How this person's attainment has moved over their last few cycles, on the item read only. A score reads
+  // differently depending on what came before it, and every review used to be read in isolation.
+  if (r._trend !== undefined) out.attainment_trend = r._trend;
   // Embedded 360 feedback, attached by the route. `_feedbackNamed` = the viewer (manager/HR) may see authors;
   // for the employee the entries arrive already filtered (submitted-only) and are rendered author-less.
   if (r._feedback !== undefined) {
@@ -650,7 +756,12 @@ function reviewFeedbackEntry(f: any, named: boolean) {
     state: f.state,
     comment: f.comment ?? undefined,
     overall_rating: f.overallRating ?? undefined,
-    ...(named ? { author: ref("employees", f.authorId) } : {}),
+    // Why a nominee said no. Only ever their own words, and only where authors are named at all - it is a
+    // sentence about a working relationship, not part of the shared review.
+    ...(named && f.declineReason ? { decline_reason: f.declineReason } : {}),
+    // A SUGGESTED row is a name the REVIEWEE typed and nothing else - no rating, no comment, nobody asked
+    // anything of yet - so its author is named even to them. Anonymity protects an ANSWER; there isn't one.
+    ...(named || f.state === "SUGGESTED" ? { author: ref("employees", f.authorId) } : {}),
   };
 }
 
@@ -664,6 +775,7 @@ export function toReviewFeedbackResource(r: any): Wire<"review-feedback"> {
     state: r.state,
     comment: r.comment ?? undefined,
     overall_rating: r.overallRating ?? undefined,
+    decline_reason: r.declineReason ?? undefined,
   };
 }
 
@@ -800,6 +912,7 @@ export function toProjectResource(r: any): Wire<"project"> {
     client: r.client ?? undefined,
     code: r.projectCode ?? undefined,
     billable: !!r.billable,
+    goal: ref("goals", r.goalId),
     status: r.status,
   };
 }
@@ -809,6 +922,9 @@ export function toTimeEntryResource(r: any): Wire<"time-entry"> {
     ...baseResource(r, "time-entries"),
     employee: ref("employees", r.employeeId),
     project: ref("projects", r.projectId),
+    // The task inside that project, when the work is tracked as a card. Secondary to the project on purpose:
+    // the project is what a timesheet approves and what a client is billed for.
+    card: ref("cards", r.cardId),
     date: r.date ? iso(r.date).slice(0, 10) : undefined,
     hours: r.hours ?? 0,
     description: r.description ?? undefined,
@@ -882,6 +998,8 @@ export function toCompensationResource(r: any): Wire<"compensation"> {
     ...baseResource(r, "compensation"),
     employee: ref("employees", r.employeeId),
     annual_ctc: r.ctcAnnual, // the authoritative figure everything leads with
+    // What they are playing for on top, at 100% attainment. Not part of CTC - see the schema comment.
+    variable_pay_target: r.variablePayTarget ?? undefined,
     base_pay: r.basePay, // derived: the monthly basic the split resolved to (for the payslip/statutory view)
     special_allowance: r.specialAllowance || undefined, // derived: the balancing plug of the split
     currency_code: r.currency,
@@ -1032,6 +1150,26 @@ export function toAssetCategoryResource(r: any): Wire<"asset-category"> {
     display_name: r.name,
     tag_code: r.tagCode,
     requires_serial: !!r.requiresSerial,
+  };
+}
+
+// A goal blueprint. `applied_count`/`skipped_count` are present only on the `:apply` answer - what that press
+// did, which is the only part of it a page can report.
+export function toGoalTemplateResource(r: any): Wire<"goal-template"> {
+  return {
+    ...baseResource(r, "goal-templates"),
+    title: r.title,
+    description: r.description ?? undefined,
+    weight: r.weight ?? 0,
+    due_in_days: r.dueInDays ?? undefined,
+    unit: r.unit ?? undefined,
+    baseline_value: r.baselineValue ?? undefined,
+    target_value: r.targetValue ?? undefined,
+    department: ref("departments", r.departmentId),
+    group_name: r.groupName ?? undefined,
+    disabled: !!r.disabled,
+    applied_count: r._applied,
+    skipped_count: r._skipped,
   };
 }
 
@@ -1863,5 +2001,28 @@ export function toCronRunResource(r: {
     ...(r.durationMs != null ? { duration_ms: r.durationMs } : {}),
     ...(r.error ? { error: r.error } : {}),
     ...(r.summaryJson ? { summary: JSON.parse(r.summaryJson) } : {}),
+  };
+}
+
+// A saved custom grid. The DEFINITION travels on the wire (base, columns, filters, sort, params); the rows it
+// produces are a separate call (`:run`), because they are re-read under each reader's own scopes.
+export function toTableViewResource(r: any): Wire<"table-view"> {
+  const spec = (() => {
+    try {
+      return JSON.parse(r.specJson ?? "{}") as { columns?: unknown[]; filters?: unknown[]; sort?: unknown[]; params?: Record<string, unknown> };
+    } catch {
+      return {};
+    }
+  })();
+  return {
+    ...baseResource(r, "table-views"),
+    display_name: r.name,
+    description: r.description ?? undefined,
+    owner: ref("employees", r.ownerId),
+    base: r.base,
+    columns: (spec.columns ?? []) as Wire<"table-view">["columns"],
+    filters: (spec.filters ?? []) as Wire<"table-view">["filters"],
+    sort: (spec.sort ?? []) as Wire<"table-view">["sort"],
+    params: (spec.params ?? {}) as Wire<"table-view">["params"],
   };
 }

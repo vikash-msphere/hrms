@@ -8,34 +8,62 @@ import { gotoRoute, purge, test, expect, toast } from "./fixtures";
 // because each step is somebody else's money. An expense whose "Mark paid" never appears is a bill nobody
 // can close, and no server test can see that.
 test("an expense moves through the approve and pay queues, asking at each step", async ({ as }) => {
+  // Longer than the 90s an inner .toPass() below budgets itself - a default 30s test timeout shorter than an
+  // inner retry's own window kills the retry mid-flight on a slow-to-populate categories fetch and reports it
+  // as the TEST timing out rather than ever letting the retry actually use the time it was given.
+  test.setTimeout(220_000);
   const page = await as("super");
   await gotoRoute(page, "expenses", "Expenses");
 
   const rupees = 20000 + Math.floor(Math.random() * 9000);
   const what = `E2E expense ${Date.now()}`;
 
-  await page.getByRole("button", { name: "New expense" }).first().click();
   const form = page.getByRole("dialog");
-  await expect(form.getByRole("heading", { name: "New expense" })).toBeVisible();
-  // "Office Supplies" is the seeded category that needs no invoice attached. The picker stays disabled until
-  // the categories are in - there is nothing to choose from before that - so it is waited for rather than
-  // clicked at: on a busy lane that fetch queues behind fifteen other browsers.
+  // "Office Supplies" is the seeded category that needs no invoice attached.
   const category = form.getByRole("combobox").first();
-  await expect(category).toBeEnabled({ timeout: 45_000 });
-  // Pressed rather than waited into stillness. The form fills itself in as its lists land - categories,
-  // vendors, departments, the budget line - and each arrival moves the fields below by a few pixels, so on a
-  // busy lane the picker can be enabled and hit-testable for a long time without ever holding the same
-  // position for the two consecutive frames Playwright wants. A person clicks it anyway.
-  // Pressed until the list is actually open: a press that lands while the field is moving can be swallowed,
-  // and a picker that did not open is not a failure worth a stack trace - it is a button somebody presses
-  // again.
   const office = page.getByRole("option", { name: /Office Supplies/ });
+
+  // Opened, picked and CHECKED as one retried unit, from the "New expense" press down.
+  //
+  // Every step here is against a form that rewrites itself as its own lists land - categories, vendors,
+  // departments, the budget line - and each arrival moves the fields below by a few pixels. So the picker
+  // stays disabled until the categories are in, and a press that lands while the TRIGGER is still moving is
+  // swallowed - which is why that one press is forced.
+  //
+  // The OPTION press is deliberately NOT forced. The listbox is portaled OUTSIDE the dialog, so a forced
+  // pointer event landing on it while it is already closing arrives at the dialog's dismissable layer as an
+  // interaction from outside - and Radix closes the DIALOG. That is what "Amount is not in this dialog" was:
+  // by the time the field was asked for, there was no dialog left on the page at all. Unforced, Playwright
+  // waits for the option to be stable instead, which the popover is once it is open (it is the fields
+  // underneath that move, not the list), and the press cannot be delivered anywhere else.
+  //
+  // Retrying only the innermost press left the outer cases - a lost press on New expense, a picker that
+  // closed with nothing chosen, a dialog dismissed out from under it - unrecoverable, so the whole sequence
+  // is re-driven from whatever state it finds, and it is the picker READING BACK "Office Supplies" IN AN
+  // OPEN DIALOG that ends it, not merely a press having been made.
   await expect(async () => {
-    if (!(await office.count())) await category.click({ force: true, timeout: 15_000 });
-    await expect(office).toBeVisible({ timeout: 5_000 });
-  }).toPass({ timeout: 90_000 });
-  await office.click({ force: true });
-  await form.getByLabel("Amount").fill(String(rupees));
+    if (!(await form.count())) {
+      await page.getByRole("button", { name: "New expense" }).first().click({ timeout: 8_000 });
+      await expect(form.getByRole("heading", { name: "New expense" })).toBeVisible({ timeout: 15_000 });
+    }
+    if (!(await category.textContent())?.includes("Office Supplies")) {
+      await expect(category).toBeEnabled({ timeout: 45_000 });
+      if (!(await office.count())) await category.click({ force: true, timeout: 8_000 });
+      await expect(office).toBeVisible({ timeout: 8_000 });
+      await office.click({ timeout: 8_000 });
+      await expect(category).toContainText(/Office Supplies/, { timeout: 8_000 });
+    }
+    // Still open, and still carrying the rest of the form: a dialog dismissed by the press above is the
+    // failure this whole block exists to catch, and it has to be caught HERE rather than several fields later.
+    await expect(form.getByLabel("Amount")).toBeVisible({ timeout: 8_000 });
+  }).toPass({ timeout: 120_000 });
+  // Retried: the form keeps re-rendering as its own lists resolve (categories, vendors, departments, the
+  // budget line), and a fill can land on a field mid-detach from one of those re-renders same as the category
+  // picker above.
+  await expect(async () => {
+    await form.getByLabel("Amount").fill(String(rupees), { timeout: 8_000 });
+    await expect(form.getByLabel("Amount")).toHaveValue(String(rupees), { timeout: 5_000 });
+  }).toPass({ timeout: 45_000 });
   await form.getByLabel(/Description/).fill(what);
   // The checkbox that decides whether this is a draft or goes straight for approval: on, by default.
   await expect(form.getByLabel("Submit for approval now")).toBeChecked();

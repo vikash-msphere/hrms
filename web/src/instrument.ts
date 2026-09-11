@@ -41,11 +41,33 @@ const dsn = import.meta.env.DEV && !devOptIn ? undefined : import.meta.env.VITE_
 // What replaced it is narrower and lives closer to the data: the seven profile panels and their editing
 // dialogs carry `sentry-mask` themselves (test/replayMaskCoverage.test.ts holds them to it), and the
 // `input[name*=…]` rules below catch account/PAN/Aadhaar/salary fields wherever in the app they appear.
-// Add a route here only when masking the whole page loses nothing worth reading.
+//
+// THE TEST FOR ADDING A ROUTE HERE, since "it feels sensitive" put fifteen of them on the list: the page's
+// VALUES have to be something the app itself PROMISED would not be read by a bystander. Money and identity
+// documents are the original three. The five below are the promises the rest of the product makes - an
+// anonymous suggestion, a confidential appraisal, a private 1:1, a tax proof, a background report - and every
+// one of them was being recorded in full while the payslip list next door was masked. "Ordinary business data
+// on a page that happens to be about people" (expenses, compliance, a directory) still does not qualify: the
+// `unmask` list below keeps headings, columns, tabs, labels, buttons and errors readable on a masked route, so
+// what a route mask actually costs is the values - which is the whole point when the values are these.
 const SENSITIVE_PAGES = [
   "payslips", // a table of net pay, deductions and statutory contributions - values with labels around them
   "payroll-runs", // the same, per employee, for a whole company
   "documents", // scanned identity documents, contracts, insurance cards
+  // Performance. Ratings and written assessments, plus 360 feedback, whose whole design is that the subject
+  // cannot attribute it - a replay of the calibration grid or a reviewer's draft undoes that from outside.
+  "reviews",
+  // The suggestion box. Anonymity is a PRODUCT PROMISE (services/suggestions.ts keeps the submitter off the
+  // notification and out of the peer view); a replay records the body next to an identified session, which is
+  // the one place that promise can be broken without anybody editing a line of server code.
+  "suggestions",
+  // Private 1:1s. The notes are written on the understanding that the two people in the room are the readers.
+  "check-ins",
+  // Tax declarations: PAN, regime, rent and investment proofs - identity numbers and financial detail.
+  "tax-declarations",
+  // Background verification results. What a check came back with about somebody's past is the most damaging
+  // single field in the app, and unlike a salary it is about them rather than their employment.
+  "background-checks",
 ] as const;
 
 /**

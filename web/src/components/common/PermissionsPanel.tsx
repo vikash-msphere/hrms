@@ -1,11 +1,11 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { Download, Upload, GitCompareArrows, KeyRound } from "lucide-react";
-import { list, create, remove, get, patch, invoke } from "@/api";
+import { list, listAll, create, remove, get, invoke } from "@/api";
 import { ruleSentence, expiryLabel } from "@/components/access/ruleLogic";
 import { Checkbox } from "@/components/ui/checkbox";
 import { usePermission } from "@/lib/perm";
-import { roleLabel, EVERYONE_ROLE } from "@/lib/roles";
+import { roleLabel, registerRoleLabels, EVERYONE_ROLE } from "@/lib/roles";
 import { CopyEmail } from "@/components/common/CopyEmail";
 import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleScope";
 import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, COLLECTION_GROUPS, groupOf, accessTone } from "@/components/access/permMatrix";
@@ -24,7 +24,8 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import type { User } from "@/types";
-import { getSetting } from "@/lib/settingsStore";
+import { getSetting, saveSetting } from "@/lib/settingsStore";
+import { todayStr } from "@/lib/orgDay";
 
 type Role = { path: string; name: string; label?: string };
 
@@ -60,7 +61,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   async function setFourEyesEnabled(enabled: boolean) {
     if (enabled && !(await confirm({ title: "Require a second approver for permission changes?", description: "From now on every access-rule change waits for a DIFFERENT access admin to approve it. A new grant does nothing until approved; a removal keeps working until approved. If you are the only access admin, nobody can approve your changes - turn this back off to unblock.", confirmLabel: "Turn on" }))) return;
     try {
-      await patch("settings/access-approval", { value: { enabled } });
+      await saveSetting("access-approval", { value: { enabled } });
       setFourEyes(enabled);
       toast({ title: enabled ? "Permission changes now need a second approver" : "Permission changes apply immediately again", variant: "success" });
     } catch (e) {
@@ -91,8 +92,11 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   const reload = React.useCallback(async () => {
     setBusy(true);
     try {
-      const [ro, us] = await Promise.all([list<Role>("roles"), list<User>("users")]);
-      setRoles(ro.results);
+      // Every role, not the first page: a rule whose subject is a role past the cap would otherwise render
+      // as a bare machine name here and be missing from the copy-permissions picker entirely.
+      const [ro, us] = await Promise.all([listAll<Role>("roles"), list<User>("users")]);
+      registerRoleLabels(ro);
+      setRoles(ro);
       setUsers(us.results.map((u) => ({ path: u.path, email: u.email })));
       setRules(await fetchAllAccessRules());
     } catch (e) {
@@ -226,7 +230,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = `access-rules-${subjectKind}s-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `access-rules-${subjectKind}s-${todayStr()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }

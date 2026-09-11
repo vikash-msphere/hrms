@@ -17,13 +17,19 @@ test.describe("own PII", () => {
 
     // The identity card has no fields of its own: an org declares what it collects (PAN, Aadhaar, a passport
     // number), and the card is that list. So the field is declared first, by the only role that may.
-    await gotoRoute(admin, "settings/employee-fields");
-    await expect(admin.locator("h1").first()).toHaveText("Employee identity fields");
-    await admin.getByRole("button", { name: "Add field" }).click();
-    await admin.getByPlaceholder("e.g. Passport number").last().fill(label);
-    await admin.getByRole("button", { name: "Save fields" }).click();
-    await admin.reload();
-    await expect(admin.getByPlaceholder("e.g. Passport number").last()).toHaveValue(label, { timeout: 30_000 });
+    // Retried as a whole. This is ONE org-wide blob and `settingsPanels.spec.ts` saves the same panel, so a
+    // save built on a snapshot that another spec has since replaced is refused by the settings compare-and-swap
+    // - correctly, and with the added field simply not there afterwards. The answer is to take a fresh snapshot
+    // (the reload) and add it again, which is what an admin who saw "couldn't save" would do.
+    await expect(async () => {
+      await gotoRoute(admin, "settings/employee-fields");
+      await expect(admin.locator("h1").first()).toHaveText("Employee identity fields");
+      await admin.getByRole("button", { name: "Add field" }).click();
+      await admin.getByPlaceholder("e.g. Passport number").last().fill(label);
+      await admin.getByRole("button", { name: "Save fields" }).click();
+      await admin.reload();
+      await expect(admin.getByPlaceholder("e.g. Passport number").last()).toHaveValue(label, { timeout: 30_000 });
+    }).toPass({ timeout: 120_000 });
 
     // And the owner fills it in - nobody else may, `OWN_PII` being the point.
     await gotoRoute(page, "profile", "My Profile");
@@ -45,12 +51,19 @@ test.describe("own PII", () => {
     await expect(page.getByRole("tabpanel").getByText("ABCDE1234F")).toBeVisible({ timeout: 30_000 });
 
     // Take the field back off the org's list: every profile in the app shows it while it is there.
-    await gotoRoute(admin, "settings/employee-fields");
-    const row = admin.locator("div").filter({ has: admin.getByPlaceholder("e.g. Passport number") }).last();
-    await row.getByRole("button", { name: "Remove field" }).last().click();
-    await admin.getByRole("button", { name: "Save fields" }).click();
-    await admin.reload();
-    await expect(admin.getByPlaceholder("e.g. Passport number").filter({ hasText: label })).toHaveCount(0, { timeout: 30_000 });
+    // Retried for the same reason the add above is: the removal is a save of the same shared blob, and leaving
+    // the field behind would put it on every profile in the app for the rest of the run.
+    await expect(async () => {
+      await gotoRoute(admin, "settings/employee-fields");
+      // Ours is the row that was appended, so it is the last one - checked before it is removed, because
+      // removing the last row blind would take somebody else's field off every profile in the org.
+      await expect(admin.getByPlaceholder("e.g. Passport number").last()).toHaveValue(label, { timeout: 30_000 });
+      const row = admin.locator("div").filter({ has: admin.getByPlaceholder("e.g. Passport number") }).last();
+      await row.getByRole("button", { name: "Remove field" }).last().click();
+      await admin.getByRole("button", { name: "Save fields" }).click();
+      await admin.reload();
+      await expect(admin.getByPlaceholder("e.g. Passport number").last()).not.toHaveValue(label, { timeout: 30_000 });
+    }).toPass({ timeout: 120_000 });
   });
 
   test("a joiner declares last year's employer income and the projection takes it", async ({ as }) => {

@@ -5,25 +5,34 @@ instance. This is the file `docs/security-review.md`, `docs/deploy-security.md` 
 `docs/architecture-decisions.md` point at for the live posture; the security review itself is an archived
 2026-07-04 snapshot, kept for the record of what was found and fixed.
 
-Last verified against the working tree on **2026-09-03**.
+Last verified against the working tree on **2026-09-10**.
 
 ## Build gates
 
-All green, run locally on the working tree:
-
 | Gate | Result |
 |------|--------|
-| `npm test` (vitest) | 2139 tests across 177 files, 0 failures |
+| `npm test` (vitest) | 2549 tests across 217 files, 0 failures |
 | `npm run typecheck` | 0 errors (api + web + e2e) |
-| `npm run api:lint` (spectral) | 0 errors |
-| `npm run preflight` | ok, 4 warnings (all deliberate — see below) |
+| `npm run api:lint` (spectral) | 0 errors (23 infos) |
+| `npm run preflight` | **2 blocking errors** + 4 warnings — see below |
 | `npm run build:web` | ok |
 | migrations | exactly one, `src/db/migrations/0000_*.sql` |
 
-The four preflight warnings are all "an optional thing is off, or a value cannot be checked from here":
-the staging D1 placeholder, no `SENTRY_AUTH_TOKEN` (so no source maps), no `VITE_APP_VERSION` (so no Sentry
-release), and the income-tax slab vintage being a year behind the current financial year. The last one is a
-launch item, below.
+Both preflight ERRORs are the same shape: a deployment-environment fact the repo cannot hold, which the gate
+refuses to assume. Not code defects — but they ARE blocking, so they belong on the launch list rather than in
+an "all green" table.
+
+- `WAF_RATE_LIMIT_CONFIRMED` — configure the Cloudflare rate-limiting rules (`docs/deploy-security.md` §1) and
+  record the date you last checked them. `/auth/*` and the e-sign callback have no limit without it, and
+  `/diag` has only the isolate-local floor.
+- `HSTS_CONFIRMED` — the app deliberately sends no `Strict-Transport-Security` of its own (see
+  `web/public/_headers` for why it cannot), so until HSTS is on at the zone there is no transport pinning
+  anywhere. Enable it in Cloudflare (SSL/TLS → Edge Certificates → HSTS) and record the date.
+
+The four warnings are "an optional thing is off, or a value cannot be checked from here": the staging D1
+placeholder, no `SENTRY_AUTH_TOKEN` (so no source maps), no `SENTRY_RELEASE`, and the SPA reporting a `-dirty`
+release because the working tree has uncommitted changes. Confirm the income-tax slab vintage against the
+financial year you are running before anyone sees a salary annexure — see the launch list below.
 
 ## What blocks a launch
 

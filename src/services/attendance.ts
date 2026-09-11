@@ -1,6 +1,7 @@
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gte, isNull, lte, sql, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
@@ -9,7 +10,6 @@ import { invalidArgument, failedPrecondition, clockNetworkFence } from "../lib/e
 import { parseIpAllowList, ipMatchesAny } from "../lib/ipAllow";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay, localMinutes } from "../domain/attendance";
 import { getSettingValue } from "./settings";
-import { paginate } from "../http/pagination";
 
 // Attendance clock sessions. A session is one clock-in -> clock-out pair; an OPEN session (clockOut null)
 // means the employee is currently clocked in. Breaks = clock out then clock in again (a new session).
@@ -22,14 +22,24 @@ export async function listSessions(deps: Deps, scope: ListScope, maxPageSize: nu
   const conds = [applyScope(scope, schema.attendanceSessions.code, schema.attendanceSessions.employeeId), isNull(schema.attendanceSessions.supersededBy)];
   if (filters.open) conds.push(isNull(schema.attendanceSessions.clockOut));
   if (filters.employeeId) conds.push(eq(schema.attendanceSessions.employeeId, filters.employeeId));
-  const rows = (await deps.db.select().from(schema.attendanceSessions).where(conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as any)) : undefined))
-    .filter((r) => {
-      const t = +new Date(r.clockIn);
-      return (filters.from === undefined || t >= filters.from) && (filters.to === undefined || t <= filters.to);
-    });
+  // THE DATE WINDOW IS BOUND IN SQL, and so is the page. Both used to be applied in JS over the whole scoped
+  // table: for an HR caller the scope predicate is empty, so every request read `attendance_sessions` in
+  // full - the highest-volume table in the app, two rows per employee per working day, growing with history
+  // rather than headcount - and then kept ~one month of it. The Attendance page asks three times per view
+  // and follows the cursor up to ten pages a time (web/src/lib/clock.tsx listAllSessions), so one page view
+  // was up to thirty whole-table reads. D1 bills rows READ, which is what made it a cost and latency
+  // problem long before it was a correctness one. Same treatment listTimeEntries already gets.
+  if (filters.from !== undefined) conds.push(gte(schema.attendanceSessions.clockIn, new Date(filters.from)));
+  if (filters.to !== undefined) conds.push(lte(schema.attendanceSessions.clockIn, new Date(filters.to)));
   // Most recent first (open sessions and today's punches surface at the top), keyed on the PUNCH rather than
-  // the row's creation - which is what the cursor carries for this one collection.
-  return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.clockIn), (r) => r.uuid);
+  // the row's creation - which is what the cursor carries for this one collection, so the sort key is passed
+  // to keysetPage explicitly. `clock_in` is NOT NULL for every row, which is what a keyset sort key needs.
+  const where = conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as SQL[])) : undefined;
+  return keysetPage<typeof schema.attendanceSessions.$inferSelect>(deps, schema.attendanceSessions, "attendance", where, {
+    max: maxPageSize,
+    pageToken,
+    order: { expr: sql`${schema.attendanceSessions.clockIn}`, value: (r) => +new Date(r.clockIn) },
+  });
 }
 
 async function openSessionFor(deps: Deps, employeeId: string) {

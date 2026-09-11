@@ -97,6 +97,32 @@ describe("diagnostics relay", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("caps a CHUNKED body as it reads, rather than buffering it and measuring after", async () => {
+    // The case the declared-length checks cannot answer: `Transfer-Encoding: chunked` sends no
+    // `Content-Length`, so middleware/bodyLimit has nothing to refuse, and the inbound wire-id edge caps only
+    // JSON content types - which an envelope is not. This route takes no credential, so an unbounded read
+    // here was the cheapest way to spend a 128 MB isolate (shared with every unrelated in-flight request)
+    // against a 1 MB ceiling. `readCappedBody` abandons the read instead, so the bytes held are bounded by
+    // one chunk past the cap however long the stream claims to be.
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++;
+        c.enqueue(new Uint8Array(256 * 1024)); // never closes: an endless body
+      },
+    });
+    const res = await app.request(
+      "/diag",
+      { method: "POST", body: stream, duplex: "half" } as RequestInit,
+      { SENTRY_DSN: DSN },
+    );
+    expect(res.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Five 256 KiB chunks reach 1.25 MB, so it stops within a chunk of the cap - not at the end of a stream
+    // that has no end.
+    expect(pulled).toBeLessThanOrEqual(6);
+  });
+
   it("is not there at all when no destination is configured", async () => {
     const res = await post(envelope(DSN), {});
     expect(res.status).toBe(404);
@@ -122,6 +148,16 @@ describe("diagnostics relay", () => {
     expect(res.headers.get("Retry-After")).toBe("60");
     expect(res.headers.get("Set-Cookie")).toBeNull();
     expect(res.headers.get("X-Upstream-Detail")).toBeNull();
+  });
+
+  it("passes back no upstream BODY either", async () => {
+    // The relay is unauthenticated, so what it hands the browser is what anyone can make it hand them. The
+    // SDK's transport reads the status and the two rate-limit headers above; the tracker's own JSON was being
+    // forwarded on top of that for no caller, which is a third party's words served from our origin.
+    fetchMock.mockResolvedValueOnce(new Response('{"id":"deadbeef","detail":"upstream said this"}', { status: 200 }));
+    const res = await post(envelope(DSN));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
   });
 
   it("forwards no client IP", async () => {

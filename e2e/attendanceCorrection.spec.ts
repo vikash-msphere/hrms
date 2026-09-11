@@ -65,7 +65,12 @@ test("an employee asks for a wrong day to be corrected, and their manager approv
         // flight, and the row is replaced when the answer lands. Pressing a disabled one only waits for it to
         // come back - which it never does, because it leaves with the row.
         const approve = row.getByRole("button", { name: "Approve", exact: true });
-        if ((await approve.count()) && (await approve.isEnabled())) {
+        // Bounded and swallowed: the row is REPLACED when a decision lands, so this very button can detach
+        // between resolving and being asked - and an `isEnabled` that throws out of a poll callback ends the
+        // poll then and there, with most of its budget unspent. A button that cannot answer is simply not
+        // pressable this pass; the next one resolves the row again.
+        const pressable = (await approve.count()) && (await approve.isEnabled({ timeout: 2_000 }).catch(() => false));
+        if (pressable) {
           await approve.click({ timeout: 5_000 }).catch(() => undefined);
           const confirm = manager.getByRole("dialog").getByRole("button", { name: "Approve", exact: true });
           if (await confirm.count()) await confirm.click({ timeout: 5_000 }).catch(() => undefined);

@@ -121,12 +121,12 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
     esignFields.esignRequestId = res.providerRef;
     esignFields.esignStatus = res.status;
     esignFields.esignUri = res.signUrl ?? null;
-    esignFields.esignSentAt = new Date();
+    esignFields.esignSentAt = deps.clock.now();
   } else if (wantEsign) {
     // internal: mark it awaiting in-app signature so the UI prompts the owner.
     esignFields.esignProvider = "internal";
     esignFields.esignStatus = "sent";
-    esignFields.esignSentAt = new Date();
+    esignFields.esignSentAt = deps.clock.now();
   }
 
   const updated = (await deps.db

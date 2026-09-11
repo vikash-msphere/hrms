@@ -46,6 +46,12 @@ export type ChangesAnswer = {
 const EMBEDDED_IN: Record<string, string[]> = {
   "review-feedback": ["reviews"],
   "transition-tasks": ["transitions"],
+  // A review carries the cycle's goals and the attainment computed from them. Moving a goal's progress
+  // therefore changes every unshared review it belongs to, without writing a review row.
+  goals: ["reviews"],
+  // A review's attainment trend names the CYCLES behind it, so renaming or re-dating one changes a stored
+  // review that was not itself written.
+  "review-cycles": ["reviews"],
 };
 
 /** Collections whose stamp is newer than `sinceMs`. Unfiltered: the route drops the ones the caller may not

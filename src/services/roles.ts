@@ -15,6 +15,8 @@ const NAME_RE = /^[a-z][a-z0-9_]{1,40}$/; // lower-snake-case identifier, 2-41 c
 
 export async function listRoles(deps: Deps, maxPageSize = 50, pageToken?: string) {
   const rows = await deps.db.select().from(schema.roles);
+  // No `wire`: a role's identity IS its name (`/v1/roles/<name>`), so the cursor's uid half is already the
+  // public identifier - there is no internal id to keep off the wire here.
   return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.name);
 }
 

@@ -30,12 +30,16 @@ const FLAG = "hrms:overflow-probe";
 function armed(): boolean {
   if (!import.meta.env.DEV) return false;
   const q = new URLSearchParams(location.search).get("overflow");
-  if (q === "1") localStorage.setItem(FLAG, "1");
-  if (q === "0") localStorage.removeItem(FLAG);
+  // Inside the try with the read. `localStorage` is not "a Map that might be empty": the ACCESSOR itself
+  // throws in a browser with site data blocked, so the two writes sitting outside it took the whole page down
+  // rather than the probe. The fallback below already covers that case for the read; it has to cover the
+  // writes too, or the case it handles can never be reached.
   try {
+    if (q === "1") localStorage.setItem(FLAG, "1");
+    if (q === "0") localStorage.removeItem(FLAG);
     return localStorage.getItem(FLAG) === "1";
   } catch {
-    return q === "1"; // private mode: still usable for one page view
+    return q === "1"; // nothing to persist to: still usable for one page view
   }
 }
 

@@ -81,7 +81,9 @@ const bodyValign = z.enum(["top", "middle", "bottom"]).nullable().optional();
 const recipientLayout = z.object({ x: z.number(), y: z.number(), size: z.number(), wrap: z.enum(WRAP_MODES).optional() }).strict().nullable().optional();
 // Poll authoring fields, shared by the write-gated create and the `post` gate. `options` (>=2) makes it a poll.
 const pollFields = {
-  options: z.array(z.string().min(1)).min(2).optional(),
+  // Capped: a ballot nobody can read is not the failure mode that matters - an uncapped list is one more place
+  // a single request decides how much work the Worker does. Twenty is well past any poll a board post asks.
+  options: z.array(z.string().min(1).max(200)).min(2).max(20).optional(),
   multiple: z.boolean().optional(),
   closes_time: z.string().datetime({ offset: true }).nullable().optional(),
 };

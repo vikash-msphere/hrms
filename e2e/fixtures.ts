@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { test as base, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { test as base, expect, type APIResponse, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { sealSession } from "../src/lib/session";
 
 // Signing in, in a browser test.
@@ -53,6 +53,24 @@ const IGNORED_CONSOLE = [
   // than the 429 has. `TELEMETRY_URL` below drops those by WHERE they came from, which is the honest test;
   // this pattern stays for the case where the browser reports no url with the message.
   /status of 429/i,
+  // 503, from the RUNTIME rather than from anything the app decided.
+  //
+  // This app has no 503 to answer with: every canonical error constructor (lib/errors.ts) is a 4xx, a 500,
+  // 501 or 502, and the one 503 in the tree is `/readyz` reporting D1 down - a path outside /v1 that the SPA
+  // never calls. The runtime does, and it says so in its own words in the body: "Your worker restarted
+  // mid-request. Please try sending the request again. Only GET or HEAD requests are retried automatically."
+  // `wrangler dev` recycles the Worker under sixteen browsers' load, and whatever was in flight is answered
+  // with that. A handful per run - `tmp/e2e-worker.log` lists every one with its timing, all answered in
+  // tens of milliseconds.
+  //
+  // Which is why this entry covers the console LINE only. A refused GET is re-read by the page and costs
+  // nothing; a refused WRITE never happened, and the runtime will not re-send it - so a spec whose claim
+  // rests on one press must press against the record until it lands (`loanRejectAndCancel.spec.ts`), and one
+  // whose FIXTURE is a POST must re-send it (`apiPost` below).
+  //
+  // 500 and 502 stay failures: those the app really can produce (errorHandler's internal, `upstreamFailed`),
+  // and a spec that provokes one still opts in by name through `allowConsoleErrors`.
+  /status of 503/i,
 ];
 
 // The relay's own path. A failed resource load is logged against the url that failed, so a console error
@@ -65,11 +83,16 @@ type Fixtures = {
    * A browser signed in as `role`, on its own context (own cookie jar, own storage). Call it more than once
    * in a test to have two people looking at the app at the same time.
    *
+   * Pass `{ email }` instead of a role to be somebody the seed did not name - the login a spec provisioned
+   * for itself. Access-control specs need that: the five seeded logins are load-bearing for the whole suite,
+   * so a spec that wants to watch a GRANT arrive (or an account get disabled) has to do it to a person of its
+   * own. The cookie lane is the same one either way, so the app cannot tell the difference.
+   *
    * Every page it hands back is watched: if the app logs an error or throws, the test fails at teardown with
    * the message. A page that is EXPECTED to log (a spec deliberately provoking a failed request) opts out
    * with `allowConsoleErrors`.
    */
-  as: (role: Role) => Promise<Page>;
+  as: (who: Role | { email: string }) => Promise<Page>;
 };
 
 /** Stop treating console errors matching `pattern` as a failure on this page. */
@@ -95,9 +118,9 @@ export async function enableTelemetry(page: Page) {
 
 const allowed = new WeakMap<Page, RegExp[]>();
 
-async function signIn(browser: Browser, baseURL: string, role: Role): Promise<BrowserContext> {
+async function signIn(browser: Browser, baseURL: string, email: string): Promise<BrowserContext> {
   const now = Date.now();
-  const token = await sealSession({ email: ROLES[role], iat: now, exp: now + 60 * 60_000 }, SESSION_KEY);
+  const token = await sealSession({ email, iat: now, exp: now + 60 * 60_000 }, SESSION_KEY);
   const context = await browser.newContext({ baseURL });
   await context.addCookies([{ name: SESSION_COOKIE, value: token, url: baseURL }]);
   return context;
@@ -108,20 +131,50 @@ export const test = base.extend<Fixtures>({
     if (!baseURL) throw new Error("e2e: no baseURL configured");
     const contexts: BrowserContext[] = [];
     const failures: string[] = [];
+    // A 500 the lane's PRISM PROXY made up, rather than one the app answered with.
+    //
+    // Every browser request goes through `prism proxy openapi.yaml --errors` (scripts/e2eStack.sh), and Prism
+    // answers with a 500 of its own when it cannot reach the Worker at all - `FetchError: ... read ECONNRESET`,
+    // which workerd produces under sixteen browsers exactly as it produces the restart 503 documented above.
+    // The console line is identical to a real one ("the server responded with a status of 500"), so the only
+    // way to tell them apart is the BODY: Prism's carries its own `stoplight.io/prism/errors` type. Those urls
+    // are collected here and the console entries naming them are dropped at the end; every other 500 is the
+    // app's own errorHandler and still fails the spec.
+    const proxyFailed = new Set<string>();
+    const bodiesRead: Promise<void>[] = [];
 
-    await use(async (role) => {
-      const context = await signIn(browser, baseURL, role);
+    await use(async (who) => {
+      const email = typeof who === "string" ? ROLES[who] : who.email;
+      const context = await signIn(browser, baseURL, email);
       contexts.push(context);
       const page = await context.newPage();
       allowed.set(page, []);
-      const record = (text: string) => {
+      // `where` is the url the browser blames, and it is reported because without it a failed resource load
+      // says only its status: "the server responded with a status of 500" names no request, so working out
+      // WHICH read failed means re-running the spec with a listener attached and hoping it happens again.
+      // The tolerance patterns are still matched against the message alone, so a spec's own
+      // `allowConsoleErrors` regex is unaffected by what is appended here.
+      const record = (text: string, where?: string) => {
         const skip = [...IGNORED_CONSOLE, ...(allowed.get(page) ?? [])].some((p) => p.test(text));
-        if (!skip) failures.push(`[${role}] ${text.slice(0, 300)}`);
+        if (!skip) failures.push(`[${typeof who === "string" ? who : email}] ${text.slice(0, 300)}${where ? ` @ ${where}` : ""}`);
       };
+      // Read before the console entry is judged - the body settles first, and the check happens after the run.
+      page.on("response", (res) => {
+        if (res.status() !== 500) return;
+        bodiesRead.push(
+          res
+            .text()
+            .then((body) => {
+              if (/stoplight\.io\/prism\/errors/.test(body)) proxyFailed.add(res.url());
+            })
+            .catch(() => undefined),
+        );
+      });
       page.on("console", (m) => {
         if (m.type() !== "error") return;
-        if (TELEMETRY_URL.test(m.location()?.url ?? "")) return;
-        record(m.text());
+        const url = m.location()?.url ?? "";
+        if (TELEMETRY_URL.test(url)) return;
+        record(m.text(), url || undefined);
       });
       // The message alone names a symptom ("Cannot read properties of undefined"); the first frames name the
       // FILE, which is the difference between a diagnosable failure and an afternoon of guessing - a crash
@@ -134,9 +187,11 @@ export const test = base.extend<Fixtures>({
       return page;
     });
 
+    await Promise.all(bodiesRead); // whose 500 each one was, before the pages go away
     for (const context of contexts) await context.close();
     // Asserted after the test body so a genuine assertion failure is reported first and this never masks it.
-    expect(failures, "the app logged errors in the browser console").toEqual([]);
+    const real = failures.filter((line) => ![...proxyFailed].some((url) => line.endsWith(` @ ${url}`)));
+    expect(real, "the app logged errors in the browser console").toEqual([]);
   },
 });
 
@@ -152,6 +207,24 @@ export { expect };
  */
 export async function purge(page: Page, path: string) {
   await page.request.delete(`/v1/${path}?force=true`, { headers: SPA_HEADERS }).catch(() => undefined);
+}
+
+/**
+ * A POST that survives the Worker being recycled under it - for a spec's own FIXTURES, never for the write a
+ * spec is actually about.
+ *
+ * The runtime this suite runs on restarts the Worker mid-request now and then and answers whatever was in
+ * flight with a 503 saying exactly that ("Only GET or HEAD requests are retried automatically" - see
+ * IGNORED_CONSOLE above). Nothing re-sends it, so a `page.request.post` that sets a spec up simply fails,
+ * and the spec dies on its scaffolding rather than on its claim. Re-sent only on that answer: any other
+ * status is the server's real verdict and comes straight back for the caller to assert on.
+ */
+export async function apiPost(page: Page, path: string, data: unknown): Promise<APIResponse> {
+  let res = await page.request.post(`/v1/${path}`, { headers: SPA_HEADERS, data });
+  for (let attempt = 0; attempt < 3 && res.status() === 503; attempt++) {
+    res = await page.request.post(`/v1/${path}`, { headers: SPA_HEADERS, data });
+  }
+  return res;
 }
 
 /**
@@ -274,20 +347,53 @@ export async function withAllowedBank(page: Page, name: string): Promise<() => P
   return () => editBanks(page, (banks) => banks.filter((b) => b !== name));
 }
 
-/** Read-modify-write the org's bank list, retrying so a concurrent write is merged rather than lost. */
+/**
+ * Read-modify-write the org's bank list, retrying so a concurrent write is merged rather than lost.
+ *
+ * `If-Match` on the etag this same read carried, not the SPA's own no-etag PATCH (memory
+ * settings-lost-update.md - the server takes one, the client just never sends it): without it, two of these
+ * running at once (or beside `settingsPanels.spec.ts` editing an unrelated key of this same blob) both read
+ * the pre-change row and both "succeed", the second's write silently discarding the first's - a 200 from
+ * `wrote.ok()` alone cannot tell that apart from a real success. A 409 here is exactly that collision caught
+ * before it lands, not a failure worth surfacing - retried on the freshly re-read row same as the app's own
+ * forms do.
+ */
 async function editBanks(page: Page, change: (banks: string[]) => string[]): Promise<void> {
+  await patchOrgSettings(page, (blob) => {
+    const banks = Array.isArray(blob.banks) ? (blob.banks as string[]) : [];
+    return { ...blob, banks: change(banks) };
+  });
+}
+
+/**
+ * Read-modify-write the shared `settings/organization` blob, retrying so a concurrent write is merged rather
+ * than lost. `mutate` gets the FRESH value on every attempt and must return the whole next value (merge in
+ * only the keys it actually cares about, spreading the rest through unchanged) - many settings panels
+ * (banks, currencies, quick-create menu, letter defaults, the org default department...) share this one row,
+ * and specs for several of them run at once.
+ *
+ * `If-Match` on the etag this same read carried, not the SPA's own no-etag PATCH (memory
+ * settings-lost-update.md - the server takes one, the client just never sends it): without it, two writers
+ * racing each other both read the pre-change row and both "succeed", the second's write silently discarding
+ * the first's - a 200 from `wrote.ok()` alone cannot tell that apart from a real success. A 409 here is
+ * exactly that collision caught before it lands, not a failure worth surfacing - retried on the freshly
+ * re-read row same as the app's own forms do. Restoring a snapshot taken at a test's own START (rather than
+ * re-reading fresh right before the write) is the same bug with extra steps: it discards not just this
+ * spec's own change but whatever ANY other spec wrote to a DIFFERENT key of this row in between.
+ */
+export async function patchOrgSettings(page: Page, mutate: (value: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const res = await page.request.get("/v1/settings/organization");
-    const blob = res.ok() ? (((await res.json()) as { value?: Record<string, unknown> }).value ?? {}) : {};
-    const banks = Array.isArray(blob.banks) ? (blob.banks as string[]) : [];
-    const next = change(banks);
+    const body = res.ok() ? ((await res.json()) as { value?: Record<string, unknown>; etag?: string }) : {};
+    const next = mutate(body.value ?? {});
     const wrote = await page.request.patch("/v1/settings/organization", {
-      headers: SPA_HEADERS,
-      data: { value: { ...blob, banks: next } },
+      headers: { ...SPA_HEADERS, ...(body.etag ? { "If-Match": body.etag } : {}) },
+      data: { value: next },
     });
     if (wrote.ok()) return;
+    if (wrote.status() !== 409) throw new Error(`e2e: could not update org settings: ${await wrote.text()}`);
   }
-  throw new Error("e2e: could not update the org's bank list");
+  throw new Error("e2e: could not update org settings - kept losing the race to a concurrent writer");
 }
 
 /** The local day `n` days from now (negative for the past), as a date input wants it. */
@@ -347,6 +453,101 @@ export async function gotoRoute(page: Page, route: string, heading?: string) {
   // default this fails as "no <h1> Documents" in the middle of a spec that has nothing to do with navigation,
   // which reads like the page being broken rather than the stack being busy. Every other wait in the suite is
   // already given room; this one was not, so it was the first thing to go under load.
-  await expect(page.getByRole("main")).toBeVisible({ timeout: 30_000 });
+  //
+  // The shell's OWN recovery is taken when the bootstrap read is the thing that failed: one 500 from a
+  // restarting dev Worker leaves "Can't reach the server ... Try again" where `<main>` belongs, and every
+  // spec that happens to navigate in that window dies of somebody else's hiccup. Pressing what the app puts
+  // in front of a real user in exactly this situation is the honest recovery - and a server that is genuinely
+  // down still fails here, since the retry has to actually produce the page.
+  await expect(async () => {
+    // Only while the shell itself is missing: a "Try again" INSIDE a rendered page belongs to that page's own
+    // failed panel (`failedRead.spec.ts` is about pressing it deliberately), and is none of this helper's
+    // business.
+    if (!(await page.getByRole("main").count())) {
+      const retry = page.getByRole("button", { name: "Try again" });
+      if (await retry.count()) await retry.first().click({ timeout: 5_000 }).catch(() => undefined);
+    }
+    // A RECORD route (`#/<page>/<id>`) opens that record's own modal as soon as its row lands, and a modal
+    // aria-hides the shell behind it - so `main` stops being reachable BY DESIGN, a second or so after the
+    // page renders. Waiting only on the landmark therefore turns into a race the deep link loses: the
+    // dialog is equally good proof that the route rendered what it was asked for.
+    if (route.includes("/") && (await page.getByRole("dialog").count())) return;
+    await expect(page.getByRole("main")).toBeVisible({ timeout: 30_000 });
+  }).toPass({ timeout: 90_000 });
   if (heading) await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible({ timeout: 30_000 });
+}
+
+/**
+ * A person nobody else in the suite is using: a throwaway employee, with the login that comes with them.
+ *
+ * Access-control specs cannot practise on the seeded five. Every other spec in the lane signs in as those
+ * logins, so a rule granted to `emp@example.com` - even for the second it takes to read it back - changes
+ * what another worker's browser is being asked to prove at that moment. A person created for one test and
+ * retired at the end of it is invisible to all of them.
+ *
+ * `services/employees.ts` provisions the login as the employee is created, so the returned email can be
+ * signed in with straight away (`as({ email })`).
+ */
+export async function makeThrowawayPerson(page: Page, tag: string): Promise<{ path: string; email: string; name: string }> {
+  const stamp = `${test.info().parallelIndex}${Date.now() % 1_000_000}`;
+  const last = `${tag}${stamp}`;
+  const email = `e2e.${tag.toLowerCase()}.${stamp}@example.com`;
+  const res = await page.request.post("/v1/employees", {
+    headers: SPA_HEADERS,
+    data: { first_name: "E2E", last_name: last, work_email: email },
+  });
+  expect(res.status(), await res.text()).toBe(200);
+  return { path: ((await res.json()) as { path: string }).path, email, name: `E2E ${last}` };
+}
+
+/**
+ * Take a throwaway person back out - a soft delete, never `?force=true`.
+ *
+ * The login provisioned alongside them is an undeclared reference (users has no delete route at all -
+ * "provisioned when an employee is created, disabled rather than removed", src/routes/users.ts), so a hard
+ * purge answers 409 and cleans up nothing.
+ */
+export async function retireThrowawayPerson(page: Page, path: string): Promise<void> {
+  const got = await page.request.get(`/v1/${path}`);
+  if (!got.ok()) return;
+  const { etag } = (await got.json()) as { etag: string };
+  await page.request.delete(`/v1/${path}`, { headers: { ...SPA_HEADERS, "If-Match": etag } }).catch(() => undefined);
+}
+
+/** The `users/<id>` path of a login, by the email it signs in with - what an access rule's subject is. */
+export async function userPath(page: Page, email: string): Promise<string> {
+  const res = await page.request.get("/v1/users?page_size=200");
+  expect(res.status(), await res.text()).toBe(200);
+  const { results = [] } = (await res.json()) as { results?: { path: string; email?: string }[] };
+  const user = results.find((u) => u.email === email);
+  if (!user) throw new Error(`e2e: no login for ${email}`);
+  return user.path;
+}
+
+/** Every access rule the caller can read - the wire truth behind whatever the ACL modal is drawing. */
+export async function accessRules(page: Page): Promise<AccessRuleRow[]> {
+  const res = await page.request.get("/v1/access-rules?page_size=500");
+  expect(res.status(), await res.text()).toBe(200);
+  return ((await res.json()) as { results?: AccessRuleRow[] }).results ?? [];
+}
+
+export type AccessRuleRow = {
+  path: string;
+  subject_kind?: string;
+  subject?: string;
+  collection?: string;
+  scope?: string;
+  level?: string;
+  verb?: string;
+  effect?: string;
+  status?: string;
+  expire_time?: string;
+};
+
+/** The capability set the server issued this caller - the only authority on what they may actually do. */
+export async function capabilitiesOf(page: Page): Promise<string[]> {
+  const res = await page.request.get("/v1/users/me");
+  expect(res.status(), await res.text()).toBe(200);
+  const me = (await res.json()) as { caller_access?: { capabilities?: string[] } };
+  return me.caller_access?.capabilities ?? [];
 }

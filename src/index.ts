@@ -5,12 +5,14 @@ import { dbContext } from "./middleware/dbContext";
 import { csrf } from "./middleware/csrf";
 import { auth } from "./middleware/auth";
 import { authz } from "./middleware/authz";
+import { rateLimit } from "./middleware/rateLimit";
 import { encodeWireIdsMiddleware } from "./middleware/encodeWireIds";
 import { decodeWireIdsRequest } from "./middleware/decodeWireIds";
-import { makeIdCodec } from "./lib/idCodec";
+import { codecFor } from "./lib/idCodec";
 import { securityHeaders } from "./middleware/securityHeaders";
 import { bodyLimit } from "./middleware/bodyLimit";
 import { errorHandler } from "./middleware/errorHandler";
+import { AppError } from "./lib/errors";
 import { requestId } from "./middleware/requestId";
 import * as Sentry from "@sentry/cloudflare";
 import { runScheduled, NIGHTLY_CRON } from "./cron";
@@ -27,6 +29,7 @@ import { employees } from "./routes/employees";
 import { departments } from "./routes/departments";
 import { leaveRequests } from "./routes/leaveRequests";
 import { goals } from "./routes/goals";
+import { goalTemplates } from "./routes/goalTemplates";
 import { boards } from "./routes/boards";
 import { cards } from "./routes/cards";
 import { sprints } from "./routes/sprints";
@@ -130,6 +133,8 @@ import { automationRuns } from "./routes/automationRuns";
 import { workflowInstances } from "./routes/workflowInstances";
 import { workflowMeta } from "./routes/workflowMeta";
 import { esignProviders } from "./routes/esignProviders";
+import { tableViews } from "./routes/tableViews";
+import { tableFields } from "./routes/tableFields";
 import { authRoutes } from "./routes/authRoutes";
 
 const app = new Hono<AppEnv>();
@@ -142,6 +147,15 @@ app.use("*", bodyLimit); // refuse an oversized body from Content-Length, before
 
 // Unauthenticated health checks for uptime monitors / load balancers (everything under /v1 needs an Access
 // JWT, so there must be something to probe without one). /healthz is pure liveness; /readyz also pings D1.
+//
+// They carry the security headers too. These were the only two JSON responses in the Worker that shipped
+// without them - no `nosniff`, no `frame-ancestors`, no `Cache-Control` - because every other mount declares
+// the middleware and these two were registered before any of them. Nothing here is sensitive; the point is
+// that "which responses are hardened" should not be a list somebody has to keep in their head, and an
+// unauthenticated endpoint is the wrong one to leave off it. It also stops an intermediary caching a stale
+// `ready` past the isolate window the block below is careful to bound.
+app.use("/healthz", securityHeaders);
+app.use("/readyz", securityHeaders);
 app.get("/healthz", (c) => c.json({ status: "ok" }));
 
 // A READY answer is cached in the isolate for a few seconds. /readyz is unauthenticated and touches D1, so
@@ -201,6 +215,10 @@ app.use("/v1/*", dbContext);
 app.use("/v1/*", encodeWireIdsMiddleware); // outbound edge: internal ids -> opaque wire tokens
 app.use("/v1/*", csrf);
 app.use("/v1/*", auth);
+// Per-caller request budgets. Deliberately between auth (which supplies the principal to key on) and authz
+// (so a refused request costs none of the gate's per-object reads). A FLOOR, not the rate limit - the WAF
+// rule is - and the counterpart inside /v1 to the one lib/isolateRate.ts puts under the public lanes.
+app.use("/v1/*", rateLimit);
 app.use("/v1/*", authz); // ENFORCE: path-based authz is the sole gate; fail-closed (null/error/unmatched -> deny)
 
 app.route("/v1/users", users);
@@ -229,6 +247,7 @@ app.route("/v1/employees", employees);
 app.route("/v1/departments", departments);
 app.route("/v1/leave-requests", leaveRequests);
 app.route("/v1/goals", goals);
+app.route("/v1/goal-templates", goalTemplates); // goal blueprints HR curates; :apply stamps them onto people
 app.route("/v1/boards", boards);
 app.route("/v1/cards", cards);
 app.route("/v1/sprints", sprints);
@@ -325,6 +344,8 @@ app.route("/v1/automation-runs", automationRuns);
 app.route("/v1/workflow-instances", workflowInstances);
 app.route("/v1/workflow-meta", workflowMeta);
 app.route("/v1/esign-providers", esignProviders); // virtual: non-secret e-sign driver catalog for Settings
+app.route("/v1/table-fields", tableFields); // virtual: the custom-grid field catalogue (no table, no rows)
+app.route("/v1/table-views", tableViews); // saved custom grids (the definition; `:run` produces the rows)
 
 // A path whose last segment carries a file extension is asking for a FILE, not an app route. Deliberately
 // narrow: SPA routes are slash-separated words, so requiring a dot in the final segment (and no trailing
@@ -365,14 +386,20 @@ app.notFound(async (c) => {
   // A client-side route: serve the shell and let the SPA router take it from here. Fetched through the
   // ASSETS binding so index.html still carries the headers _headers assigns it (CSP, no-cache).
   const shell = await c.env.ASSETS.fetch(new URL("/index.html", c.req.url));
+  // The shell's OWN status, not a hardcoded 200. If index.html is missing or the asset layer is unwell, this
+  // used to answer 200 with whatever came back - an error page, or nothing - and every monitor, crawler and
+  // browser cache would take that as a healthy app route. Pass the failure through instead; a working shell
+  // is a 200 either way.
+  if (!shell.ok) return new Response(shell.body, { status: shell.status, headers: shell.headers });
   return new Response(shell.body, { status: 200, headers: shell.headers });
 });
 
-// One codec per isolate (memoized) so the HKDF subkeys are derived once, not per request.
-let codec: ReturnType<typeof makeIdCodec> | null = null;
-// Shared so the batch route can decode each re-dispatched sub-request with the SAME derived subkeys.
+// One codec per isolate so the HKDF subkeys are derived once, not per request. The memo lives in
+// lib/idCodec.ts (keyed on the key material) rather than here, because `makeDeps` needs the same instance and
+// cannot import from this module - so the inbound edge, the batch re-dispatch and every `deps.idCodec` now
+// share one set of derived subkeys instead of the edge having its own and each request minting another.
 export function getCodec(env: AppEnv["Bindings"]) {
-  return (codec ??= makeIdCodec(env.WIRE_ID_KEY));
+  return codecFor(env.WIRE_ID_KEY);
 }
 // Exported so /v1/batch:run can re-dispatch sub-requests through the full middleware chain via app.fetch.
 // Only referenced inside the batch handler (runtime), so the index<->batch import cycle is safe.
@@ -386,7 +413,22 @@ const handler = {
   // Inbound edge: decode wire tokens -> internal ids BEFORE Hono routes, so params/services/authz are
   // id-native. Outbound encoding is the encodeWireIds middleware. Non-/v1 paths pass through unchanged.
   async fetch(request: Request, env: AppEnv["Bindings"], ctx: ExecutionContext) {
-    const decoded = await decodeWireIdsRequest(request, getCodec(env));
+    let decoded: Request;
+    try {
+      decoded = await decodeWireIdsRequest(request, getCodec(env));
+    } catch (e) {
+      // This edge runs OUTSIDE Hono, so `app.onError` never sees what it throws - and it throws for exactly
+      // one reason: a JSON body that read past the size cap (middleware/decodeWireIds.ts readCapped). Rendered
+      // here in the same problem+json shape middleware/errorHandler gives the declared-length refusal, so a
+      // client cannot tell which half of the cap stopped it. Anything else is a real fault and is re-thrown to
+      // `withSentry` below rather than dressed up as a client error.
+      if (!(e instanceof AppError)) throw e;
+      const problem = e.toProblem(new URL(request.url).pathname);
+      return new Response(JSON.stringify(problem), {
+        status: e.httpStatus,
+        headers: { "Content-Type": "application/problem+json" },
+      });
+    }
     return app.fetch(decoded, env, ctx);
   },
   // Non-/v1 paths are served from web/dist by the platform (SPA fallback).

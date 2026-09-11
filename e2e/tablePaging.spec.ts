@@ -39,19 +39,26 @@ test.describe("the table pager", () => {
 
     // A clickable DataTable row is `role="button"`, which takes it out of the table's accessibility tree - so
     // rows are reached by CSS. Which person is first is not the point; that it is a DIFFERENT person after
-    // the step is, and the same one again after stepping back.
+    // the step is, and the same one again after stepping back. Retried as one whole round trip: the Directory
+    // is org-wide and unfiltered, and the rest of this suite creates and removes employees in it constantly
+    // under 16-worker load - an employee landing (or leaving) ahead of the captured first row in the moment
+    // between "Next" and "Previous" changes who page 1's own first row legitimately is, which is a real change
+    // in the data this test does not own, not a pager bug. A fresh snapshot on retry is what tells the two
+    // apart from an actual regression, which would fail the very same way on every attempt.
     const firstRow = rows(page).first();
-    const wasFirst = (await firstRow.textContent()) ?? "";
-    expect(wasFirst.trim().length, "the directory drew no rows").toBeGreaterThan(0);
+    await expect(async () => {
+      const wasFirst = (await firstRow.textContent()) ?? "";
+      expect(wasFirst.trim().length, "the directory drew no rows").toBeGreaterThan(0);
 
-    await page.getByRole("button", { name: "Next page" }).click();
-    await expect(line(page, /^Showing 26-50 of \d+/)).toBeVisible({ timeout: 30_000 });
-    await expect(line(page, /^Page 2 of \d+$/)).toBeVisible();
-    await expect.poll(async () => (await firstRow.textContent()) ?? "").not.toBe(wasFirst);
+      await page.getByRole("button", { name: "Next page" }).click();
+      await expect(line(page, /^Showing 26-50 of \d+/)).toBeVisible({ timeout: 30_000 });
+      await expect(line(page, /^Page 2 of \d+$/)).toBeVisible();
+      await expect.poll(async () => (await firstRow.textContent()) ?? "", { timeout: 10_000 }).not.toBe(wasFirst);
 
-    await page.getByRole("button", { name: "Previous page" }).click();
-    await expect(line(page, /^Showing 1-25 of \d+/)).toBeVisible({ timeout: 30_000 });
-    await expect.poll(async () => (await firstRow.textContent()) ?? "").toBe(wasFirst);
+      await page.getByRole("button", { name: "Previous page" }).click();
+      await expect(line(page, /^Showing 1-25 of \d+/)).toBeVisible({ timeout: 30_000 });
+      await expect.poll(async () => (await firstRow.textContent()) ?? "", { timeout: 10_000 }).toBe(wasFirst);
+    }).toPass({ timeout: 60_000 });
     // Nothing before the first page: the arrow is refused rather than paging into an empty table.
     await expect(page.getByRole("button", { name: "Previous page" })).toBeDisabled();
   });

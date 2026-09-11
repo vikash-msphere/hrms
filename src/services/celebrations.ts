@@ -3,6 +3,8 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { Wire } from "../http/wire";
 import { photoMarker } from "../http/serialize";
+import { daysInMonthUtc } from "../domain/calendar";
+import { orgToday, dayStartMs } from "./orgDay";
 
 // Company-wide "who's celebrating soon" feed for the dashboard. Birthdays come from the ENCRYPTED personal
 // details blob (date_of_birth) and are returned as day+month ONLY - never the year, so no age is exposed.
@@ -14,13 +16,18 @@ export type Celebration = Wire<"celebration">;
 
 const DAY_MS = 86_400_000;
 
-// Days from `today` (UTC midnight) to the next occurrence of (month, day); 0 = today. A Feb-29 date in a
-// non-leap year naturally rolls to Mar 1 (Date.UTC overflow), which is the conventional fallback.
+// Days from `todayMs` (the org's calendar day, anchored at UTC midnight) to the next occurrence of
+// (month, day); 0 = today.
+//
+// A 29 February anchor in a common year CLAMPS to the 28th. It used to roll to 1 March on `Date.UTC`'s own
+// overflow, which is a defensible fallback in isolation and the wrong one here: the cron's anniversary email
+// and event fire on the clamped day (domain/calendar.ts `isAnniversaryOf`, which is the house rule this whole
+// module was written to enforce), so the widget counted down to a day one later than the day the greeting
+// actually arrived. One rule, applied on both surfaces, matters more than which of the two days it picks.
 function daysUntil(todayMs: number, month: number, day: number): number {
-  const today = new Date(todayMs);
-  const y = today.getUTCFullYear();
-  let occ = Date.UTC(y, month - 1, day);
-  if (occ < todayMs) occ = Date.UTC(y + 1, month - 1, day);
+  const y = new Date(todayMs).getUTCFullYear();
+  const at = (year: number) => Date.UTC(year, month - 1, Math.min(day, daysInMonthUtc(year, month - 1)));
+  const occ = at(y) < todayMs ? at(y + 1) : at(y);
   return Math.round((occ - todayMs) / DAY_MS);
 }
 
@@ -44,9 +51,11 @@ async function readDob(deps: Deps, enc: string | null): Promise<string | undefin
 }
 
 export async function upcomingCelebrations(deps: Deps, withinDays = 30): Promise<Celebration[]> {
-  const today = new Date(deps.clock.now());
-  today.setUTCHours(0, 0, 0, 0);
-  const todayMs = +today;
+  // The ORG's today. This widget has to agree with the cron that sends the greeting (`isAnniversaryOf`, run
+  // off the same org day), and a UTC-derived one disagrees with it for part of every day: east of UTC the
+  // card still read "in 1 day" on the morning the mail went out, west of UTC it read "today" the evening
+  // before. Same reasoning as the 29 February clamp above - one rule on both surfaces. See orgDay.ts.
+  const todayMs = dayStartMs(await orgToday(deps));
 
   const rows = await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"));
   const out: Celebration[] = [];

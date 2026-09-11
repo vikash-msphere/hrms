@@ -30,12 +30,12 @@ export const ACCESS_VERBS: Record<string, string[]> = {
   operations: ["run"],
   "cron-runs": ["run"],
   "leave-requests": ["update", "delete", "approve", "reject", "cancel", "upload", "download"],
-  goals: ["update", "delete", "updateProgress", "comment"],
+  goals: ["update", "delete", "updateProgress", "comment", "setContributors", "watch", "unwatch"],
   boards: ["update", "delete", "configure", "metrics"],
-  cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo"],
+  cards: ["update", "delete", "move", "block", "unblock", "assign", "prioritize", "comment", "addTodos", "toggleTodo", "removeTodo", "promoteTodo", "watch", "unwatch"],
   sprints: ["update", "delete", "activate", "complete"],
   "review-cycles": ["update", "delete", "launch", "enroll", "close", "reopen"],
-  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "nudge", "pdf"],
+  reviews: ["submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "suggestFeedback", "assignReviewer", "nudge", "pdf"],
   "review-feedback": ["submitFeedback", "decline"],
   "time-entries": ["update", "delete", "submit", "approve", "reject"],
   loans: ["update", "delete", "approve", "reject", "disburse", "recordRepayment"],
@@ -108,12 +108,17 @@ export const KNOWN_VERBS: ReadonlySet<string> = new Set([
   "vote", // cast the caller's vote on a board poll (announcements)
   "pin", "unpin", // pin a board post to the top of the feed / take it down (announcements, moderation)
   "updateProgress", // move a goal's progress without full edit rights (goals)
+  "setContributors", // credit a share of a goal to the people who delivered it (goals)
   "configure", "metrics", // kanban board config (columns/WIP/policies/lanes) + flow analytics (boards)
   "move", "block", "unblock", "assign", "prioritize", "comment", // kanban card actions (cards)
   "addTodos", "toggleTodo", "removeTodo", // card checklist (cards; tickets use the same verbs)
+  "promoteTodo", // turn a checklist item into a card of its own (cards)
+  "watch", "unwatch", // follow a card or a goal you do not own (cards, goals)
   "activate", // start a sprint (sprints) - complete reuses the existing verb
   "launch", "enroll", "close", "reopen", // review-cycle lifecycle (review-cycles)
   "submitSelf", "submitManager", "acknowledge", "skipStage", "nominate", "nudge", "pdf", // review workflow stages + 360 nomination + stall reminder + record copy (reviews)
+  "suggestFeedback", // the reviewee's own list of who saw their work, inert until a manager nominates (reviews)
+  "assignReviewer", // name who writes one review, instead of re-parenting the employee (reviews)
   "submitFeedback", "decline", // 360 peer feedback (review-feedback)
   "complete", "appendTask", // onboarding/offboarding transitions + tasks (transitions, transition-tasks)
   "disburse", "recordRepayment", // loan lifecycle (loans)

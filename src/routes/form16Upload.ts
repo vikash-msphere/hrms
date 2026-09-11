@@ -4,7 +4,7 @@ import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { makeDocumentService } from "../services/documentService";
 import { toPersonalDocumentResource } from "../http/serialize";
-import { idFromPath, isPdfUpload, assertUploadSize } from "../services/documentsCommon";
+import { idFromPath, isPdfUpload, assertUploadSize, requireCappedBody } from "../services/documentsCommon";
 import { invalidArgument } from "../lib/errors";
 
 // Collection-level custom method `personal-documents:uploadForm16` - file the OFFICIAL TRACES Form 16 PDF for
@@ -32,8 +32,10 @@ export const form16Upload = new Hono<AppEnv>().post("/", async (c) => {
   if (!isPdfUpload(fileName, contentType)) throw invalidArgument("Form 16 must be a PDF");
 
   // An oversized body never reaches here: middleware/bodyLimit.ts refuses it from `Content-Length` before any
-  // handler reads. This assertion is the backstop for a chunked body, which declares no length.
-  const bytes = await c.req.arrayBuffer();
+  // handler reads, and `requireCappedBody` abandons a chunked one - which declares no length - at the same cap
+  // rather than buffering to the end and measuring after the memory is spent. `assertUploadSize` stays as the
+  // assertion on the bytes finally held.
+  const bytes = await requireCappedBody(c.req.raw);
   if (bytes.byteLength === 0) throw invalidArgument("empty file");
   assertUploadSize(bytes.byteLength);
 

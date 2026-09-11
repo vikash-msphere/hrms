@@ -1,4 +1,4 @@
-import { like, eq, sql, or, and, not, type SQL } from "drizzle-orm";
+import { eq, sql, or, and, not, type SQL } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import type { ListScope } from "../domain/access";
 
@@ -11,9 +11,28 @@ import type { ListScope } from "../domain/access";
 // table does not have matches nothing rather than everything.
 //
 // A per-object share/deny on code C covers C AND its whole subtree (the same `isUnder` the item path decides
-// with), bound boundary-safe as `(code = C OR code LIKE 'C-%')`. The trailing '-' is the delimiter guard, so
+// with), bound boundary-safe as `(code = C OR code GLOB 'C-*')`. The trailing '-' is the delimiter guard, so
 // a share on `04-002` lists `04-002` + `04-002-*` but NEVER the prefix-collision neighbour `04-0029`. No bare
-// prefix match. Codes are server-generated base32 + '-' (no LIKE wildcards), so the pattern needs no escaping.
+// prefix match. Codes are server-generated base32 + '-' (no glob metacharacters), so no escaping is needed.
+//
+// GLOB, NOT LIKE, AND THIS IS A PERFORMANCE DECISION, NOT A STYLE ONE. SQLite can only turn a prefix pattern
+// into the index range scan it looks like when the comparison is case-SENSITIVE: with the default
+// `case_sensitive_like=OFF`, `code LIKE 'C-%'` is a full table SCAN even with `code` uniquely indexed - which
+// every `code` column is (schema.ts `codeCol`). D1 exposes no way to set that pragma, so the operator is the
+// only lever. `EXPLAIN QUERY PLAN` on the exact predicate this builds:
+//
+//   code = '04' OR code LIKE '04-%'  ->  SCAN x
+//   code = '04' OR code GLOB '04-*'  ->  MULTI-INDEX OR
+//                                          SEARCH x USING COVERING INDEX (code=?)
+//                                          SEARCH x USING COVERING INDEX (code>? AND code<?)
+//
+// That is the difference between an indexed lookup and reading the table, on the hottest predicate in the
+// app: this runs for `dept` breadth AND for every per-object share and deny - and denies apply even at `all`
+// breadth, so an admin's list scanned too. It costs nothing on seeded data and is the first thing to fall
+// over on a real `attendance`/`notifications`/`audit_log`/`payslips` table.
+//
+// GLOB is case-sensitive where LIKE was not, which is strictly tighter and changes no result: codes are
+// generated from the lowercase Crockford alphabet in domain/codes.ts, so no code has a case variant to match.
 export function applyScope(
   scope: ListScope | undefined,
   code: AnySQLiteColumn | undefined,
@@ -24,13 +43,21 @@ export function applyScope(
   const denies = scope.denies ?? [];
 
   // Match code C and everything under it (boundary-anchored). Mirrors the engine's isUnder on the item path.
-  const subtree = (c: string): SQL => (code ? or(eq(code, c), like(code, `${c}-%`))! : sql`1 = 0`);
+  const subtree = (c: string): SQL => (code ? or(eq(code, c), sql`${code} glob ${`${c}-*`}`)! : sql`1 = 0`);
 
   // Breadth predicate (undefined = all rows, no filter). `all` needs no column, so it is the one breadth a
   // table without a code or owner column can still answer.
+  //
+  // `dept` is the SUBTREE of the department, which includes the department's own row - the same `isUnder`
+  // the item path decides with (domain/codes.ts), reached here through the same `subtree` helper the shares
+  // use. It used to be a bare `LIKE '<dept>-%'`, i.e. descendants ONLY, so the two halves of one rule
+  // disagreed about a row whose code IS the dept code: `GET /v1/departments/<dept>` was allowed by the
+  // engine while the list that is supposed to contain it left it out. Only `departments` can have such a row
+  // (every other collection's codes are `<dept>-<leaf>`), and it does not currently offer the `dept` tier -
+  // so this is closing the gap before something reaches it, not fixing a live symptom.
   let base: SQL | undefined;
   if (scope.breadth === "all") base = undefined;
-  else if (scope.breadth === "dept") base = scope.deptCode && code ? like(code, `${scope.deptCode}-%`) : sql`1 = 0`;
+  else if (scope.breadth === "dept") base = scope.deptCode && code ? subtree(scope.deptCode) : sql`1 = 0`;
   else base = scope.ownerId && owner ? eq(owner, scope.ownerId) : sql`1 = 0`; // own
 
   // OR in per-object shares (each as its subtree). If breadth is 'all' (base undefined) the caller already

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Laptop, Plus, HandHeart, PackagePlus, X } from "lucide-react";
 import { get, patch, invoke, create } from "@/api";
 import { cn, formatDate, idOf } from "@/lib/utils";
+import { todayStr as today } from "@/lib/orgDay";
 import { useCollection } from "@/hooks/useCollection";
 import type { Asset, AssetCategory, AssetRequest } from "@/types";
 import { ASSET_STATUS_LABEL, ASSET_STATUS_TONE } from "@/lib/assetTags";
@@ -21,7 +22,6 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 
-const today = () => new Date().toISOString().slice(0, 10);
 const EMPTY_REQUEST = { category: "", neededBy: "", justification: "" };
 
 // The company assets assigned to this employee. Read-only by default; when the caller may write assets a
@@ -55,7 +55,7 @@ export function EmployeeAssets({
   const [confirming, setConfirming] = useState<Asset | null>(null);
   // An asset names its category by reference; the catalog is small and cached, so the name costs nothing here.
   const { rows: categories } = useCollection<AssetCategory>("asset-categories");
-  const catName = useCallback((p?: string) => (p ? categories.find((c) => idOf(c.path) === idOf(p))?.display_name ?? "" : ""), [categories]);
+  const catName = useCallback((p?: string | null) => (p ? categories.find((c) => idOf(c.path) === idOf(p))?.display_name ?? "" : ""), [categories]);
 
   const empRef = `employees/${employeeId}`;
   const [requests, setRequests] = useState<AssetRequest[]>([]);

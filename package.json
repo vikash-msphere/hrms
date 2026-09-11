@@ -15,12 +15,13 @@
     "db:migrate:remote": "wrangler d1 migrations apply hrms --remote",
     "api:lint": "spectral lint openapi.yaml --fail-severity=warn",
     "api:types": "openapi-typescript openapi.yaml -o src/http/openapi.d.ts",
+    "lint": "eslint . --max-warnings 0",
     "typecheck": "npm run api:types && tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "e2e:stack": "scripts/e2eStack.sh",
-    "verify": "npm run api:lint && npm run typecheck && npm run test",
+    "verify": "npm run api:lint && npm run lint && npm run typecheck && npm run test",
     "precommit": "npm run verify",
     "prepare": "husky"
   },
@@ -57,7 +58,7 @@
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
     "frappe-charts": "^1.6.2",
-    "hono": "^4.13.4",
+    "hono": "^4.13.7",
     "html-to-image": "^1.11.13",
     "jose": "^5",
     "jsbarcode": "^3.12.3",
@@ -76,7 +77,8 @@
   "devDependencies": {
     "@aep_dev/aep-openapi-linter": "^0.5.3",
     "@cloudflare/vitest-pool-workers": "^0.12.21",
-    "@cloudflare/workers-types": "^4",
+    "@cloudflare/workers-types": "^5.20260910.1",
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@stoplight/spectral-cli": "^6",
     "@types/jsbarcode": "^3.11.4",
@@ -87,6 +89,8 @@
     "@vitejs/plugin-react": "^4",
     "autoprefixer": "^10.5.0",
     "drizzle-kit": "^0.28",
+    "eslint": "^10.10.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "husky": "^9",
     "openapi-typescript": "^7",
     "postcss": "^8.5.15",
@@ -94,12 +98,18 @@
     "tailwindcss": "^3.4.19",
     "tailwindcss-animate": "^1.0.7",
     "typescript": "^5",
+    "typescript-eslint": "^8.70.0",
     "vite": "^5",
     "vitest": "^2",
-    "wrangler": "^4"
+    "wrangler": "^4.131.0"
+  },
+  "overrides": {
+    "browserslist": "^4.28.7",
+    "baseline-browser-mapping": "^2.11.0"
   },
   "allowScripts": {
     "workerd@1.20260310.1": true,
-    "workerd@1.20260526.1": true
+    "workerd@1.20260526.1": true,
+    "workerd@1.20260910.1": true
   }
 }

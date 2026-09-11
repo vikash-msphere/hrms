@@ -41,8 +41,9 @@ export const automations = collectionRoutes<AutomationInput, typeof schema.autom
     // A hard delete: a rule that no longer exists must not sit in the trash still firing.
     remove: (deps, actor, id, ifMatch) => deleteAutomation(deps, actor, id, ifMatch),
   },
-  // Rules are admin-only, so this list is the caller's own rather than a code-scoped one.
-  list: (c, page) => listAutomations(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken),
+  // Route-level only because the paging is the older in-memory kind; the middleware's scope is passed through
+  // and bound in the service exactly as the generic list would bind it.
+  list: (c, page) => listAutomations(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken),
   verbs: {
     // The collection's OWN :enable / :disable, answered before the shared lifecycle lane. They write the same
     // `disabled` column and record the same audit stem; what they add is dropping the engine's rule cache, so a

@@ -6,7 +6,7 @@
 // fails downstream (not found / invalid), never resolving to another object.
 import { ENCODABLE } from "./encodeWireIds";
 import { isJsonBody } from "../http/jsonRequest";
-import { MAX_DOCUMENT_BYTES } from "../services/documentsCommon";
+import { MAX_DOCUMENT_BYTES, requireCappedBody } from "../services/documentsCommon";
 import type { IdCodec } from "../lib/idCodec";
 
 const TOKEN = "[0-9a-hj-km-np-tv-z]{26}"; // a wire token (encrypted 8-byte id -> 26 base32 chars)
@@ -97,10 +97,44 @@ async function decodeSearchParams(url: URL, codec: IdCodec): Promise<boolean> {
   return changed;
 }
 
+/**
+ * Read a JSON body to text, refusing at the document cap instead of buffering past it.
+ *
+ * `request.text()` reads to the end of the stream, however long that is. For a body that DECLARES its length
+ * the caller above skips the read entirely and leaves middleware/bodyLimit to refuse it - but a chunked body
+ * declares nothing, so both the declared-length check there and the one above pass, and `text()` then
+ * committed an unbounded payload to isolate memory. Here, at the outermost wrapper, that happens BEFORE auth:
+ * an anonymous `Transfer-Encoding: chunked` POST with a JSON content type was a way to spend the isolate's
+ * 128 MB against a 10 MiB cap without holding a credential.
+ *
+ * The capped read itself lives in services/documentsCommon beside the cap it enforces, because this was never
+ * the only body read that needed it - the upload routes and the /diag relay read bytes the same way.
+ */
+async function readCapped(request: Request): Promise<string> {
+  return new TextDecoder().decode(await requireCappedBody(request));
+}
+
 // Produce a request with the path token, query ref tokens, and JSON body ref tokens decoded to internal
 // ids. Non-JSON bodies (binary uploads) are passed through untouched.
+//
+// THROWS `bodyTooLarge` for a JSON body that reads past the cap (see readCapped). This runs outside Hono, so
+// the fetch handler in index.ts is what turns that into the problem+json response.
 export async function decodeWireIdsRequest(request: Request, codec: IdCodec): Promise<Request> {
   const url = new URL(request.url);
+  // THE API ONLY. `decodePathname` has always gated itself on `/v1/`, but the query and body rewrites below
+  // did not - so every request the Worker serves had its JSON body read, parsed and RE-SERIALIZED here,
+  // including the public ones mounted outside /v1. That is not a no-op on a body somebody else signed:
+  // /esign/callback is authenticated by an HMAC over the RAW bytes (services/esign/cashfree.ts parseWebhook
+  // verifies `HMAC(secret, timestamp + rawBody)`), and `JSON.stringify(JSON.parse(text))` is not the text.
+  // Pretty-printed JSON, a trailing newline, `\uXXXX` escapes, `1.0` - each of them changes the bytes and
+  // therefore the MAC, and the webhook answers "invalid webhook" for a delivery that was perfectly signed.
+  // It fails CLOSED and SILENTLY (the vendor sees a 400; e-signatures then only land via the nightly
+  // reconcile poll), and no test could see it, because the callback tests call the handler directly and
+  // never come through this edge.
+  //
+  // Nothing outside /v1 wants the transform in the first place: wire tokens are an API convention, and the
+  // public routes take their ids from a signed payload or their own HMAC'd token.
+  if (!url.pathname.startsWith("/v1/") && url.pathname !== "/v1") return request;
   const newPath = await decodePathname(url.pathname, codec);
   const pathChanged = newPath !== url.pathname;
   if (pathChanged) url.pathname = newPath;
@@ -121,7 +155,7 @@ export async function decodeWireIdsRequest(request: Request, codec: IdCodec): Pr
   const declared = Number(request.headers.get("content-length"));
   const overCap = Number.isFinite(declared) && declared > MAX_DOCUMENT_BYTES;
   if (isJson && hasBody && !overCap) {
-    const text = await request.text();
+    const text = await readCapped(request);
     let outText = text;
     if (text) {
       try {

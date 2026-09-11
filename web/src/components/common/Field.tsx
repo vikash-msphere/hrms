@@ -138,7 +138,11 @@ export function Field({
   // The server's own verdict on this field, from the last failed submit. It wins over the local rule: the local
   // one is a guess at what the API will accept, this IS what it said, and it shows immediately (the reader has
   // already pressed Save - there is nothing left to wait for).
-  const fromServer = field ? React.useContext(FieldErrorCtx)[field] : undefined;
+  // The context is read unconditionally and INDEXED conditionally. Reading it inside the ternary made the
+  // hook depend on the `field` prop, so a caller that renders the same <Field> with and without one changes
+  // this component's hook count between renders.
+  const serverErrors = React.useContext(FieldErrorCtx);
+  const fromServer = field ? serverErrors[field] : undefined;
   const shown = fromServer ?? (armed ? error : undefined);
   return (
     <div
