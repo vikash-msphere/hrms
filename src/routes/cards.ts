@@ -91,7 +91,19 @@ export const cards = collectionRoutes<CardInput, typeof schema.cards>({
   verbs: {
     move: {
       schema: moveSchema,
-      run: (deps, user, id, b) => moveCard(deps, user, id, b.to_column, b.to_swimlane, b.rank, b.to_assignee, b.to_goal, b.to_priority, b.to_department, b.to_sprint),
+      // A key the body omitted arrives as `undefined`, which the service reads as "this move does not touch
+      // that field"; an explicit null means "clear it". That is how a lane drop reassigns without wiping the
+      // sprint, and how a backlog drop clears the sprint without touching the assignee.
+      run: (deps, user, id, b) => moveCard(deps, user, id, {
+        column: b.to_column,
+        swimlane: b.to_swimlane,
+        rank: b.rank,
+        assignee: b.to_assignee,
+        goal: b.to_goal,
+        priority: b.to_priority,
+        department: b.to_department,
+        sprint: b.to_sprint,
+      }),
     },
     block: { schema: blockSchema, run: (deps, user, id, b) => setCardBlocked(deps, user, id, true, b.reason, b.blocked_by) },
     unblock: { run: (deps, user, id) => setCardBlocked(deps, user, id, false) },

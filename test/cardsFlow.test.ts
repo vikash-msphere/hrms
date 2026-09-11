@@ -62,10 +62,10 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const c1 = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "One", column_key: "todo" });
     const c2 = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Two", column_key: "todo" });
 
-    await moveCard(deps, actor, c1.uuid, "doing"); // fills the WIP-1 column
-    await expect(moveCard(deps, actor, c2.uuid, "doing")).rejects.toThrow(/WIP limit/i);
+    await moveCard(deps, actor, c1.uuid, { column: "doing" }); // fills the WIP-1 column
+    await expect(moveCard(deps, actor, c2.uuid, { column: "doing" })).rejects.toThrow(/WIP limit/i);
     // Moving back out of a full column is always allowed.
-    await expect(moveCard(deps, actor, c1.uuid, "todo")).resolves.toBeTruthy();
+    await expect(moveCard(deps, actor, c1.uuid, { column: "todo" })).resolves.toBeTruthy();
   });
 
   it("enforces per-assignee WIP independently per person", async () => {
@@ -83,9 +83,9 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const a2 = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "A2", column_key: "todo", assignee: `employees/${emp}` });
     const un = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Unassigned", column_key: "todo" });
 
-    await moveCard(deps, actor, a1.uuid, "doing"); // emp's bucket now has 1
-    await expect(moveCard(deps, actor, a2.uuid, "doing")).rejects.toThrow(/already has 1/i); // emp's bucket full
-    await expect(moveCard(deps, actor, un.uuid, "doing")).resolves.toBeTruthy(); // unassigned bucket is separate
+    await moveCard(deps, actor, a1.uuid, { column: "doing" }); // emp's bucket now has 1
+    await expect(moveCard(deps, actor, a2.uuid, { column: "doing" })).rejects.toThrow(/already has 1/i); // emp's bucket full
+    await expect(moveCard(deps, actor, un.uuid, { column: "doing" })).resolves.toBeTruthy(); // unassigned bucket is separate
   });
 
   it("stamps commitment/started/delivery times and logs every move", async () => {
@@ -97,16 +97,16 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect(row.committedAt).toBeNull();
     expect(row.deliveredAt).toBeNull();
 
-    await moveCard(deps, actor, card.uuid, "ready"); // commitment point
+    await moveCard(deps, actor, card.uuid, { column: "ready" }); // commitment point
     row = await cardRow(card.uuid);
     expect(row.committedAt).not.toBeNull();
     expect(row.startedAt).toBeNull(); // not past commitment yet
 
-    await moveCard(deps, actor, card.uuid, "in_progress");
+    await moveCard(deps, actor, card.uuid, { column: "in_progress" });
     row = await cardRow(card.uuid);
     expect(row.startedAt).not.toBeNull();
 
-    await moveCard(deps, actor, card.uuid, "done"); // delivery point
+    await moveCard(deps, actor, card.uuid, { column: "done" }); // delivery point
     row = await cardRow(card.uuid);
     expect(row.deliveredAt).not.toBeNull();
 
@@ -141,8 +141,8 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const keep = await createCard(deps, actor, { board: b1, title: "Kept" });
     const gone = await createCard(deps, actor, { board: b1, title: "Deleted" });
     for (const c of [keep, gone]) {
-      await moveCard(deps, actor, c.uuid, "ready");
-      await moveCard(deps, actor, c.uuid, "done");
+      await moveCard(deps, actor, c.uuid, { column: "ready" });
+      await moveCard(deps, actor, c.uuid, { column: "done" });
     }
 
     const before = await boardMetrics(deps, actor, board.uuid, 30);
@@ -172,10 +172,10 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
 
     expect((await goalNow()).progress).toBe(0); // 2 linked tasks, none delivered
 
-    await moveCard(deps, actor, small.uuid, "done"); // deliver 2 of 5 pts
+    await moveCard(deps, actor, small.uuid, { column: "done" }); // deliver 2 of 5 pts
     expect((await goalNow()).progress).toBe(40);
 
-    await moveCard(deps, actor, big.uuid, "done"); // deliver all 5 pts
+    await moveCard(deps, actor, big.uuid, { column: "done" }); // deliver all 5 pts
     const gr = await goalNow();
     expect(gr.progress).toBe(100);
     expect(gr.status).toBe("completed");
@@ -196,7 +196,7 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     const b = `boards/${board.uuid}`, g = `goals/${goal.uuid}`;
     const c1 = await createCard(deps, actor, { board: b, title: "One", goal: g });
     await createCard(deps, actor, { board: b, title: "Two", goal: g });
-    await moveCard(deps, actor, c1.uuid, "done"); // 1 of 2 tasks
+    await moveCard(deps, actor, c1.uuid, { column: "done" }); // 1 of 2 tasks
     const gr = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, goal.uuid)).limit(1))[0]!;
     expect(gr.progress).toBe(50);
   });
@@ -321,7 +321,7 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     (actor as { reqMeta?: unknown }).reqMeta = { ip: "1.2.3.4", ua: "vitest-agent" };
     const board = await createBoard(deps, actor, { name: "Audited" });
     const card = await createCard(deps, actor, { board: `boards/${board.uuid}`, title: "Tracked" });
-    await moveCard(deps, actor, card.uuid, "ready");
+    await moveCard(deps, actor, card.uuid, { column: "ready" });
     await updateCard(deps, actor, card.uuid, { title: "Renamed" });
     const rows = (await deps.db.select().from(schema.auditLog).where(eq(schema.auditLog.entity, "cards"))).filter((r) => r.entityId === card.uuid);
     expect(rows.map((r) => r.action).sort()).toEqual(["card.create", "card.move", "card.update"]);
@@ -409,7 +409,7 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
 
     const done = await createCard(deps, actor, { board: `boards/${board.uuid}`, sprint: `sprints/${s1.uuid}`, title: "Done" });
     const wip = await createCard(deps, actor, { board: `boards/${board.uuid}`, sprint: `sprints/${s1.uuid}`, title: "Unfinished" });
-    await moveCard(deps, actor, done.uuid, "done"); // delivered
+    await moveCard(deps, actor, done.uuid, { column: "done" }); // delivered
 
     await completeSprint(deps, actor, s1.uuid);
     const doneRow = await cardRow(done.uuid);
@@ -426,20 +426,20 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect((await cardRow(card.uuid)).sprintId).toBeNull();
 
     // Pull into the sprint: one move call sets sprint + column + rank.
-    await moveCard(deps, actor, card.uuid, "in_progress", undefined, 512, undefined, undefined, undefined, undefined, `sprints/${s1.uuid}`);
+    await moveCard(deps, actor, card.uuid, { column: "in_progress", rank: 512, sprint: `sprints/${s1.uuid}` });
     let row = await cardRow(card.uuid);
     expect(row.sprintId).toBe(s1.uuid);
     expect(row.columnKey).toBe("in_progress");
     expect(row.rank).toBe(512);
 
     // Send back to the backlog (to_sprint null) with a reorder rank; column unchanged.
-    await moveCard(deps, actor, card.uuid, "in_progress", undefined, 256, undefined, undefined, undefined, undefined, null);
+    await moveCard(deps, actor, card.uuid, { column: "in_progress", rank: 256, sprint: null });
     row = await cardRow(card.uuid);
     expect(row.sprintId).toBeNull();
     expect(row.rank).toBe(256);
 
     // A move that says nothing about sprints leaves the assignment alone.
-    await moveCard(deps, actor, card.uuid, "review");
+    await moveCard(deps, actor, card.uuid, { column: "review" });
     expect((await cardRow(card.uuid)).sprintId).toBeNull();
   });
 

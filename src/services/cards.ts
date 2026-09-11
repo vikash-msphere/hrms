@@ -592,19 +592,24 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
 // The pull action. Moves a card to `toColumn` (optionally a swimlane + explicit rank), enforcing the destination
 // column's WIP limit server-side, stamping the commitment/started/delivery timestamps the first time the card
 // crosses those points, appending a movement, and (if the board opts in) rolling a delivered card up to its goal.
-export async function moveCard(
-  deps: Deps,
-  actor: AppUser,
-  id: string,
-  toColumn: string,
-  toSwimlane?: string | null,
-  rank?: number,
-  toAssignee?: string | null,
-  toGoal?: string | null,
-  toPriority?: string | null,
-  toDepartment?: string | null,
-  toSprint?: string | null,
-) {
+// Where a move is sending the card. Every field except `column` is optional, and the difference between
+// ABSENT and null is load-bearing: absent means "this move does not touch that field", null means "clear it"
+// (drop the swimlane, unassign, send back to the backlog). A positional parameter list could not hold that
+// distinction safely - five adjacent `string | null | undefined` arguments type-check in any order, so a
+// transposed pair silently moved the wrong field.
+export type MoveCardTarget = {
+  column: string;
+  swimlane?: string | null;
+  rank?: number;
+  assignee?: string | null;
+  goal?: string | null;
+  priority?: string | null;
+  department?: string | null;
+  sprint?: string | null;
+};
+
+export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveCardTarget) {
+  const { column: toColumn, swimlane: toSwimlane, rank, assignee: toAssignee, goal: toGoal, priority: toPriority, department: toDepartment, sprint: toSprint } = to;
   const row = await getCard(deps, actor, id);
   if (row.deleteTime) throw notFound("card not found");
   const board = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, row.boardId)).limit(1))[0];

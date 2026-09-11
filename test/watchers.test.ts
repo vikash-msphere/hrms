@@ -71,7 +71,7 @@ describe("card watchers", () => {
     const cols = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, board.uuid)).limit(1))[0]!;
     const columns = JSON.parse(cols.columnsJson) as { key: string }[];
 
-    await moveCard(deps, owner, card.uuid, columns[1]!.key);
+    await moveCard(deps, owner, card.uuid, { column: columns[1]!.key });
     await commentCard(deps, owner, card.uuid, "picked this up");
     await setCardBlocked(deps, owner, card.uuid, true, "waiting on vendor");
     await setCardBlocked(deps, owner, card.uuid, false);
@@ -177,7 +177,7 @@ describe("recurring cards", () => {
       board: `boards/${board.uuid}`, title: "Access review", assignee: `employees/${doer}`,
       due_date: lastDue.toISOString().slice(0, 10), cadence: "monthly", size: 3, initial_todos: ["pull the list", "check leavers"],
     });
-    await moveCard(deps, owner, card.uuid, cols[cols.length - 1]!.key); // deliver it
+    await moveCard(deps, owner, card.uuid, { column: cols[cols.length - 1]!.key }); // deliver it
 
     expect(await rollRecurringCards(deps)).toBe(1);
     const all = await deps.db.select().from(schema.cards).where(eq(schema.cards.boardId, board.uuid));
@@ -210,7 +210,7 @@ describe("recurring cards", () => {
     const board = await createBoard(deps, owner, { name: "Doomed" });
     const cols = JSON.parse((await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, board.uuid)).limit(1))[0]!.columnsJson) as { key: string }[];
     const card = await createCard(deps, owner, { board: `boards/${board.uuid}`, title: "Weekly sweep", due_date: "2026-01-01", cadence: "weekly" });
-    await moveCard(deps, owner, card.uuid, cols[cols.length - 1]!.key); // deliver it
+    await moveCard(deps, owner, card.uuid, { column: cols[cols.length - 1]!.key }); // deliver it
     await deps.db.update(schema.boards).set({ deleteTime: new Date() }).where(eq(schema.boards.uuid, board.uuid));
 
     // No throw, nothing filed, and no second card.
@@ -235,7 +235,7 @@ describe("recurring cards", () => {
     const board = await createBoard(deps, owner, { name: "Ops" });
     const cols = JSON.parse((await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, board.uuid)).limit(1))[0]!.columnsJson) as { key: string }[];
     const card = await createCard(deps, owner, { board: `boards/${board.uuid}`, title: "Weekly sweep", cadence: "weekly" });
-    await moveCard(deps, owner, card.uuid, cols[cols.length - 1]!.key);
+    await moveCard(deps, owner, card.uuid, { column: cols[cols.length - 1]!.key });
 
     await rollRecurringCards(deps);
     const next = (await deps.db.select().from(schema.cards)).find((c) => c.uuid !== card.uuid)!;
@@ -251,7 +251,7 @@ describe("recurring cards", () => {
     const cols = JSON.parse((await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, board.uuid)).limit(1))[0]!.columnsJson) as { key: string }[];
     const goal = await createGoal(deps, owner, { title: "Keep the lights on" });
     const card = await createCard(deps, owner, { board: `boards/${board.uuid}`, title: "Weekly sweep", cadence: "weekly", goal: `goals/${goal.uuid}` });
-    await moveCard(deps, owner, card.uuid, cols[cols.length - 1]!.key);
+    await moveCard(deps, owner, card.uuid, { column: cols[cols.length - 1]!.key });
 
     await rollRecurringCards(deps);
     const next = (await deps.db.select().from(schema.cards)).find((c) => c.uuid !== card.uuid)!;
