@@ -70,6 +70,16 @@ const MEMORY_ONLY = new Set([
   "background-checks",
   "api-keys",
   "bank-formats",
+  // An offer row carries `base_comp` - the annual compensation being offered (src/db/schema.ts) - which is the
+  // same kind of figure `compensation` is on this list for, before the person it belongs to has even accepted.
+  // It was persistable only because the rule above was applied by remembering, and the test that pins this set
+  // asserts a hand-written allowlist, so nothing caught it. The Offers page reads it once; storing it bought
+  // nothing.
+  "offers",
+  // Candidates are the one collection here whose subjects are not employees: name, personal email, phone and
+  // free-text notes on people OUTSIDE the org, who never agreed to anything and cannot ask for it back. Same
+  // reasoning, same conclusion - read on one page, so keep it off the disk.
+  "candidates",
 ]);
 
 /** Whether a loaded copy of this collection may be written to disk (see MEMORY_ONLY above). */

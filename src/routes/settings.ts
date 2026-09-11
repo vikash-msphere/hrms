@@ -90,6 +90,67 @@ function validateTagCustody(value: unknown) {
   if (value.verify_stale_days != null && !isIntIn(value.verify_stale_days, 7, 3650)) throw invalidArgument("asset-tags.custody.verify_stale_days must be an integer in [7, 3650]");
 }
 
+// The org's attendance schedule (settings/attendance) - and therefore the org's CALENDAR DAY, the LOP divisor,
+// the wage LOP is docked from and the proration basis. It belongs in this table for exactly the reason the
+// table exists, and it was the one such key with no validator while its timezone field is free text in the UI
+// (web/src/pages/Settings.tsx). That left two failure modes, and the quiet one is the worse of them:
+//
+//   - A value ICU REFUSES - "Asia/Bombay", "GMT+5:30", "UTC+5:30", the shapes somebody reaches for when
+//     "Asia/Kolkata" is not to hand - makes `Intl.DateTimeFormat` THROW inside `localDay`. Not a wrong day: an
+//     exception, out of the attendance clock, the payroll build, and every nightly cron subtask that asks for
+//     today. It is stored, so it is a 500 that persists until somebody edits the row back by hand.
+//   - A value ICU ACCEPTS that is not a zone - "EST", "IST": fixed offsets carrying no daylight-saving rules -
+//     errors nowhere. The org's day is silently wrong half the year, and a negative fixed offset also puts the
+//     deployment west of UTC, which is the side every date-only comparison in the app is thinner on (see
+//     domain/attendance.ts#utcDay).
+//
+// So a zone must be a real IANA NAME - "UTC", or Area/Location - and must resolve here. The rest of the blob is
+// checked because it is arithmetic that fails silently: a `lop_basis` typo picks the other divisor without
+// complaint, a non-numeric `full_day_minutes` makes every comparison in `lopDayUnits` false so nothing is ever
+// docked, and a `work_days` that is not an array is a TypeError inside the pure day walk.
+const LOP_BASES = ["working_days", "days_30"] as const;
+const LOP_WAGE_BASES = ["gross", "basic"] as const;
+const PRORATION_BASES = ["calendar_days", "working_days"] as const;
+
+function validateTimezone(tz: unknown) {
+  if (typeof tz !== "string" || !tz.trim()) throw invalidArgument("attendance.timezone must be a non-empty IANA timezone name, e.g. Asia/Kolkata");
+  const name = tz.trim();
+  // Shape first, because it is the half ICU will not refuse for us: an abbreviation ("IST", "EST") and a bare
+  // "GMT" resolve to a FIXED offset with no daylight-saving rules, which is not what any of the callers mean
+  // by "the org's timezone". "UTC" is the one legitimate slash-free zone.
+  if (name !== "UTC" && !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+){1,2}$/.test(name)) {
+    throw invalidArgument(`attendance.timezone must be an IANA zone name like Asia/Kolkata - "${name}" is an abbreviation or a fixed offset, which carries no daylight-saving rules`);
+  }
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: name, year: "numeric" }).format(new Date(0));
+  } catch {
+    throw invalidArgument(`attendance.timezone "${name}" is not a timezone this runtime knows (it must be a current IANA name, e.g. Asia/Kolkata rather than Asia/Bombay)`);
+  }
+}
+
+function validateAttendance(value: unknown) {
+  if (!isObj(value)) return;
+  if (value.timezone != null) validateTimezone(value.timezone);
+  if (value.work_days != null && (!Array.isArray(value.work_days) || value.work_days.some((d) => !isIntIn(d, 0, 6)))) {
+    throw invalidArgument("attendance.work_days must be an array of weekday numbers (0=Sun..6=Sat)");
+  }
+  for (const k of ["full_day_minutes", "half_day_minutes"] as const) {
+    if (value[k] != null && !isIntIn(value[k], 0, 1440)) throw invalidArgument(`attendance.${k} must be a whole number of minutes in [0, 1440]`);
+  }
+  // A half day worth more than a full one inverts the ladder in `lopDayUnits`: the 0.5 branch becomes
+  // unreachable and every short day is charged as a whole absence.
+  if (typeof value.full_day_minutes === "number" && typeof value.half_day_minutes === "number" && value.half_day_minutes > value.full_day_minutes) {
+    throw invalidArgument("attendance.half_day_minutes must not exceed attendance.full_day_minutes");
+  }
+  if (value.lop_enabled != null && typeof value.lop_enabled !== "boolean") throw invalidArgument("attendance.lop_enabled must be a boolean");
+  for (const [k, allowed] of [["lop_basis", LOP_BASES], ["lop_wage_basis", LOP_WAGE_BASES], ["proration_basis", PRORATION_BASES]] as const) {
+    const v = value[k];
+    if (v != null && (typeof v !== "string" || !(allowed as readonly string[]).includes(v))) {
+      throw invalidArgument(`attendance.${k} must be one of: ${allowed.join(", ")}`);
+    }
+  }
+}
+
 // Per-currency display/payout precision: a { [ISO code]: decimals } map. Each entry must be an integer in
 // [0, 4] - money is stored full-precision, so this only sets how many places a currency is shown and paid in.
 // `document_logos` maps a generated-document kind to the letterhead it prints on; an unknown kind would be a
@@ -139,9 +200,13 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["payslip", validatePayslip],
   ["asset-tags", validateAssetTags],
   ["organization", validateOrganization],
+  ["attendance", validateAttendance],
 ]);
 
-function validateSettingValue(key: string, value: unknown) {
+// Exported so test/attendanceSettings.test.ts can drive the per-key rules without a request: these guard the
+// blobs the day and money math read, and the failures they exist to stop (a timezone the runtime throws on, a
+// silently-ignored `lop_basis` typo) are the kind nothing downstream can report.
+export function validateSettingValue(key: string, value: unknown) {
   SETTING_VALIDATORS.get(key)?.(value);
 }
 

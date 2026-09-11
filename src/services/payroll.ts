@@ -25,7 +25,7 @@ import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, t
 import { getSettingValue } from "./settings";
 import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
 import type { LetterheadSpec } from "../lib/letterPdf";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
 import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } from "./compensation";
@@ -160,15 +160,21 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   const tz = att.timezone || "Asia/Kolkata";
   const startMs = +new Date(period.periodStart);
   const endMs = +new Date(period.periodEnd);
-  const startYmd = localDay(startMs, tz);
-  const periodEndYmd = localDay(endMs, tz);
+  // DATE-ONLY columns, so their days are read in UTC (`utcDay`); `now` is an INSTANT, so its day is read in
+  // the org timezone (`localDay`). Mixing the two is what the domain helper's header describes: read through
+  // `localDay`, the period's own bounds and every holiday shifted a day earlier west of UTC, so LOP enumerated
+  // a window one day off the period - charging the day before it began and never checking the day it ended -
+  // while excusing the day before each holiday and docking the holiday itself. The punch days below stay on
+  // `localDay`, because a punch IS an instant and the day it belongs to is the org's.
+  const startYmd = utcDay(startMs);
+  const periodEndYmd = utcDay(endMs);
   const todayYmd = localDay(+deps.clock.now(), tz);
   const endYmd = periodEndYmd < todayYmd ? periodEndYmd : todayYmd;
 
   const holidays = new Set(
     (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= startMs && +new Date(h.date) <= endMs)
-      .map((h) => localDay(+new Date(h.date), tz)),
+      .map((h) => utcDay(+new Date(h.date))),
   );
   // EVERY READ BELOW IS BOUND TO THE PERIOD IN SQL. All three used to read their whole table and keep the
   // one month that mattered: approved leave, attendance punches, count-as-work events. Like the ESI probe
@@ -183,7 +189,7 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     .where(and(eq(schema.leaveRequests.state, "APPROVED"), gte(schema.leaveRequests.endDate, new Date(startMs)), lte(schema.leaveRequests.startDate, new Date(endMs))))) {
     if (l.state !== "APPROVED" || +new Date(l.endDate) < startMs || +new Date(l.startDate) > endMs) continue;
     const arr = leaveByEmp.get(l.employeeId) ?? [];
-    arr.push({ start: localDay(+new Date(l.startDate), tz), end: localDay(+new Date(l.endDate), tz) });
+    arr.push({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)) });
     leaveByEmp.set(l.employeeId, arr);
   }
   const workedByEmp = new Map<string, Map<string, number>>(); // employee -> day -> worked minutes
@@ -364,10 +370,13 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // Proration for partial-period employment (mid-period joiners/leavers): a per-employee factor on the regular
   // earnings, by the configured basis. Needs the period ymds + holidays (for the working-days basis); reuse the
   // LOP facts when present, else compute the minimal holiday set once. A full-period employee gets factor 1.
-  const tz = att.timezone || "Asia/Kolkata";
   const prorationBasis = att.proration_basis ?? "calendar_days";
-  const periodStartYmd = period ? localDay(+new Date(period.periodStart), tz) : "";
-  const periodEndYmd = period ? localDay(+new Date(period.periodEnd), tz) : "";
+  // DATE-ONLY columns: their day is the UTC one they are anchored at, never the org-local reading of that
+  // instant. See domain/attendance.ts#utcDay - through `localDay` the proration window shifted a day earlier
+  // west of UTC, which the `working_days` basis turns into a different weekday composition and therefore a
+  // different factor on every partial-period employee's pay.
+  const periodStartYmd = period ? utcDay(+new Date(period.periodStart)) : "";
+  const periodEndYmd = period ? utcDay(+new Date(period.periodEnd)) : "";
   // Half-day and location-scoped holidays are counted here as ordinary company holidays on purpose: this set
   // only ever EXCUSES a day (LOP, and the working-days proration basis), so the lenient reading can never dock
   // someone for a day the office may have been shut. Leave charging, where the distinction changes what an
@@ -375,7 +384,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const holidaySet = !period ? new Set<string>() : lop?.holidays ?? new Set(
     (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= +new Date(period.periodStart) && +new Date(h.date) <= +new Date(period.periodEnd))
-      .map((h) => localDay(+new Date(h.date), tz)),
+      .map((h) => utcDay(+new Date(h.date))),
   );
 
   // The payslip is rendered in the org currency, and every line total is summed as a bare number. The app is
@@ -453,8 +462,8 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // Partial-employment proration factor (1.0 for a full-period employee). Applied to the BASIC, Special
     // Allowance and every recurring EARNING (fixed + percent-of-base); EPF rides the prorated base too. Fixed
     // DEDUCTIONS are not prorated. In-window absences are still docked separately by LOP at the full daily rate.
-    const empStartYmd = e.startDate ? localDay(+new Date(e.startDate), tz) : null;
-    const empEndYmd = e.endDate ? localDay(+new Date(e.endDate), tz) : null;
+    const empStartYmd = e.startDate ? utcDay(+new Date(e.startDate)) : null;
+    const empEndYmd = e.endDate ? utcDay(+new Date(e.endDate)) : null;
     const factor = period
       ? employmentFraction({ periodStartYmd, periodEndYmd, empStartYmd, empEndYmd, workDays: att.work_days, holidays: holidaySet, basis: prorationBasis })
       : 1;
@@ -1114,9 +1123,8 @@ async function payslipDataForItem(deps: Deps, ctx: PayslipRunContext, it: typeof
     // Clamp the window to employment so a mid-period joiner/leaver's strip matches what the build charged:
     // pre-join / post-leave days are covered by proration, not shown as absences. workingDays reflects the
     // days actually employed in the period, so daysPayable lines up with the (prorated) pay.
-    const tz = att.timezone || "Asia/Kolkata";
-    const empStartYmd = emp.startDate ? localDay(+new Date(emp.startDate), tz) : null;
-    const empEndYmd = emp.endDate ? localDay(+new Date(emp.endDate), tz) : null;
+    const empStartYmd = emp.startDate ? utcDay(+new Date(emp.startDate)) : null;
+    const empEndYmd = emp.endDate ? utcDay(+new Date(emp.endDate)) : null;
     const wStart = empStartYmd && empStartYmd > lop.startYmd ? empStartYmd : lop.startYmd;
     const wEnd = empEndYmd && empEndYmd < lop.endYmd ? empEndYmd : lop.endYmd;
     const lopDays = lopDayUnits({

@@ -6,6 +6,7 @@ import { buildIcs } from "../lib/ics";
 import { getSettingValue } from "../services/settings";
 import { holidayApplies } from "../services/holidays";
 import { refHolidays } from "../lib/refData";
+import { counter } from "../lib/isolateRate";
 
 // PUBLIC, SUBSCRIBABLE holiday calendar: `<origin>/calendar/holidays/<token>` pasted into Google Calendar or
 // Outlook keeps someone's days off in sync, instead of the one-shot .ics the page downloads. No session - a
@@ -21,8 +22,20 @@ import { refHolidays } from "../lib/refData";
 
 const ymd = (d: Date | number | string) => new Date(d).toISOString().slice(0, 10);
 
+// A FLOOR on an unauthenticated route (the control is the WAF rule - see lib/isolateRate.ts). /auth, /diag and
+// /esign each have one and this route did not. It is the most expensive of the four per request: a valid token
+// reads the whole `settings` table AND the whole `holidays` table (lib/refData.ts reads those catalogs whole),
+// plus the employee row, their positions and their optional-holiday picks. The URL is meant to be pasted into a
+// calendar client, so it is long-lived, shareable and polled on somebody else's schedule - and D1 bills rows
+// read. Sized well above what any calendar client refreshes at; a forged token still costs nothing, because the
+// decode below runs first and is pure compute.
+const feeds = counter(300);
+
 export const holidayFeed = new Hono<AppEnv>().get("/holidays/:token", async (c) => {
   const deps = c.get("deps");
+  if (feeds.throttled(Date.now())) {
+    return c.text("too many requests", 429, { "Retry-After": String(feeds.retryAfterSeconds) });
+  }
   // Decode BEFORE reading anything: this route is unauthenticated (a calendar client has no session) and token
   // validation is pure compute, so a forged token should cost zero D1 reads rather than a settings read each.
   const employeeId = await deps.idCodec.decode("holiday-feed", c.req.param("token").replace(/\.ics$/, ""));

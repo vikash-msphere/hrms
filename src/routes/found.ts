@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { getSettingValue } from "../services/settings";
+import { counter } from "../lib/isolateRate";
 
 // PUBLIC lost-and-found lookup for printed asset tags: the sticker's QR can encode
 // `<origin>/found/<wire-id>` so a stranger who finds the hardware sees who to return it to -
@@ -15,6 +16,18 @@ import { getSettingValue } from "../services/settings";
 // NOTE for Cloudflare Access deployments: CF sits in front of the whole worker, so `/found/*`
 // needs a bypass rule in the CF Access app config before the QR works for outsiders.
 type FoundPage = { enabled?: boolean; contact?: string; show_name?: boolean };
+
+// A FLOOR on an unauthenticated route (the control is the WAF rule - see lib/isolateRate.ts). /auth, /diag and
+// /esign each have one and this route did not, on the reasoning that a stranger returning hardware cannot be
+// asked to hold a credential. That is an argument for having no AUTH here, not for having no bound: the token
+// is PRINTED ON THE STICKER, so it is public by design, and every request carrying a valid one reads the whole
+// `settings` table (lib/refData.ts reads these catalogs whole) plus the asset row. D1 bills rows read, so a
+// scanned-and-shared tag URL is a cheap way to spend the quota the app itself needs - no forgery required. A
+// forged token still costs nothing: the decode below runs first and is pure compute.
+//
+// Generous against the traffic this page is for (someone found a laptop, once), and a rejection is a plain 429
+// with Retry-After rather than a broken page.
+const lookups = counter(300);
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
@@ -48,9 +61,12 @@ export const found = new Hono<AppEnv>()
   })
   .get("/:token", async (c) => {
   const deps = c.get("deps");
-  // Decode BEFORE reading anything. This route is unauthenticated and unrated by nature (a stranger returning
-  // hardware has no session), and token validation is pure compute with zero DB reads - so checking it first
-  // means a forged or scanned-at-random token costs nothing, instead of a settings read per attempt.
+  if (lookups.throttled(Date.now())) {
+    return c.text("too many lookups", 429, { "Retry-After": String(lookups.retryAfterSeconds) });
+  }
+  // Decode BEFORE reading anything. This route is unauthenticated by nature (a stranger returning hardware has
+  // no session), and token validation is pure compute with zero DB reads - so checking it first means a forged
+  // or scanned-at-random token costs nothing, instead of a settings read per attempt.
   const uuid = await deps.idCodec.decode("assets", c.req.param("token"));
   if (!uuid) return c.notFound();
   const cfg = await getSettingValue<{ found_page?: FoundPage }>(deps, "asset-tags", {});

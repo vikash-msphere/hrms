@@ -5,6 +5,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { crudService, has, type CrudSpec, type SetOf } from "./crud";
+import { payComponentLineCode } from "../domain/payroll";
 
 export type PayComponentInput = {
   display_name?: string;
@@ -96,6 +97,32 @@ async function validatePt(deps: Deps, effective: { method?: string; kind?: strin
   if (dup) throw invalidArgument(`only one Professional Tax component may exist - ${dupHint(dup)}`);
 }
 
+// Two components must not reduce to the same payslip LINE CODE.
+//
+// Every line a run writes is matched downstream by its exact code - the statutory register, the PF ECR, the
+// loss-of-pay normalisation, the payout rounding line, the payslip template's block lookups - and an ordinary
+// component's code is the slug of its NAME: upper-cased, with every run of non-alphanumerics collapsed to a
+// single '_' (domain/payroll.ts componentLineCode). So names that differ only in punctuation or case -
+// "Travel Allowance" and "Travel-Allowance", "Fuel" and "fuel " - are ONE code for TWO heads. The run prices
+// both and writes both, and anything reading a head by code then gets whichever of them came last; the two
+// amounts also read as one line on the payslip. Nothing downstream can notice, because by then there is only
+// one code to notice with. The catalog is the only place both names are visible, so it is where this is
+// refused. Employer contributions are checked the same way - their codes are namespaced (`ER_…`) but still
+// slugged from the name, so they collide among themselves on exactly the same rule.
+async function validateLineCode(deps: Deps, effective: { kind?: string; method?: string; name?: string }, selfId?: string) {
+  const { kind, method, name } = effective;
+  if (!kind || !method || !name) return;
+  const code = payComponentLineCode({ kind, method, name });
+  const dup = (await deps.db.select().from(schema.payComponents)).find(
+    (c) => !c.deleteTime && c.uuid !== selfId && payComponentLineCode(c) === code,
+  );
+  if (dup) {
+    throw invalidArgument(
+      `"${name}" reduces to the payslip line code "${code}", which "${dup.name}" already uses${dup.disabled ? " (disabled, but still using it)" : ""} - rename one of them`,
+    );
+  }
+}
+
 export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComponents> = {
   table: schema.payComponents,
   collection: "pay-components",
@@ -110,6 +137,7 @@ export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComp
     await validateEsi(deps, { method, kind: input.kind });
     await validatePfCharges(deps, { method, kind: input.kind });
     await validatePt(deps, { method, kind: input.kind });
+    await validateLineCode(deps, { kind: input.kind, method, name: input.display_name });
     validateComponentAmounts(
       method,
       method === "income_tax" || method === "pt" ? null : input.rate ?? null,
@@ -146,12 +174,16 @@ export const payComponentSpec: CrudSpec<PayComponentInput, typeof schema.payComp
       method: (has(patch, "method") ? patch.method : row.method) ?? row.method,
       kind: (has(patch, "kind") ? patch.kind : row.kind) ?? row.kind,
       regime: has(patch, "regime") ? patch.regime?.trim() || null : row.regime,
+      // The NAME is part of the effective state too, because it is what the line code is slugged from: a
+      // rename is exactly how a collision gets introduced into a catalog that had none.
+      name: (has(patch, "display_name") ? patch.display_name : row.name) ?? row.name,
     };
     await validateIncomeTax(deps, eff, row.uuid);
     await validateEpf(deps, eff, row.uuid);
     await validateEsi(deps, eff, row.uuid);
     await validatePfCharges(deps, eff, row.uuid);
     await validatePt(deps, eff, row.uuid);
+    await validateLineCode(deps, eff, row.uuid);
     const effRate = has(patch, "rate") ? patch.rate ?? null : row.rate;
     const effCap = has(patch, "cap") ? patch.cap ?? null : row.cap;
     validateComponentAmounts(

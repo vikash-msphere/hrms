@@ -19,7 +19,13 @@
 export type IsolateRate = {
   /** True when this isolate has already spent its allowance for the current window. Counts the call. */
   throttled(nowMs: number): boolean;
-  /** Seconds to advertise in `Retry-After`. */
+  /**
+   * Seconds to advertise in `Retry-After`: what is LEFT of the window that refused the call, not the window's
+   * length. These are FIXED windows, so a caller throttled at second 59 is clear a second later - telling them
+   * 60 parks a legitimate client (a provider's delivery worker, an SDK honouring the header) for a whole extra
+   * window over a burst that has already passed. Read after `throttled` returns true; with no window open it
+   * answers the full length, which is the only honest answer before anything has been counted.
+   */
   retryAfterSeconds: number;
 };
 
@@ -43,11 +49,23 @@ export type IsolateRate = {
 export type KeyedIsolateRate = {
   /** True when THIS key has spent its allowance for the current window. Counts the call. */
   throttled(key: string, nowMs: number): boolean;
+  /** Seconds left in the window that refused the most recent `throttled` call - see IsolateRate. */
   retryAfterSeconds: number;
 };
 
 export function keyedCounter(maxPerWindow: number, windowMs = 60_000, maxKeys = 5_000): KeyedIsolateRate {
   const windows = new Map<string, { startedAt: number; count: number }>();
+  // What `throttled` last looked at, so `retryAfterSeconds` can report the remainder of the window that
+  // actually refused the call. A getter rather than a value for the same reason.
+  //
+  // ONE slot, not one per key: read `retryAfterSeconds` in the same synchronous stretch as the `throttled`
+  // call it belongs to (which every caller does - there is no await between the two), and it is that key's
+  // window. Await in between and it is whichever key was asked about most recently, because an isolate serves
+  // many requests off one event loop.
+  // NULL, not 0: a window can legitimately open at epoch 0 (every test clock does), and a falsy sentinel read
+  // that as "no window yet" and reported the full length.
+  let lastAt: number | null = null;
+  let lastStartedAt: number | null = null;
   return {
     throttled(key: string, nowMs: number): boolean {
       let w = windows.get(key);
@@ -59,15 +77,20 @@ export function keyedCounter(maxPerWindow: number, windowMs = 60_000, maxKeys = 
         windows.set(key, (w = { startedAt: nowMs, count: 0 }));
       }
       w.count++;
+      lastAt = nowMs;
+      lastStartedAt = w.startedAt;
       return w.count > maxPerWindow;
     },
-    retryAfterSeconds: Math.ceil(windowMs / 1000),
+    get retryAfterSeconds() {
+      return lastAt === null || lastStartedAt === null ? Math.ceil(windowMs / 1000) : remainingSeconds(lastStartedAt, lastAt, windowMs);
+    },
   };
 }
 
 export function counter(maxPerWindow: number, windowMs = 60_000): IsolateRate {
   let windowStartedAt = 0;
   let count = 0;
+  let lastAt: number | null = null;
   return {
     throttled(nowMs: number): boolean {
       if (nowMs - windowStartedAt >= windowMs) {
@@ -75,8 +98,17 @@ export function counter(maxPerWindow: number, windowMs = 60_000): IsolateRate {
         count = 0;
       }
       count++;
+      lastAt = nowMs;
       return count > maxPerWindow;
     },
-    retryAfterSeconds: Math.ceil(windowMs / 1000),
+    get retryAfterSeconds() {
+      return lastAt === null ? Math.ceil(windowMs / 1000) : remainingSeconds(windowStartedAt, lastAt, windowMs);
+    },
   };
+}
+
+/** Whole seconds left in a fixed window, at least 1 (a `Retry-After: 0` invites an immediate retry that the
+ *  same window would refuse again). Callers answer the full length when no window has opened yet. */
+function remainingSeconds(startedAt: number, nowMs: number, windowMs: number): number {
+  return Math.max(1, Math.ceil((startedAt + windowMs - nowMs) / 1000));
 }

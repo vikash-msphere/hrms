@@ -137,9 +137,32 @@ import { tableViews } from "./routes/tableViews";
 import { tableFields } from "./routes/tableFields";
 import { authRoutes } from "./routes/authRoutes";
 
+/** Path prefixes the Worker owns outright, where a miss is a real 404 rather than a client-side route.
+ *
+ *  MUST mirror `run_worker_first` in wrangler.toml - that setting decides which paths reach the Worker
+ *  ahead of the assets, and this decides how a miss among them is answered. test/spaFallback.test.ts pins
+ *  the two together, because a prefix added to one and not the other fails in a way nothing else catches:
+ *  the route starts replying 200 with the app shell instead of its 404. */
+export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag"];
+
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
 app.use("*", requestId); // correlation id on every request/response + in error logs
+// Response security headers across every path the WORKER owns, ahead of the middleware that can answer before
+// a mount is reached. Each mount below still declares the middleware inside its own chain, and this is
+// idempotent with them - securityHeaders fills a header in rather than overwriting one, so a route that sets
+// its own (the /found page's inline-style CSP, the calendar feed's cache directives) keeps it. What this adds
+// is the responses produced ABOVE a mount, which that mount's copy can never reach: `bodyLimit` on the next
+// line is the concrete case, and a 413 was the one /v1 answer in the app shipping with no `nosniff`, no
+// `frame-ancestors` and no `Cache-Control`.
+//
+// DELIBERATELY NOT "*". The catch-all would also wrap the SPA fallback at the bottom of this file, whose
+// headers come from the asset layer's `_headers` - and the API's CSP is `default-src 'none'`, which renders
+// the app shell as a blank page if it ever landed on one. The prefixes are the same set the fallback treats as
+// worker-owned, and the test that pins that list against wrangler.toml covers this registration with it.
+for (const prefix of [...WORKER_OWNED_PREFIXES.flatMap((p) => [p, `${p}/*`]), "/healthz", "/readyz"]) {
+  app.use(prefix, securityHeaders);
+}
 // Body ceiling on EVERY route, not just /v1: the e-sign webhook below also buffers a JSON body, and a cap that
 // stops at /v1 is not a cap on the worker. Registered here because Hono applies middleware in registration
 // order against the routes declared AFTER it - mounted lower down, it would miss /auth, /found and /esign.
@@ -148,14 +171,11 @@ app.use("*", bodyLimit); // refuse an oversized body from Content-Length, before
 // Unauthenticated health checks for uptime monitors / load balancers (everything under /v1 needs an Access
 // JWT, so there must be something to probe without one). /healthz is pure liveness; /readyz also pings D1.
 //
-// They carry the security headers too. These were the only two JSON responses in the Worker that shipped
-// without them - no `nosniff`, no `frame-ancestors`, no `Cache-Control` - because every other mount declares
-// the middleware and these two were registered before any of them. Nothing here is sensitive; the point is
-// that "which responses are hardened" should not be a list somebody has to keep in their head, and an
-// unauthenticated endpoint is the wrong one to leave off it. It also stops an intermediary caching a stale
+// They carry the security headers too, from the registration above - which is why they are named in it: they
+// sit outside every worker-owned prefix, so nothing else would cover them. Nothing here is sensitive; the
+// point is that "which responses are hardened" should not be a list somebody has to keep in their head, and
+// an unauthenticated endpoint is the wrong one to leave off it. It also stops an intermediary caching a stale
 // `ready` past the isolate window the block below is careful to bound.
-app.use("/healthz", securityHeaders);
-app.use("/readyz", securityHeaders);
 app.get("/healthz", (c) => c.json({ status: "ok" }));
 
 // A READY answer is cached in the isolate for a few seconds. /readyz is unauthenticated and touches D1, so
@@ -351,14 +371,6 @@ app.route("/v1/table-views", tableViews); // saved custom grids (the definition;
 // narrow: SPA routes are slash-separated words, so requiring a dot in the final segment (and no trailing
 // slash) never catches one.
 const LOOKS_LIKE_A_FILE = /\/[^/]+\.[a-z0-9]+$/i;
-
-/** Path prefixes the Worker owns outright, where a miss is a real 404 rather than a client-side route.
- *
- *  MUST mirror `run_worker_first` in wrangler.toml - that setting decides which paths reach the Worker
- *  ahead of the assets, and this decides how a miss among them is answered. test/spaFallback.test.ts pins
- *  the two together, because a prefix added to one and not the other fails in a way nothing else catches:
- *  the route starts replying 200 with the app shell instead of its 404. */
-export const WORKER_OWNED_PREFIXES = ["/v1", "/esign", "/auth", "/found", "/calendar", "/diag"];
 
 // Everything the asset layer could not serve arrives here, because `not_found_handling` is "none" - the
 // SPA fallback is this function's job rather than the platform's.

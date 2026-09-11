@@ -13,7 +13,7 @@ import {
   assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
 } from "./taxProjection";
 import { encashmentRateConfig } from "./leaveEncashments";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, lopDayUnits, eventCreditByDay } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
 import { unpaidBonuses, markBonusesSettledStmt, releaseBonusesSettledStmt } from "./bonuses";
@@ -116,14 +116,20 @@ function releaseSettlementStmts(deps: Deps, row: typeof schema.settlements.$infe
 // Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
 // uses (holidays, approved leave, attendance punches) so the exit month is docked the same way every other
 // month is. Scoped to one employee and one month, so it stays a handful of reads.
-async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number, toMs: number, att: AttendanceConfig): Promise<number> {
+async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number, toMs: number, endYmd: string, att: AttendanceConfig): Promise<number> {
   const tz = att.timezone || "Asia/Kolkata";
-  const startYmd = localDay(fromMs, tz);
-  const endYmd = localDay(toMs, tz);
+  // `fromMs` is a DATE-ONLY anchor (the month start, or the employee's start_date), so its day is the UTC one
+  // it is stored at; `endYmd` was resolved and clamped by the caller, which is the only place that knows which
+  // source named it. Holidays and leave ranges below are date-only too. The punch days further down stay on
+  // `localDay`, because a punch is an instant. See domain/attendance.ts#utcDay for what reading a date-only
+  // column through `localDay` cost: every one of these days shifted a day earlier west of UTC, so the exit
+  // month docked the day before it began, never checked its last day, and excused the day before each holiday
+  // while docking the holiday itself.
+  const startYmd = utcDay(fromMs);
   const holidays = new Set(
     (await refHolidays(deps))
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= fromMs && +new Date(h.date) <= toMs)
-      .map((h) => localDay(+new Date(h.date), tz)),
+      .map((h) => utcDay(+new Date(h.date))),
   );
   // Both reads below are BOUND TO THE FINAL MONTH IN SQL, with a UTC day of slack at each end (no timezone is
   // more than 14 hours from UTC, so nothing whose org-local day falls in the window can lie outside them) and
@@ -144,7 +150,7 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
       lte(schema.leaveRequests.startDate, windowTo),
     )))
     .filter((l) => l.state === "APPROVED" && +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
-    .map((l) => ({ start: localDay(+new Date(l.startDate), tz), end: localDay(+new Date(l.endDate), tz) }));
+    .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)) }));
   const workedByDay = new Map<string, number>();
   for (const s of await deps.db
     .select()
@@ -334,7 +340,15 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const effective = applyStructure(components, await structureLinesById(deps, comp.structureId));
   const monthlyGross = monthlyRecurringGross(comp.basePay, effective, comp.specialAllowance);
 
-  const settleMs = !Number.isNaN(dayMs(input.settlement_date)) ? dayMs(input.settlement_date) : +(emp.endDate ?? deps.clock.now());
+  // The day this settlement is FOR, derived PER SOURCE rather than by reading one source through the other's
+  // rule. `settlement_date` and `employees.end_date` are DATE-ONLY columns anchored at UTC midnight, so the day
+  // they name is the UTC one; the clock fallback is an INSTANT, so its day is the org's. Read uniformly through
+  // `localDay`, every explicit date shifted a day earlier west of UTC - see domain/attendance.ts#utcDay.
+  const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
+  const tz = att.timezone || DEFAULT_ATTENDANCE.timezone;
+  const datedMs = !Number.isNaN(dayMs(input.settlement_date)) ? dayMs(input.settlement_date) : emp.endDate ? +new Date(emp.endDate) : null;
+  const settleMs = datedMs ?? +deps.clock.now();
+  const settleYmd = datedMs !== null ? utcDay(datedMs) : localDay(settleMs, tz);
   const settlementDate = new Date(settleMs);
 
   // Encashable leave: explicit override, else the balance of the ENCASHABLE leave types only. The same
@@ -386,7 +400,6 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // Not simply "the day of the month": a mid-month JOINER never earned the days before their start date, and
   // unexcused absences in the exit month are loss of pay exactly as they are in a payroll run. Both would
   // otherwise be paid in full on the way out.
-  const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const daysInMonth = daysInMonthUTC(settlementDate);
   const monthStartMs = Date.UTC(settlementDate.getUTCFullYear(), settlementDate.getUTCMonth(), 1);
   const startedThisMonth = emp.startDate && +new Date(emp.startDate) > monthStartMs ? +new Date(emp.startDate) : monthStartMs;
@@ -394,8 +407,12 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // Absences are only countable up to today: a settlement computed BEFORE the last working day must not dock days
   // that haven't happened yet (the same clamp the payroll build applies to a mid-period build).
   const lopUntilMs = Math.min(settleMs, +deps.clock.now());
+  // Clamped by DAY as well as by instant, the same way assembleLop clamps a mid-period build: `settleYmd` was
+  // resolved from whichever source named it, and today's day comes from the clock.
+  const todayYmd = localDay(+deps.clock.now(), tz);
+  const lopEndYmd = settleYmd < todayYmd ? settleYmd : todayYmd;
   const lopDaysInFinalMonth = att.lop_enabled && lopUntilMs >= startedThisMonth
-    ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, att)
+    ? await finalMonthLopDays(deps, employeeId, startedThisMonth, lopUntilMs, lopEndYmd, att)
     : 0;
 
   // ---- Exit benefits --------------------------------------------------------------------------------------

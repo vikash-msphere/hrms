@@ -107,12 +107,21 @@ export function componentLineCode(name: string): string {
   return RESERVED_LINE_CODES.has(slug) || slug.startsWith("ER_") ? `C_${slug}` : slug || "COMPONENT";
 }
 
-export function employerLineCode(c: CtcComponent): string {
+// Takes the shape rather than a full CtcComponent: the catalog's uniqueness check (services/payComponents.ts)
+// asks this about a stored row, which is not one.
+export function employerLineCode(c: { method: string; name: string }): string {
   return c.method === "epf" ? "ER_EPF"
     : c.method === "esi" ? "ER_ESI"
     : c.method === "edli" ? "ER_EDLI"
     : c.method === "pf_admin" ? "ER_PF_ADMIN"
     : `ER_${c.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "")}`;
+}
+
+// The line code a component's amounts will actually appear under - the employer's own contributions are
+// namespaced (`ER_…`), everything else takes the slug of its name. One function, so the uniqueness rule the
+// catalog enforces is asking about the same string the build writes.
+export function payComponentLineCode(c: { kind: string; method: string; name: string }): string {
+  return c.kind === "employer_contribution" ? employerLineCode(c) : componentLineCode(c.name);
 }
 
 // ---- PF wages -------------------------------------------------------------------------------------------

@@ -27,12 +27,18 @@ import { keyedCounter, type KeyedIsolateRate } from "../lib/isolateRate";
 // Ordering: mounted AFTER auth (it needs the principal) and BEFORE authz, so a refused request costs the
 // per-object reads the gate would otherwise do.
 
-/** The identity a budget belongs to: the API key if there is one, else the user. */
-function principalOf(user: { uuid: string; apiKey?: { uuid: string } }): string {
+/** The identity a budget belongs to: the API key, else the human actually making the calls. */
+function principalOf(user: { uuid: string; apiKey?: { uuid: string }; simulatedBy?: { uuid: string } }): string {
   // KEYED ON THE KEY, not on its owner. A key acts as its owner (middleware/auth.ts), so keying on the user
   // would pool a person's own browsing together with every integration running under their name - one busy
   // key would then throttle the human, and revoking the key would not free the budget of anything else.
-  return user.apiKey ? `k:${user.apiKey.uuid}` : `u:${user.uuid}`;
+  if (user.apiKey) return `k:${user.apiKey.uuid}`;
+  // A "view as" request is the ADMIN'S request, answered as somebody else (lib/viewAs.ts), so the budget is
+  // theirs - the simulated person is not making calls. It also has to be, because a subject who has never
+  // signed in has no account row and carries `uuid: ""`: keyed on that, every simulation of every such person,
+  // by every admin, shared ONE bucket, and whoever hit it first throttled the rest.
+  if (user.simulatedBy) return `u:${user.simulatedBy.uuid}`;
+  return `u:${user.uuid}`;
 }
 
 // A budget, its counter, and how to recognise the requests it covers. Order matters: the FIRST match wins, so

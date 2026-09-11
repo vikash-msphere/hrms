@@ -75,8 +75,23 @@ describe("keyedCounter: the budget belongs to the caller, not the isolate", () =
     expect(rate.throttled("live", now)).toBe(true);
   });
 
-  it("retryAfterSeconds describes the window", () => {
-    expect(keyedCounter(1, 60_000).retryAfterSeconds).toBe(60);
+  it("retryAfterSeconds is what is LEFT of the window, not its length", () => {
+    // Before anything is counted there is no window to be part-way through, so the full length is the only
+    // honest answer.
+    const rate = keyedCounter(1, 60_000);
+    expect(rate.retryAfterSeconds).toBe(60);
+    // A window opened at t=0 and refused at t=59s clears one second later. Advertising 60 there parks a client
+    // that honours the header for a whole extra window over a burst that has already passed.
+    expect(rate.throttled("k", 0)).toBe(false);
+    expect(rate.throttled("k", 59_000)).toBe(true);
+    expect(rate.retryAfterSeconds).toBe(1);
+    // Never 0: a `Retry-After: 0` invites the retry the same window would refuse again.
+    expect(rate.throttled("k", 59_999)).toBe(true);
+    expect(rate.retryAfterSeconds).toBe(1);
+    // The next window is reported from its own start.
+    expect(rate.throttled("k", 60_000)).toBe(false);
+    expect(rate.throttled("k", 75_000)).toBe(true);
+    expect(rate.retryAfterSeconds).toBe(45);
   });
 });
 

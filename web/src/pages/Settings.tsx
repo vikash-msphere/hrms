@@ -79,6 +79,7 @@ import { SHEET_FORMATS, FALLBACK_TAG_CODE, DEFAULT_TAG_SETTINGS, allFormats, res
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ShieldAlert } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
@@ -540,6 +541,34 @@ const MAX_LOGO_BYTES = 256 * 1024;
 const MAX_FAVICON_BYTES = 64 * 1024; // favicons are tiny; the data URL lives in the settings/organization blob
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// The zones the org's calendar day may be set to, from the runtime's own IANA database.
+//
+// This used to be a free-text input, and the two wrong answers it invited are not equally loud. A name the
+// runtime refuses ("Asia/Bombay", "GMT+5:30") makes `Intl.DateTimeFormat` throw wherever the org day is read -
+// the attendance clock, the payroll build, the nightly tick - and the value is stored, so it is a persistent
+// 500. A name it ACCEPTS but that is not a zone ("IST", "EST") is a fixed offset with no daylight-saving rules:
+// nothing errors and the org's day is just wrong. The API now rejects both (src/routes/settings.ts
+// validateAttendance); offering only real zones is the half that keeps anyone from having to find that out.
+//
+// `Intl.supportedValuesOf` is the canonical list and needs no dependency. A browser without it falls back to
+// the device zone plus the app default, which is a short list rather than an empty one. The CURRENT value is
+// always included even when it is not a zone, so an org already holding a bad one can see it and replace it
+// instead of finding the control mysteriously blank.
+function timezoneOptions(current: string): ComboboxOption[] {
+  // Cast because the project's `lib` predates the Intl Enumeration API's declarations; the guard below is the
+  // runtime check either way, since a browser can have the lib and not the function.
+  const supportedValuesOf = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+  let zones: string[];
+  try {
+    zones = supportedValuesOf?.("timeZone") ?? [];
+    if (!zones.length) throw new Error("no zone list");
+  } catch {
+    zones = [...new Set([Intl.DateTimeFormat().resolvedOptions().timeZone, "Asia/Kolkata", "UTC"].filter(Boolean))];
+  }
+  if (current && !zones.includes(current)) zones = [current, ...zones];
+  return zones.map((z) => ({ value: z, label: z }));
+}
 
 // E-signature (settings/esign): the master enable switch + Aadhaar vendor (Cashfree) config. The signing
 // METHOD is NOT chosen here - it is picked per e-signature block on a template (/letters) or per document
@@ -1090,8 +1119,16 @@ function AttendanceTab({ toast }: { toast: Toast }) {
 
           <TabsContent value="schedule" className="space-y-4">
             <p className="text-sm text-muted-foreground">Used to flag late arrivals, early departures and absent days. Punch times are recorded as exact instants; the shift below is wall-clock in this timezone.</p>
-            <Field label="Timezone" hint="IANA timezone, e.g. Asia/Kolkata.">
-              <Input value={cfg.timezone} onChange={(e) => setCfg((c) => ({ ...c, timezone: e.target.value }))} />
+            <Field label="Timezone" hint="The org's calendar day. Everything that turns on \u201ctoday\u201d - the LOP window, leave back-dating, the nightly tick - is read in this zone.">
+              <Combobox
+                className="w-full sm:w-80"
+                value={cfg.timezone}
+                onValueChange={(v) => setCfg((c) => ({ ...c, timezone: v }))}
+                options={timezoneOptions(cfg.timezone)}
+                placeholder="Select a timezone\u2026"
+                searchPlaceholder="Search zones\u2026"
+                emptyText="No zone matches."
+              />
             </Field>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Shift start"><Input type="time" value={cfg.shift_start} onChange={(e) => setCfg((c) => ({ ...c, shift_start: e.target.value }))} /></Field>

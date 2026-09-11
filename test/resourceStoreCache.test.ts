@@ -204,7 +204,11 @@ describe("resource store disk cache", () => {
   it("never writes a collection down that carries pay or identity", async () => {
     // These are cached in memory like anything else - same dedup, same TTL - but a copy of someone's pay on the
     // disk of whatever machine the browser is on buys nothing (they are read on one page, not on every page).
-    for (const c of ["payslips", "compensation", "loans", "tax-declarations", "personal-documents", "background-checks"]) {
+    // `offers` and `candidates` were persistable while every collection either side of them on this list was
+    // not: an offer row carries the annual compensation being offered, and a candidate row is contact details
+    // and free-text notes on someone outside the org. Both are named here because this assertion is a
+    // hand-written allowlist - the one shape of test that cannot notice the collection nobody added.
+    for (const c of ["payslips", "compensation", "loans", "tax-declarations", "personal-documents", "background-checks", "offers", "candidates"]) {
       expect(persistable(c), c).toBe(false);
     }
     // While the reference lists and the directory - read by nearly every page - are exactly what to store.

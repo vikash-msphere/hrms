@@ -1,9 +1,62 @@
 import { describe, it, expect } from "vitest";
-import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, type WorkEvent } from "../src/domain/attendance";
+import { weekdayOf, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay, localDay, utcDay, type WorkEvent } from "../src/domain/attendance";
 
 const WORK = [1, 2, 3, 4, 5]; // Mon-Fri
 const FULL = 480; // minutes for a full day
 const HALF = 240; // minimum minutes to earn a half day
+
+describe("which day a value names: an instant's is the org's, a date-only column's is UTC", () => {
+  // The schema anchors every date-only column at UTC midnight (`period_start`, `holidays.date`,
+  // `leave_requests.start_date`, `employees.start_date`...), so the day such a column NAMES is the UTC one.
+  // Reading it with `localDay` asks a different question, and west of UTC gets a different answer - which is
+  // how payroll and the FnF settlement came to enumerate a window one day off the period, charging the day
+  // before it began, never checking the day it ended, and excusing the day before each holiday while docking
+  // the holiday itself. The two helpers exist so the distinction is visible at the call site; these are the
+  // cases that make the difference concrete.
+  const apr1 = Date.parse("2026-04-01T00:00:00Z"); // a date-only column holding "1 April 2026"
+
+  it("reads a date-only column as the day it names, in every timezone", () => {
+    expect(utcDay(apr1)).toBe("2026-04-01");
+    // utcDay takes no zone precisely because the answer cannot depend on one.
+    for (const tz of ["Asia/Kolkata", "America/New_York", "Pacific/Kiritimati", "UTC"]) {
+      expect(localDay(apr1, "UTC")).toBe(utcDay(apr1));
+      // And this is the reading that was wrong: west of UTC, midnight-Z is the previous evening locally.
+      if (tz === "America/New_York") expect(localDay(apr1, tz)).toBe("2026-03-31");
+    }
+  });
+
+  it("still reads an INSTANT in the org timezone - that half was always right", () => {
+    const punch = Date.parse("2026-04-01T20:30:00Z"); // 02:00 on 2 April in IST
+    expect(localDay(punch, "Asia/Kolkata")).toBe("2026-04-02");
+    expect(localDay(punch, "America/New_York")).toBe("2026-04-01");
+  });
+
+  it("the shift is not cosmetic: it moves the weekday composition a working-days proration counts", () => {
+    // June 2026 starts on a Monday, so reading it a day early trades a working day (Tue 30 June) for a
+    // non-working one (Sun 31 May): a different divisor, and therefore a different proration factor on every
+    // partial-period employee's pay. (It does not always change the COUNT - April 2026 trades one weekday for
+    // another and comes out level - which is exactly why the bug survived: the window is always wrong, and the
+    // arithmetic only sometimes shows it.)
+    expect(weekdayOf("2026-06-01")).toBe(1);
+    const correct = workingDaysInRange("2026-06-01", "2026-06-30", WORK, new Set());
+    const shifted = workingDaysInRange("2026-05-31", "2026-06-29", WORK, new Set());
+    expect(shifted).toBe(correct - 1);
+  });
+
+  it("the shift is not cosmetic: a holiday keyed a day early excuses the wrong day and docks the holiday", () => {
+    const holiday = Date.parse("2026-04-03T00:00:00Z"); // Friday
+    const base = {
+      startYmd: "2026-04-01", endYmd: "2026-04-03", workDays: WORK, leaveRanges: [],
+      workedByDay: new Map<string, number>(), fullDayMinutes: FULL, halfDayMinutes: HALF,
+    };
+    // Read correctly: Wed + Thu are absences, the Friday holiday is excused.
+    expect(lopDayUnits({ ...base, holidays: new Set([utcDay(holiday)]) })).toBe(2);
+    // Read a day early (west of UTC): Thursday is excused instead and the holiday itself is charged. Same
+    // total here, a different person docked - and the totals diverge the moment the shifted day is a weekend.
+    expect(lopDayUnits({ ...base, holidays: new Set([localDay(holiday, "America/New_York")]) })).toBe(2);
+    expect(localDay(holiday, "America/New_York")).toBe("2026-04-02");
+  });
+});
 
 describe("employment fraction (partial-month proration)", () => {
   const P = { periodStartYmd: "2026-01-01", periodEndYmd: "2026-01-31", workDays: WORK, holidays: new Set<string>() };

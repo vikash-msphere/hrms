@@ -62,9 +62,27 @@ export function employmentFraction(opts: {
   return total <= 0 ? 1 : Math.min(1, calDays(from, to) / total);
 }
 
-// Calendar day "YYYY-MM-DD" of an instant in the org timezone.
+// Calendar day "YYYY-MM-DD" of an INSTANT, read in the org timezone. For a moment that happened - a punch, an
+// audit stamp, `now`. NOT for a date-only column: see utcDay.
 export function localDay(ms: number, tz: string): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+}
+
+// Calendar day "YYYY-MM-DD" of a DATE-ONLY column.
+//
+// Every date-only column in the schema is anchored at UTC midnight (`period_start`, `holidays.date`,
+// `leave_requests.start_date`, `employees.start_date`, ...), so the day it NAMES is read in UTC and nowhere
+// else. Reading one with `localDay(ms, tz)` asks a different question and gets a different answer: west of
+// UTC, midnight-Z on the named day is the PREVIOUS evening locally, so every such day shifts back one - a
+// payroll period that starts a day early and ends a day short, holidays that excuse the wrong day, and a
+// proration window whose weekday composition is not the period's. East of UTC the two happen to agree, which
+// is why the default Asia/Kolkata configuration never showed it.
+//
+// The rule is stated once in services/orgDay.ts (`dayStartMs` is the inverse: an org-local day -> the ms a
+// date-only column stores it at). This is the forward half, named so the distinction is visible at the call
+// site rather than being a property of which column somebody remembered.
+export function utcDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
 // Weekday (0=Sun..6=Sat) of a "YYYY-MM-DD".
@@ -75,7 +93,7 @@ export function weekdayOf(ymd: string): number {
 function enumerate(startYmd: string, endYmd: string): string[] {
   const out: string[] = [];
   for (let t = Date.parse(`${startYmd}T00:00:00Z`); t <= Date.parse(`${endYmd}T00:00:00Z`); t += 86_400_000) {
-    out.push(new Date(t).toISOString().slice(0, 10));
+    out.push(utcDay(t));
   }
   return out;
 }
@@ -121,7 +139,6 @@ export function eventCreditByDay(opts: {
   onLeave: (day: string) => boolean;
 }): Map<string, number> {
   const { events, tz, workDays, fullDayMinutes, todayYmd, nowMs, punchedDays, onLeave } = opts;
-  const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   const out = new Map<string, number>();
   for (const ev of events) {
     if (!ev.allDay && ev.endMs >= nowMs) continue; // timed event still running / upcoming
