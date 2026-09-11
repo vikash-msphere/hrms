@@ -12,6 +12,7 @@ import { navigate, navigateTab } from "@/router";
 import type { OvertimeRequest, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/common/RequestsHistoryTabs";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
@@ -231,6 +232,8 @@ export default function Overtime({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Overtime" actions={addBtn} />
+      {/* The minute totals below are summed over the loaded rows, which are one page of the collection. */}
+      <TruncationNotice collection="overtime-requests" what="overtime requests" className="mb-3" />
 
       {state === "ready" && (
         <SummaryStrip

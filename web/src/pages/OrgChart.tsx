@@ -269,9 +269,17 @@ export default function OrgChart({ me, focusId: initialFocusId }: { me: Me; focu
     // Static output: hide interactive chrome (grips, move/focus buttons, carets) via [data-exporting]
     // CSS - visibility, not display, so nothing reflows - and prepend a title line for context.
     const width = el.scrollWidth;
+    // BUILT AS NODES, not as an HTML string. Nothing interpolated here is caller-controlled (a view name, a
+    // count, today's date), so the string form was not a hole - but the app's rule is that text reaches the
+    // DOM as text (lib/richText.tsx says so, and tailwind.config.js relies on it), and one exception is how a
+    // rule stops being one. `textContent` cannot be parsed as markup whatever it is handed.
     const header = document.createElement("div");
     header.style.cssText = `width:${width}px;text-align:center;padding:8px 0 20px;font-size:16px;font-weight:600;`;
-    header.innerHTML = `${view === "people" ? "Org chart" : "Department structure"}<div style="font-size:12px;font-weight:400;color:hsl(var(--muted-foreground))">${nodes.size} ${view === "people" ? "people" : "departments"} · ${new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}</div>`;
+    header.textContent = view === "people" ? "Org chart" : "Department structure";
+    const sub = document.createElement("div");
+    sub.style.cssText = "font-size:12px;font-weight:400;color:hsl(var(--muted-foreground));";
+    sub.textContent = `${nodes.size} ${view === "people" ? "people" : "departments"} · ${new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}`;
+    header.append(sub);
     el.setAttribute("data-exporting", "");
     el.prepend(header);
     try {

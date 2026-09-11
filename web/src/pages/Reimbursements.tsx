@@ -19,6 +19,7 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { metaColumns } from "@/components/common/metaColumns";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { Field, FieldRow } from "@/components/common/Field";
 import { FormError } from "@/components/common/FormError";
 import { MoneyInput } from "@/components/common/MoneyInput";
@@ -258,6 +259,8 @@ export default function Reimbursements({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Reimbursements" actions={<>{requestBtn}<PageSettings me={me} host="reimbursements" /></>} />
+      {/* The claim amounts below are summed over the loaded rows, which are one page of the collection. */}
+      <TruncationNotice collection="reimbursements" what="claims" className="mb-3" />
 
       <input ref={fileRef} type="file" className="hidden" onChange={onReceiptPicked} />
 

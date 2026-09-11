@@ -8,6 +8,7 @@ import type { Employee, Loan, LoanStatus, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -140,6 +141,9 @@ export default function Loans({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Loans & Advances" description="Salary advances and loans for employees." actions={requestBtn} />
+      {/* The strip below sums the LOADED rows, and a list page is a window on the collection. An outstanding
+          figure that silently omits everything past the first page is the kind of number somebody quotes. */}
+      <TruncationNotice collection="loans" what="loans" className="mb-3" />
 
       <DataState state={state} error={error} onRetry={reload}>
         {sorted.length === 0 ? (

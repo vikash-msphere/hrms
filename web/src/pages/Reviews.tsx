@@ -81,7 +81,9 @@ function StageTrail({ state }: { state: ReviewState }) {
 export default function Reviews({ me }: { me: Me }) {
   const { rows: reviews, state, error, reload } = useCollection<Review>("reviews");
   const { rows: cycles } = useCollection<ReviewCycle>("review-cycles");
-  const { rows: employees } = useCollection<Employee>("employees");
+  // COMPLETE: this list is what EmployeePicker offers (reviewers, 360 feedback givers) and what the name map
+  // resolves. On a window, everyone past the first page is unpickable and renders as "Employee".
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const { rows: feedbackReqs, reload: reloadFb } = useCollection<ReviewFeedback>("review-feedback");
   // `cards` and `goals` are read-only EVIDENCE inside an expanded review (what this person delivered, which

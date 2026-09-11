@@ -396,6 +396,33 @@ export async function listAll<T>(collection: string): Promise<T[]> {
   return all;
 }
 
+/**
+ * Follow the cursor on an ARBITRARY list path (one carrying its own filters), up to a row ceiling.
+ *
+ * `listAll` above is the unfiltered, unbounded form and it only suits a small catalog. The callers here are
+ * the views whose ANSWER IS WRONG rather than merely short when the rows run past one page: a week's roster
+ * with blank cells for shifts that exist, a policy's acknowledgement progress listing signed employees as
+ * pending, a free-slot search that offers a time the panel is on leave. Each of them used to ask for
+ * `max_page_size=500`, which the server clamps to 100 (http/pagination.ts) without saying so, and then read
+ * the first page as the whole set.
+ *
+ * BOUNDED, not unbounded: each page is a request, so an unfiltered call on a large collection would be a loop
+ * of them. The ceiling is the caller's, sized for what its own filters can legitimately return, and
+ * `truncated` says the ceiling was reached so the view can admit it rather than present a window as the total.
+ */
+export async function getAllPages<T>(path: string, cap: number): Promise<{ results: T[]; truncated: boolean }> {
+  const results: T[] = [];
+  let pageToken: string | undefined;
+  do {
+    const sep = path.includes("?") ? "&" : "?";
+    const page = await coalescedGet<ListResponse<T>>(pageToken ? `${path}${sep}page_token=${encodeURIComponent(pageToken)}` : path);
+    results.push(...(page.results ?? []));
+    pageToken = page.next_page_token;
+    if (results.length >= cap) return { results: results.slice(0, cap), truncated: !!pageToken || results.length > cap };
+  } while (pageToken);
+  return { results, truncated: false };
+}
+
 export function get<T>(path: string): Promise<T> {
   return coalescedGet<T>(path);
 }

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "263c7462-aae9-428e-b03c-2585c024ffb1",
+  "id": "b5042e1d-8e86-47fa-885a-4c196797cd90",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -13736,6 +13736,15 @@
             "date"
           ],
           "isUnique": false
+        },
+        "sa_emp_day_idx": {
+          "name": "sa_emp_day_idx",
+          "columns": [
+            "employee_id",
+            "date"
+          ],
+          "isUnique": true,
+          "where": "\"shift_assignments\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {

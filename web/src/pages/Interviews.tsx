@@ -1,9 +1,10 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { AlertTriangle, CalendarClock, CalendarPlus, ChevronLeft, ChevronRight, Link2, Mail, Plus, Pencil, Check, X, ClipboardList, Trash2, Clock, CheckCircle2, Users } from "lucide-react";
-import { create, patch, remove, invoke, get } from "@/api";
+import { create, patch, remove, invoke, get, getAllPages } from "@/api";
 import type { ListResponse } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, idOf } from "@/lib/utils";
+import { todayStr, addDaysYmd } from "@/lib/orgDay";
 import { isConflict } from "@/lib/formError";
 import { navigate, recordUrl, setRouteRecord } from "@/router";
 import type { Me, Interview, InterviewFeedback, Application, Candidate, JobRequisition, Employee, LeaveRequest, Event as EventRow } from "@/types";
@@ -30,6 +31,12 @@ import { useToast } from "@/components/ui/use-toast";
 import { REC_LABEL, REC_VARIANT, NEGATIVE_REC, findFreeSlots, type BusyWindow } from "@/lib/ats";
 import { buildTimedIcs, downloadIcs } from "@/lib/ics";
 import { useAtsConfig } from "./Candidates";
+
+// How far ahead the free-slot search looks, and the ceiling on the rows it reads to answer. ONE number for the
+// window: the leave query below is narrowed to exactly the days `findFreeSlots` will consider, so widening one
+// without the other would either read rows it cannot use or miss days it does.
+const SLOT_SEARCH_DAYS = 10;
+const SLOT_ROW_CAP = 1000;
 
 const MODES = [
   { key: "video", label: "Video" },
@@ -417,9 +424,18 @@ function InterviewDialog({ interview, defaultApplication, apps, interviews, cand
     if (!form.panel.length) return;
     setSlots({ loading: true, offered: null });
     try {
+      // NARROWED TO THE SEARCH WINDOW, not to the newest rows. This asked for `max_page_size=200`, got the
+      // server's 100 (http/pagination.ts caps there), and those hundred are the most recently CREATED leave
+      // requests - which has nothing to do with the days being searched. Leave approved a month ago for next
+      // week sat past the cursor, so the slot finder offered times the panel is away for: a wrong answer
+      // wearing the confidence of a computed one. `state`/`from`/`to` are server-side filters on this
+      // collection, so the rows that come back are exactly the ones that can make a day busy.
+      const fromYmd = todayStr();
+      const toYmd = addDaysYmd(fromYmd, SLOT_SEARCH_DAYS);
       const [leave, events] = await Promise.all([
-        get<ListResponse<LeaveRequest>>("leave-requests?max_page_size=200").catch(() => ({ results: [] as LeaveRequest[] })),
-        get<ListResponse<EventRow>>("events?max_page_size=200").catch(() => ({ results: [] as EventRow[] })),
+        getAllPages<LeaveRequest>(`leave-requests?state=approved&from=${fromYmd}&to=${toYmd}`, SLOT_ROW_CAP).catch(() => ({ results: [] as LeaveRequest[] })),
+        // `events` has no date filter on the server, so this follows the cursor within a ceiling instead.
+        getAllPages<EventRow>("events", SLOT_ROW_CAP).catch(() => ({ results: [] as EventRow[] })),
       ]);
       const busy: BusyWindow[] = [];
       // Other interviews the panel is already sitting on.
@@ -445,7 +461,7 @@ function InterviewDialog({ interview, defaultApplication, apps, interviews, cand
       }
       setSlots({
         loading: false,
-        offered: findFreeSlots({ panel: form.panel, busy, durationMin: minutes || 60, fromMs: Date.now(), limit: 6 }),
+        offered: findFreeSlots({ panel: form.panel, busy, durationMin: minutes || 60, fromMs: Date.now(), days: SLOT_SEARCH_DAYS, limit: 6 }),
       });
     } catch {
       setSlots({ loading: false, offered: [] });

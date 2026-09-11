@@ -1,11 +1,11 @@
-import { eq, and, gte, lte } from "drizzle-orm";
+import { eq, and, gte, isNull, lte } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { invalidArgument } from "../lib/errors";
+import { alreadyExists, invalidArgument } from "../lib/errors";
 import { paginate } from "../http/pagination";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
@@ -34,27 +34,58 @@ export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPage
   return { ...page, items: page.items.sort((a, b) => +new Date(a.date) - +new Date(b.date) || a.uuid.localeCompare(b.uuid)) };
 }
 
+// The live roster entry for one person on one day, if there is one. `sa_emp_day_idx` is what ENFORCES the
+// one-per-day rule; this read is what lets a write say which entry is in the way instead of answering with a
+// constraint name. Two indexed columns, so it costs one lookup on a path that is already writing.
+async function rosteredOn(deps: Deps, employeeId: string, date: Date, exceptUuid?: string) {
+  const rows = await deps.db
+    .select({ uuid: schema.shiftAssignments.uuid, shiftId: schema.shiftAssignments.shiftId })
+    .from(schema.shiftAssignments)
+    .where(and(
+      eq(schema.shiftAssignments.employeeId, employeeId),
+      eq(schema.shiftAssignments.date, date),
+      isNull(schema.shiftAssignments.deleteTime),
+    ));
+  return rows.find((r) => r.uuid !== exceptUuid);
+}
+
 // One employee rostered onto one shift on one day. Owned by that employee (the code embeds the owner, so
 // own/dept/all scoping works); the write only decides which shift, which day and the note.
+//
+// ONE ENTRY PER PERSON PER DAY, checked here and enforced by the index. Every reader of the roster already
+// assumes it - the grid keys its cells by (employee, date) - so a second entry for the same cell is one the
+// screen cannot show, and the fix is to move the existing one rather than add another.
 export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput, typeof schema.shiftAssignments> = {
   table: schema.shiftAssignments,
   collection: "shift-assignments",
   auditName: "shift-assignment",
   notFound: "shift assignment not found",
   allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.shiftAssignments.employeeId, values.employeeId as string),
-  insert: (input, _deps, actor) => {
+  insert: async (input, deps, actor) => {
     const employeeId = idFromPath(input.employee) ?? actor.employeeId;
     if (!employeeId) throw invalidArgument("employee is required");
     const shiftId = idFromPath(input.shift);
     if (!shiftId) throw invalidArgument("shift is required");
     const ms = dayMs(input.date);
     if (Number.isNaN(ms)) throw invalidArgument("date is required");
-    return { employeeId, shiftId, date: new Date(ms), note: input.note?.trim() || null };
+    const date = new Date(ms);
+    if (await rosteredOn(deps, employeeId, date)) throw alreadyExists(`that employee is already rostered on ${input.date} - change the existing entry instead`);
+    return { employeeId, shiftId, date, note: input.note?.trim() || null };
   },
-  patch: (patch) => {
+  // A patch can MOVE an entry onto an occupied day, so the same check runs here - against the row being
+  // edited, which is excluded (moving an entry onto the day it already sits on is a no-op, not a clash).
+  patch: async (patch, row, deps) => {
     const set: SetOf<typeof schema.shiftAssignments> = {};
     if (has(patch, "shift")) { const s = idFromPath(patch.shift); if (!s) throw invalidArgument("shift is required"); set.shiftId = s; }
-    if (has(patch, "date")) { const ms = dayMs(patch.date); if (Number.isNaN(ms)) throw invalidArgument("date is invalid"); set.date = new Date(ms); }
+    if (has(patch, "date")) {
+      const ms = dayMs(patch.date);
+      if (Number.isNaN(ms)) throw invalidArgument("date is invalid");
+      const date = new Date(ms);
+      if (await rosteredOn(deps, row.employeeId as string, date, row.uuid as string)) {
+        throw alreadyExists(`that employee is already rostered on ${patch.date} - change the existing entry instead`);
+      }
+      set.date = date;
+    }
     if (has(patch, "note")) set.note = patch.note?.trim() || null;
     return set;
   },

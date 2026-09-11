@@ -30,7 +30,17 @@ const SETTINGS_ALLOW: Record<string, string> = {
 // ---- 2. collections ------------------------------------------------------------------------------------------
 // A collection read looks like get<…>("<collection>?…") or get<…>(`<collection>?…`) - a bare `get("thing/id")`
 // (one record) is fine and common.
-const COLLECTION_READ = /\bget<[^(]*>\(\s*[`"]([a-z][a-z0-9-]*)\?/g;
+//
+// `getAllPages` COUNTS AS ONE, and is matched here for that reason. It is the same store-bypassing read with
+// the cursor followed, so it bypasses the same dedup, freshness tiers and disk cache - more of them, in fact,
+// since it is several requests rather than one. Left out of this pattern it would have been the way to make an
+// unshared collection read invisible to the rule that exists to find them.
+// Two alternatives, one captured name between them (`m[1] ?? m[2]`): `get` is matched only when a query string
+// follows, exactly as before - a bare `get("thing/id")` is one record and always fine - while `getAllPages`
+// counts whether or not it carries filters, since following a cursor over a whole collection is the reason it
+// exists and the thing worth declaring.
+const COLLECTION_READ = /\bget<[^(]*>\(\s*[`"]([a-z][a-z0-9-]*)\?|\bgetAllPages<[^(]*>\(\s*[`"]([a-z][a-z0-9-]*)[?`"]/g;
+const readCollection = (m: RegExpMatchArray) => (m[1] ?? m[2])!;
 // collection -> why reading it outside the store is right. These are all NARROWED reads (a server-side filter
 // the store's snapshot doesn't model) or one-shot payloads nothing else shares.
 const COLLECTION_ALLOW: Record<string, string> = {
@@ -40,8 +50,9 @@ const COLLECTION_ALLOW: Record<string, string> = {
   offers: "narrowed to one application (the pipeline drawer)",
   "shift-assignments": "narrowed to the week on screen",
   "time-entries": "narrowed to one employee/status for the timesheet being edited",
-  "leave-requests": "conflict check for one interview slot; a page-wide view would not answer it",
+  "leave-requests": "conflict check for one interview slot, narrowed to approved leave inside the search window",
   events: "conflict check for one interview slot",
+  "document-acknowledgements": "narrowed to ONE policy, in the dialog that chases its signatures; the answer is a subtraction from the roster, so it follows the cursor rather than reading a window",
   reviews: "cycle progress roll-up, paged through to completion",
   goals: "the calibration panel's attainment curve: narrowed to one cycle, asks for a single row, and exists FOR the aggregate the server computes alongside it (`?burnup=true`) - the store's snapshot models neither",
   notifications: "the snoozed view is the INVERSE of the cached feed; fetched once, only when it is opened",
@@ -91,7 +102,7 @@ describe("SPA read discipline", () => {
     for (const [path, src] of Object.entries(web)) {
       if (rel(path).startsWith("lib/resourceStore") || rel(path) === "api.ts") continue;
       for (const m of src.matchAll(COLLECTION_READ)) {
-        const collection = m[1]!;
+        const collection = readCollection(m);
         if (COLLECTION_ALLOW[collection]) continue;
         offenders.push(`${rel(path)}: ${collection}`);
       }
@@ -116,7 +127,7 @@ describe("SPA read discipline", () => {
     const deadFiles = Object.keys(SETTINGS_ALLOW).filter((suffix) => !paths.some((p) => p.endsWith(suffix)));
     expect(deadFiles, `allowlisted files that no longer exist: ${deadFiles.join(", ")}`).toEqual([]);
     const seen = new Set<string>();
-    for (const src of Object.values(web)) for (const m of src.matchAll(COLLECTION_READ)) seen.add(m[1]!);
+    for (const src of Object.values(web)) for (const m of src.matchAll(COLLECTION_READ)) seen.add(readCollection(m));
     const deadCollections = Object.keys(COLLECTION_ALLOW).filter((c) => !seen.has(c));
     expect(deadCollections, `allowlisted collections nothing reads any more: ${deadCollections.join(", ")}`).toEqual([]);
   });

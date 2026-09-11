@@ -58,7 +58,8 @@ export default function GoalTemplates({ embedded, openId }: { me?: Me; embedded?
   const [applying, setApplying] = useState<{ templates: GoalTemplate[]; label: string; refs: string[] } | null>(null);
   const [applyCycle, setApplyCycle] = useState("none");
   const [applyBusy, setApplyBusy] = useState(false);
-  const { rows: employees } = useCollection<Employee>("employees");
+  // COMPLETE: the picker applies a template onto the people chosen here, so a window drops people silently.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
 
   const groups = useMemo(() => [...new Set(rows.map((t) => t.group_name).filter(Boolean) as string[])].sort(), [rows]);
   const deptName = (ref?: string | null) => departments.find((d) => idOf(d.path) === idOf(ref ?? ""))?.display_name;

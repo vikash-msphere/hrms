@@ -4,15 +4,20 @@ import { usePermission } from "@/lib/perm";
 
 export type LoadState = "loading" | "ready" | "error";
 
+/** Default ceiling for `{ all: true }`. High enough that no ordinary org reaches it, low enough that a caller
+ *  who points the flag at a genuinely unbounded collection pays a bounded number of requests rather than
+ *  walking it to the end. Reaching it leaves `hasMore` true, so the view still admits the truncation. */
+const ALL_CAP = 1000;
+
 // Reads a collection through the shared resource store: identical reads across components are deduped into one
 // request, a short TTL lets navigations reuse cached rows, and a mutation (via api.ts) refreshes every mounted
 // view. Same return shape as before - pages don't change. `setRows` applies an optimistic edit shared by every
 // subscriber of this exact key; `reload` forces a refetch (bypasses the TTL).
 export function useCollection<T>(
   collection: string,
-  opts: { showDeleted?: boolean; deletedOnly?: boolean; max?: number; enabled?: boolean; q?: string; params?: Record<string, string> } = {},
+  opts: { showDeleted?: boolean; deletedOnly?: boolean; max?: number; enabled?: boolean; q?: string; params?: Record<string, string>; all?: boolean; allCap?: number } = {},
 ) {
-  const { showDeleted = false, deletedOnly = false, max, enabled = true, q, params } = opts;
+  const { showDeleted = false, deletedOnly = false, max, enabled = true, q, params, all = false, allCap = ALL_CAP } = opts;
   // Collection-specific SERVER filters (e.g. `{ leave_type: "leave-types/<id>" }`). Serialised so a caller can
   // pass a fresh object literal each render without churning the store key.
   const paramsKey = JSON.stringify(
@@ -67,6 +72,25 @@ export function useCollection<T>(
   // wired to a "Load more" button, or to the reader reaching the foot of a feed (useInfiniteScroll). Never
   // speculative: no page is fetched until someone has actually run out of rows, so D1 reads stay demand-led.
   const loadMore = useCallback(() => loadMoreRows(collection, stableOpts), [collection, stableOpts]);
+
+  // `all: true` - follow the cursor to the end (or to `allCap`) instead of stopping at the first page.
+  //
+  // For the readers whose answer is WRONG rather than merely short on a window: a picker that cannot offer
+  // the hundred-and-first employee, a `new Map(employees.map(...))` name lookup that renders "Employee" for
+  // everyone past the page, a grid with one row per person. Those are not list pages - there is no "load
+  // more" for a reader to press and nothing on screen that reads as incomplete - so the fetch has to be the
+  // one that completes itself.
+  //
+  // Deliberately opt-in, and deliberately NOT the default: an ordinary list page is a window on purpose, and
+  // making every collection walk its cursor would turn one read per mount into several. One page at a time,
+  // driven by the rows already in the store, so it stops as soon as the collection is exhausted; the store
+  // de-dupes concurrent loads of the same key, so several mounted readers of one collection share the walk.
+  const rowCount = snap.rows.length;
+  useEffect(() => {
+    if (!all || !enabled || !canRead) return;
+    if (!hasMore || rowCount >= allCap) return;
+    void loadMore();
+  }, [all, enabled, canRead, hasMore, rowCount, allCap, loadMore]);
 
   // No read capability -> a settled empty view (never a stuck skeleton, never a request).
   if (!canRead) return { rows: [] as T[], setRows, state: "ready" as LoadState, error: undefined, reload, meta: undefined, hasMore: false, loadMore: () => {} };

@@ -9,6 +9,7 @@ import type { Employee, Me, TaxDeclaration, TaxDeclarationStatus } from "@/types
 import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { useKpiFocus } from "@/lib/kpiFocus";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -133,6 +134,8 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   return (
     <div>
       <PageHeader title="Tax Declarations" description="Declare your tax-saving investments for the year and attach proofs." actions={newBtn} />
+      {/* Declared and verified totals are summed over the loaded rows, which are one page of the collection. */}
+      <TruncationNotice collection="tax-declarations" what="declarations" className="mb-3" />
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <Select value={fy} onValueChange={setFy}>

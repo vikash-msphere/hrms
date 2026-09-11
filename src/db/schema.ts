@@ -1323,7 +1323,18 @@ export const shiftAssignments = sqliteTable("shift_assignments", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("sa_emp_idx").on(t.employeeId), shiftIdx: index("sa_shift_idx").on(t.shiftId), dateIdx: index("sa_date_idx").on(t.date) }));
+}, (t) => ({
+  empIdx: index("sa_emp_idx").on(t.employeeId),
+  shiftIdx: index("sa_shift_idx").on(t.shiftId),
+  dateIdx: index("sa_date_idx").on(t.date),
+  // ONE roster entry per person per day, which is what every reader already assumes: the roster grid keys its
+  // cells `(employeeId, date)` and keeps the last row it sees, so a second entry for the same cell is not a
+  // second shift on screen - it is an invisible one. Editing the visible entry then leaves the hidden one
+  // behind, the employee gets two "shift assigned" notifications, and the day's coverage count is one too
+  // many. Partial, on the live rows only (like comp_open_idx): a soft-deleted entry must not block rostering
+  // that person again on that day.
+  empDayUniq: uniqueIndex("sa_emp_day_idx").on(t.employeeId, t.date).where(sql`${t.deleteTime} is null`),
+}));
 
 // ---- Timesheets / project time tracking ----
 // A project to log time against (flat-coded catalog like leave-types). `code` (wire) is an optional human

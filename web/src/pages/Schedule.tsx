@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarClock, Check, ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
-import { get, create, patch, remove } from "@/api";
-import { useCollection } from "@/hooks/useCollection";
+import { getAllPages, create, patch, remove } from "@/api";
+import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
 import { useClock } from "@/lib/clock";
 import { usePermission } from "@/lib/perm";
 import { cn, idOf } from "@/lib/utils";
@@ -29,11 +29,16 @@ import { useConfirm } from "@/components/common/confirm";
 // manager abroad rostered against a different Monday to everyone else - and `+weekStart + i * DAY` is only a
 // calendar day until a DST boundary falls inside the week, after which the grid repeats or skips a date.
 const WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// How far the roster will follow the cursor for one week. Seven days of a four-figure headcount is past what a
+// grid is readable at anyway, and the notice says so rather than the page quietly showing part of a week.
+const ROSTER_ROW_CAP = 2000;
 const dayNum = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
 export default function Schedule({ me }: { me: Me }) {
   const { rows: shifts, state: shiftsState, reload: reloadShifts } = useCollection<Shift>("shifts");
-  const { rows: employees, state: employeesState } = useCollection<Employee>("employees");
+  // COMPLETE, not the first page: the grid is one row per person and `canManage` sees everyone, so a windowed
+  // read means the hundred-and-first employee has no row at all and cannot be rostered from this page.
+  const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true });
   const { rows: departments, state: departmentsState } = useCollection<Department>("departments");
   // Holidays are read so the roster can say when a day it is about to fill is a closure day.
   const { rows: holidays } = useCollection<Holiday>("holidays");
@@ -45,6 +50,9 @@ export default function Schedule({ me }: { me: Me }) {
     if (shiftsState === "error" || employeesState === "error" || departmentsState === "error")
       toast({ title: "Couldn't load some schedule options", description: "Filters may be incomplete. Try reloading.", variant: "destructive" });
   }, [shiftsState, employeesState, departmentsState, toast]);
+  // `all: true` walks the employee cursor to its ceiling; if even that was not the whole directory, the grid is
+  // still missing rows and says so below.
+  const employeesTruncated = useCollectionHasMore(["employees"]);
   const canManage = usePermission("shift-assignments.write");
   const canManageShifts = usePermission("shifts.write");
   // The org's working days (settings → Attendance), so "repeat onto the week" can default to working days
@@ -57,6 +65,7 @@ export default function Schedule({ me }: { me: Me }) {
   const [weekStart, setWeekStart] = useState(() => weekStartYmd(todayStr()));
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysYmd(weekStart, i)), [weekStart]);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
+  const [rosterTruncated, setRosterTruncated] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [editing, setEditing] = useState<{ employee: string; date: string; existing?: ShiftAssignment } | null>(null);
 
@@ -66,8 +75,14 @@ export default function Schedule({ me }: { me: Me }) {
   const [from, to] = [days[0]!, days[6]!];
   const load = useCallback(async () => {
     try {
-      const r = await get<{ results: ShiftAssignment[] }>(`shift-assignments?from=${from}&to=${to}&max_page_size=500`);
-      setAssignments(r.results ?? []);
+      // THE CURSOR IS FOLLOWED, because a roster that is short is a roster that is WRONG. This asked for
+      // `max_page_size=500`; the server caps a page at 100 and says so only through `next_page_token`, which
+      // nothing here read - so on any org whose week has more than a hundred entries (headcount times working
+      // days reaches that at twenty people) the grid rendered EMPTY CELLS for shifts that exist. A scheduler
+      // then rosters over them, and the person is assigned twice.
+      const r = await getAllPages<ShiftAssignment>(`shift-assignments?from=${from}&to=${to}`, ROSTER_ROW_CAP);
+      setAssignments(r.results);
+      setRosterTruncated(r.truncated);
     } catch (e) {
       toast({ title: "Couldn't load the roster", description: (e as Error).message, variant: "destructive" });
     } finally {
@@ -179,6 +194,15 @@ export default function Schedule({ me }: { me: Me }) {
           )}
         </div>
       </div>
+
+      {/* The two ways this grid can still be a window: more roster entries in the week than the cursor was
+          followed for, or more people than the employee walk loaded. Either one means a blank cell is not
+          evidence that nobody is on - which is the one thing a scheduler reads this grid for. */}
+      {(rosterTruncated || employeesTruncated) && (
+        <p className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
+          This week has more entries than the roster loads at once. An empty cell may not mean nobody is rostered - narrow by department or shift to be sure.
+        </p>
+      )}
 
       {!loaded ? (
         <div className="space-y-2">

@@ -144,6 +144,16 @@ export function isCompOffDuplicate(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bcomp_off_credits\.(employee_id|worked_date)\b/i.test(errorChainText(err));
 }
 
+/** That person is already rostered on that day (`sa_emp_day_idx`, partial on the live rows).
+ *
+ *  The service checks for an existing entry before it writes, so reaching here means two rostering calls for
+ *  the same cell raced - or one caller worked from a roster view that did not hold the entry (a truncated
+ *  page). Either way it is the caller's to resolve by looking again, not a 500: the index is what keeps the
+ *  invariant every roster reader assumes, and the check above it is what usually explains it in words. */
+export function isShiftAssignmentDuplicate(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\bshift_assignments\.(employee_id|date)\b/i.test(errorChainText(err));
+}
+
 /** Two concurrent writes to one employee's effective-dated timeline both tried to leave it with an open row.
  *
  *  `comp_open_idx` / `pos_open_idx` are partial unique indexes on `employee_id where effective_to is null`, so

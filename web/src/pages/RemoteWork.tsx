@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/card";
 import type { ApprovalDelegation, RemoteWorkRequest, Employee, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { RequestsHistoryTabs, type RequestsHistorySearch } from "@/components/common/RequestsHistoryTabs";
 import { RowActivityButton } from "@/components/common/RowActivityButton";
@@ -205,6 +206,8 @@ export default function RemoteWork({ me }: { me: Me }) {
   return (
     <div>
       <PageHeader title="Remote work" actions={addBtn} />
+      {/* The day totals below are summed over the loaded rows, which are one page of the collection. */}
+      <TruncationNotice collection="remote-work-requests" what="remote-work requests" className="mb-3" />
 
       {state === "ready" && (
         <SummaryStrip

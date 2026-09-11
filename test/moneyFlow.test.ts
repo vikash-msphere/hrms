@@ -15,7 +15,7 @@ import { createRun, buildRunItems, transition, deleteRun, listRunItems, getRun, 
 import { createLoan, approveLoan, disburseLoan, recordLoanRepayment, repaidCreditStmt, resetLoanRepaymentStmts } from "../src/services/loans";
 import { recordBonus, unpaidBonuses } from "../src/services/bonuses";
 import { computeAndStoreEncashment, approveEncashment, cancelEncashment, approvedUnpaidEncashments } from "../src/services/leaveEncashments";
-import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement } from "../src/services/reimbursements";
+import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement, markReimbursementsPaidByRun, markReimbursementsSettledStmt } from "../src/services/reimbursements";
 import { computeAndStoreSettlement } from "../src/services/settlements";
 import { createSalaryStructure } from "../src/services/salaryStructures";
 import { reviseCompensation, updateCompensation, deleteCompensation, reapplySplitCurrent, splitStatus, listCompensation, decorateCompensation } from "../src/services/compensation";
@@ -1143,6 +1143,83 @@ describe("FnF settlement: every open payable is settled at exit", () => {
     expect((await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, loan.uuid)))[0]!.repaid).toBe(3000);
     // And the leave balance is debited once, not twice.
     expect((await deps.db.select().from(schema.leaveBalances).where(eq(schema.leaveBalances.employeeId, emp)))[0]!.balanceDays).toBe(0);
+  });
+});
+
+// A payroll run and an FnF settlement read the SAME payable queues for the same person. They overlap in
+// practice rather than in theory: a run prices every employee who is not yet `terminated`, and an FnF is
+// normally computed on the last working day, before the exit transition flips that status.
+//
+// The run half has always been guarded and CHECKED (it undoes the build and fails loudly on drift). The
+// settlement half was neither: one marker carried no guard at all, and the commit ran unchecked - so a claim
+// the run took in the window stayed in the settlement's net and was paid on both.
+describe("FnF: a payable a payroll run took mid-compute is never paid twice", () => {
+  it("the settled-marker refuses a claim a run has already paid, rather than overwriting its stamp", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+
+    const claim = await createReimbursement(deps, actor, { employee: `employees/${emp}`, amount: 900, description: "Taxi" });
+    await approveReimbursement(deps, actor, claim.uuid);
+    const runPaidAt = new Date("2026-01-31T00:00:00Z");
+    await markReimbursementsPaidByRun(deps, [claim.uuid], run.uuid, runPaidAt);
+
+    // The settlement's marker, over the same id. It must land on NOTHING.
+    const touched = await markReimbursementsSettledStmt(deps, [claim.uuid], new Date("2026-02-05T00:00:00Z"))
+      .returning({ uuid: schema.reimbursements.uuid });
+    expect(touched).toHaveLength(0);
+
+    // The run's stamp survives intact - the row still says which run paid it, and when.
+    const row = (await deps.db.select().from(schema.reimbursements).where(eq(schema.reimbursements.uuid, claim.uuid)))[0]!;
+    expect(row.state).toBe("PAID");
+    expect(row.paidRunId).toBe(run.uuid);
+    expect(+row.paidAt!).toBe(+runPaidAt);
+  });
+
+  it("a run committing inside the compute window aborts the settlement instead of double-paying the claim", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+
+    const claim = await createReimbursement(deps, actor, { employee: `employees/${emp}`, amount: 900, description: "Taxi" });
+    await approveReimbursement(deps, actor, claim.uuid);
+
+    // THE RACE, at the exact boundary it happens on: the settlement has already read the queue and priced the
+    // claim, and the run's commit lands before the settlement's does. Firing it from inside `batch` is what
+    // makes that ordering deterministic instead of a timing accident nothing would reproduce.
+    // `batch` is generic over its statement tuple, so the stand-in is typed through `unknown` rather than
+    // pretending to reproduce that signature - it only needs to fire once and delegate.
+    type BatchFn = Deps["db"]["batch"];
+    const asAny = deps.db as unknown as { batch: BatchFn };
+    const realBatch = asAny.batch.bind(deps.db) as unknown as (stmts: unknown) => Promise<unknown>;
+    let raced = false;
+    asAny.batch = (async (stmts: unknown) => {
+      if (!raced) {
+        raced = true;
+        await markReimbursementsPaidByRun(deps, [claim.uuid], run.uuid, new Date("2026-01-31T00:00:00Z"));
+      }
+      return realBatch(stmts);
+    }) as unknown as BatchFn;
+
+    try {
+      await expect(
+        computeAndStoreSettlement(deps, actor, { employee: `employees/${emp}`, settlement_date: "2026-01-31" }),
+      ).rejects.toThrow(/payables changed/i);
+    } finally {
+      asAny.batch = realBatch as unknown as BatchFn;
+    }
+    expect(raced).toBe(true);
+
+    // Nothing survives the abort: no settlement row to pay from, and the claim belongs to the run alone.
+    expect(await deps.db.select().from(schema.settlements).where(eq(schema.settlements.employeeId, emp))).toHaveLength(0);
+    const row = (await deps.db.select().from(schema.reimbursements).where(eq(schema.reimbursements.uuid, claim.uuid)))[0]!;
+    expect(row.state).toBe("PAID");
+    expect(row.paidRunId).toBe(run.uuid);
+    // And the release must not have re-queued a claim the RUN paid - that would be a third payout waiting.
+    expect(await approvedUnpaidReimbursements(deps, emp)).toHaveLength(0);
   });
 });
 

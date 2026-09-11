@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { ZodError } from "zod";
-import { AppError, aborted, errorChainText, isCodeCollision } from "../lib/errors";
+import { AppError, aborted, alreadyExists, errorChainText, isCodeCollision, isShiftAssignmentDuplicate } from "../lib/errors";
 
 // Which fields a validation failure was about, and what was wrong with each.
 //
@@ -62,7 +62,13 @@ export const errorHandler = (err: Error, c: Context) => {
         // to retry rather than a server fault, so it answers 409 and not a 500.
         : isCodeCollision(err)
           ? aborted("resource id collision; please retry").toProblem(c.req.path)
-          : { type: "/errors/internal", title: "Internal Server Error", status: 500 };
+          // The roster's one-entry-per-person-per-day index. The service checks for the existing entry first
+          // and says so in words; this catches the paths that cannot (a restore of a soft-deleted entry onto a
+          // day since re-rostered) and the races that get past the check, so the invariant answers 409 rather
+          // than surfacing SQLite's constraint text as a 500.
+          : isShiftAssignmentDuplicate(err)
+            ? alreadyExists("that employee is already rostered on that day").toProblem(c.req.path)
+            : { type: "/errors/internal", title: "Internal Server Error", status: 500 };
   // Log any unexpected (non-AppError, non-Zod) failure server-side. The client body stays generic, but with
   // [observability] on this is the only trace of a 500 - without it a production 500 is undebuggable.
   //

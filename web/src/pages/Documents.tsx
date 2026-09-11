@@ -7,7 +7,7 @@ import {
   Lock, Unlock, Send, FileEdit, CheckCircle2, Ban, FileSignature, Sparkles, PenLine, ClipboardCheck, AlertCircle,
   RefreshCw, ExternalLink, ShieldCheck, Copy, CalendarClock, BellRing, Eye,
 } from "lucide-react";
-import { api, get, upload, patch, invoke, download as downloadFile } from "@/api";
+import { api, get, getAllPages, upload, patch, invoke, download as downloadFile } from "@/api";
 import { documentDownloadItems, useDocumentDownload } from "@/components/common/DocumentDownload";
 import { useDocuments, createDocument, docCollection, documentFileName } from "@/lib/documents";
 import { useCollection } from "@/hooks/useCollection";
@@ -135,7 +135,9 @@ const EMPTY = { name: "", type: "OTHER", expire: "", employee: ORG, requireAck: 
 
 export default function Documents({ me }: { me: Me }) {
   const { rows, state, error, reload, reloadOrg, reloadPersonal } = useDocuments({ showDeleted: true });
-  const { rows: employees, state: employeesState } = useCollection<Employee>("employees");
+  // COMPLETE: this one list feeds the letter/Form-16 pickers AND the acknowledgement dialog's "who is still
+  // pending" roster, which is a compliance answer - on a window it names people who have already signed.
+  const { rows: employees, state: employeesState } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const [pickAudience, setPickAudience] = useState(false);
   // The acknowledging user's own record (for their signature image + name on the acknowledge dialog).
@@ -1074,16 +1076,25 @@ function DocumentReadCount({ doc }: { doc: DocumentResource }) {
   );
 }
 
+// How far the acknowledgement dialog follows the cursor. One row per employee per version, so this covers an
+// org several times over; past it the notice in the dialog takes over.
+const ACK_ROW_CAP = 5000;
+
 // HR view: who has acknowledged the current version of a policy, and who's still pending. Pending is computed
 // against active employees (an approximation of "everyone who can see it").
 function AckProgressDialog({ doc, employees, departments, onClose }: { doc: DocumentResource; employees: Employee[]; departments: Department[]; onClose: () => void }) {
   const { toast } = useToast();
   const [acks, setAcks] = useState<DocumentAcknowledgement[]>([]);
+  const [acksTruncated, setAcksTruncated] = useState(false);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let live = true;
-    api<{ results: DocumentAcknowledgement[] }>(`/document-acknowledgements?document=${encodeURIComponent(doc.path)}&max_page_size=500`)
-      .then((r) => { if (live) { setAcks(r.results ?? []); setLoaded(true); } })
+    // THE CURSOR IS FOLLOWED. "Pending" here is computed by SUBTRACTING the signatures from the active roster,
+    // so a short read does not show fewer signatures - it moves people who have already signed into the chase
+    // list. This asked for 500 and the server caps a page at 100, so every org past a hundred acknowledgements
+    // was being told to chase people who were done.
+    getAllPages<DocumentAcknowledgement>(`document-acknowledgements?document=${encodeURIComponent(doc.path)}`, ACK_ROW_CAP)
+      .then((r) => { if (live) { setAcks(r.results); setAcksTruncated(r.truncated); setLoaded(true); } })
       .catch(() => { if (live) setLoaded(true); });
     return () => { live = false; };
   }, [doc.path]);
@@ -1177,6 +1188,13 @@ function AckProgressDialog({ doc, employees, departments, onClose }: { doc: Docu
           </>
         ) : (
           <div className="space-y-4">
+            {/* Past the ceiling the subtraction below stops being trustworthy, and this dialog's whole output is
+                that subtraction - so say it here rather than let the pending list read as fact. */}
+            {acksTruncated && (
+              <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
+                Showing the first {ACK_ROW_CAP.toLocaleString()} acknowledgements. Some people listed as pending may already have signed.
+              </p>
+            )}
             {/* One glance at how far this policy has got, before any names. */}
             <div className="space-y-1.5">
               <div className="flex items-baseline justify-between gap-2 text-sm">

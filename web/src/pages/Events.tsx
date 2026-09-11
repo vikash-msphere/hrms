@@ -93,7 +93,8 @@ const endMs = (e: Event) => (e.all_day ? Date.parse(e.end_time.slice(0, 10)) + D
 export default function Events({ me, openId }: { me: Me; openId?: string }) {
   const { rows, state, error, reload } = useCollection<Event>("events", { showDeleted: true });
   useDeepOpen(openId, rows, openEdit);
-  const { rows: employees } = useCollection<Employee>("employees");
+  // COMPLETE: the attendee picker invites from this list, so a window makes people un-invitable.
+  const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments");
   const { toast } = useToast();
   const sd = useSoftDelete("events", "event", reload);

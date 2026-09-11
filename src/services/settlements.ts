@@ -7,7 +7,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { invalidArgument, notFound } from "../lib/errors";
+import { failedPrecondition, invalidArgument, notFound } from "../lib/errors";
 import {
   currentComp, compAsOf, monthlyRecurringGross, tdsComponent, loadTaxConfig, fyWindow, finalizedTotals,
   assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
@@ -29,7 +29,7 @@ import {
   DEFAULT_GRATUITY_CONFIG, type GratuityConfig, type SettlementLine,
 } from "../domain/settlement";
 import { round2, sum2 } from "../domain/money";
-import { runBatch, chunk, byIdChunks, type BatchStmt } from "../lib/dbBatch";
+import { runBatch, runBatchChecked, chunk, byIdChunks, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
 import { notify } from "./notifications";
 import { refHolidays, refLeaveTypes, refPayComponents, refPayPeriods } from "../lib/refData";
@@ -87,8 +87,7 @@ function parseRefs(json: string | null): SettledRefs {
 // the payroll run's releasePaidByRun - same contract, keyed to a settlement instead of a run. Returns the
 // UNEXECUTED statements so the caller commits the release and the row's deletion in one atomic batch: a
 // half-applied release leaves payables both consumed and unpayable.
-function releaseSettlementStmts(deps: Deps, row: typeof schema.settlements.$inferSelect, at: Date): BatchStmt[] {
-  const refs = parseRefs(row.settledJson);
+function releaseSettlementStmts(deps: Deps, refs: SettledRefs, at: Date): BatchStmt[] {
   const stmts: BatchStmt[] = [];
   for (const ids of chunk(refs.reimbursements, 90)) stmts.push(releaseReimbursementsSettledStmt(deps, ids));
   for (const ids of chunk(refs.bonuses, 90)) stmts.push(releaseBonusesSettledStmt(deps, ids));
@@ -327,7 +326,7 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   if (prior.length) {
     const releaseAt = new Date();
     await runBatch(deps.db, [
-      ...prior.flatMap((p) => releaseSettlementStmts(deps, p, releaseAt)),
+      ...prior.flatMap((p) => releaseSettlementStmts(deps, parseRefs(p.settledJson), releaseAt)),
       deps.db.delete(schema.settlements).where(inArray(schema.settlements.uuid, prior.map((p) => p.uuid))),
     ]);
   }
@@ -532,7 +531,7 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
     leaveDebits,
   };
 
-  const stmts: BatchStmt[] = [
+  const stmts: (BatchStmt | CheckedStmt)[] = [
     deps.db.insert(schema.settlements).values({
       uuid: settlementId,
       code: await allocOwnedCode(deps, schema.settlements, schema.settlements.employeeId, employeeId),
@@ -552,11 +551,31 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
       settledJson: JSON.stringify(refs),
     }),
   ];
-  for (const ids of chunk(refs.reimbursements, 90)) stmts.push(markReimbursementsSettledStmt(deps, ids, at));
-  for (const ids of chunk(refs.bonuses, 90)) stmts.push(markBonusesSettledStmt(deps, ids, at));
-  for (const ids of chunk(refs.encashments, 90)) stmts.push(markEncashmentsSettledStmt(deps, ids, at));
-  for (const ids of chunk(refs.overtime, 90)) stmts.push(markOvertimeSettledStmt(deps, ids, at));
-  for (const ids of chunk(refs.arrears, 90)) stmts.push(markCompArrearsSettledStmt(deps, ids, at));
+  // Every settled-marker is CHECKED, for the same reason the payroll build checks its paid-by-run markers
+  // (services/payroll.ts): the queues above were read at the top of this compute, and a payable can have left
+  // one since. A payroll run prices EVERY employee who is not yet `terminated` (payroll.ts roster), and an FnF
+  // is routinely computed before the exit transition flips that status - so the run and this settlement are
+  // reading the same queue at the same time, for the same person.
+  //
+  // Each marker's guard stops the wrong flip; without the row count nothing NOTICES. The payable's amount is
+  // already summed into `settlement.net` above, so a silently-refused marker is precisely a double payout: paid
+  // on the run's payslip and again in the FnF net, with the settlement reporting success. The short count is
+  // what turns that into the undo below.
+  for (const ids of chunk(refs.reimbursements, 90)) {
+    stmts.push({ stmt: markReimbursementsSettledStmt(deps, ids, at).returning({ uuid: schema.reimbursements.uuid }), expect: ids.length, label: "reimbursements" });
+  }
+  for (const ids of chunk(refs.bonuses, 90)) {
+    stmts.push({ stmt: markBonusesSettledStmt(deps, ids, at).returning({ uuid: schema.bonuses.uuid }), expect: ids.length, label: "bonuses" });
+  }
+  for (const ids of chunk(refs.encashments, 90)) {
+    stmts.push({ stmt: markEncashmentsSettledStmt(deps, ids, at).returning({ uuid: schema.leaveEncashments.uuid }), expect: ids.length, label: "leave encashments" });
+  }
+  for (const ids of chunk(refs.overtime, 90)) {
+    stmts.push({ stmt: markOvertimeSettledStmt(deps, ids, at).returning({ uuid: schema.overtimeRequests.uuid }), expect: ids.length, label: "overtime" });
+  }
+  for (const ids of chunk(refs.arrears, 90)) {
+    stmts.push({ stmt: markCompArrearsSettledStmt(deps, ids, at).returning({ uuid: schema.compensation.uuid }), expect: ids.length, label: "salary arrears" });
+  }
   // Loan recovery: the same ledger row a repayment always writes (run-less, like a manual repayment) plus a
   // RELATIVE credit to `repaid`, so the loan closes and nothing can collect it twice.
   for (const w of loanWrites) {
@@ -569,7 +588,18 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
       .set({ balanceDays: sql`max(0, round(${schema.leaveBalances.balanceDays} - ${d.days}, 2))`, updatedAt: at })
       .where(eq(schema.leaveBalances.uuid, d.balanceId)));
   }
-  await runBatch(deps.db, stmts);
+  const drifted = await runBatchChecked(deps.db, stmts);
+  if (drifted.length) {
+    // A payable this settlement priced moved under it. The row just written would pay it without having
+    // settled it, so undo the whole settlement back to "never computed" and fail loudly - the same contract
+    // the payroll build's drift path keeps. `releaseSettlementStmts` is guarded the same way the markers are
+    // (it will not re-queue a claim a RUN paid), so the payable that drifted stays with whoever took it.
+    await runBatch(deps.db, [
+      ...releaseSettlementStmts(deps, refs, new Date()),
+      deps.db.delete(schema.settlements).where(eq(schema.settlements.uuid, settlementId)),
+    ]);
+    throw failedPrecondition(`payables changed while the settlement was being computed (${[...new Set(drifted)].join(", ")}) - nothing was settled; compute it again`);
+  }
   const row = (await deps.db.select().from(schema.settlements).where(eq(schema.settlements.uuid, settlementId)).limit(1))[0]!;
 
   await audit(deps, actor, "settlement.compute", "settlements", row.uuid, { employee: `employees/${employeeId}` });

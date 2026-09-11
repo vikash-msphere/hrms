@@ -1909,6 +1909,7 @@ CREATE UNIQUE INDEX `shift_assignments_code_unique` ON `shift_assignments` (`cod
 CREATE INDEX `sa_emp_idx` ON `shift_assignments` (`employee_id`);--> statement-breakpoint
 CREATE INDEX `sa_shift_idx` ON `shift_assignments` (`shift_id`);--> statement-breakpoint
 CREATE INDEX `sa_date_idx` ON `shift_assignments` (`date`);--> statement-breakpoint
+CREATE UNIQUE INDEX `sa_emp_day_idx` ON `shift_assignments` (`employee_id`,`date`) WHERE "shift_assignments"."delete_time" is null;--> statement-breakpoint
 CREATE TABLE `shifts` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,

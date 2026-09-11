@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Timer, ChevronLeft, ChevronRight, CopyPlus, Minus, Plus, Send, Check, X, Trash2 } from "lucide-react";
-import { get, create, patch, remove, invoke } from "@/api";
+import { get, getAllPages, create, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { usePermission } from "@/lib/perm";
 import { cn, formatDate, idOf } from "@/lib/utils";
@@ -35,6 +35,9 @@ import { confirmDecision } from "@/lib/confirmDecision";
 // rather than the org's, and `+weekStart + i * DAY` stops being a calendar day the moment a DST boundary
 // falls inside the week - which is also how "copy last week" could land an entry on the wrong weekday.
 const WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Ceiling on the time entries any one of this page's reads will follow the cursor for. Well past a person's
+// week or a team's approval queue; it exists so a filter that goes wrong reads a bounded number of pages.
+const ENTRY_ROW_CAP = 2000;
 const dayNum = (s: string) => new Date(s + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" });
 const fmt = (n: number) => (n % 1 === 0 ? String(n) : n.toFixed(2).replace(/0$/, ""));
 
@@ -96,14 +99,19 @@ export default function Timesheets({ me }: { me: Me }) {
   const loadWeek = useCallback(async () => {
     if (!meRef) { setWeekLoaded(true); return; }
     try {
-      const r = await get<{ results: TimeEntry[] }>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${weekFrom}&to=${weekTo}&max_page_size=500`);
-      setMine(r.results ?? []);
+      // The grid keys its cells `(project, date)` off these rows and totals the week from them, so a short read
+      // is a wrong timesheet, not a short one. `max_page_size=500` was clamped to 100 by the server without
+      // saying so; the cursor is followed instead, within a ceiling a week cannot legitimately reach.
+      const r = await getAllPages<TimeEntry>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${weekFrom}&to=${weekTo}`, ENTRY_ROW_CAP);
+      setMine(r.results);
     } catch (e) { toast({ title: "Couldn't load the week's entries", description: (e as Error).message, variant: "destructive" }); }
     finally { setWeekLoaded(true); }
   }, [meRef, weekFrom, weekTo, toast]);
   const loadPending = useCallback(async () => {
     if (!canApprove) return;
-    try { const r = await get<{ results: TimeEntry[] }>(`time-entries?status=SUBMITTED&max_page_size=200`); setPending((r.results ?? []).filter((e) => idOf(e.employee ?? "") !== me.employee_id)); }
+    // The approval queue: unlike the week above this one really does run past a page on any busy team, and a
+    // queue that stops at a hundred hides work nobody is told about.
+    try { const r = await getAllPages<TimeEntry>("time-entries?status=SUBMITTED", ENTRY_ROW_CAP); setPending(r.results.filter((e) => idOf(e.employee ?? "") !== me.employee_id)); }
     catch { setPending([]); }
   }, [canApprove, me.employee_id]);
   useEffect(() => { void loadWeek(); }, [loadWeek]);
@@ -200,8 +208,8 @@ export default function Timesheets({ me }: { me: Me }) {
     try {
       const from = addDaysYmd(weekStart, -7);
       const to = addDaysYmd(weekStart, -1);
-      const r = await get<{ results: TimeEntry[] }>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${from}&to=${to}&max_page_size=500`);
-      const source = (r.results ?? []).filter((e) => e.project && e.date);
+      const r = await getAllPages<TimeEntry>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${from}&to=${to}`, ENTRY_ROW_CAP);
+      const source = r.results.filter((e) => e.project && e.date);
       const todo = source
         .map((e) => ({ e, date: addDaysYmd(e.date!, 7) }))
         .filter(({ e, date }) => days.includes(date) && !byCell.get(`${idOf(e.project!)}|${date}`));

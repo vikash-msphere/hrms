@@ -7027,13 +7027,16 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
-      description: Create method for shift-assignment.
+      description: >-
+        Create method for shift-assignment. One live entry per employee per day: answers 409 when that person is
+        already rostered on that date.
       operationId: CreateShiftAssignment
       parameters: [ { in: query, name: id, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/shift-assignments/{assignment_id}:
     parameters: [ { in: path, name: assignment_id, required: true, schema: { type: string } } ]
@@ -7044,12 +7047,15 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
         '404': { $ref: '#/components/responses/Problem' }
     patch:
-      description: Update method for shift-assignment.
+      description: >-
+        Update method for shift-assignment. Moving an entry onto a date that person is already rostered on
+        answers 409.
       operationId: UpdateShiftAssignment
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
     delete:
       description: Delete method for shift-assignment.
       operationId: DeleteShiftAssignment
@@ -7060,12 +7066,15 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
   /v1/shift-assignments/{assignment_id}:restore:
     post:
-      description: "Custom method restore: undo a soft-delete."
+      description: >-
+        Custom method restore: undo a soft-delete. Answers 409 when the employee has since been rostered on that
+        date by another entry.
       operationId: ":RestoreShiftAssignment"
       parameters: [ { in: path, name: assignment_id, required: true, schema: { type: string } } ]
       responses:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/shift-assignment' } } } }
         '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/projects:
     get:
@@ -8042,7 +8051,10 @@ paths:
         '403': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
     post:
-      description: Compute + store a full-and-final settlement snapshot.
+      description: >-
+        Compute + store a full-and-final settlement snapshot. Answers 409 when a payable it priced (an approved
+        claim, bonus, encashment, overtime or arrears row) was claimed by a payroll run while the settlement was
+        being computed: nothing is settled, and the call should be made again.
       operationId: CreateSettlement
       parameters: [ { in: query, name: id, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/settlement' } } } }
@@ -8050,6 +8062,7 @@ paths:
         '200': { description: Successful response, content: { application/json: { schema: { $ref: '#/components/schemas/settlement' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
   /v1/settlements/{settlement_id}:
     parameters: [ { in: path, name: settlement_id, required: true, schema: { type: string } } ]

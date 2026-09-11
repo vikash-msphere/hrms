@@ -11,6 +11,7 @@ import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { Chart, ChartCard } from "@/components/common/Chart";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Button } from "@/components/ui/button";
@@ -152,6 +153,9 @@ export default function Payslips({ me }: { me: Me }) {
           </>
         }
       />
+      {/* The year's net/tax totals and the pay chart are both built from the loaded rows, which are one page of
+          the collection - a long enough history runs past it. */}
+      <TruncationNotice collection="payslips" what="payslips" className="mb-3" />
       <DataState state={state} error={error} onRetry={reload} rows={3}>
         {rows.length === 0 ? (
           <EmptyState icon={RupeeCircle} title="No payslips yet" description="Payslips appear here once a payroll run is published. New joiners usually see their first one after the first full pay cycle." />

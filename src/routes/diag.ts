@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env";
 import { readCappedBody } from "../services/documentsCommon";
-import { counter } from "../lib/isolateRate";
+import { keyedCounter } from "../lib/isolateRate";
 
 // Diagnostics relay: the browser posts its telemetry envelope here and the Worker forwards it to the error
 // tracker, server to server.
@@ -42,7 +42,19 @@ const MAX_ENVELOPE_BYTES = 1_000_000;
 // tracker as a real outbound request, and the DSN it is checked against is baked into the public bundle, so
 // burning the org's event quota needs no credential at all. It never rejects a real client: the SDK's own
 // transport sends far below this, and a rejection returns 429 with Retry-After, which is what it backs off on.
-const relay = counter(600);
+//
+// PER CALLER, not one counter for the route. A single shared budget is the shape `counter()` is right for -
+// a login lane, a provider webhook - where the route itself is the thing being protected. Here it made one
+// noisy client (a page in a reload loop, or anyone who found the path) able to spend the whole isolate's
+// allowance, and the cost of that is not a refused report: it is that error reporting goes dark for everyone
+// else on the isolate, silently, exactly when something is wrong. There is no principal on this lane, so the
+// address Cloudflare itself observed is the key - a client cannot set `cf-connecting-ip` (the edge overwrites
+// it), which is the same reason the audit trail keys on it and nothing else.
+const relay = keyedCounter(600);
+// One bucket for requests arriving with no observed address (not behind the edge - local dev, a direct
+// origin hit). They share a budget rather than each getting the full one, which is the conservative way
+// round: unattributable traffic must not be the way to get an unbounded allowance.
+const NO_IP = "-";
 
 /** The ingest origin and project id a DSN points at, or null if it is not a DSN we can parse. */
 function parseDsn(dsn: string): { origin: string; projectId: string } | null {
@@ -72,7 +84,7 @@ diag.post("/", async (c) => {
   if (!configured) return c.notFound(); // relay not configured: indistinguishable from no such route
 
   // Counted BEFORE the body is read, so a throttled request costs neither the buffer nor the outbound call.
-  if (relay.throttled(Date.now())) {
+  if (relay.throttled(c.req.header("cf-connecting-ip") ?? NO_IP, Date.now())) {
     return c.text("too many reports", 429, { "Retry-After": String(relay.retryAfterSeconds) });
   }
 

@@ -193,11 +193,19 @@ export function markReimbursementsPaidByRun(deps: Deps, ids: string[], runId: st
 // queue (state=APPROVED AND paidRunId IS NULL) and a run for a still-active leaver can't pay them a second time.
 // Returns the UNEXECUTED statement so the FnF can commit it in the same atomic batch as the settlement that
 // consumes the claim (thenable - a direct await still executes). Callers guard on a non-empty id list.
+//
+// GUARDED on still being approved-and-unpaid, exactly like markReimbursementsPaidByRun above and like every
+// other settled-marker (bonuses, encashments, overtime, arrears). It was the one marker in the set with no
+// guard, and the asymmetry ran the wrong way: the RELEASE below already refuses to touch a run-paid claim,
+// while the mark overwrote one. A payroll run building for a still-active leaver claims the same queue, so a
+// run committing between this settlement's read and its commit left the row reading `state=PAID,
+// paid_run_id=<run>, paid_at=<settlement>` - paid on the payslip AND in the FnF net, with the trail saying
+// neither. The guard makes that write land nowhere; the caller's runBatchChecked is what notices.
 export function markReimbursementsSettledStmt(deps: Deps, ids: string[], at: Date) {
   return deps.db
     .update(schema.reimbursements)
     .set({ state: "PAID", paidAt: at, updatedAt: at })
-    .where(inArray(schema.reimbursements.uuid, ids));
+    .where(and(inArray(schema.reimbursements.uuid, ids), eq(schema.reimbursements.state, "APPROVED"), isNull(schema.reimbursements.paidRunId)));
 }
 
 // Separate-mode :pay - mark an approved claim paid out-of-band (no payroll run).
