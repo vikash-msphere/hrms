@@ -286,6 +286,44 @@ describe("running a grid", () => {
     for (const row of result.rows) expect(row.denied).toContain("@identity.pan");
   });
 
+  // A field a view FILTERS on and never displays is still a field the request acts on: the rows that come
+  // back are chosen by its value. Gating only the DISPLAYED columns published that value a bit at a time -
+  // a hidden `@personal.personal_email contains "ada"` narrowed the page to Ada for a caller denied the
+  // sub-resource, and repeating the probe reads the address out of a grid that shows no PII at all.
+  it("refuses to judge a filter on a PII field the caller may not read", async () => {
+    await seed();
+    // May list people and read their names; denied the personal-info sub-resource outright.
+    const user = hrUser([rule("employees", "read"), rule("employees.**", "read"), rule("employees.*.personal-info.**", null, "deny")]);
+    const view = {
+      base: "employees",
+      columns: [{ field: "first_name" }], // the PII field is NOT a column
+      filters: [{ field: "@personal.personal_email", op: "contains", value: "ada" } as ViewFilter],
+    };
+    const result = await runTableView(deps, user, allScopes(), view, { maxPageSize: 50, unmask: true });
+    // The denied cell is null, so the predicate matches nothing - the filter cannot tell the two people
+    // apart, which is the whole point. It must NOT come back holding only Ada.
+    expect(result.rows.map((r) => r.cells.first_name)).toEqual([]);
+    // And the same filter still works for a caller who may read the field, or the test above proves nothing.
+    const allowed = await runTableView(deps, SUPER(), allScopes(), view, { maxPageSize: 50, unmask: true });
+    expect(allowed.rows.map((r) => r.cells.first_name)).toEqual(["Ada"]);
+  });
+
+  // The per-FIELD half of the same hole: the sub-resource is readable, one field in it is not, and that
+  // field is only ever filtered on.
+  it("refuses to judge a filter on a denied FIELD that is not a column", async () => {
+    await seed();
+    const user = hrUser([rule("**.**", "admin"), rule("**.**.**", "admin"), rule("employees.*.identity.pan.**", null, "deny")]);
+    const view = {
+      base: "employees",
+      columns: [{ field: "first_name" }],
+      filters: [{ field: "@identity.pan", op: "contains", value: "ABCDE1000" } as ViewFilter],
+    };
+    const result = await runTableView(deps, user, allScopes(), view, { maxPageSize: 50, unmask: true });
+    expect(result.rows.map((r) => r.cells.first_name)).toEqual([]);
+    const allowed = await runTableView(deps, SUPER(), allScopes(), view, { maxPageSize: 50, unmask: true });
+    expect(allowed.rows.map((r) => r.cells.first_name)).toEqual(["Ada"]);
+  });
+
   it("filters on a base column in SQL and on a joined value in memory, with the same meaning", async () => {
     await seed();
     const byName = await runTableView(deps, SUPER(), allScopes(), { ...salarySheet(), filters: [{ field: "first_name", op: "eq", value: "Ada" }] }, { maxPageSize: 50, unmask: true });

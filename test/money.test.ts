@@ -47,6 +47,17 @@ describe("round2", () => {
     expect(round2(1e21)).toBe(1e21);
     expect(round2(-1e21)).toBe(-1e21);
   });
+
+  // THE HOLE UNDERNEATH THAT GUARD. There are two decimal-string parses, and they go exponential at
+  // DIFFERENT inputs: `${n}e2` at n = 1e21, but `${rounded}e-2` at rounded = 1e21, i.e. at n = 1e19. A guard
+  // written against the first left the second answering NaN for two whole decades - and `|| 0` turned that
+  // into a silent ZERO, which is worse than the NaN the guard was added to stop. Returning the value is the
+  // only acceptable answer; returning 0 is money vanishing without an error.
+  it("does not collapse to zero between 1e19 and 1e21, where only the SECOND parse goes exponential", () => {
+    for (const n of [1e19, -1e19, 1.5e19, 1e20, 5e20, 9.99e20]) {
+      expect(round2(n), String(n)).toBe(n);
+    }
+  });
 });
 
 describe("sum2", () => {

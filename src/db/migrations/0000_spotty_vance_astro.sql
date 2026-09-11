@@ -2182,6 +2182,7 @@ CREATE TABLE `users` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `users_code_unique` ON `users` (`code`);--> statement-breakpoint
 CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);--> statement-breakpoint
+CREATE UNIQUE INDEX `users_employee_idx` ON `users` (`employee_id`);--> statement-breakpoint
 CREATE TABLE `vendors` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,

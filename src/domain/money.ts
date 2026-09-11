@@ -19,20 +19,28 @@
 
 // Round to 2 decimal places (paise), decimal-half-correct and sign-symmetric. Non-finite / sub-paise noise
 // collapses to 0 (also dodges the exponential-string edge for |n| < 1e-6, which is already 0 at 2dp).
-// The decimal-string trick below only works while `n` stringifies in POSITIONAL notation. JS switches to
-// exponential at both ends of the range, and `${1e21}e2` parses as NaN - so both ends need a guard, not just
-// the small one. Under 1e-6 the answer is 0 at 2dp anyway; at or above 1e21 there is no meaningful paise value
-// to return, and Math.round is the honest fallback (it cannot be a decimal half-case at that magnitude).
-const EXP_MAX = 1e21;
+//
+// The decimal-string trick only works while the number being stringified is in POSITIONAL notation; JS
+// switches to exponential at 1e21, and `${1e21}e2` parses as NaN. THERE ARE TWO SUCH STRINGIFICATIONS, not
+// one, and they switch at different inputs: `${n}e2` goes exponential at n = 1e21, but `${rounded}e-2` goes
+// exponential at rounded = 1e21, i.e. at n = 1e19. A single guard on `n >= 1e21` therefore left a two-decade
+// hole beneath itself in which the SECOND parse produced NaN and `|| 0` turned it into a silent ZERO -
+// round2(5e20) answered 0. Nothing legitimate reaches that magnitude, but a money helper whose failure mode
+// is "returns zero without saying so" is the exact shape this function exists to prevent.
+//
+// So the guard is not a threshold to keep in sync with the language's switch point: each parse is CHECKED,
+// where it happens. Past either one there is no meaningful paise value to return and Math.round is the honest
+// fallback - at that magnitude the value cannot be a decimal half-case anyway.
 export function round2(n: number): number {
   if (!Number.isFinite(n) || Math.abs(n) < 1e-6) return 0;
-  if (Math.abs(n) >= EXP_MAX) return Math.round(n);
+  const scaled = Number(`${n}e2`);
+  if (!Number.isFinite(scaled)) return Math.round(n);
   // Rounded on the MAGNITUDE and the sign reapplied, which is what makes the tie symmetric. `-0` cannot
   // survive: `${-0}e-2` parses back as -0, and a stored -0 compares equal to 0 but prints as "-0" on a
   // payslip. The `|| 0` normalises it.
-  const scaled = Number(`${n}e2`);
   const rounded = Math.sign(scaled) * Math.round(Math.abs(scaled));
-  return Number(`${rounded}e-2`) || 0;
+  const back = Number(`${rounded}e-2`);
+  return Number.isFinite(back) ? back || 0 : Math.round(n);
 }
 
 // Sum a list of amounts and round ONCE at the end. Use for every aggregate (run totals, bank-file total,

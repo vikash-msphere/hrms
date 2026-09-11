@@ -69,7 +69,19 @@ export const users = sqliteTable("users", {
   sessionsValidFrom: integer("sessions_valid_from", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({
+  // ONE account per person. The link is patchable (`PATCH /v1/users` employee), and nothing stopped two
+  // accounts pointing at the same employee - at which point "who is this person's account" has two answers
+  // and every consumer picks a different one: the view-as subject lookup takes whichever row comes back
+  // first, the holiday-feed token is minted for one of them, and a self-scoped grant resolves against the
+  // employee code either account happens to carry. The auto-provision path could never produce it (it links
+  // by work email and `users.email` is unique), so this closes the one door that was open - an admin
+  // re-pointing an account by hand - rather than a live symptom.
+  //
+  // SQLite treats NULLs as distinct in a unique index, which is exactly right: an account with no employee
+  // (a break-glass identity, a service owner) is unconstrained, and there may be many.
+  employeeUniq: uniqueIndex("users_employee_idx").on(t.employeeId),
+}));
 
 // Machine credentials. An API key is NOT a principal of its own - it acts as its owner (a real `users` row)
 // and may only ever NARROW that user's authority, never widen it (domain/keyScope.ts). That is why there is

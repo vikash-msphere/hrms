@@ -9,7 +9,10 @@ import type { Bindings } from "../src/env";
 import type { ListScope } from "../src/domain/access";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { listUsers } from "../src/services/users";
+import { listUsers, updateUser } from "../src/services/users";
+import type { AppUser } from "../src/env";
+import { EMPTY_GRANT } from "../src/domain/grants";
+import { DEFAULT_POLICY } from "../src/domain/manifests";
 
 // A sign-in account names a person, their email and the role they hold, so who may LIST accounts matters.
 // Everyone holds `users.me.**` (their own account), which resolves to breadth `own`; only an admin holds
@@ -60,5 +63,41 @@ describe("the accounts list is scoped", () => {
 
   it("gives an unscoped request nothing, rather than the whole table", async () => {
     expect((await listUsers(deps, undefined, 50)).items).toEqual([]);
+  });
+});
+
+// ONE account per person. The link is patchable, and without the unique index two accounts could name the
+// same employee - at which point "this person's account" has two answers and every consumer picks a
+// different one (the view-as subject lookup takes whichever row comes back, the holiday-feed token is minted
+// for one of them, a self-scoped grant resolves against whichever employee code the account carries).
+describe("an employee may hold only one sign-in account", () => {
+  const actor = (uuid: string): AppUser => ({
+    uuid, email: "admin@test.example", role: "super_admin", status: "active",
+    employeeId: null, employeeCode: null, name: "Admin", grant: EMPTY_GRANT, policy: DEFAULT_POLICY,
+  });
+
+  it("refuses to point a second account at an employee who already has one", async () => {
+    const admin = (await deps.db.select().from(schema.users)).find((u) => u.email === "admin@test.example")!;
+    // `peer` already belongs to u-2. Say so, rather than raising a bare UNIQUE constraint as a 500.
+    await expect(updateUser(deps, actor(admin.uuid), admin.uuid, { employee: `employees/${peer}` })).rejects.toThrow(/already has a sign-in account/);
+    // and nothing moved
+    const after = (await deps.db.select().from(schema.users)).find((u) => u.uuid === admin.uuid)!;
+    expect(after.employeeId).toBeNull();
+  });
+
+  it("still allows linking an account to an employee who has none", async () => {
+    const admin = (await deps.db.select().from(schema.users)).find((u) => u.email === "admin@test.example")!;
+    const spare = genId();
+    await deps.db.insert(schema.employees).values({ uuid: spare, code: "04-0003", firstName: "Spare", lastName: "Person", workEmail: "spare@test.example", status: "active" });
+    const updated = await updateUser(deps, actor(admin.uuid), admin.uuid, { employee: `employees/${spare}` });
+    expect(updated.employeeId).toBe(spare);
+  });
+
+  it("leaves accounts with no employee unconstrained - NULLs are distinct in the index", async () => {
+    await deps.db.insert(schema.users).values([
+      { uuid: genId(), code: "u-4", email: "svc1@test.example", role: "employee", status: "active", employeeId: null },
+      { uuid: genId(), code: "u-5", email: "svc2@test.example", role: "employee", status: "active", employeeId: null },
+    ]);
+    expect((await listUsers(deps, all, 50)).items.length).toBe(5);
   });
 });

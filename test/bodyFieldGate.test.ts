@@ -37,7 +37,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.accessRules, schema.auditLog, schema.users, schema.employees, schema.departments, schema.roles];
+const TABLES = [schema.accessRules, schema.auditLog, schema.personalDocuments, schema.users, schema.employees, schema.departments, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t);
   await deps.db.insert(schema.roles).values([{ name: "records_admin", label: "Records" }]);
@@ -113,5 +113,49 @@ describe("body-level field gate, over HTTP, on every JSON content type", () => {
     expect(res.status).not.toBe(500);
     const row = (await deps.db.select().from(schema.employees))!.find((e) => e.uuid === target.employeeId)!;
     expect(row.departmentId).toBeNull();
+  });
+});
+
+// A declared ref does not stop being one because it arrived in the query string.
+//
+// `personal-documents:uploadForm16` files a document for `?employee=<ref>` with the raw PDF as the body, so
+// the gate - which used to return early on anything that was not JSON - never ran on it, while the sibling
+// route that files the same document through a JSON body was gated. The owner-on-create check was in effect a
+// property of the CONTENT TYPE rather than of the request.
+describe("owner-on-create gate, when the owner ref rides in the query string", () => {
+  const uploadForm16 = (employeeId: string) =>
+    app.request(
+      `/v1/personal-documents:uploadForm16?employee=employees/${employeeId}&financial_year=2025-26`,
+      { method: "POST", headers: { "X-Requested-By": "hrms-spa", "Content-Type": "application/pdf" }, body: "%PDF-1.4\n" },
+      b as unknown as Record<string, unknown>,
+    );
+
+  beforeEach(async () => {
+    await deps.db.insert(schema.roles).values([{ name: "doc_filer", label: "Docs" }]).onConflictDoNothing();
+    // May use the verb and may write documents for their OWN subtree only - not for 04-002.
+    await deps.db.insert(schema.accessRules).values([
+      { subject: "doc_filer", subjectKind: "role", namespace: "personal-documents", pattern: "personal-documents.uploadForm16", scopeKind: "all", scopeCode: "", matchCode: null, level: null, effect: "allow" },
+      { subject: "doc_filer", subjectKind: "role", namespace: "personal-documents", pattern: "personal-documents.me.**", scopeKind: "self", scopeCode: "", matchCode: null, level: "write", effect: "allow" },
+      { subject: "doc_filer", subjectKind: "role", namespace: "employees", pattern: "employees.me.**", scopeKind: "self", scopeCode: "", matchCode: null, level: "read", effect: "allow" },
+    ]);
+    clearCache();
+  });
+
+  it("refuses filing against an employee the caller may not write", async () => {
+    const filer = await seedPerson("04-001", "Filer", "doc_filer");
+    const other = await seedPerson("04-002", "Other", "doc_filer");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = filer.email;
+
+    const res = await uploadForm16(other.employeeId);
+    expect(res.status).toBe(403);
+    expect(await deps.db.select().from(schema.personalDocuments)).toEqual([]);
+  });
+
+  it("still allows filing against an employee the caller may write", async () => {
+    const filer = await seedPerson("04-001", "Filer", "doc_filer");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = filer.email;
+
+    const res = await uploadForm16(filer.employeeId);
+    expect(res.status).toBe(200);
   });
 });

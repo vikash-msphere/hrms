@@ -115,13 +115,17 @@ export function probationLabel(endDate: string): string {
 // It had already drifted twice: the tie rule (the server's is symmetric about zero, this one broke ties toward
 // +∞, so a negative preview and the figure the run wrote could differ by a paise) and the upper-range guard
 // (`${1e21}e2` parses as NaN, so this answered NaN where the server answered the number).
-const EXP_MAX = 1e21;
+//
+// Both parses are checked rather than guarded by one magnitude threshold: `${n}e2` and `${rounded}e-2` switch
+// to exponential notation at DIFFERENT inputs (n = 1e21 and n = 1e19), and a single threshold on the first
+// left the second returning NaN - which `|| 0` then made a silent zero. See the full note on the server copy.
 export function round2(n: number): number {
   if (!Number.isFinite(n) || Math.abs(n) < 1e-6) return 0;
-  if (Math.abs(n) >= EXP_MAX) return Math.round(n);
   const scaled = Number(`${n}e2`);
+  if (!Number.isFinite(scaled)) return Math.round(n);
   const rounded = Math.sign(scaled) * Math.round(Math.abs(scaled));
-  return Number(`${rounded}e-2`) || 0;
+  const back = Number(`${rounded}e-2`);
+  return Number.isFinite(back) ? back || 0 : Math.round(n);
 }
 
 // Format an amount in a currency. `decimals` sets the shown precision (both min and max fraction digits) so

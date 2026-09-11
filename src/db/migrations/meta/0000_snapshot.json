@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "f380d856-fa35-4c8b-b8ab-ac5bfd833562",
+  "id": "24468ac5-1019-4293-8f97-27239f357b90",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -15709,6 +15709,13 @@
           "name": "users_email_unique",
           "columns": [
             "email"
+          ],
+          "isUnique": true
+        },
+        "users_employee_idx": {
+          "name": "users_employee_idx",
+          "columns": [
+            "employee_id"
           ],
           "isUnique": true
         }

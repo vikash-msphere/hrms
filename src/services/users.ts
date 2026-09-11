@@ -7,7 +7,7 @@ import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
-import { notFound, aborted, invalidArgument, oneOf } from "../lib/errors";
+import { notFound, aborted, invalidArgument, isUserEmployeeCollision, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { EVERYONE_ROLE } from "../domain/grants";
 
@@ -61,7 +61,15 @@ export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: 
     if (has("status") && patch.status !== "active") throw invalidArgument("you cannot disable your own account");
   }
 
-  const updated = (await deps.db.update(schema.users).set(set).where(eq(schema.users.uuid, id)).returning())[0]!;
+  // `users_employee_idx` keeps one account per person. Re-pointing an account at someone who already has one
+  // is an ordinary mistake an admin makes in a picker, so it answers as one rather than as a 500.
+  let updated: typeof row;
+  try {
+    updated = (await deps.db.update(schema.users).set(set).where(eq(schema.users.uuid, id)).returning())[0]!;
+  } catch (e) {
+    if (!isUserEmployeeCollision(e)) throw e;
+    throw invalidArgument("that employee already has a sign-in account; unlink it before linking this one");
+  }
   // Only the fields whose value actually changed (from→to), not every field the form submitted.
   await audit(deps, actor, "user.update", "users", id, diffMeta(row, updated, set, "users"), updated);
   return updated;

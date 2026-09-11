@@ -74,10 +74,6 @@ async function responseResource(c: Context<AppEnv>): Promise<Record<string, unkn
 async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user: AppUser, grant: Grant): Promise<Decision | null> {
   const method = c.req.method.toUpperCase();
   if (method !== "POST" && method !== "PATCH" && method !== "PUT") return null;
-  // JSON-FAMILY, not just `application/json`: an Update arrives as `application/merge-patch+json`, so a
-  // substring test for `application/json` skipped this entire gate on every PATCH in the app (see
-  // http/jsonRequest.ts). Every lane that decides whether a body exists asks the same predicate.
-  if (!isJsonBody(c.req.header("content-type"))) return null;
   const segs = coded.replace(/^\/v1\//, "").split("?")[0]!.split("/").filter(Boolean);
   // A custom method carries its verb in the LAST path segment, and the gate is about the COLLECTION and the
   // OBJECT, never the verb - so it is split off. Both halves matter:
@@ -97,14 +93,40 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   const sub = segs.length === 3 ? segs[2]!.split(":")[0]! : null;
   const subBodyKey = sub ? subresourceBodyKey(sub) : null;
   if (fields.length === 0 && Object.keys(refs).length === 0 && Object.keys(ownerRefs).length === 0 && subBodyKey === null) return null;
-  let body: Record<string, unknown>;
-  try {
-    body = (await c.req.json()) as Record<string, unknown>;
-  } catch {
-    return null; // not parseable as JSON -> the validator will reject it; no field to gate
+
+  // A DECLARED REF CARRIED IN THE QUERY STRING IS STILL THAT REF.
+  //
+  // This gate used to return early on anything that was not a JSON body, which quietly made the owner-on-create
+  // check a property of the CONTENT TYPE rather than of the request. `personal-documents:uploadForm16` files a
+  // document for `?employee=<ref>` with the raw PDF as the body, so it took the early return and never ran -
+  // while its sibling `:generateForm16`, which files the same document for the same person through a JSON
+  // body, was gated. Two routes, one authorization question, two answers, decided by how the bytes happened to
+  // be shaped. Exposure today is nil (a collection-level verb key is two tokens, so only an org-wide grant
+  // reaches either route, and for such a caller filing across owners is the intent) - but this is the single
+  // place cross-owner creates are stopped, and "unless the payload is a PDF" is not a rule anyone would write.
+  //
+  // So the declared refs are collected from the query string as well, and gated identically. Only keys the
+  // policy already NAMES for this collection are read, so nothing else about the query is interpreted here.
+  const declared = [...Object.keys(refs), ...Object.keys(ownerRefs)];
+  const fromQuery: Record<string, unknown> = {};
+  for (const key of declared) {
+    const v = c.req.query(key);
+    if (typeof v === "string" && v.length > 0) fromQuery[key] = v;
   }
-  if (!body || typeof body !== "object") return null;
+
   const self = { employeeCode: user.employeeCode };
+  // JSON-FAMILY, not just `application/json`: an Update arrives as `application/merge-patch+json`, so a
+  // substring test for `application/json` skipped this entire gate on every PATCH in the app (see
+  // http/jsonRequest.ts). Every lane that decides whether a body exists asks the same predicate.
+  let body: Record<string, unknown> = {};
+  if (isJsonBody(c.req.header("content-type"))) {
+    try {
+      body = (await c.req.json()) as Record<string, unknown>;
+    } catch {
+      body = {}; // not parseable as JSON -> the validator will reject it; no field to gate
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) body = {};
+  }
   // Protected fields, declared references and the owner-on-create gate, over ONE record's worth of body.
   const gateRecord = async (rec: Record<string, unknown>): Promise<Decision | null> => {
     for (const f of fields) {
@@ -138,6 +160,12 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
     }
     return null;
   };
+  // The query-carried refs first: on the one route that uses them there is no JSON body to gate at all, and
+  // where both are present a ref may legitimately appear in either.
+  if (Object.keys(fromQuery).length) {
+    const deniedQuery = await gateRecord(fromQuery);
+    if (deniedQuery) return deniedQuery;
+  }
   const denied = await gateRecord(body);
   if (denied) return denied;
   // A BULK body (`{ items: [ …one record each… ] }`, as `assets:batchCreate` takes) is many records in one
@@ -172,7 +200,11 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
       }
     }
   }
-  return { allow: true };
+  // NULL, not `{ allow: true }`. The caller folds this in as `decision = (await bodyDecision(…)) ?? decision`,
+  // so a bare allow REPLACES the resource-level decision - and with it the `via` pattern that authorized the
+  // request, which lib/audit.ts stamps on every row the handler then writes. "Nothing here objects" is what
+  // this returns, and null is how it says so without discarding the answer it was narrowing.
+  return null;
 }
 
 // Aggregate ROUTES: transports that own no rows and grant nothing, answering over many collections at once.

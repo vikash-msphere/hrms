@@ -102,6 +102,12 @@ export function isUserEmailCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\busers\.email\b/i.test(errorChainText(err));
 }
 
+/** Two sign-in accounts pointed at one employee (`users_employee_idx`). Not a race and not retryable: it is
+ *  an admin re-pointing an account at a person who already has one, and the answer is to say so. */
+export function isUserEmployeeCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\busers\.employee_id\b/i.test(errorChainText(err));
+}
+
 /** And on a person's human ID (EMP-0042), allocated max+1 from the org's format and unique. */
 export function isEmployeeNumberCollision(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bemployees\.employee_number\b/i.test(errorChainText(err));

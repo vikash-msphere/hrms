@@ -164,6 +164,19 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
       paramsSpent += cost;
     } else deferred.push(f);
   }
+
+  // A deferred filter's field is NOT necessarily a selected column. It can be a hidden one (`ViewColumn.hidden`
+  // - "narrow by department without showing the department") or a field the view filters on and never
+  // displays. Its cell is computed below into a side map, used for the predicate and never returned.
+  //
+  // RESOLVED HERE, above the sources, because the PII gate down there has to cover these fields too - see the
+  // note on `ofSource`. `gated` is therefore the whole set of fields this request can ACT on, displayed or
+  // not, and is what every access decision below is taken over.
+  const judgedOnly = [...new Set(deferred.map((f) => f.field))]
+    .map((key) => byKey.get(key))
+    .filter((f): f is ResolvedField => !!f && !selected.some((s) => s.field.key === f.key));
+  const gated: ResolvedField[] = [...selected.map((s) => s.field), ...judgedOnly];
+
   const page = await keysetPage<Record<string, any>>(deps, table, base, and(...(conds.filter(Boolean) as SQL[])), {
     max: opts.maxPageSize,
     pageToken: opts.pageToken,
@@ -173,17 +186,13 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // ---- Linked rows: one query per (path, collection), never one per row ------------------------------------
   // `linked` maps "employeeId" / "employeeId.departmentId" to the row each base row's chain lands on.
   const linked = new Map<string, Map<string, Record<string, any>>>();
+  // Over `gated`, so a field the view only FILTERS on brings its own chain with it - the deferred half is
+  // judged on real values, which it cannot be if the row they live on was never loaded.
   const linkPaths = new Set<string>();
-  for (const { field } of selected) if (field.path.length) linkPaths.add(field.path.join("."));
-  for (const f of deferred) {
-    const field = byKey.get(f.field);
-    if (field?.path.length) linkPaths.add(field.path.join("."));
-  }
+  for (const field of gated) if (field.path.length) linkPaths.add(field.path.join("."));
   // Employee sub-resource sources need the employee ROW (its code gates the sub-resource, and the PII blobs
   // live on it), so their subject path is loaded even when no column of that row was picked.
-  const subjectPaths = new Set<string>();
-  for (const { field } of selected) if (field.source) subjectPaths.add(field.path.join("."));
-  for (const p of subjectPaths) if (p) linkPaths.add(p);
+  for (const field of gated) if (field.source && field.path.length) linkPaths.add(field.path.join("."));
 
   // Load shallow-to-deep so a depth-2 link can read the ids off its depth-1 parent.
   for (const path of [...linkPaths].sort((a, b) => a.split(".").length - b.split(".").length)) {
@@ -234,11 +243,7 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   const sourceValues = new Map<string, Map<string, Record<string, unknown>>>(); // `${path}|${source}` -> rowId -> values
   const deniedByRow = new Map<string, Set<string>>();
   const usedSources = new Set<string>();
-  for (const { field } of selected) if (field.source) usedSources.add(`${field.path.join(".")}|${field.source}`);
-  for (const f of deferred) {
-    const field = byKey.get(f.field);
-    if (field?.source) usedSources.add(`${field.path.join(".")}|${field.source}`);
-  }
+  for (const field of gated) if (field.source) usedSources.add(`${field.path.join(".")}|${field.source}`);
 
   const self = { employeeCode: user.employeeCode };
   for (const used of usedSources) {
@@ -257,30 +262,33 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
     // matches against the caller's grant - the same ones GET /v1/employees/<id>/identity is answered by.
     const sub = SUBRESOURCE[source];
     if (!sub) continue;
-    const keys = selected.filter((s) => s.field.source === source && s.field.path.join(".") === pathKey).map((s) => s.field.fieldKey ?? s.field.leaf);
+    // EVERY field of this source the request can act on - the columns it DISPLAYS and the ones it only
+    // FILTERS on (`gated`, not `selected`).
+    //
+    // A filter-only field is never returned, but the rows that survive the predicate are chosen BY ITS VALUE,
+    // so leaving it out of this gate published that value a bit at a time: a hidden
+    // `@personal.<field> contains "…"` on a grid whose base the caller may list narrowed the page by PII they
+    // hold no read on, and repeating the probe reads it out. The `denied` guard on the judged-only cell below
+    // could never fire either, because only selected keys were ever put in the set - so the one line that
+    // looked like it covered this was dead. Filtering by a column is not a way to read it, and that has to be
+    // true of the DECISION as well as of the payload.
+    const ofSource = gated.filter((f) => f.source === source && f.path.join(".") === pathKey);
+    const keys = ofSource.map((f) => f.fieldKey ?? f.leaf);
     for (const [rowId, emp] of subjects) {
       const denied = deniedByRow.get(rowId) ?? new Set<string>();
       const bad = deniedSubresourceKeys(user.grant, emp.code as string | null, sub, keys, self);
-      for (const s of selected) {
-        if (s.field.source !== source || s.field.path.join(".") !== pathKey) continue;
-        if (bad.has(s.field.fieldKey ?? s.field.leaf)) denied.add(s.field.key);
-      }
+      for (const f of ofSource) if (bad.has(f.fieldKey ?? f.leaf)) denied.add(f.key);
       if (denied.size) deniedByRow.set(rowId, denied);
     }
   }
 
   // ---- Cells ---------------------------------------------------------------------------------------------
   //
-  // A deferred filter's field is NOT necessarily a selected column. It can be a hidden one (`ViewColumn.hidden`
-  // - "narrow by department without showing the department") or a field the view filters on and never displays,
-  // and the loading above already anticipates both: the deferred loop registers their link paths and their
-  // sources. Only the CELL was missing, so `row.cells[f.field]` was `undefined` and `matches` judged every row
-  // against nothing - a filter on a hidden linked column emptied the grid, silently and always. Those fields
-  // are computed here into a side map, used for the predicate and never returned: filtering by a column is not
-  // a way to read it.
-  const judgedOnly = [...new Set(deferred.map((f) => f.field))]
-    .map((key) => byKey.get(key))
-    .filter((f): f is ResolvedField => !!f && !selected.some((s) => s.field.key === f.key));
+  // `judgedOnly` (resolved above, with `gated`) is the filter-only half: a hidden column, or a field the view
+  // filters on and never displays. The loading above anticipates both - the link paths and the sources are
+  // registered off `gated`. Only the CELL was missing, so `row.cells[f.field]` was `undefined` and `matches`
+  // judged every row against nothing: a filter on a hidden linked column emptied the grid, silently and
+  // always. Those cells are computed here into a side map, used for the predicate and never returned.
   const rows: RunRow[] = [];
   const judged = new Map<string, Record<string, unknown>>();
   for (const r of baseRows) {

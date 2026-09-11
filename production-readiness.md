@@ -5,16 +5,17 @@ instance. This is the file `docs/security-review.md`, `docs/deploy-security.md` 
 `docs/architecture-decisions.md` point at for the live posture; the security review itself is an archived
 2026-07-04 snapshot, kept for the record of what was found and fixed.
 
-Last verified against the working tree on **2026-09-10**.
+Last verified against the working tree on **2026-09-11**.
 
 ## Build gates
 
 | Gate | Result |
 |------|--------|
-| `npm test` (vitest) | 2549 tests across 217 files, 0 failures |
+| `npm test` (vitest) | 2654 tests across 225 files, 0 failures |
 | `npm run typecheck` | 0 errors (api + web + e2e) |
+| `npm run lint` (eslint, `--max-warnings 0`) | 0 issues |
 | `npm run api:lint` (spectral) | 0 errors (23 infos) |
-| `npm run preflight` | **2 blocking errors** + 4 warnings — see below |
+| `npm run preflight` | **2 blocking errors** + 5 warnings — see below |
 | `npm run build:web` | ok |
 | migrations | exactly one, `src/db/migrations/0000_*.sql` |
 
@@ -29,9 +30,11 @@ an "all green" table.
   `web/public/_headers` for why it cannot), so until HSTS is on at the zone there is no transport pinning
   anywhere. Enable it in Cloudflare (SSL/TLS → Edge Certificates → HSTS) and record the date.
 
-The four warnings are "an optional thing is off, or a value cannot be checked from here": the staging D1
-placeholder, no `SENTRY_AUTH_TOKEN` (so no source maps), no `SENTRY_RELEASE`, and the SPA reporting a `-dirty`
-release because the working tree has uncommitted changes. Confirm the income-tax slab vintage against the
+The five warnings are "an optional thing is off, or a value cannot be checked from here": the staging D1
+placeholder, no `SENTRY_AUTH_TOKEN` (so no source maps), no `SENTRY_RELEASE`, the SPA reporting a `-dirty`
+release because the working tree has uncommitted changes, and no frozen migration yet — the last of those is
+harmless until the first production deploy and is discharged by step 7a of `docs/deploy.md`, which runs
+`scripts/freezeMigrations.ts` as part of the release. Confirm the income-tax slab vintage against the
 financial year you are running before anyone sees a salary annexure — see the launch list below.
 
 ## What blocks a launch
