@@ -7,7 +7,7 @@ import {
   Lock, Unlock, Send, FileEdit, CheckCircle2, Ban, FileSignature, Sparkles, PenLine, ClipboardCheck, AlertCircle,
   RefreshCw, ExternalLink, ShieldCheck, Copy, CalendarClock, BellRing, Eye,
 } from "lucide-react";
-import { api, get, getAllPages, upload, patch, invoke, download as downloadFile } from "@/api";
+import { api, get, getAllPages, upload, patch, invoke, blobOf, download as downloadFile } from "@/api";
 import { documentDownloadItems, useDocumentDownload } from "@/components/common/DocumentDownload";
 import { useDocuments, createDocument, docCollection, documentFileName } from "@/lib/documents";
 import { useCollection } from "@/hooks/useCollection";
@@ -604,8 +604,12 @@ export default function Documents({ me }: { me: Me }) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch(`/v1/${dialog.doc.path}:download`, { method: "POST", credentials: "include", headers: { "X-Requested-By": "hrms-spa" } });
-        if (res.ok && !cancelled) setEditPdf(await res.blob());
+        // Through the API client, never a hand-rolled fetch: `blobOf` is what carries the simulation rules
+        // (a binary method is a POST, which "view as" refuses), the 401 -> session-expired handoff and the
+        // transient retry. A raw fetch here answered as the REAL admin during a simulation, so an HR admin
+        // checking what an employee sees was shown a PDF that employee cannot open.
+        const blob = await blobOf(dialog.doc.path);
+        if (!cancelled) setEditPdf(blob);
       } catch { /* placer shows a loading note */ }
     })();
     return () => { cancelled = true; };
@@ -670,8 +674,8 @@ export default function Documents({ me }: { me: Me }) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch(`/v1/${viewerDoc.path}:download`, { method: "POST", credentials: "include", headers: { "X-Requested-By": "hrms-spa" } });
-        if (res.ok && !cancelled) setViewerBytes(new Uint8Array(await res.arrayBuffer()));
+        const bytes = new Uint8Array(await (await blobOf(viewerDoc.path)).arrayBuffer());
+        if (!cancelled) setViewerBytes(bytes);
       } catch { /* viewer shows its own loading/error state */ }
     })();
     return () => { cancelled = true; };

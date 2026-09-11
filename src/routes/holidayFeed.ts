@@ -6,7 +6,7 @@ import { buildIcs } from "../lib/ics";
 import { getSettingValue } from "../services/settings";
 import { holidayApplies } from "../services/holidays";
 import { refHolidays } from "../lib/refData";
-import { counter } from "../lib/isolateRate";
+import { keyedCounter } from "../lib/isolateRate";
 
 // PUBLIC, SUBSCRIBABLE holiday calendar: `<origin>/calendar/holidays/<token>` pasted into Google Calendar or
 // Outlook keeps someone's days off in sync, instead of the one-shot .ics the page downloads. No session - a
@@ -29,11 +29,23 @@ const ymd = (d: Date | number | string) => new Date(d).toISOString().slice(0, 10
 // calendar client, so it is long-lived, shareable and polled on somebody else's schedule - and D1 bills rows
 // read. Sized well above what any calendar client refreshes at; a forged token still costs nothing, because the
 // decode below runs first and is pure compute.
-const feeds = counter(300);
+//
+// PER CALLER, not one counter for the route - and this is the lane where that matters most of the four, because
+// a feed URL is polled on somebody ELSE'S schedule. Under one shared budget a single calendar client set to a
+// tight refresh (or one URL pasted into a team's shared calendar) spends the isolate's whole allowance, and
+// every other subscriber's client starts taking 429s for a feed it is fetching perfectly politely. A
+// subscription that stops updating is silent: nobody is watching the calendar that did not change. There is no
+// principal on this lane, so the key is the address Cloudflare itself observed - a client cannot set
+// `cf-connecting-ip` (the edge overwrites it). Same shape as routes/diag.ts and routes/found.ts.
+const feeds = keyedCounter(300);
+// One bucket for requests arriving with no observed address (not behind the edge - local dev, a direct origin
+// hit): they share a budget rather than each getting the full one, so unattributable traffic is not the way to
+// get an unbounded allowance.
+const NO_IP = "-";
 
 export const holidayFeed = new Hono<AppEnv>().get("/holidays/:token", async (c) => {
   const deps = c.get("deps");
-  if (feeds.throttled(Date.now())) {
+  if (feeds.throttled(c.req.header("cf-connecting-ip") ?? NO_IP, Date.now())) {
     return c.text("too many requests", 429, { "Retry-After": String(feeds.retryAfterSeconds) });
   }
   // Decode BEFORE reading anything: this route is unauthenticated (a calendar client has no session) and token

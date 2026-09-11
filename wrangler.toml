@@ -5,7 +5,23 @@ main = "src/index.ts"
 # longer it sits, the larger the step becomes and the less a green test run says about it. Raise it, run
 # `npm run verify`, and keep the two environments on the SAME date: staging rehearses production or it
 # rehearses nothing.
-compatibility_date = "2026-09-01"
+#
+# IT MUST NOT OUTRUN THE INSTALLED RUNTIME, and that half is easy to miss because nothing fails when it does.
+# `wrangler dev` and the whole vitest suite run on the workerd bundled with the `wrangler` devDependency, and a
+# date that runtime does not know is not an error - it is a warning, once per worker boot, in a log nobody reads:
+#
+#   [mf:warn] The latest compatibility date supported by the installed Cloudflare Workers Runtime is
+#   "<date>", but you've requested "<later date>". Falling back to "<date>"...
+#
+# The deploy still sends the later date, so the edge honours it. The result is the quiet one: every test and
+# every local request validates the app under one behaviour set while production runs another, and a green suite
+# stops being evidence about the thing that ships. This date was six months ahead of the bundled workerd
+# (1.20260310.1, which tops out at 2026-03-10), so it is pulled back to what the toolchain can actually execute.
+#
+# TO MOVE IT FORWARD: bump `wrangler` first, check the date the new workerd supports (boot the suite and confirm
+# the warning above is gone), then raise this line and the staging one together. The date and the devDependency
+# are one edit, not two.
+compatibility_date = "2026-03-10"
 compatibility_flags = ["nodejs_compat"]
 
 # Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
@@ -111,7 +127,7 @@ crons = ["*/5 * * * *", "0 2 * * *"]
 # env, so they are redeclared here. Fill in the staging database_id after `wrangler d1 create hrms-staging`.
 [env.staging]
 name = "hrms-staging"
-compatibility_date = "2026-09-01" # keep in step with the top-level date - see the note there
+compatibility_date = "2026-03-10" # keep in step with the top-level date - see the note there
 compatibility_flags = ["nodejs_compat"]
 
 [env.staging.observability]

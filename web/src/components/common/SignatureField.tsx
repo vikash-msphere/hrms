@@ -1,27 +1,34 @@
 import { useEffect, useRef, useState } from "react";
 import { Upload, Trash2, PenLine } from "lucide-react";
-import { api } from "@/api";
+import { api, dataUrl } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { AccessTarget } from "@/components/access/AccessTarget";
 import { useToast } from "@/components/ui/use-toast";
 
-// Fetch a signature image as a blob URL. `signature` is the resource marker (employees/<id>:getSignature) and
+// Fetch a signature image as a data URL. `signature` is the resource marker (employees/<id>:getSignature) and
 // `version` lets a parent force a refetch after upload/remove (the marker string is stable).
+//
+// THROUGH THE API CLIENT, not a hand-rolled fetch. Two things rode on that and both were missing here: the
+// request carried no `X-View-As`, so during an access-mode simulation this answered as the REAL admin and
+// rendered a signature the simulated person is owner-gated out of - on the one screen whose whole job is to
+// show what they see; and a 401 never reached the session-expired handoff, so the image just stayed blank.
+//
+// `dataUrl` rather than `blobUrl` for the reason api.ts gives: an object URL has to be revoked by hand, and
+// this hook re-fetches on `version` - so the cleanup of the previous run raced the new one and revoked the URL
+// the <img> was still displaying. A data URL stays valid for as long as it is held; nothing to get wrong.
 function useSignatureUrl(employeeId: string, signature?: string, version = 0) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
-    let url: string | null = null;
     let active = true;
-    if (signature) {
-      fetch(`/v1/employees/${employeeId}:getSignature`, { method: "POST", headers: { "X-Requested-By": "hrms-spa" }, credentials: "include" })
-        .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error("no signature"))))
-        .then((buf) => { if (!active) return; url = URL.createObjectURL(new Blob([buf], { type: "image/png" })); setSrc(url); })
-        .catch(() => { if (active) setSrc(null); });
-    } else {
+    if (!signature) {
       setSrc(null);
+      return;
     }
-    return () => { active = false; if (url) URL.revokeObjectURL(url); };
+    dataUrl(`employees/${employeeId}`, { verb: "getSignature" })
+      .then((url) => { if (active) setSrc(url); })
+      .catch(() => { if (active) setSrc(null); });
+    return () => { active = false; };
   }, [employeeId, signature, version]);
   return src;
 }

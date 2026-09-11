@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
 import { getSettingValue } from "../services/settings";
-import { counter } from "../lib/isolateRate";
+import { keyedCounter } from "../lib/isolateRate";
 
 // PUBLIC lost-and-found lookup for printed asset tags: the sticker's QR can encode
 // `<origin>/found/<wire-id>` so a stranger who finds the hardware sees who to return it to -
@@ -27,7 +27,19 @@ type FoundPage = { enabled?: boolean; contact?: string; show_name?: boolean };
 //
 // Generous against the traffic this page is for (someone found a laptop, once), and a rejection is a plain 429
 // with Retry-After rather than a broken page.
-const lookups = counter(300);
+//
+// PER CALLER, not one counter for the route. A single shared budget is the shape `counter()` is right for - a
+// login lane, a provider webhook - where the whole route is the thing being protected. Here it made one noisy
+// client able to spend the isolate's entire allowance, and the cost of that is not a refused scan: it is that
+// the page goes dark for every OTHER person holding a sticker, at the moment they are standing there with
+// somebody's laptop. There is no principal on this lane, so the key is the address Cloudflare itself observed -
+// a client cannot set `cf-connecting-ip` (the edge overwrites it), the same reason the audit trail keys on it
+// and nothing else. Same shape as routes/diag.ts.
+const lookups = keyedCounter(300);
+// One bucket for requests arriving with no observed address (not behind the edge - local dev, a direct origin
+// hit). They share a budget rather than each getting the full one, which is the conservative way round:
+// unattributable traffic must not be the way to get an unbounded allowance.
+const NO_IP = "-";
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
@@ -61,7 +73,7 @@ export const found = new Hono<AppEnv>()
   })
   .get("/:token", async (c) => {
   const deps = c.get("deps");
-  if (lookups.throttled(Date.now())) {
+  if (lookups.throttled(c.req.header("cf-connecting-ip") ?? NO_IP, Date.now())) {
     return c.text("too many lookups", 429, { "Retry-After": String(lookups.retryAfterSeconds) });
   }
   // Decode BEFORE reading anything. This route is unauthenticated by nature (a stranger returning hardware has

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Eye, FileSignature, KeyRound, PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
-import { create, patch, remove } from "@/api";
+import { blobUrl, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { useLetterheads } from "@/lib/letterheads";
 import { cn, idOf } from "@/lib/utils";
@@ -311,14 +311,14 @@ export default function LettersTab({ toast }: { toast: Toast }) {
       // Sample values for any input fields, so an HR-filled template still previews with placeholder text.
       const input = Object.fromEntries((selected.inputs ?? []).map((f) => [f.key, f.placeholder || `[${f.label}]`]));
       const tpl = { id: selected.id, label: selected.label, filename: selected.filename, letterhead: selected.letterhead, inputs: selected.inputs, blocks: selected.blocks };
-      const res = await fetch("/v1/personal-documents:previewLetter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Requested-By": "hrms-spa" },
-        credentials: "include",
-        body: JSON.stringify({ employee: `employees/${previewEmp}`, template: tpl, input }),
+      // Through the API client: `blobUrl` carries the simulation rules, the 401 -> session-expired handoff and
+      // the transient retry (a preview is a whole PDF render behind one request, so a gateway blip used to
+      // dead-end the designer). It also throws an ApiError, so the catch below shows the server's own sentence
+      // instead of the bare `HTTP 500` this branch used to report.
+      const url = await blobUrl("personal-documents", {
+        verb: "previewLetter",
+        body: { employee: `employees/${previewEmp}`, template: tpl, input },
       });
-      if (!res.ok) { toast({ title: "Preview failed", description: `HTTP ${res.status}`, variant: "destructive" }); return; }
-      const url = URL.createObjectURL(await res.blob());
       setPreviewUrl(url);
     } catch (e) {
       toast({ title: "Preview failed", description: (e as Error).message, variant: "destructive" });
