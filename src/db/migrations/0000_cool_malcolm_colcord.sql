@@ -375,6 +375,7 @@ CREATE TABLE `automations` (
 	`disabled` integer DEFAULT false NOT NULL,
 	`locked` integer DEFAULT false NOT NULL,
 	`locked_by` text,
+	`super_authored` integer DEFAULT true NOT NULL,
 	`created_by` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,

@@ -1572,6 +1572,14 @@ export const automations = sqliteTable("automations", {
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
   lockedBy: text("locked_by"),
+  // Was the LAST person to write this rule a super admin? Not decoration: an `emitEvent` action re-emits a
+  // domain event with an author-chosen type and payload, and the event's SUBJECT is inherited from whatever
+  // triggered the relaying rule. Without this, an hr_admin - who may author `emitEvent` but never `apiCall` -
+  // could relay into a super-authored rule whose action is `POST /v1/{{subject}}:approve` and have it run, as
+  // super, against a record of their choosing. The engine refuses that by asking this column (see
+  // automationEngine.ts dispatchAutomations). Stamped on every create and update, so a non-super edit of a
+  // super-authored rule downgrades it; the seeds default to trusted because bootstrap.sql IS the app.
+  superAuthored: integer("super_authored", { mode: "boolean" }).notNull().default(true),
   createdBy: text("created_by").references((): AnySQLiteColumn => users.uuid),
   createdAt: created(),
   updatedAt: updated(),

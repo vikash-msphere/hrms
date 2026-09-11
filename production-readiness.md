@@ -11,7 +11,7 @@ Last verified against the working tree on **2026-09-11**.
 
 | Gate | Result |
 |------|--------|
-| `npm test` (vitest) | 2654 tests across 225 files, 0 failures |
+| `npm test` (vitest) | 2673 tests across 227 files, 0 failures |
 | `npm run typecheck` | 0 errors (api + web + e2e) |
 | `npm run lint` (eslint, `--max-warnings 0`) | 0 issues |
 | `npm run api:lint` (spectral) | 0 errors (23 infos) |
@@ -150,6 +150,17 @@ Each of these leaves production working but weaker.
 - **The automation dispatch budget is 50 per originating action.** A correct runaway guard; when it trips it
   now writes one `dropped` `automation_runs` row (once per action, naming no rule, because none was loaded),
   so it surfaces in the Workflows UI instead of only in Workers Logs.
+- **Automation actions run as the system principal, and `hr_admin` may author rules.** That is the reason
+  `apiCall` / `webhook` / `email` / `emailAudience` are super-only to write - authoring one is equivalent to
+  holding super. The same gate now covers every act that decides whether such a rule runs: `:enable`,
+  `:disable` and delete ask it of the STORED actions, because `bootstrap/bootstrap.sql` ships privileged rules
+  disabled on purpose and arming one is not a lesser act than writing it. The hop around it is closed too:
+  `emitEvent` is deliberately not privileged, so a rule an hr_admin wrote can relay an event - but that
+  relayed event cannot trigger a rule holding a privileged action, because the event would carry a subject the
+  relayer chose into a path the privileged rule templates (`POST /v1/{{subject}}:approve` is a shipped seed).
+  Trust is a column (`automations.super_authored`), stamped from the author on every write and carried through
+  a `wait` / `waitFor` continuation; a refused hop is a `skipped` `automation_runs` row, not a silence.
+  Pinned by `test/automationRelayTrust.test.ts`.
 - **`/readyz` is unauthenticated and touches D1.** A READY answer is cached in the isolate for 5 seconds, so
   a flood costs one D1 read per isolate per window. A failing probe is deliberately not cached, so an
   outage is still reported on the first call after it starts.

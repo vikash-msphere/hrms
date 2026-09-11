@@ -21,7 +21,7 @@ import { allocFlatCode } from "./codeAlloc";
 import { notify, notifyManager, notifyAudience, audienceEmployeeIds } from "./notifications";
 import type { Action, Automation, EvalContext, RecipientSpec, WaitArm, Schedule, EmailAttachmentSpec } from "../domain/automations";
 import type { EmailAttachment } from "../ports";
-import { evalCondition, resolveField, scheduleDueOn, SCHEDULE_TRIGGER } from "../domain/automations";
+import { evalCondition, hasPrivilegedAction, privilegedActionKinds, resolveField, scheduleDueOn, SCHEDULE_TRIGGER } from "../domain/automations";
 import { computeEmployeeMetrics, NEVER_TAKEN_LEAVE } from "./scheduledMetrics";
 import { orgToday, dayStartMs } from "./orgDay";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
@@ -58,6 +58,40 @@ const MAX_EVENT_DEPTH = 5;
 // It is still a hard bound, and the runaway case it was written for is unaffected: a self-triggering apiCall
 // loop hits 250 as surely as it hit 50, one tick later.
 export const MAX_TOTAL_DISPATCHES = 250;
+
+/**
+ * WHICH RULE THESE ACTIONS BELONG TO, and whether a super admin wrote it.
+ *
+ * `emitEvent` re-emits a domain event under the system principal with a type and payload the rule's author
+ * chose, while the event's SUBJECT is inherited from whatever triggered that rule. A privileged rule whose
+ * action templates the subject into its path - `POST /v1/{{subject}}:approve` is a shipped seed - therefore
+ * acts on whichever record the RELAYING author pointed it at. Authoring `apiCall` is super-only, but authoring
+ * `emitEvent` deliberately is not, so without this an hr_admin could reach the same super authority one hop
+ * removed: trigger on an event carrying the subject they want, relay it as the type a privileged rule listens
+ * for, and have that rule run as super against it.
+ *
+ * The rule's OWN action list cannot answer "was this authored by a super admin" - the seeded milestone relays
+ * (`transition.completed` -> emitEvent `employee.onboarded`) hold nothing privileged and must keep driving the
+ * privileged rules downstream of them - so the answer is stored per rule (`automations.super_authored`) and
+ * carried here through every continuation: a deferred `wait`, a suspended `waitFor`, a resumed timer.
+ *
+ * `trusted: false` never blocks the rule's own actions. It only means the events this rule RELAYS may not
+ * trigger a rule holding a privileged action (dispatchAutomations / resumeWaiting).
+ */
+type RuleOrigin = { automationId: string | null; trusted: boolean };
+
+/** Fail-closed origin: no rule to attribute the actions to, so nothing it relays is trusted. */
+const UNTRUSTED: RuleOrigin = { automationId: null, trusted: false };
+
+/** The stored trust of one rule, off the engine's own cache where it can be (a resume is not a hot path, but
+ *  it already costs a read per waiting instance). A rule that no longer exists is not trusted. */
+async function originOf(deps: Deps, automationId: string | null): Promise<RuleOrigin> {
+  if (!automationId) return UNTRUSTED;
+  const cached = (await loadEnabled(deps)).find((r) => r.uuid === automationId);
+  if (cached) return { automationId, trusted: !!cached.superAuthored };
+  const row = (await deps.db.select({ superAuthored: schema.automations.superAuthored }).from(schema.automations).where(eq(schema.automations.uuid, automationId)).limit(1))[0];
+  return { automationId, trusted: !!row?.superAuthored };
+}
 
 /**
  * Run `fn` with a FRESH dispatch budget, and report how many events the budget refused.
@@ -234,7 +268,9 @@ async function resolveAttachments(deps: Deps, ctx: EvalContext, specs: EmailAtta
 type ActionOutcome = { kind: string; status: "done" | "skipped" | "error" | "suspended"; detail?: string };
 
 // Run one action with system authority. Mutates `ctx.results` for captures. Never throws (caller also guards).
-async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, action: Action, depth: number): Promise<ActionOutcome> {
+// `origin` is the rule these actions came from - carried so `emitEvent` can say whether what it relays is
+// allowed to reach a privileged rule, and so a suspended continuation remembers whose it was (see RuleOrigin).
+async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, action: Action, depth: number, origin: RuleOrigin): Promise<ActionOutcome> {
   switch (action.kind) {
     case "notify": {
       const recipient = await resolveRecipient(deps, ctx, action.recipient);
@@ -266,7 +302,15 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
     case "emitEvent": {
       if (depth + 1 > MAX_EVENT_DEPTH) return { kind: action.kind, status: "skipped", detail: "max event depth" };
       const { emitEvent } = await import("./eventBus");
-      await emitEvent(deps, systemActor(), action.type, { subject: event.subject, employeeId: event.employeeId, payload: (template(action.payload ?? event.payload, ctx) as Record<string, unknown>), depth: depth + 1 });
+      // `relayed` when the rule doing the relaying was not authored by a super admin: the event is real and is
+      // logged and dispatched exactly as any other, but it may not trigger a rule holding a privileged action.
+      await emitEvent(deps, systemActor(), action.type, {
+        subject: event.subject,
+        employeeId: event.employeeId,
+        payload: template(action.payload ?? event.payload, ctx) as Record<string, unknown>,
+        depth: depth + 1,
+        relayedUntrusted: !origin.trusted,
+      });
       return { kind: action.kind, status: "done" };
     }
     case "wait": {
@@ -275,14 +319,16 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
       await deps.db.insert(schema.jobs).values({
         code: await allocFlatCode(deps, schema.jobs),
         kind: "automation.action",
-        payload: JSON.stringify({ actions: action.then, event, ctx, depth, correlationId: deps.trace }),
+        // `origin` rides with the continuation: a deferred relay is still its rule's relay when it runs hours
+        // later, and a payload without it resumes untrusted rather than guessing (runDeferredActions).
+        payload: JSON.stringify({ actions: action.then, event, ctx, depth, correlationId: deps.trace, origin }),
         employeeId: ctx.employeeId ?? null,
         runAfter,
       });
       return { kind: action.kind, status: "done", detail: `deferred to ${runAfter.toISOString()}` };
     }
     case "waitFor": {
-      await suspend(deps, ctx, event, action.on, depth);
+      await suspend(deps, ctx, event, action.on, depth, origin);
       return { kind: action.kind, status: "suspended", detail: `awaiting ${action.on.length} arm(s)` };
     }
     case "webhook": {
@@ -337,11 +383,11 @@ async function runAction(deps: Deps, ctx: EvalContext, event: DomainEvent, actio
 }
 
 // Run a list of actions in order (best-effort per action). Stops after a `waitFor` (terminal - it suspends).
-async function runActions(deps: Deps, ctx: EvalContext, event: DomainEvent, actions: Action[], depth: number): Promise<ActionOutcome[]> {
+async function runActions(deps: Deps, ctx: EvalContext, event: DomainEvent, actions: Action[], depth: number, origin: RuleOrigin): Promise<ActionOutcome[]> {
   const outcomes: ActionOutcome[] = [];
   for (const action of actions) {
     try {
-      const outcome = await runAction(deps, ctx, event, action, depth);
+      const outcome = await runAction(deps, ctx, event, action, depth, origin);
       outcomes.push(outcome);
       if (outcome.status === "suspended") break;
     } catch (e) {
@@ -355,12 +401,16 @@ async function runActions(deps: Deps, ctx: EvalContext, event: DomainEvent, acti
 
 // Persist a suspended workflow and register any timer arms as durable timers (jobs with run_after). The full
 // eval context (payload + captured results) is snapshotted so the continuation resumes with everything it had.
-async function suspend(deps: Deps, ctx: EvalContext, event: DomainEvent, arms: WaitArm[], depth: number): Promise<void> {
+async function suspend(deps: Deps, ctx: EvalContext, event: DomainEvent, arms: WaitArm[], depth: number, origin: RuleOrigin): Promise<void> {
   const awaitedTypes = arms.filter((a): a is Extract<WaitArm, { event: string }> => "event" in a).map((a) => a.event);
   const [inst] = await deps.db
     .insert(schema.workflowInstances)
     .values({
       code: await allocFlatCode(deps, schema.workflowInstances),
+      // WHICH RULE SUSPENDED, which the column has always had room for and nothing ever wrote - so the
+      // Workflows UI rendered every instance with no rule against it (http/serialize.ts drops a null ref), and
+      // a resumed continuation had no way back to its author's trust (originOf, read in resumeWaiting).
+      automationId: origin.automationId,
       status: "waiting",
       awaitedTypes: awaitedTypes.join(","),
       armsJson: JSON.stringify(arms),
@@ -419,7 +469,7 @@ function ctxFromInstance(inst: typeof schema.workflowInstances.$inferSelect, res
 
 // Resume any waiting workflows whose event arm matches this event. Called by dispatchAutomations after the
 // normal rules. First matching arm per instance wins; the atomic claim guards against double-resume.
-async function resumeWaiting(deps: Deps, event: DomainEvent, depth: number): Promise<number> {
+async function resumeWaiting(deps: Deps, event: DomainEvent, depth: number, relayedUntrusted: boolean): Promise<number> {
   const waiting = await deps.db.select().from(schema.workflowInstances).where(eq(schema.workflowInstances.status, "waiting"));
   let resumed = 0;
   for (const inst of waiting) {
@@ -428,11 +478,19 @@ async function resumeWaiting(deps: Deps, event: DomainEvent, depth: number): Pro
     try { arms = JSON.parse(inst.armsJson) as WaitArm[]; } catch { continue; }
     const arm = arms.find((a): a is Extract<WaitArm, { event: string }> => "event" in a && armMatches(inst, a, event));
     if (!arm) continue;
+    // The same gate dispatchAutomations applies to a rule, applied to a suspended continuation: an arm whose
+    // `then` holds a privileged action is super-authored work, and an untrusted relay may not be what wakes
+    // it. NOT claimed first - a refused resume must leave the instance waiting for a real event.
+    if (relayedUntrusted && hasPrivilegedAction(arm.then)) {
+      console.warn(`[automationEngine] workflow ${inst.uuid} not resumed by a relayed ${event.type}: its continuation holds a privileged action`);
+      continue;
+    }
     if (!(await claim(deps, inst.uuid))) continue; // lost the race (another arm/timer already fired)
     const ctx = ctxFromInstance(inst, event);
     const prevTrace = deps.trace;
     deps.trace = inst.correlationId ?? prevTrace; // the continuation belongs to the original saga's trace
-    try { await runActions(deps, ctx, event, arm.then, inst.depth); } finally { deps.trace = prevTrace; }
+    const origin = await originOf(deps, inst.automationId);
+    try { await runActions(deps, ctx, event, arm.then, inst.depth, origin); } finally { deps.trace = prevTrace; }
     resumed++;
   }
   return resumed;
@@ -510,7 +568,11 @@ export async function anyAutomationInterest(deps: Deps, type: string): Promise<b
 }
 
 // Entry point called by emitEvent: run every enabled rule that matches, then resume any waiting workflows. Never throws.
-export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventId: string | null, depth: number): Promise<void> {
+//
+// `relayedUntrusted` says this event was produced by an `emitEvent` action of a rule no super admin authored
+// (see RuleOrigin). Such an event runs the ordinary rules exactly as any other - what it may not do is trigger
+// a rule holding a privileged action, because that rule runs as super against a subject the relayer chose.
+export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventId: string | null, depth: number, relayedUntrusted = false): Promise<void> {
   if (depth > MAX_EVENT_DEPTH) return;
   const budget = (deps.automationBudget ??= { n: 0, dropped: 0 });
   if (budget.n >= MAX_TOTAL_DISPATCHES) {
@@ -538,6 +600,17 @@ export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventI
     const ctx = contextOf(event); // fresh results bag per rule
     if (!evalCondition(automation.condition, ctx)) continue;
     const start = +deps.clock.now();
+    // Refused BEFORE the actions, and recorded as a run rather than only logged: "my rule did not fire" is a
+    // question someone asks in the Workflows UI, and a privileged rule silently skipped is the same shape of
+    // mystery the dispatch-budget drop row exists to prevent.
+    if (relayedUntrusted && hasPrivilegedAction(automation.actions)) {
+      await recordRun(deps, row.uuid, eventId, event, start, [{
+        kind: "dispatch",
+        status: "skipped",
+        detail: `${event.type} was relayed by an automation no super admin authored, so it may not trigger a rule with ${privilegedActionKinds(automation.actions).join("/")} action(s).`,
+      }]);
+      continue;
+    }
     // Name the rule for the duration of its actions, so every audit entry they write says which automation
     // did it rather than "System". Parked on Deps like `trace`, so it survives the apiCall re-dispatch (which
     // reuses this Deps) and is restored afterwards - a rule must not be blamed for the next rule's writes.
@@ -545,14 +618,14 @@ export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventI
     deps.actingAs = { kind: "automation", name: automation.name || row.uuid, ref: `automations/${row.uuid}` };
     let outcomes: ActionOutcome[];
     try {
-      outcomes = await runActions(deps, ctx, event, automation.actions, depth);
+      outcomes = await runActions(deps, ctx, event, automation.actions, depth, { automationId: row.uuid, trusted: !!row.superAuthored });
     } finally {
       deps.actingAs = prevActing;
     }
     await recordRun(deps, row.uuid, eventId, event, start, outcomes);
   }
   try {
-    await resumeWaiting(deps, event, depth);
+    await resumeWaiting(deps, event, depth, relayedUntrusted);
   } catch (e) {
     console.error("[automationEngine] resumeWaiting failed (non-fatal)", e);
   }
@@ -602,7 +675,7 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
       const ctx = contextOf(event);
       if (!evalCondition(automation.condition, ctx)) return;
       const start = +deps.clock.now();
-      const outcomes = await runActions(deps, ctx, event, automation.actions, 0);
+      const outcomes = await runActions(deps, ctx, event, automation.actions, 0, { automationId: row.uuid, trusted: !!row.superAuthored });
       await recordRun(deps, row.uuid, null, event, start, outcomes);
       fired++;
     };
@@ -650,11 +723,15 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
 }
 
 // Run a deferred (`wait`) automation payload - called by the cron drain when the job's runAfter has passed.
-export async function runDeferredActions(deps: Deps, payload: { actions: Action[]; event: DomainEvent; ctx?: EvalContext; depth: number; correlationId?: string }): Promise<void> {
+export async function runDeferredActions(deps: Deps, payload: { actions: Action[]; event: DomainEvent; ctx?: EvalContext; depth: number; correlationId?: string; origin?: RuleOrigin }): Promise<void> {
   const event = { ...payload.event, occurredAt: new Date(payload.event.occurredAt) };
   const ctx = payload.ctx ?? contextOf(event);
   deps.trace = payload.correlationId ?? undefined; // resume under the original workflow's trace (fresh Deps per cron job)
-  try { await runActions(deps, ctx, event, payload.actions, payload.depth); } finally { deps.trace = undefined; }
+  // The rule's trust is re-read rather than taken from the payload: a `wait` can be days long, and the rule
+  // may have been edited by someone with less authority in between. A payload that names no rule (one enqueued
+  // before this field existed) resumes untrusted, which costs a relay nothing but the privileged hop.
+  const origin = payload.origin?.automationId ? await originOf(deps, payload.origin.automationId) : UNTRUSTED;
+  try { await runActions(deps, ctx, event, payload.actions, payload.depth, origin); } finally { deps.trace = undefined; }
 }
 
 // Fire a durable timer arm of a suspended workflow - called by the cron drain for a `workflow.timer` job.
@@ -669,5 +746,6 @@ export async function runWorkflowTimer(deps: Deps, payload: { instanceId: string
   const ctx = ctxFromInstance(inst);
   const event: DomainEvent = { type: inst.originType ?? "", subject: inst.subject, actorId: null, employeeId: inst.employeeId, payload: {}, occurredAt: deps.clock.now() };
   deps.trace = inst.correlationId ?? undefined; // resume under the original saga trace (fresh Deps per cron job)
-  try { await runActions(deps, ctx, event, arm.then, inst.depth); } finally { deps.trace = undefined; }
+  const origin = await originOf(deps, inst.automationId);
+  try { await runActions(deps, ctx, event, arm.then, inst.depth, origin); } finally { deps.trace = undefined; }
 }

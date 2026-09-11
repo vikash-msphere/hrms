@@ -149,6 +149,36 @@ export type Automation = {
 export const ACTION_KINDS = ["notify", "notifyManager", "notifyAudience", "apiCall", "emitEvent", "wait", "waitFor", "webhook", "email", "emailAudience"] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
+// ---- Privileged action kinds ----
+//
+// The kinds that run with SYSTEM (super) authority or reach the network. Authoring one is equivalent to
+// holding super, so only a super_admin may put one in a rule (services/automations.ts) - and an event a
+// non-super-authored rule relays may not trigger a rule that holds one (services/automationEngine.ts).
+//
+// Here in the domain rather than in the service that first needed it, because three places now ask the same
+// question and a second copy of this list is a second answer: the authoring gate, the enable/delete gates,
+// and the dispatch gate all have to mean the same thing by "privileged".
+export const PRIVILEGED_ACTION_KINDS: ReadonlySet<string> = new Set<ActionKind>(["apiCall", "webhook", "email", "emailAudience"]);
+
+/** Every action kind in `actions`, INCLUDING the ones nested in a `wait`/`waitFor` continuation - a privileged
+ *  action must not be able to hide inside a `then` or an arm. */
+export function collectActionKinds(actions: Action[] | undefined, acc: Set<string> = new Set()): Set<string> {
+  for (const a of actions ?? []) {
+    if (a && typeof (a as Action).kind === "string") acc.add((a as Action).kind);
+    const any = a as { then?: Action[]; on?: { then?: Action[] }[] };
+    if (Array.isArray(any?.then)) collectActionKinds(any.then, acc);
+    if (Array.isArray(any?.on)) for (const arm of any.on) if (Array.isArray(arm?.then)) collectActionKinds(arm.then, acc);
+  }
+  return acc;
+}
+
+/** The privileged kinds this action list holds (empty = none), for naming them in a refusal. */
+export function privilegedActionKinds(actions: Action[] | undefined): string[] {
+  return [...collectActionKinds(actions)].filter((k) => PRIVILEGED_ACTION_KINDS.has(k));
+}
+
+export const hasPrivilegedAction = (actions: Action[] | undefined): boolean => privilegedActionKinds(actions).length > 0;
+
 // ---- Scheduled (time-driven) triggers ----
 // The reserved trigger a scheduled rule uses instead of a domain event type. A rule with this trigger has a
 // non-null `schedule`; a daily cron scanner (services/automationEngine.ts runScheduledAutomations) fires it

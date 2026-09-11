@@ -11,7 +11,13 @@ import { DEFAULT_KUDOS_CONFIG, pointsForLevel } from "../src/domain/kudos";
 import { KUDOS_CONFIG } from "./collections/kudos";
 
 const T0 = 1700000000000;
-const NOW = Date.now(); // generation time, so the feed always reads as recent (and the "New" badge lights)
+// Generation time, so the feed always reads as recent (and the "New" badge lights) - QUANTIZED TO THE DAY.
+// Taken raw, every regeneration rewrote all 83 rows with millisecond-different stamps, so `bootstrap/demo.sql`
+// showed up modified in `git status` after any `--demo` run, on a file nobody had edited. That is not free: a
+// dirty tree is what makes `npm run preflight` stamp the SPA release `-dirty`, so the noise lands in a deploy
+// gate. A demo feed is not less recent for being anchored at midnight, and same-day re-runs are now
+// byte-identical - which is the property the ids already had.
+const NOW = Math.floor(Date.now() / 86_400_000) * 86_400_000;
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 

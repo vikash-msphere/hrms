@@ -630,10 +630,17 @@ async function rollCarryForward(deps: Deps, queueRemainder: boolean): Promise<{ 
     const roll = due.filter((b) => b.lastCarryForwardYear != null);
     const init = due.filter((b) => b.lastCarryForwardYear == null);
     if (init.length) {
-      await deps.db
-        .update(schema.leaveBalances)
-        .set({ lastCarryForwardYear: year, updatedAt: new Date() })
-        .where(inArray(schema.leaveBalances.uuid, init.map((b) => b.uuid)));
+      // Chunked to the id cap like every other IN list in the app: the statement also binds the year and the
+      // stamp, so a list sized at the cap is over it. An employee with more leave types than that is unusual,
+      // which is exactly why an unchunked list here would have failed for the first org that had one, on
+      // first-deploy night, in the subtask that stamps every balance row in the org.
+      await byIdChunks(init.map((b) => b.uuid), (group) =>
+        deps.db
+          .update(schema.leaveBalances)
+          .set({ lastCarryForwardYear: year, updatedAt: new Date() })
+          .where(inArray(schema.leaveBalances.uuid, group))
+          .returning({ uuid: schema.leaveBalances.uuid }),
+      );
     }
     if (roll.length === 0) continue;
 

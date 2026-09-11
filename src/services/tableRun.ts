@@ -214,13 +214,22 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
     // guessing `employeeId` here blanked the commonest column in the app, because the commonest link target
     // is `employees` (owned by `uuid`), so a caller reading employees at `me` breadth got a name column that
     // was empty on every row of a grid whose base rows were all correctly their own.
+    // ...and by the target's own soft-delete, which the base page (above) and every PII source (below) already
+    // apply and this did not. A deleted row is one no list in the app will answer with, so a grid that
+    // dereferences an FK into one was the single place a deleted employee's name, a retired department or a
+    // removed project kept being published - to whoever could see the row pointing at it. A dangling link
+    // renders empty, which is what the rest of the app shows for a reference it cannot resolve.
     const targetTable = TABLES[target.collection] as SQLiteTable & Record<string, any>;
     const targetScope = scopes.get(target.collection)!;
     const rows = await byIdChunks(ids, (group) =>
       deps.db
         .select()
         .from(targetTable)
-        .where(and(inArray(targetTable.uuid, group), applyScope(targetScope, targetTable.code, listOwnerColumn(target.collection, targetTable)))) as PromiseLike<Record<string, any>[]>,
+        .where(and(
+          inArray(targetTable.uuid, group),
+          applyScope(targetScope, targetTable.code, listOwnerColumn(target.collection, targetTable)),
+          targetTable.deleteTime ? isNull(targetTable.deleteTime) : undefined,
+        )) as PromiseLike<Record<string, any>[]>,
     );
     linked.set(path, new Map(rows.map((r) => [r.uuid as string, r])));
   }
@@ -315,6 +324,11 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // Deferred filters (anything not a plain base column, plus anything the parameter budget could not fit) over
   // the assembled page. Filtering a page at a time is the same answer as filtering the union: each row is
   // judged on its own values.
+  //
+  // It is applied AFTER the page was cut, though, so a page can come back short - or empty - while
+  // `next_page_token` still names more. That is not a truncated answer: the grid follows the cursor to the end
+  // of the report (see the sort note below), so the union it assembles is complete. A client that reads one
+  // page and stops would see fewer rows than exist, which is why no caller in this app does.
   const cellFor = (row: RunRow, key: string) =>
     key in row.cells ? row.cells[key] : judged.get(row.path.split("/").pop()!)?.[key];
   const filtered = deferred.length ? rows.filter((row) => deferred.every((f) => matches(cellFor(row, f.field), f, byKey.get(f.field)?.kind))) : rows;

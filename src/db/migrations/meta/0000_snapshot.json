@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "24468ac5-1019-4293-8f97-27239f357b90",
+  "id": "8a7008e3-7f26-4fd7-9b48-7e7ecc031062",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -2744,6 +2744,14 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "super_authored": {
+          "name": "super_authored",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
         },
         "created_by": {
           "name": "created_by",

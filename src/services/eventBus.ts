@@ -17,6 +17,10 @@ export type EmitOptions = {
   employeeId?: string | null; // primary employee concerned (scoping / the `employee` condition field)
   payload?: Record<string, unknown>; // event-specific fields (see domain/events.ts EVENT_TYPES)
   depth?: number; // internal: event-chain recursion depth (loop guard); callers leave unset
+  // Internal: this event was RELAYED by an automation's `emitEvent` action, from a rule no super admin
+  // authored. It is logged and dispatched like any other event; the one thing it may not do is trigger a rule
+  // holding a privileged (super-authority) action. Services leave it unset - only the engine sets it.
+  relayedUntrusted?: boolean;
 };
 
 // Emit one domain event. Never throws. `actor` is the caller who triggered the action (null for system/cron).
@@ -64,7 +68,7 @@ export async function emitEvent(deps: Deps, actor: AppUser | null, type: string,
     console.error("[emitEvent] event_log insert failed (non-fatal)", e);
   }
   try {
-    await dispatchAutomations(deps, event, eventId, opts.depth ?? 0);
+    await dispatchAutomations(deps, event, eventId, opts.depth ?? 0, opts.relayedUntrusted ?? false);
   } catch (e) {
     console.error("[emitEvent] automation dispatch failed (non-fatal)", e);
   } finally {
@@ -115,7 +119,7 @@ export async function emitEvents(deps: Deps, actor: AppUser | null, type: string
   }
   try {
     if (await anyAutomationInterest(deps, type)) {
-      for (const { event, id } of events) await dispatchAutomations(deps, event, id, list[0]?.depth ?? 0);
+      for (const { event, id } of events) await dispatchAutomations(deps, event, id, list[0]?.depth ?? 0, list[0]?.relayedUntrusted ?? false);
     }
   } catch (e) {
     console.error("[emitEvents] automation dispatch failed (non-fatal)", e);

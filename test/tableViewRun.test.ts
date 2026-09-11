@@ -2,6 +2,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers" />
 import { env } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
 const migrationModules = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const migrationSql = Object.keys(migrationModules).sort().map((k) => migrationModules[k]).join("\n");
 import * as schema from "../src/db/schema";
@@ -182,6 +183,19 @@ describe("running a grid", () => {
     expect(ada.cells["@personal.personal_email"]).toBe("ada@personal.example");
     expect(ada.cells["@comp.ctc_annual"]).toBe(1200000);
     expect(ada.cells["department_id.name"]).toBe("Engineering");
+  });
+
+  it("does not publish a SOFT-DELETED row through a link", async () => {
+    const { people, deptId } = await seed();
+    // The base page has always excluded deleted rows; the FK dereference did not, so a grid was the one place
+    // a deleted department (or employee, or project) kept being read out to whoever could see a row pointing
+    // at it. A dangling link renders empty, as an unresolvable reference does everywhere else.
+    await deps.db.update(schema.departments).set({ deleteTime: new Date() }).where(eq(schema.departments.uuid, deptId));
+
+    const result = await runTableView(deps, SUPER(), allScopes(), salarySheet(["department_id.name"]), { maxPageSize: 50, unmask: true });
+    expect(result.rows).toHaveLength(2); // the employees are not deleted, so they stay
+    expect(result.rows.map((r) => r.cells["department_id.name"])).toEqual([null, null]);
+    expect(people).toHaveLength(2);
   });
 
   it("masks a sensitive identity field unless the caller holds `unmask`", async () => {

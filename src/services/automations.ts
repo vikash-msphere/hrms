@@ -15,7 +15,7 @@ import type { ListScope } from "../domain/access";
 import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
-import { validateAutomation, evalCondition, isScheduled, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
+import { validateAutomation, evalCondition, isScheduled, privilegedActionKinds, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
 import { invalidateAutomationCache } from "./automationEngine";
 import type { DomainEvent } from "../domain/events";
 
@@ -47,21 +47,32 @@ function assertValid(a: Automation): void {
 
 // Actions that run with SYSTEM (super) authority or reach the network: authoring one is equivalent to holding
 // super, so only a super_admin may author them. hr_admin keeps the safe action kinds (notify/emitEvent/wait).
-// Recurses into wait/waitFor continuations so a privileged action can't hide inside a `then`/arm.
-const PRIVILEGED_ACTION_KINDS = new Set(["apiCall", "webhook", "email", "emailAudience"]);
-function collectActionKinds(actions: Action[] | undefined, acc: Set<string> = new Set()): Set<string> {
-  for (const a of actions ?? []) {
-    if (a && typeof (a as Action).kind === "string") acc.add((a as Action).kind);
-    const any = a as { then?: Action[]; on?: { then?: Action[] }[] };
-    if (Array.isArray(any?.then)) collectActionKinds(any.then, acc);
-    if (Array.isArray(any?.on)) for (const arm of any.on) if (Array.isArray(arm?.then)) collectActionKinds(arm.then, acc);
-  }
-  return acc;
-}
+// The kind list and the recursion into wait/waitFor continuations live in domain/automations.ts, because the
+// dispatch-side gate asks the same question and two copies would be two answers.
+//
+// "AUTHOR" MEANS EVERY WRITE THAT DECIDES WHETHER THE RULE RUNS, not only the one that types the actions. The
+// gate used to sit on create/update alone, so an hr_admin could not write an `apiCall` rule - and could still
+// switch one ON. That is the same act with fewer steps: `bootstrap.sql` ships privileged rules DISABLED on
+// purpose ("Auto-approve small salary advances", whose own description says it moves money with no human
+// decision), and arming one is exactly the authority the create gate withholds. Delete is here for the
+// converse reason: silently removing a control a super admin installed is not a lesser act than installing one.
 function assertMayAuthorActions(actor: AppUser, actions: Action[] | undefined): void {
   if (isSuperGrant(actor.grant)) return;
-  const privileged = [...collectActionKinds(actions)].filter((k) => PRIVILEGED_ACTION_KINDS.has(k));
+  const privileged = privilegedActionKinds(actions);
   if (privileged.length) throw forbidden(`only a super admin may author automations with ${privileged.join("/")} action(s)`);
+}
+
+/** The same gate, asked about a rule as it is STORED - for the verbs that act on an existing rule rather than
+ *  on a submitted body (enable / disable / delete). A malformed `actions_json` fails closed. */
+function assertMayActOnStored(actor: AppUser, row: { actionsJson: string }): void {
+  if (isSuperGrant(actor.grant)) return;
+  let actions: Action[];
+  try {
+    actions = JSON.parse(row.actionsJson) as Action[];
+  } catch {
+    throw forbidden("this automation's actions cannot be read; only a super admin may act on it");
+  }
+  assertMayAuthorActions(actor, actions);
 }
 
 // The caller's list scope is BOUND, like every other list in the app, rather than assumed away.
@@ -101,6 +112,8 @@ export async function createAutomation(deps: Deps, actor: AppUser, input: Automa
       actionsJson: JSON.stringify(a.actions),
       scheduleJson: isScheduled(a) && a.schedule ? JSON.stringify(a.schedule) : null,
       disabled: input.enabled === false,
+      // What the engine consults before letting this rule's `emitEvent` reach a privileged rule (schema.ts).
+      superAuthored: isSuperGrant(actor.grant),
       createdBy: actor.uuid === "system" ? null : actor.uuid,
     })
     .returning())[0]!;
@@ -128,7 +141,10 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
   );
   assertValid(merged);
   assertMayAuthorActions(actor, merged.actions);
-  const set: SetOf<typeof schema.automations> = { updatedAt: new Date() };
+  // Re-stamped on EVERY update, not only when the actions move: trust belongs to whoever last decided what
+  // this rule does. A rule a super admin wrote and an hr_admin then re-pointed at a different trigger is an
+  // hr_admin's rule, and its relayed events must be treated as such.
+  const set: SetOf<typeof schema.automations> = { updatedAt: new Date(), superAuthored: isSuperGrant(actor.grant) };
   if (has("name")) set.name = merged.name;
   if (has("description")) set.description = patch.description?.trim() || null;
   if (has("trigger_type")) set.triggerType = merged.triggerType;
@@ -150,6 +166,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
 export async function deleteAutomation(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.automations).where(eq(schema.automations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("automation not found");
+  assertMayActOnStored(actor, row);
   assertNotLocked(row);
   if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
   // Bottom-up, because both children are foreign keys SQLite refuses the delete over - which is what made
@@ -171,6 +188,8 @@ export async function deleteAutomation(deps: Deps, actor: AppUser, id: string, i
 export async function setAutomationEnabled(deps: Deps, actor: AppUser, id: string, enabled: boolean) {
   const row = (await deps.db.select().from(schema.automations).where(eq(schema.automations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("automation not found");
+  // Arming (or silencing) a rule whose actions run as super is the authoring act - see assertMayActOnStored.
+  assertMayActOnStored(actor, row);
   const updated = (await deps.db.update(schema.automations).set({ disabled: !enabled, updatedAt: new Date() }).where(eq(schema.automations.uuid, id)).returning())[0]!;
   // A rule silently switched off is the hardest automation bug to find, so record the flip explicitly.
   await audit(deps, actor, `automation.${enabled ? "enable" : "disable"}`, "automations", id, { diff: { disabled: { from: row.disabled, to: !enabled } } }, updated);
