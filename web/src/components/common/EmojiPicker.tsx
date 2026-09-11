@@ -44,7 +44,7 @@ export function EmojiPicker({
   const [q, setQ] = useState("");
 
   useEffect(() => {
-    if (open && !data) loadData().then(setData);
+    if (open && !data) void loadData().then(setData);
   }, [open, data]);
 
   function pick(native: string) {

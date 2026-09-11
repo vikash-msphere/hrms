@@ -119,7 +119,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
 
       <Dialog open={open} onOpenChange={setOpen}>
         {/* scrollBody: a dozen fields plus the activity trail, so the save action needed pinning. */}
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) save(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) void save(); }}>
           <DialogHeader><DialogTitle>{editing ? "Edit plan" : "New benefit plan"}</DialogTitle></DialogHeader>
           <DialogBody>
           <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus /></Field>

@@ -27,7 +27,7 @@ export function PdfSignaturePlacer({ src, value, onChange }: { src: File | Blob 
   React.useEffect(() => {
     let cancelled = false;
     let loaded: any = null;
-    (async () => {
+    void (async () => {
       try {
         setLoading(true);
         loaded = await openPdf(typeof src === "string" ? src : new Uint8Array(await src.arrayBuffer()));
@@ -48,7 +48,7 @@ export function PdfSignaturePlacer({ src, value, onChange }: { src: File | Blob 
   React.useEffect(() => {
     if (!doc) return;
     let cancelled = false;
-    (async () => {
+    void (async () => {
       const p = await doc.getPage(page);
       if (cancelled) return;
       const canvas = canvasRef.current;

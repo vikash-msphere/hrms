@@ -642,7 +642,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const [pt, setPt] = useState<{ slabs: { up_to: number | null; amount: number }[]; annual_cap: number | null }>({ slabs: [{ up_to: 25000, amount: 0 }, { up_to: null, amount: 200 }], annual_cap: 2500 });
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    Promise.allSettled([
+    void Promise.allSettled([
       getSetting<Partial<typeof ctc>>("ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
       getSetting<Partial<typeof ot>>("overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
       getSetting<{ slabs?: { up_to: number | null; amount: number }[]; annual_cap?: number | null }>("professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs, annual_cap: s.value.annual_cap ?? null }); }),
@@ -2806,7 +2806,7 @@ function DefaultsTab({ toast }: { toast: Toast }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    Promise.allSettled([
+    void Promise.allSettled([
       getSetting<{ default_months?: number }>("probation")
         .then((s) => typeof s.value?.default_months === "number" && setProbation(String(s.value.default_months))),
       getSetting<{ max_optional?: number; pick_by?: string; pick_reminder_days?: number; feed_enabled?: boolean; comp_off_on_holiday_work?: boolean }>("holidays")
@@ -3237,7 +3237,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    Promise.allSettled([
+    void Promise.allSettled([
       getSetting<Record<string, unknown>>("leave_caps")
         .then((s) => {
           const v = s.value ?? {};

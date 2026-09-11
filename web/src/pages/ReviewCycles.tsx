@@ -534,7 +534,7 @@ function CalibrationPanel({ cycle, employees, departments }: { cycle: ReviewCycl
 
   useEffect(() => {
     let live = true;
-    (async () => {
+    void (async () => {
       try {
         const cfg = await getSetting<Partial<PerformanceFramework>>("performance").catch(() => ({ value: undefined }));
         if (live && cfg.value?.competencies?.length && cfg.value.scale?.length) setFramework({ ...DEFAULT_PERFORMANCE, ...cfg.value });

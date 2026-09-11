@@ -10,6 +10,19 @@ describe("round2", () => {
     expect(round2(5.015)).toBe(5.02);
     expect(round2(1000000.005)).toBe(1000000.01); // still correct at large magnitude
   });
+  it("breaks ties AWAY FROM ZERO, so a negative amount rounds like its positive twin", () => {
+    // `Math.round` ties toward +∞, which treats the same half-paise as a round-up on one sign and a round-down
+    // on the other. Loss of pay is a negative earning, and corrections and clawbacks are negative too, so the
+    // asymmetry is reachable with ordinary payroll data - not only in theory.
+    expect(round2(-1.005)).toBe(-1.01);
+    expect(round2(-2.675)).toBe(-2.68);
+    expect(round2(-5.015)).toBe(-5.02);
+    expect(round2(-1.005)).toBe(-round2(1.005));
+    expect(round2(-0.125)).toBe(-round2(0.125));
+    // Never -0: it compares equal to 0 but renders as "-0" on a payslip.
+    expect(Object.is(round2(-0.001), 0)).toBe(true);
+    expect(Object.is(round2(-1e-9), 0)).toBe(true);
+  });
   it("clears float accumulation noise", () => {
     expect(round2(0.1 + 0.2)).toBe(0.3); // 0.30000000000000004 -> 0.3
     expect(round2(70000 / 3)).toBe(23333.33);

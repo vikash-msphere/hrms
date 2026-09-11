@@ -248,7 +248,7 @@ function DependentDialog({ dependent, onClose, onSave }: {
       {/* `sentry-mask` for the same reason the dependents list carries it, and separately because a dialog is
           portalled outside `<main data-page>` where no page-level mask reaches it: this form holds a family
           member's name and date of birth. */}
-      <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
+      <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (valid && !busy) void doSave(); }}>
         <DialogHeader><DialogTitle>{dependent ? "Edit dependent" : "Add dependent"}</DialogTitle></DialogHeader>
         <DialogBody>
         <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus /></Field>
@@ -292,7 +292,7 @@ function EnrollDialog({ plan, dependents, current, onClose, onEnrol }: {
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (!busy) doEnrol(); }}>
+      <DialogContent onEnterSubmit={() => { if (!busy) void doEnrol(); }}>
         <DialogHeader><DialogTitle>Enrol in {plan.name}</DialogTitle></DialogHeader>
         <p className="text-sm text-muted-foreground">You pay <span className="font-medium text-foreground tabular-nums">{plan.employee_cost > 0 ? `${money(plan.employee_cost)}${per(plan)}` : "nothing"}</span>.</p>
         <Field label="Effective date"><Input type="date" value={effective} onChange={(e) => setEffective(e.target.value)} /></Field>

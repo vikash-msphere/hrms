@@ -12,13 +12,26 @@
 // and the set is sized so that it passes today without a wave of new suppressions: a gate people have to
 // silence to get work done stops being read.
 //
-// NO TYPE-AWARE RULES, and that is a measured decision rather than an oversight. `no-floating-promises` and
-// `no-misused-promises` are the two most valuable rules eslint has for a codebase that is asynchronous end to
-// end, and both need a full type program. Turned on across this repo (200k lines, four tsconfigs, plus the
-// 33k-line generated `src/http/openapi.d.ts` that the program pulls in whether or not it is linted), the run
-// exhausts an 8 GB V8 heap and aborts - so it is not a gate, it is a coin toss. Revisit if the generated
-// declarations are ever trimmed or the lint is split per-project; until then `tsc`'s own strictness plus the
-// `void x()` convention already in the code carry that weight.
+// TYPE-AWARE RULES: exactly two, scoped to two projects. `no-floating-promises` and `no-misused-promises` are
+// the most valuable rules eslint has for a codebase that is asynchronous end to end, and both need a full type
+// program. The earlier reading here was that they were unaffordable - that turning them on across the repo
+// exhausted the heap - and the compensating control was said to be the `void x()` convention already in the
+// code. Both halves were wrong, and the second is the one that mattered: `void` appeared at six of the
+// eighty-odd sites that needed it, so the convention was not in force and nothing was checking that it was.
+// One of the gaps was live (the Excel export dropped its promise, so a stale chunk made the button do nothing
+// at all, silently).
+//
+// What actually costs the heap is ONE program spanning everything. Scoped per tsconfig - `src/**` against the
+// Worker project, `web/src/**` against the SPA's - each pass builds only its own program, and the two run in
+// the same `eslint .` inside the default heap. The generated `src/http/openapi.d.ts` is still pulled in by the
+// Worker program; it is ignored for linting and costs parse time, not correctness. Measured: the whole
+// `eslint .` is ~45s on a laptop, inside Node's default heap, with no NODE_OPTIONS. If a future change makes
+// that untrue, scope the rules further - do not turn them off.
+//
+// Only these two rules are on. The rest of `recommendedTypeChecked` reports ~270 findings here, essentially
+// all of them defensive null-checks the compiler can prove redundant but which are load-bearing at runtime
+// (validators parse untyped JSON that the signature claims is already narrowed). That is a different argument
+// to have, and not one to bundle into a gate about dropped promises.
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -101,6 +114,32 @@ export default tseslint.config(
       // `await` inside a loop body is how a fan-out becomes N round-trips; flagged as a warning because the
       // sequential form is sometimes exactly what a guarded write wants (see the carry-forward retry in cron).
       "require-atomic-updates": "off",
+    },
+  },
+  // ---- The two type-aware rules, one block per tsconfig (see the header) --------------------------------
+  //
+  // A dropped promise is not a style question: the work still runs, the failure still happens, and the only
+  // thing missing is anybody being told. On the Worker that is a write nobody knows failed; in the SPA it is a
+  // button that did nothing. `void x()` is how this codebase says "deliberately not awaited" - these rules are
+  // what make that statement mean something.
+  {
+    files: ["src/**/*.ts"],
+    languageOptions: { parserOptions: { project: "./tsconfig.json", tsconfigRootDir: import.meta.dirname } },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+    },
+  },
+  {
+    files: ["web/src/**/*.{ts,tsx}"],
+    languageOptions: { parserOptions: { project: "./web/tsconfig.json", tsconfigRootDir: import.meta.dirname } },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "error",
+      // `checksVoidReturn` OFF for the SPA only. With it on, every `onClick={async () => …}` in React is a
+      // report - a void-returning prop handed an async function - which is both the idiomatic way to write a
+      // React handler and not the bug this rule is here for. The half that IS the bug (an async function
+      // passed where a boolean or a value is expected, so a Promise object is truthy-tested) stays on.
+      "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: false }],
     },
   },
   // The SPA. The hooks rules are the reason this file exists.

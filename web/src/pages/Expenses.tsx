@@ -1144,7 +1144,7 @@ export default function Expenses({ me }: { me: Me }) {
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
         {/* The form's own Enter handling stops at the description textarea; Cmd/Ctrl+Enter finishes from anywhere. */}
-        <DialogContent scrollBody onEnterSubmit={() => { if (formValid && !busy) save(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (formValid && !busy) void save(); }}>
           <AccessScope collection="expenses" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? (editing.recurring ? "Edit recurring expense" : "Edit expense") : form.recurring ? "New recurring expense" : "New expense"}</DialogTitle>
@@ -1158,7 +1158,7 @@ export default function Expenses({ me }: { me: Me }) {
           </DialogHeader>
           <form
             className="flex min-h-0 flex-1 flex-col gap-5"
-            onSubmit={(e) => { e.preventDefault(); if (formValid && !busy) save(); }}
+            onSubmit={(e) => { e.preventDefault(); if (formValid && !busy) void save(); }}
           >
             <DialogBody>
             <FormError error={err} />
@@ -1323,7 +1323,7 @@ export default function Expenses({ me }: { me: Me }) {
           {quickDraft.restored && <DraftNotice onStartOver={() => { quickDraft.clear(); setQuick({ amount: "", category: "", description: "" }); }} />}
           {/* The form ends before the footer so the footer can sit outside the scroll area and stay put; the
               submit button reaches it by id instead of by nesting, which keeps Enter-to-submit working. */}
-          <form id="quick-expense" className="grid gap-4" onSubmit={(e) => { e.preventDefault(); if (quick.amount && Number(quick.amount) > 0 && !quickBusy) quickSubmit(); }}>
+          <form id="quick-expense" className="grid gap-4" onSubmit={(e) => { e.preventDefault(); if (quick.amount && Number(quick.amount) > 0 && !quickBusy) void quickSubmit(); }}>
             <FieldRow>
               <Field label="Amount" error={quick.amount !== "" && Number(quick.amount) <= 0 ? "Enter an amount greater than 0." : undefined}>
                 <MoneyInput value={quick.amount} onChange={(v) => setQuick({ ...quick, amount: v })} min={0} autoFocus />

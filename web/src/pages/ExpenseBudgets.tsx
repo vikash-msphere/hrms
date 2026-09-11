@@ -886,7 +886,7 @@ export default function ExpenseBudgets({ me, openId }: { me: Me; openId?: string
       </Dialog>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy) submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy) void submit(); }}>
           <AccessScope collection="expense-budgets" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit budget" : "New budget"}</DialogTitle>

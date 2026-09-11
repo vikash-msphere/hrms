@@ -41,7 +41,7 @@ export function useSplitStaleness({ auto = true }: { auto?: boolean } = {}) {
     } catch { /* advisory only - never block the page */ }
   }, [canReapply, dryRun]);
 
-  useEffect(() => { if (auto) refresh(); }, [auto, refresh]);
+  useEffect(() => { if (auto) void refresh(); }, [auto, refresh]);
 
   const reapply = useCallback(async () => {
     setReapplying(true);

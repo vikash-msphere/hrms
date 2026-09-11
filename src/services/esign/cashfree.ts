@@ -6,6 +6,7 @@
 // keyed by the CLIENT SECRET (Cashfree has no separate webhook secret). All I/O is the Workers global fetch.
 import type { EsignProvider, CreateRequestInput, WebhookInput, WebhookResult, EsignProviderCfg, EsignSecrets, EsignStatus, StatusResult } from "../../domain/esign";
 import { assertPublicHttpsUrl } from "../../lib/urlGuard";
+import { readCappedBody } from "../documentsCommon";
 
 const VENDOR_TIMEOUT_MS = 15_000;
 const MAX_SIGNED_PDF_BYTES = 25 * 1024 * 1024; // mirrors the upload cap (documentsCommon.ts)
@@ -121,11 +122,18 @@ async function downloadSigned(url: string, secrets: EsignSecrets): Promise<Uint8
       continue;
     }
     if (!res.ok) return undefined;
+    // A declared length short-circuits the read; a MISSING one is the case that matters, so the body is
+    // streamed under the cap rather than buffered and measured. `res.arrayBuffer()` reads to the end of the
+    // stream, so the ceiling only applied once the bytes it was protecting were already in the isolate - and
+    // the hop this reaches is a redirect target the vendor named, which may answer chunked with no length at
+    // all. Same failure and same fix as the /diag relay and the e-sign webhook (services/documentsCommon.ts).
     const len = Number(res.headers.get("content-length") || 0);
-    if (len && len > MAX_SIGNED_PDF_BYTES) return undefined;
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (buf.byteLength > MAX_SIGNED_PDF_BYTES) return undefined;
-    return buf;
+    if (len && len > MAX_SIGNED_PDF_BYTES) {
+      await res.body?.cancel();
+      return undefined;
+    }
+    const capped = await readCappedBody(res, MAX_SIGNED_PDF_BYTES);
+    return capped ? new Uint8Array(capped) : undefined;
   }
 }
 

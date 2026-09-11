@@ -403,7 +403,7 @@ function CountDetail({
     const rows = isOpen
       ? liveMissing.map((a) => [a.asset_tag ?? "", a.name ?? "", ASSET_STATUS_LABEL[a.status] ?? a.status, a.assigned_to ? empName(a.assigned_to) : "", a.last_verified_time ? formatDate(a.last_verified_time.slice(0, 10)) : "never", "not sighted yet"])
       : rec.rows.map((r) => [r.row.asset_tag ?? "", r.row.name ?? "", ASSET_STATUS_LABEL[r.row.status ?? ""] ?? r.row.status ?? "", r.row.assigned_to ? empName(r.row.assigned_to) : "", r.row.last_verified_time ? formatDate(r.row.last_verified_time.slice(0, 10)) : "never", r.stillMissing ? "still missing" : `turned up ${formatDate((r.sightedAt ?? "").slice(0, 10))}`]);
-    exportTable(`stocktake-${(count.label ?? "count").replace(/\W+/g, "-").toLowerCase()}`, ["Tag", "Name", "Status at count", "Held by", "Last verified", "Since"], rows, "csv", "stocktakes");
+    void exportTable(`stocktake-${(count.label ?? "count").replace(/\W+/g, "-").toLowerCase()}`, ["Tag", "Name", "Status at count", "Held by", "Last verified", "Since"], rows, "csv", "stocktakes");
   }
 
   // The sighted list is the half an auditor asks for, so it exports too - with the proof column, which is the
@@ -419,7 +419,7 @@ function CountDetail({
       r.scanned ? "scanned" : "by hand",
       r.condition ?? "",
     ]);
-    exportTable(`stocktake-${(count.label ?? "count").replace(/\W+/g, "-").toLowerCase()}-sighted`, ["Tag", "Name", "Status", "Held by", "Sighted", "By", "Proof", "Condition"], rows, "csv", "stocktakes");
+    void exportTable(`stocktake-${(count.label ?? "count").replace(/\W+/g, "-").toLowerCase()}-sighted`, ["Tag", "Name", "Status", "Held by", "Sighted", "By", "Proof", "Condition"], rows, "csv", "stocktakes");
   }
 
   return (

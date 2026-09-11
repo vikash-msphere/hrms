@@ -110,9 +110,18 @@ export function probationLabel(endDate: string): string {
 // the parser produce the nearest double to the intended decimal, so the half-case rounds as a human expects.
 // Every mirrored money computation in the UI (the CTC breakdown, the top-down split preview) goes through this,
 // so a previewed figure can't disagree with the server's by a paise.
+//
+// KEEP THIS BODY IDENTICAL to src/domain/money.ts#round2 - test/moneyDrift.test.ts fails when they diverge.
+// It had already drifted twice: the tie rule (the server's is symmetric about zero, this one broke ties toward
+// +∞, so a negative preview and the figure the run wrote could differ by a paise) and the upper-range guard
+// (`${1e21}e2` parses as NaN, so this answered NaN where the server answered the number).
+const EXP_MAX = 1e21;
 export function round2(n: number): number {
   if (!Number.isFinite(n) || Math.abs(n) < 1e-6) return 0;
-  return Number(`${Math.round(Number(`${n}e2`))}e-2`);
+  if (Math.abs(n) >= EXP_MAX) return Math.round(n);
+  const scaled = Number(`${n}e2`);
+  const rounded = Math.sign(scaled) * Math.round(Math.abs(scaled));
+  return Number(`${rounded}e-2`) || 0;
 }
 
 // Format an amount in a currency. `decimals` sets the shown precision (both min and max fraction digits) so

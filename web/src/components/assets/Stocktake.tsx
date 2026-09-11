@@ -238,7 +238,7 @@ export function Stocktake({ onClose, initialCountId }: { onClose: () => void; in
   }
 
   function exportMissing() {
-    exportTable(
+    void exportTable(
       "stocktake-missing",
       ["Tag", "Name", "Category", "Status", "Last verified"],
       remaining.map((a) => [a.asset_tag ?? "", a.name, catName(a.category), ASSET_STATUS_LABEL[a.status] ?? a.status, a.last_verified_time ? formatDate(a.last_verified_time.slice(0, 10)) : "never"]),

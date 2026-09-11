@@ -3,6 +3,7 @@
 // client-side - the data is whatever the caller could already read; who may export at all is gated by the
 // `export` capability - but the ACT is recorded server-side (see `record` below).
 import { api } from "@/api";
+import { toast } from "@/components/ui/use-toast";
 
 type Cell = string | number | boolean | null | undefined;
 
@@ -63,19 +64,40 @@ export function toCsv(headers: string[], rows: Cell[][]): string {
   return [headers, ...rows].map((r) => r.map(esc).join(",")).join("\r\n");
 }
 
+/**
+ * Produce the download. NEVER REJECTS - it reports its own failure instead.
+ *
+ * Same argument as `record` above: this is the one function every export in the app goes through, so the
+ * handling belongs here rather than at each of the eight call sites, where it was absent at three of them and
+ * the promise was simply dropped. The failure is not hypothetical - the Excel path lazy-loads SheetJS, and a
+ * chunk request for a build that has since been replaced fails outright, so a click on "Export to Excel" did
+ * nothing at all: no file, no message, and an unhandled rejection in the console. A person who is not watching
+ * the console reads that as the button being broken.
+ */
 export async function exportTable(filename: string, headers: string[], rows: Cell[][], format: "csv" | "xlsx", collection?: string) {
   // Awaited before the file is produced, so an export and its entry cannot be separated by the user closing
-  // the tab on a download that had not been logged yet.
+  // the tab on a download that had not been logged yet. `record` swallows its own failure - see above.
   await record(collection ?? filename, format, rows.length, headers);
-  if (format === "csv") {
-    // Prepend a BOM so Excel reads UTF-8 (accents, ₹, etc.) correctly.
-    downloadBlob(new Blob(["﻿" + toCsv(headers, rows)], { type: "text/csv;charset=utf-8;" }), `${filename}.csv`);
-  } else {
-    // Lazy-load SheetJS only when an Excel export is actually requested (keeps it out of the main bundle).
-    const XLSX = await import("xlsx");
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows.map((r) => r.map((c) => (c == null ? "" : c)))]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Export");
-    XLSX.writeFile(wb, `${filename}.xlsx`);
+  try {
+    if (format === "csv") {
+      // Prepend a BOM so Excel reads UTF-8 (accents, ₹, etc.) correctly.
+      downloadBlob(new Blob(["﻿" + toCsv(headers, rows)], { type: "text/csv;charset=utf-8;" }), `${filename}.csv`);
+    } else {
+      // Lazy-load SheetJS only when an Excel export is actually requested (keeps it out of the main bundle).
+      const XLSX = await import("xlsx");
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows.map((r) => r.map((c) => (c == null ? "" : c)))]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Export");
+      XLSX.writeFile(wb, `${filename}.xlsx`);
+    }
+  } catch (e) {
+    console.error("[export] the file could not be produced", e);
+    toast({
+      variant: "destructive",
+      title: "Couldn't produce the export",
+      // A failed chunk load is the common cause and is fixed by a reload, so say so rather than showing a
+      // stack-shaped message nobody can act on.
+      description: "Reload the page and try again - the app may have been updated since this tab was opened.",
+    });
   }
 }

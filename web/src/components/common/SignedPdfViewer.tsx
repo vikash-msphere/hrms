@@ -51,7 +51,7 @@ export function SignedPdfViewer({ bytes }: { bytes: Uint8Array }) {
   React.useEffect(() => {
     let cancelled = false;
     let loaded: any = null;
-    (async () => {
+    void (async () => {
       try {
         setLoading(true);
         // pdf.js transfers/detaches the buffer it renders; verify on a copy so both see intact bytes.
@@ -88,7 +88,7 @@ export function SignedPdfViewer({ bytes }: { bytes: Uint8Array }) {
   React.useEffect(() => {
     if (!doc) return;
     let cancelled = false;
-    (async () => {
+    void (async () => {
       const p = await doc.getPage(page);
       if (cancelled) return;
       const canvas = canvasRef.current;

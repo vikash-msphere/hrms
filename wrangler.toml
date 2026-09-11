@@ -1,6 +1,11 @@
 name = "hrms"
 main = "src/index.ts"
-compatibility_date = "2025-09-01"
+# Pinned, and BUMPED DELIBERATELY rather than left to drift. The date selects the Workers runtime's behaviour
+# set, so leaving it a year behind means running on semantics the platform has already moved past - and the
+# longer it sits, the larger the step becomes and the less a green test run says about it. Raise it, run
+# `npm run verify`, and keep the two environments on the SAME date: staging rehearses production or it
+# rehearses nothing.
+compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Persist Workers Logs so console.error (500s, non-fatal event/automation/esign failures) survives beyond a
@@ -106,7 +111,7 @@ crons = ["*/5 * * * *", "0 2 * * *"]
 # env, so they are redeclared here. Fill in the staging database_id after `wrangler d1 create hrms-staging`.
 [env.staging]
 name = "hrms-staging"
-compatibility_date = "2025-09-01"
+compatibility_date = "2026-09-01" # keep in step with the top-level date - see the note there
 compatibility_flags = ["nodejs_compat"]
 
 [env.staging.observability]

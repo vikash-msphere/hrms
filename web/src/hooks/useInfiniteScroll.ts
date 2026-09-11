@@ -49,7 +49,7 @@ export function useInfiniteScroll(opts: {
         if (done || !entries.some((e) => e.isIntersecting)) return;
         done = true; // one page per observer; the effect re-arms it below once this load settles
         setLoading(true);
-        Promise.resolve(fn.current()).finally(() => setLoading(false));
+        void Promise.resolve(fn.current()).finally(() => setLoading(false));
       },
       { rootMargin },
     );

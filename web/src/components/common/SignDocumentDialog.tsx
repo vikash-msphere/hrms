@@ -83,7 +83,7 @@ export function SignDocumentDialog({
   React.useEffect(() => {
     if (!doc || !viewable) { setBytes(null); return; }
     let live = true;
-    (async () => {
+    void (async () => {
       try {
         const blob = await blobOf(doc.path);
         if (live) setBytes(blob);

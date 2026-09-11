@@ -334,7 +334,7 @@ export default function App() {
   // records `openFor` deletes rather than reads. Absent on a session-less lane (API key, Access JWT, dev
   // bypass), where the key falls back to the email alone and behaves as it always did.
   const cacheUser = me ? `${me.email}${me.session_id ? `#${me.session_id}` : ""}${viewAs ? `~${viewAs.subject}` : ""}` : undefined;
-  setResourceStoreUser(cacheUser);
+  void setResourceStoreUser(cacheUser);
   setPhotoCacheUser(cacheUser); // faces are cached on disk too, under the same identity key
   setSettingsUser(cacheUser); // and the org settings snapshot, which gates other reads (see lib/settingsStore.ts)
 
@@ -383,8 +383,8 @@ export default function App() {
   // Pull cross-device preferences once the user is known.
   useEffect(() => {
     if (me) {
-      syncThemeFromServer();
-      syncTabSeenFromServer();
+      void syncThemeFromServer();
+      void syncTabSeenFromServer();
     }
   }, [me]);
 
@@ -440,7 +440,7 @@ export default function App() {
     if (!loader) { setChunkReady(true); return; }
     let live = true;
     setChunkReady(false);
-    Promise.resolve(loader()).finally(() => { if (live) setChunkReady(true); });
+    void Promise.resolve(loader()).finally(() => { if (live) setChunkReady(true); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.page, route.id]);

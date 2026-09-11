@@ -185,7 +185,7 @@ function useSilhouette(url: string | undefined, enabled: boolean): Contour | nul
       return c;
     });
     tracing.set(key, job);
-    job.then(() => live && bump((n) => n + 1));
+    void job.then(() => live && bump((n) => n + 1));
     return () => {
       live = false;
     };

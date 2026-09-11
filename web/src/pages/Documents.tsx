@@ -600,7 +600,7 @@ export default function Documents({ me }: { me: Me }) {
   useEffect(() => {
     if (!dialog || dialog.kind !== "edit" || !ackMode || !isPdfDoc(dialog.doc)) { setEditPdf(null); return; }
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         const res = await fetch(`/v1/${dialog.doc.path}:download`, { method: "POST", credentials: "include", headers: { "X-Requested-By": "hrms-spa" } });
         if (res.ok && !cancelled) setEditPdf(await res.blob());
@@ -666,7 +666,7 @@ export default function Documents({ me }: { me: Me }) {
   useEffect(() => {
     if (!viewerDoc) { setViewerBytes(null); return; }
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         const res = await fetch(`/v1/${viewerDoc.path}:download`, { method: "POST", credentials: "include", headers: { "X-Requested-By": "hrms-spa" } });
         if (res.ok && !cancelled) setViewerBytes(new Uint8Array(await res.arrayBuffer()));

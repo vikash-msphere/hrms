@@ -146,7 +146,7 @@ export default function ReimbursementCategories({ embedded, openId }: { me?: Me;
       </DataState>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) void submit(); }}>
           <AccessScope collection="reimbursement-categories" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit category" : "New category"}</DialogTitle>

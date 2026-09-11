@@ -128,7 +128,7 @@ export default function Loans({ me }: { me: Me }) {
   // Disbursal starts payroll deductions - worth a beat of confirmation.
   async function disburse(l: Loan) {
     if (!(await confirm({ title: "Mark this loan as disbursed?", description: `EMI of ${l.monthly_amount ? money(l.monthly_amount) : "the agreed amount"} will be deducted from payroll starting with the next run.`, confirmLabel: "Mark disbursed" }))) return;
-    act(l, "disburse");
+    void act(l, "disburse");
   }
 
   const requestBtn = (
@@ -258,7 +258,7 @@ function RequestDialog({ onClose, onCreated }: {
 
   return (
     <Dialog open onOpenChange={guard.onOpenChange}>
-      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && valid) submit(); }}>
+      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && valid) void submit(); }}>
         <AccessScope collection="loans">
         <DialogHeader>
           <DialogTitle>Request a loan or advance</DialogTitle>
@@ -334,7 +334,7 @@ function RepayDialog({ loan, onClose, onSave }: { loan: Loan; onClose: () => voi
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
+      <DialogContent onEnterSubmit={() => { if (valid && !busy) void doSave(); }}>
         <AccessScope collection="loans" objectPath={loan.path}>
         <DialogHeader>
           <DialogTitle>Record repayment</DialogTitle>

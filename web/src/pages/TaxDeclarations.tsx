@@ -106,7 +106,7 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   }
   async function reject(d: TaxDeclaration) {
     if (!(await confirm({ title: `Reject the ${d.section} declaration?`, description: "The employee can edit it to fix the problem - saving resubmits it for verification.", destructive: true, confirmLabel: "Reject" }))) return;
-    act(d, "reject");
+    void act(d, "reject");
   }
   async function del(d: TaxDeclaration) {
     if (!(await confirm({ title: "Delete this declaration?", destructive: true, confirmLabel: "Delete" }))) return;
@@ -287,7 +287,7 @@ function DeclDialog({ declaration, fy, sameSectionTotal, onClose, onSave }: {
 
   return (
     <Dialog open onOpenChange={guard.onOpenChange}>
-      <DialogContent scrollBody onEnterSubmit={() => { if (valid && !busy) doSave(); }}>
+      <DialogContent scrollBody onEnterSubmit={() => { if (valid && !busy) void doSave(); }}>
         <AccessScope collection="tax-declarations" objectPath={declaration?.path}>
         <DialogHeader>
           <DialogTitle>{resubmitting ? "Edit & resubmit declaration" : declaration ? "Edit declaration" : `Declare for FY ${fy}`}</DialogTitle>
@@ -353,7 +353,7 @@ function VerifyDialog({ declaration, onClose, onVerify }: { declaration: TaxDecl
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent onEnterSubmit={() => { if (valid && !busy) doVerify(); }}>
+      <DialogContent onEnterSubmit={() => { if (valid && !busy) void doVerify(); }}>
         <DialogHeader>
           <DialogTitle>Verify declaration</DialogTitle>
           <DialogDescription>The verified amount is what reduces this employee's withholding from the next payroll run. Verifying locks the declaration.</DialogDescription>

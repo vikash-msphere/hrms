@@ -36,7 +36,7 @@ export function PdfReader({
     let cancelled = false;
     let loaded: any = null;
     reachedRef.current = false;
-    (async () => {
+    void (async () => {
       try {
         setLoading(true);
         setError(null);
@@ -128,7 +128,7 @@ function PdfPage({ pdf, page, onRendered }: { pdf: any; page: number; onRendered
 
   React.useEffect(() => {
     let cancelled = false;
-    (async () => {
+    void (async () => {
       const p = await pdf.getPage(page);
       if (cancelled) return;
       const canvas = ref.current;

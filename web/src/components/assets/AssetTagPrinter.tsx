@@ -371,7 +371,7 @@ function PrinterBody({ me, assets, onClose, onReload, initialAssetIds, tagSettin
   // Code128 always encodes the plain tag - that's what 1D laser scanners expect.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    void (async () => {
       const missing = [...queueCounts.keys()].filter((id) => !codeUrls.has(id) && byId.has(id));
       if (missing.length === 0) return;
       let entries: (readonly [string, string])[];

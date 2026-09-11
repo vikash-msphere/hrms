@@ -186,7 +186,7 @@ export function startClippedTitles(): void {
 
   // Text laid out in the fallback font measures at the wrong width, so the first answer can be wrong in both
   // directions until Inter is in.
-  document.fonts?.ready.then(() => {
+  void document.fonts?.ready.then(() => {
     for (const el of tracked) dirty.add(el);
     schedule();
   });

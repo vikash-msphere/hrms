@@ -245,7 +245,7 @@ export function EmployeeTaxDetails({ employeeId, canEdit, canVerify = false }: {
       </CardContent>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent className="sentry-mask" onEnterSubmit={() => { if (!saving) save(); }}>
+        <DialogContent className="sentry-mask" onEnterSubmit={() => { if (!saving) void save(); }}>
           <AccessScope collection="employees">
           <DialogHeader>
             <DialogTitle>Income from a previous employer (this financial year)</DialogTitle>

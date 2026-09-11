@@ -61,7 +61,10 @@ export function problemText(status: number, problem: ProblemShape, statusText = 
   if (type.endsWith("/invalid-argument") || status === 400) return said || "Some of that isn't valid. Check the fields and try again.";
   if (type.endsWith("/failed-precondition")) return said || "This can't be done in the record's current state.";
   if (type.endsWith("/unauthenticated") || status === 401) return "Your session has expired. Sign in again to continue.";
-  if (status === 429) return "Too many requests just now. Wait a few seconds and try again.";
+  // The server's own detail names the surface AND the wait ("too many render requests; retry in 47s"), which
+  // is the difference between a person waiting the right length of time and one clicking again immediately.
+  // The generic sentence is the fallback for a refusal that carries no detail (an edge rule, not ours).
+  if (status === 429) return said ? `${said} Nothing was changed.` : "Too many requests just now. Wait a few seconds and try again.";
   if (status >= 500) return "The server had a problem with that. Nothing was changed - try again in a moment.";
   return said || sentence(problem?.title ?? statusText) || "Something went wrong. Try again.";
 }

@@ -246,7 +246,7 @@ export function DataTable<T>({
       savedBaseline.current = null;
       loadedFor.current = tableId;
     }
-    fetchServerPrefs(tableId).then((sp) => {
+    void fetchServerPrefs(tableId).then((sp) => {
       if (!active) return;
       if (sp) {
         if (sp.order) setOrder(sp.order);

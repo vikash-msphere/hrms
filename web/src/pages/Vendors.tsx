@@ -149,7 +149,7 @@ export default function Vendors({ openId }: { me?: Me; openId?: string }) {
       </DataState>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && !emailBad) submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && !emailBad) void submit(); }}>
           <AccessScope collection="vendors" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit vendor" : "New vendor"}</DialogTitle>

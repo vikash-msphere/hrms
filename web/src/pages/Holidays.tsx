@@ -754,7 +754,7 @@ export default function Holidays({ me, openId }: { me: Me; openId?: string }) {
       </DataState>
 
       <Dialog open={open} onOpenChange={guardClose(dirty, closeDialog)}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && form.date) submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && form.date) void submit(); }}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit holiday" : "Add holiday"}</DialogTitle>
             <DialogDescription>A fixed holiday is a day off for everyone it applies to; an optional one is a day employees can choose from their allowance.</DialogDescription>

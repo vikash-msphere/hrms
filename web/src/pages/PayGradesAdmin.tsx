@@ -187,7 +187,7 @@ export default function PayGradesAdmin({ embedded, openId }: { me?: Me; embedded
       </DataState>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && !bandError) submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim() && !bandError) void submit(); }}>
           <AccessScope collection="pay-grades" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit pay grade" : "New pay grade"}</DialogTitle>

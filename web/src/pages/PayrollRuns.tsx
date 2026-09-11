@@ -401,7 +401,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
         setPublishing(id);
         const op = await invoke<Operation>("payroll-runs/" + id, "publish", run.etag);
         toast({ title: "Publishing…", description: "Generating payslips in the background." });
-        if (op?.path) pollOperation(op.path);
+        if (op?.path) void pollOperation(op.path);
         else {
           setPublishing(null);
           reload();

@@ -182,6 +182,31 @@ const TRANSIENT = new Set([502, 503, 504]);
 const READ_ATTEMPTS = 3;
 const settle = (attempt: number) => new Promise((r) => setTimeout(r, 150 * attempt));
 
+// A 429 is the per-caller budget in middleware/rateLimit.ts (or an isolate floor on a public lane). Unlike a
+// gateway blip it is not over in a moment, so it gets its OWN rule rather than joining TRANSIENT:
+//
+//  - the server ALWAYS says how long to wait, in `Retry-After`, and a client that ignores a header the server
+//    took the trouble to send just fails work it could have completed. The budgets are per minute, and the
+//    header carries what is LEFT of the window - at the end of one that is a second or two.
+//  - but only when the wait is SHORT and only for a READ. Parking a click for 45 seconds behind a spinner is
+//    worse than saying "too many requests"; and a write may have landed before the refusal, so repeating it is
+//    how one expense becomes two - the same reason TRANSIENT is read-only.
+//
+// Past the cap the error is thrown, and the server's own detail names the wait ("retry in 47s"), so the
+// message the person reads is actionable either way.
+const RETRY_AFTER_CAP_MS = 3_000;
+/** The `Retry-After` delay in ms when it is present, parseable and inside the cap; otherwise null. */
+function retryAfterMs(res: Response): number | null {
+  const raw = res.headers.get("Retry-After");
+  if (!raw) return null;
+  const secs = Number(raw.trim());
+  // Seconds-form only. The HTTP-date form is legal but nothing in this app sends it, and mis-parsing a date
+  // as NaN must not become a zero-delay hot retry.
+  if (!Number.isFinite(secs) || secs < 0) return null;
+  const ms = secs * 1000;
+  return ms <= RETRY_AFTER_CAP_MS ? ms : null;
+}
+
 export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   guardReadOnly(path, init);
   let res: Response;
@@ -206,8 +231,19 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
       await settle(attempt);
       continue;
     }
-    if (!TRANSIENT.has(res.status) || attempt >= attempts) break;
-    await settle(attempt);
+    if (attempt >= attempts) break;
+    if (TRANSIENT.has(res.status)) {
+      await settle(attempt);
+      continue;
+    }
+    // Budget refusal: wait exactly as long as the server asked, and only when that is short (see above).
+    if (res.status === 429 && isRead) {
+      const wait = retryAfterMs(res);
+      if (wait === null) break;
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
+    break;
   }
   if (res.status === 401) handle401();
   if (!res.ok) {

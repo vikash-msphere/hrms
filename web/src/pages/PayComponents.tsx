@@ -248,7 +248,7 @@ export default function PayComponents({ embedded, openId }: { me?: Me; embedded?
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
         {/* The longest form in this domain (kind, method, rate, ceiling, CTC side, two flags, activity): its
             Save belongs on screen the whole way down, not below the fold. */}
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) void submit(); }}>
           <AccessScope collection="pay-components" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit pay component" : "New pay component"}</DialogTitle>

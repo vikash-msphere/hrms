@@ -1154,7 +1154,7 @@ export default function Goals({ me, openId }: { me: Me; openId?: string }) {
             onCurrentValue={(v) => setCurrentValue(detailGoal, v)}
             employees={employees}
             onEdit={() => { closeDetail(); openEdit(detailGoal); }}
-            onDelete={() => { closeDetail(); sd.softDelete(detailGoal); }}
+            onDelete={() => { closeDetail(); void sd.softDelete(detailGoal); }}
             onProgress={(p, note) => setProgress(detailGoal, p, note)}
             onConfidence={(c) => setConfidence(detailGoal, c)}
             onRetro={(retro) => saveRetro(detailGoal, retro)}

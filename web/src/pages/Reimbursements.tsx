@@ -306,7 +306,7 @@ export default function Reimbursements({ me }: { me: Me }) {
           </DialogHeader>
           <form
             className="flex min-h-0 flex-1 flex-col gap-5"
-            onSubmit={(e) => { e.preventDefault(); if (form.amount && Number(form.amount) > 0 && !(receiptRequired && !file) && !(form.incurred_on && form.incurred_on > todayStr()) && !busy) submit(); }}
+            onSubmit={(e) => { e.preventDefault(); if (form.amount && Number(form.amount) > 0 && !(receiptRequired && !file) && !(form.incurred_on && form.incurred_on > todayStr()) && !busy) void submit(); }}
           >
           <DialogBody>
           <FormError error={err} />

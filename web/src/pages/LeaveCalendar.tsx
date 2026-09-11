@@ -330,7 +330,7 @@ export default function LeaveCalendar({ me }: { me: Me }) {
       en.pending ? "Pending" : "Approved",
     ]);
   const doExport = (format: "csv" | "xlsx") =>
-    exportTable(`leave-${range.from}-to-${range.to}`, ["Person", "Department", "Type", "Start", "End", "Part", "Days", "Status"], exportRows(), format, "leave-requests");
+    void exportTable(`leave-${range.from}-to-${range.to}`, ["Person", "Department", "Type", "Start", "End", "Part", "Days", "Status"], exportRows(), format, "leave-requests");
   const doIcs = () =>
     downloadIcs(
       `leave-${range.from}-to-${range.to}`,

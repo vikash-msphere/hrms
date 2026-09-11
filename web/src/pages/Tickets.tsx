@@ -1125,7 +1125,7 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
             </h4>
             {checklists.length > 0 && (
               <AccessAction collection="tickets" objectPath={t.path} verb="addTodos" can={can} label="Add from checklist">
-                <Select value="" disabled={!!busy} onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl) act("addTodos", { texts: cl.items }, "Checklist added"); }}>
+                <Select value="" disabled={!!busy} onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl) void act("addTodos", { texts: cl.items }, "Checklist added"); }}>
                   {/* w-48 plus the heading is wider than a phone's content column; the row wraps, and the
                       control still fits a 360px screen on its own line. */}
                   <SelectTrigger className="h-8 w-40 text-xs sm:w-48"><SelectValue placeholder="Add from checklist…" /></SelectTrigger>
@@ -1167,7 +1167,7 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
                 placeholder="Add a checklist item…"
                 value={newTodo}
                 onChange={(e) => setNewTodo(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addTodoItem(); } }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addTodoItem(); } }}
               />
               <Button size="sm" variant="outline" loading={busy === "addTodos"} disabled={!!busy || !newTodo.trim()} onClick={addTodoItem}>
                 <Plus className="h-4 w-4" /> Add
@@ -1218,7 +1218,7 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
                   // The mention menu gets first refusal on the keys it uses; only what it did not take sends.
                   onKeyDown={(e) => {
                     if (mentions.onKeyDown(e)) return;
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendReply(); }
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void sendReply(); }
                   }}
                 />
                 {mentions.menu}

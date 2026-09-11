@@ -20,6 +20,10 @@ import { describe, it, expect } from "vitest";
 const rawSchema = import.meta.glob("../src/db/schema.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const schemaSrc = Object.values(rawSchema)[0]!;
 const rawSources = import.meta.glob(["../src/services/**/*.ts", "../src/domain/**/*.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+// The browser keeps a TWIN of round2 (web/src/lib/utils.ts) so a previewed figure and the figure the run
+// writes agree to the paise. Nothing made them agree - and they had already drifted on the tie rule and on the
+// upper-range guard, which is exactly the class of defect nobody notices until a negative line is a paise out.
+const rawTwins = import.meta.glob(["../src/domain/money.ts", "../web/src/lib/utils.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
 // ---- 1. What the schema says ------------------------------------------------------------------------
 
@@ -216,6 +220,26 @@ describe("money drift - every stored money value is round2/sum2-pinned", () => {
     expect(isPinned("gross - deductions")).toBe(false);
     expect(isPinned("lines.reduce((a, l) => a + l.amount, 0)")).toBe(false);
     expect(isPinned("sql`${schema.loans.repaid} + ${amount}`")).toBe(false);
+  });
+
+  // The server's rounding helper and the browser's copy of it must be the SAME FUNCTION. Compared on the
+  // normalised body rather than on outputs, so a divergence is caught at the source instead of only at
+  // whichever input a test happened to pick.
+  it("keeps the browser's round2 byte-identical to the server's", () => {
+    const body = (src: string) => {
+      const at = src.indexOf("export function round2(");
+      expect(at, "round2 not found").toBeGreaterThan(-1);
+      const open = src.indexOf("{", at);
+      let depth = 0;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}" && --depth === 0) return src.slice(open + 1, i).replace(/\/\/[^\n]*/g, "").replace(/\s+/g, " ").trim();
+      }
+      throw new Error("unbalanced round2 body");
+    };
+    const [server] = Object.entries(rawTwins).filter(([k]) => k.includes("domain/money"))[0]!.slice(1) as [string];
+    const [browser] = Object.entries(rawTwins).filter(([k]) => k.includes("lib/utils"))[0]!.slice(1) as [string];
+    expect(body(browser)).toBe(body(server));
   });
 
   it("accepts the pinned forms the codebase actually uses", () => {

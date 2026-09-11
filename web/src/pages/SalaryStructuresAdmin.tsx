@@ -193,7 +193,7 @@ export default function SalaryStructuresAdmin({ embedded, openId }: { me?: Me; e
       </DataState>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (!busy && form.name.trim()) void submit(); }}>
           <AccessScope collection="salary-structures" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit salary structure" : "New salary structure"}</DialogTitle>

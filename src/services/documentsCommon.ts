@@ -29,7 +29,7 @@ export const bodyTooLarge = () =>
   invalidArgument(`request body too large (max ${Math.floor(MAX_DOCUMENT_BYTES / (1024 * 1024))} MiB)`);
 
 /**
- * Read a request body to bytes, ABANDONING the read the moment it passes `max`.
+ * Read a request OR RESPONSE body to bytes, ABANDONING the read the moment it passes `max`.
  *
  * This is the only body read in the app that is a real cap. `request.arrayBuffer()` reads to the end of the
  * stream however long that is, so a size check on the result fires after the memory it was protecting has
@@ -44,8 +44,13 @@ export const bodyTooLarge = () =>
  * Returns null when the body is over the cap - the refusal is the CALLER's, because they do not agree on it:
  * an upload answers `bodyTooLarge` (400, the shared wording), the telemetry relay answers 413 in the shape its
  * client SDK understands. Use `requireCappedBody` for the former.
+ *
+ * Typed on the `body` stream rather than on `Request`, because a RESPONSE we did not originate needs the same
+ * treatment for the same reason: the signed-document download in services/esign/cashfree.ts follows a vendor
+ * redirect to somewhere the vendor chose, and `res.arrayBuffer()` there spent the isolate against a ceiling
+ * checked afterwards. A `content-length` is not a cap either - the hop that matters is the one that omits it.
  */
-export async function readCappedBody(request: Request, max: number = MAX_DOCUMENT_BYTES): Promise<ArrayBuffer | null> {
+export async function readCappedBody(request: { body: ReadableStream<Uint8Array> | null }, max: number = MAX_DOCUMENT_BYTES): Promise<ArrayBuffer | null> {
   const stream = request.body;
   if (!stream) return new ArrayBuffer(0);
   const reader = stream.getReader();

@@ -375,7 +375,7 @@ export function RequestLeaveDialog({
       {/* scrollBody: this is a dozen fields and a calendar, so on a phone the whole panel used to scroll and
           "Request leave" sat below the fold - the button you came to press was the one thing you could not
           see. The form scrolls inside; the title and the two actions stay put. */}
-      <DialogContent scrollBody className="sm:max-w-2xl" onEnterSubmit={() => { if (!busy && canSubmit) submit(); }}>
+      <DialogContent scrollBody className="sm:max-w-2xl" onEnterSubmit={() => { if (!busy && canSubmit) void submit(); }}>
         <DialogHeader>
           <DialogTitle>Request leave</DialogTitle>
           <DialogDescription>

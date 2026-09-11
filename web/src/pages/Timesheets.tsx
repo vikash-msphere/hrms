@@ -188,7 +188,7 @@ export default function Timesheets({ me }: { me: Me }) {
     try {
       for (const e of toSubmit) await invoke(`time-entries/${idOf(e.path)}`, "submit");
       toast({ title: `Submitted ${toSubmit.length} ${toSubmit.length === 1 ? "entry" : "entries"}`, variant: "success" });
-      loadWeek();
+      void loadWeek();
     } catch (e) { toast({ title: "Couldn't submit", description: (e as Error).message, variant: "destructive" }); }
     finally { setSubmitting(false); }
   }
@@ -213,7 +213,7 @@ export default function Timesheets({ me }: { me: Me }) {
         await create("time-entries", { project: e.project, date, hours: e.hours, description: e.description || undefined, billable: e.billable });
       }
       toast({ title: `Copied ${todo.length} ${todo.length === 1 ? "entry" : "entries"}`, variant: "success" });
-      loadWeek();
+      void loadWeek();
     } catch (e) { toast({ title: "Couldn't copy last week", description: (e as Error).message, variant: "destructive" }); }
     finally { setCopying(false); }
   }
@@ -414,11 +414,11 @@ export default function Timesheets({ me }: { me: Me }) {
             // A cleared reference goes over the wire as "" rather than null (api.ts, "No nulls on the wire").
             if (cell.existing) await patch(`time-entries/${idOf(cell.existing.path)}`, { hours, description: description || null, card: card || "" }, cell.existing.etag);
             else await create("time-entries", { project: `projects/${cell.projectId}`, date: cell.date, hours, description: description || undefined, billable: projectById.get(cell.projectId)?.billable ?? true, ...(card ? { card } : {}) });
-            loadWeek();
+            void loadWeek();
           }}
           onRemove={cell.existing ? async () => {
             await remove(`time-entries/${idOf(cell.existing!.path)}`);
-            setCell(null); loadWeek();
+            setCell(null); void loadWeek();
           } : undefined}
         />
       )}
@@ -496,7 +496,7 @@ function LogDialog({ project, date, existing, otherHours, suggestions, tasks, ne
     <Dialog open onOpenChange={(o) => { if (!o && !busy) close(); }}>
       {/* scrollBody: hours, the quick amounts, a description with its suggestions and the task picker add up
           to more than a phone can show at once, and the Save button must stay reachable. */}
-      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && valid) save(); }}>
+      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && valid) void save(); }}>
         <DialogHeader>
           <DialogTitle>{existing ? "Edit time" : "Log time"}</DialogTitle>
           <DialogDescription asChild>

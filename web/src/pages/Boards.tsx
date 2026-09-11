@@ -1646,7 +1646,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                 {todos.length > 0 && <span className="text-xs font-normal text-muted-foreground">{todoDone}/{todos.length} done</span>}
               </p>
               {can.includes("addTodos") && checklists.length > 0 && (
-                <Select value="" disabled={busy} onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl?.items?.length) todoAct("addTodos", { texts: cl.items }); }}>
+                <Select value="" disabled={busy} onValueChange={(v) => { const cl = checklists.find((c) => c.path === v); if (cl?.items?.length) void todoAct("addTodos", { texts: cl.items }); }}>
                   <SelectTrigger className="h-8 w-44 text-xs"><SelectValue placeholder="Apply template…" /></SelectTrigger>
                   <SelectContent>{checklists.map((c) => <SelectItem key={c.path} value={c.path}>{c.display_name}</SelectItem>)}</SelectContent>
                 </Select>
@@ -1676,8 +1676,8 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
               <div className="flex items-center gap-2">
                 {/* Enter always stops here: unswallowed it reaches the dialog's Enter-submits handler and saves
                     the whole task while the reader is still building its checklist. */}
-                <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (newTodo.trim()) { todoAct("addTodos", { texts: [newTodo.trim()] }); setNewTodo(""); } }} />
-                <Button size="sm" variant="outline" loading={busy} disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (v) { todoAct("addTodos", { texts: [v] }); setNewTodo(""); } }}><Plus className="h-4 w-4" /> Add</Button>
+                <Input className="h-8" placeholder="Add a checklist item…" value={newTodo} onChange={(e) => setNewTodo(e.target.value)} onKeyDown={(e) => { if (e.key !== "Enter") return; e.preventDefault(); if (newTodo.trim()) { void todoAct("addTodos", { texts: [newTodo.trim()] }); setNewTodo(""); } }} />
+                <Button size="sm" variant="outline" loading={busy} disabled={!newTodo.trim()} onClick={() => { const v = newTodo.trim(); if (v) { void todoAct("addTodos", { texts: [v] }); setNewTodo(""); } }}><Plus className="h-4 w-4" /> Add</Button>
               </div>
             )}
           </div>
@@ -1756,7 +1756,7 @@ function CardDialog({ board, card, column, employees, goals, departments, boardC
                     onClick={mentions.sync}
                     onKeyDown={(e) => {
                       if (mentions.onKeyDown(e)) return;
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addComment(); }
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void addComment(); }
                     }}
                   />
                   {mentions.menu}

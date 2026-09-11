@@ -646,7 +646,7 @@ export function invalidateCollections(collections: string[]): string[] {
     if (!set.has(e.collection)) continue;
     e.ts = 0; // mark stale
     if (e.subs.size > 0) {
-      ensureFetch(e.collection, e.opts, true);
+      void ensureFetch(e.collection, e.opts, true);
       notRefetched.delete(e.collection);
     }
   }
@@ -687,7 +687,7 @@ export function clearCache(): void {
   for (const e of [...entries.values()]) {
     e.ts = 0; // mark stale
     if (e.subs.size === 0 && !e.inflight) dropEntry(e);
-    else ensureFetch(e.collection, e.opts, true);
+    else void ensureFetch(e.collection, e.opts, true);
   }
 }
 

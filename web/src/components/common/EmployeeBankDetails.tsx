@@ -135,7 +135,7 @@ export function EmployeeBankDetails({ employeeId, canEdit, title = "Bank details
       </CardContent>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (canSave) save(); }}>
+        <DialogContent className="sentry-mask" scrollBody onEnterSubmit={() => { if (canSave) void save(); }}>
           <AccessScope collection="employees" objectPath={`employees/${employeeId}`}>
           <DialogHeader>
             <DialogTitle>{data?.on_file ? "Edit bank details" : "Add bank details"}</DialogTitle>

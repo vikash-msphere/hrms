@@ -854,7 +854,7 @@ export function PostComposer({
           // Cmd/Ctrl+Enter posts from anywhere in the dialog - plain Enter belongs to the poll options.
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
-            submit();
+            void submit();
           }
         }}
       >

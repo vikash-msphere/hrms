@@ -298,7 +298,7 @@ export default function Schedule({ me }: { me: Me }) {
               else await create("shift-assignments", { employee: editing.employee, shift: shiftRef, date: d, note: note || undefined });
             }
             toast({ title: dates.length > 1 ? `${dates.length} days scheduled` : editing.existing ? "Shift updated" : "Shift assigned", variant: "success" });
-            setEditing(null); load();
+            setEditing(null); void load();
           }}
           onRemove={editing.existing ? async () => {
             const ok = await confirm({
@@ -310,7 +310,7 @@ export default function Schedule({ me }: { me: Me }) {
             if (!ok) return;
             await remove(`shift-assignments/${idOf(editing.existing!.path)}`);
             toast({ title: "Assignment removed", variant: "success" });
-            setEditing(null); load();
+            setEditing(null); void load();
           } : undefined}
         />
       )}
@@ -390,7 +390,7 @@ function AssignDialog({ employeeName, date, existing, shifts, weekDays, workDays
   };
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !busy) close(); }}>
-      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && shift) save(); }}>
+      <DialogContent scrollBody onEnterSubmit={() => { if (!busy && shift) void save(); }}>
         <DialogHeader>
           <DialogTitle>{existing ? "Edit shift" : "Assign shift"}</DialogTitle>
           <DialogDescription asChild>

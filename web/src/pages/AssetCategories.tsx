@@ -150,7 +150,7 @@ export default function AssetCategories({ embedded, openId }: { me?: Me; embedde
       </DataState>
 
       <Dialog open={open} onOpenChange={guard.onOpenChange}>
-        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) submit(); }}>
+        <DialogContent onEnterSubmit={() => { if (!busy && form.name.trim()) void submit(); }}>
           <AccessScope collection="asset-categories" objectPath={editing?.path}>
           <DialogHeader>
             <DialogTitle>{editing ? "Edit category" : "New category"}</DialogTitle>

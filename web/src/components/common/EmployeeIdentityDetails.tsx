@@ -50,7 +50,7 @@ export function EmployeeIdentityDetails({ employeeId, canEdit, title = "Identity
     try {
       await upload(`employees/${employeeId}`, file, { verb: "uploadIdentityDoc", params: { field } });
       toast({ title: "Document attached", variant: "success" });
-      load();
+      void load();
     } catch (err) {
       toast({ title: "Upload failed", description: (err as Error).message, variant: "destructive" });
     }

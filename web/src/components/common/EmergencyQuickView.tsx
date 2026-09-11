@@ -151,7 +151,7 @@ export function EmergencyQuickView({
         <FieldAccess accessTarget={subRef} />
       </span>
       <Dialog open={open} onOpenChange={(next) => (edit ? guard.onOpenChange(next) : setOpen(next))}>
-        <DialogContent scrollBody onEnterSubmit={() => { if (edit && !saving) save(); }}>
+        <DialogContent scrollBody onEnterSubmit={() => { if (edit && !saving) void save(); }}>
           <DialogHeader className="flex flex-row items-start justify-between gap-3">
             <div className="min-w-0 space-y-1.5">
               <DialogTitle className="flex items-center gap-2">
