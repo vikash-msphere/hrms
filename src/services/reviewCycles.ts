@@ -1,4 +1,7 @@
-import { and, eq, gte, inArray, isNotNull, isNull, lte, ne } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lte, ne, type SQL } from "drizzle-orm";
+import type { ListScope } from "../domain/access";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import { allocFlatCode, allocOwnedCodesFor } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
@@ -27,10 +30,18 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const dateOrNull = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:00Z")) : null);
 
-export async function listReviewCycles(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.reviewCycles), showDeleted);
-  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "review-cycles" });
-  return { items: slice, nextPageToken };
+// THE CALLER'S SCOPE IS BOUND HERE. This used to take the actor and ignore it (`_actor`) and read the whole
+// table. The breadth is the lesser half of what that skipped: `scope` also carries the caller's per-object
+// shares and DENIES (resolved by middleware/authz.ts for every collection-level list), and `applyScope` is the
+// only thing that binds them - so a per-object deny on a cycle had no effect on this list.
+// `review-cycles` is a flat catalog with a `code` and no owner column, so an own-scoped caller gets nothing.
+export async function listReviewCycles(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
+  const conds: (SQL | undefined)[] = [applyScope(scope, schema.reviewCycles.code, undefined)];
+  if (!showDeleted) conds.push(isNull(schema.reviewCycles.deleteTime));
+  return keysetPage<typeof schema.reviewCycles.$inferSelect>(deps, schema.reviewCycles, "review-cycles", and(...conds.filter(Boolean) as SQL[]), {
+    max: maxPageSize,
+    pageToken,
+  });
 }
 
 async function getReviewCycle(deps: Deps, _actor: AppUser, id: string) {

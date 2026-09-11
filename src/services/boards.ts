@@ -1,15 +1,17 @@
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, type SQL } from "drizzle-orm";
 import { allocFlatCode, withFreshCode } from "./codeAlloc";
 import { chunk, ID_CHUNK } from "../lib/dbBatch";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
+import type { ListScope } from "../domain/access";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
+import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import {
   DEFAULT_BOARD_COLUMNS, DEFAULT_SCRUM_COLUMNS, normalizeColumns, normalizeSwimlanes, normalizeLabels,
   normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
@@ -38,10 +40,24 @@ const asArgError = <T>(fn: () => T): T => {
   }
 };
 
-export async function listBoards(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.boards), showDeleted);
-  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "boards" });
-  return { items: slice, nextPageToken };
+// THE CALLER'S SCOPE IS BOUND HERE, like every other list in the app.
+//
+// This used to take the actor and ignore it (`_actor`), reading the whole table and paging it in JS. The
+// breadth was harmless while `boards` is granted to nobody but super_admin - but `scope` carries more than a
+// breadth: the middleware resolves the caller's per-object shares and DENIES onto it for every
+// collection-level list (middleware/authz.ts), and `applyScope` is the only thing that binds them. So a
+// per-object deny on a board simply evaporated, on a list, in the one direction that leaks. Deny-wins has to
+// mean everywhere.
+//
+// `boards` has no owner column (it is a flat catalog with a `code`), so an own-scoped caller correctly gets
+// nothing - the same fail-closed answer the generic list gives, rather than the whole table.
+export async function listBoards(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
+  const conds: (SQL | undefined)[] = [applyScope(scope, schema.boards.code, undefined)];
+  if (!showDeleted) conds.push(isNull(schema.boards.deleteTime));
+  return keysetPage<typeof schema.boards.$inferSelect>(deps, schema.boards, "boards", and(...conds.filter(Boolean) as SQL[]), {
+    max: maxPageSize,
+    pageToken,
+  });
 }
 
 async function getBoard(deps: Deps, _actor: AppUser, id: string) {
@@ -135,13 +151,25 @@ export async function configureBoard(deps: Deps, actor: AppUser, id: string, inp
 // The `metrics` verb: flow analytics (CFD + lead/cycle time + throughput) over the board's cards + movement
 // log. `days` is the CFD/throughput window (default 30). Computation is pure (domain/boardMetrics); here we
 // only fetch the rows. Read-gated by the board's access (the route decides), so it exposes only aggregates.
+// A DELETED CARD IS NOT WORK, and every other count on this board already agrees: `cardCountsFor` above reads
+// `delete_time` to exclude it from `card_count`, and the nudge metrics filter it in SQL
+// (services/scheduledMetrics.ts). This read did not, so a deleted card went on contributing its lead time,
+// its cycle time and its delivery to throughput - and, worse, never LEFT the CFD: the diagram reconstructs
+// each card's column from its last move at or before a day boundary, so a card deleted a year ago was still
+// being counted into whatever column it was sitting in, on every day of every window, forever.
+//
+// The movement log is filtered with it. `card_movements` carries no `delete_time` of its own (the soft delete
+// stamps the card, not its history), so the live card ids are what say which movements still describe work -
+// filtered in memory against the set, because the ids are already in hand and an `IN` list of a whole board's
+// cards is past D1's bound-parameter cap anyway (lib/dbBatch.ts).
 export async function boardMetrics(deps: Deps, actor: AppUser, id: string, days = 30) {
   const board = await getBoard(deps, actor, id);
   const cols = parseColumns(board.columnsJson).map((c) => ({ key: c.key, label: c.label }));
-  const cardRows = await deps.db
-    .select({ committedAt: schema.cards.committedAt, startedAt: schema.cards.startedAt, deliveredAt: schema.cards.deliveredAt })
+  const cardRows = (await deps.db
+    .select({ uuid: schema.cards.uuid, committedAt: schema.cards.committedAt, startedAt: schema.cards.startedAt, deliveredAt: schema.cards.deliveredAt })
     .from(schema.cards)
-    .where(eq(schema.cards.boardId, id));
+    .where(and(eq(schema.cards.boardId, id), isNull(schema.cards.deleteTime))));
+  const live = new Set(cardRows.map((c) => c.uuid));
   const moveRows = await deps.db
     .select({ cardId: schema.cardMovements.cardId, toColumn: schema.cardMovements.toColumn, at: schema.cardMovements.at })
     .from(schema.cardMovements)
@@ -149,7 +177,7 @@ export async function boardMetrics(deps: Deps, actor: AppUser, id: string, days 
   return computeBoardMetrics(
     cols,
     cardRows.map((c) => ({ committedAt: c.committedAt ? +new Date(c.committedAt) : null, startedAt: c.startedAt ? +new Date(c.startedAt) : null, deliveredAt: c.deliveredAt ? +new Date(c.deliveredAt) : null })),
-    moveRows.map((m) => ({ cardId: m.cardId, toColumn: m.toColumn, at: +new Date(m.at) })),
+    moveRows.filter((m) => live.has(m.cardId)).map((m) => ({ cardId: m.cardId, toColumn: m.toColumn, at: +new Date(m.at) })),
     { days: Math.max(1, Math.min(180, days)) },
   );
 }

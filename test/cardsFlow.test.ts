@@ -122,6 +122,44 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect(m.columns.map((c) => c.key)).toContain("done");
   });
 
+  // A deleted card is not work, and every other count on the board already agreed (`card_count` reads
+  // `delete_time`). This read did not, so a deleted card kept contributing its lead time, its cycle time and
+  // its delivery to throughput - and never left the CFD, because the diagram reconstructs a card's column from
+  // its last movement and a soft delete writes no movement. It sat in whatever column it was in, on every day
+  // of every window, forever.
+  it("drops soft-deleted cards from the flow metrics and the CFD", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Metrics board" });
+    await configureBoard(deps, actor, board.uuid, {
+      columns: [
+        { key: "backlog", label: "Backlog", wipLimit: null, policy: "", commitment: false, delivery: false },
+        { key: "ready", label: "Ready", wipLimit: null, policy: "", commitment: true, delivery: false },
+        { key: "done", label: "Done", wipLimit: null, policy: "", commitment: false, delivery: true },
+      ],
+    });
+    const b1 = `boards/${board.uuid}`;
+    const keep = await createCard(deps, actor, { board: b1, title: "Kept" });
+    const gone = await createCard(deps, actor, { board: b1, title: "Deleted" });
+    for (const c of [keep, gone]) {
+      await moveCard(deps, actor, c.uuid, "ready");
+      await moveCard(deps, actor, c.uuid, "done");
+    }
+
+    const before = await boardMetrics(deps, actor, board.uuid, 30);
+    expect(before.throughput.delivered).toBe(2);
+    expect(before.lead_time.count).toBe(2);
+
+    await deleteCard(deps, actor, gone.uuid);
+
+    const after = await boardMetrics(deps, actor, board.uuid, 30);
+    expect(after.throughput.delivered).toBe(1);
+    expect(after.lead_time.count).toBe(1);
+    expect(after.cycle_time.count).toBe(1);
+    // The CFD counts cards by column per day; the deleted one must be in none of them. Today's row is the
+    // last, and both cards are sitting in `done`.
+    expect(after.cfd[after.cfd.length - 1]!.counts.done).toBe(1);
+  });
+
   it("rolls a goal's progress up from its linked tasks, weighted by story points", async () => {
     const actor = await seedActor();
     const goal = await createGoal(deps, actor, { title: "Q3 objective" });

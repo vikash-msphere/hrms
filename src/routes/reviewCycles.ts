@@ -55,7 +55,7 @@ export const reviewCycles = collectionRoutes<ReviewCycleInput, typeof schema.rev
     purge: (deps, actor, id, ifMatch) => purgeReviewCycle(deps, actor, id, ifMatch),
   },
   // This list scopes by the caller (a cycle is visible to whoever holds a review in it), not by a code filter.
-  list: (c, page) => listReviewCycles(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken, page.showDeleted),
+  list: (c, page) => listReviewCycles(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
   verbs: {
     launch: { schema: employeesSchema, run: (deps, user, id, body) => launchReviewCycle(deps, user, id, body.employees) },
     enroll: { schema: employeesSchema, run: (deps, user, id, body) => addRevieweesToCycle(deps, user, id, body.employees) },

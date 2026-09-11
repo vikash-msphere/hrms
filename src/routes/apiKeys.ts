@@ -70,7 +70,7 @@ export const apiKeys = collectionRoutes<ApiKeyInput, typeof schema.apiKeys>({
       ...(input.description !== undefined ? { description: input.description?.trim() || null } : {}),
     };
   },
-  list: (c, page) => listApiKeys(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), page.deletedOnly),
+  list: (c, page) => listApiKeys(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), page.deletedOnly),
   verbs: {
     revoke: { run: (deps, user, id) => revokeApiKey(deps, user, id) },
   },

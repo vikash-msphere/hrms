@@ -640,9 +640,11 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   const { canReapply, staleCount, skippedCount, reapplying, reapply: doReapply, promptReapply } = useSplitStaleness();
   const [ot, setOt] = useState({ enabled: false, multiplier: 2, hours_per_month: 200, rate_per_hour: 0 });
   const [pt, setPt] = useState<{ slabs: { up_to: number | null; amount: number }[]; annual_cap: number | null }>({ slabs: [{ up_to: 25000, amount: 0 }, { up_to: null, amount: 200 }], annual_cap: 2500 });
+  const [approval, setApproval] = useState({ enabled: false });
   const [ready, setReady] = useState(false);
   useEffect(() => {
     void Promise.allSettled([
+      getSetting<Partial<typeof approval>>("payroll-approval").then((s) => { if (s.value) setApproval((p) => ({ ...p, ...s.value })); }),
       getSetting<Partial<typeof ctc>>("ctc").then((s) => { if (s.value) setCtc((p) => ({ ...p, ...s.value })); }),
       getSetting<Partial<typeof ot>>("overtime").then((s) => { if (s.value) setOt((p) => ({ ...p, ...s.value, rate_per_hour: s.value!.rate_per_hour ?? 0 })); }),
       getSetting<{ slabs?: { up_to: number | null; amount: number }[]; annual_cap?: number | null }>("professional-tax").then((s) => { if (s.value?.slabs?.length) setPt({ slabs: s.value.slabs, annual_cap: s.value.annual_cap ?? null }); }),
@@ -671,6 +673,8 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
   };
   const saveGratuity = async () => { try { await saveSetting("gratuity", { value: gratuity }); markGratuitySaved(); toast({ title: "Gratuity policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
   const savePerq = async () => { try { await saveSetting("loan-perquisite", { value: perq }); markPerqSaved(); toast({ title: "Loan perquisite policy saved" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const saveApproval = async () => { try { await saveSetting("payroll-approval", { value: approval }); markApprovalSaved(); toast({ title: approval.enabled ? "Payroll runs now need a second approver" : "Payroll runs can be approved by the submitter again" }); } catch (e) { toast({ variant: "destructive", title: "Couldn't save", description: String((e as Error).message) }); } };
+  const { markSaved: markApprovalSaved } = useUnsaved(approval, ready, saveApproval);
   const { markSaved: markGratuitySaved } = useUnsaved(gratuity, ready, saveGratuity);
   const { markSaved: markPerqSaved } = useUnsaved(perq, ready, savePerq);
   const { markSaved: markCtcSaved } = useUnsaved(ctc, ready, saveCtc);
@@ -686,6 +690,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
         <TabsTrigger value="pt">Professional Tax</TabsTrigger>
         <TabsTrigger value="gratuity">Gratuity</TabsTrigger>
         <TabsTrigger value="perquisite">Loan perquisite</TabsTrigger>
+        <TabsTrigger value="approval">Approval</TabsTrigger>
       </TabsList>
 
       <TabsContent value="ctc">
@@ -802,6 +807,20 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
               <Field label="Exempt up to (aggregate principal)" hint="Nothing is taxable while the total original loan amount is at or below this (₹20,000)."><Input type="number" step="1000" value={perq.exempt_principal_upto} onChange={(e) => setPerq((c) => ({ ...c, exempt_principal_upto: Number(e.target.value) }))} disabled={!perq.enabled} /></Field>
             </div>
             <Button size="sm" onClick={savePerq}><Save className="h-4 w-4" /> Save</Button>
+          </CardContent>
+        </Card>
+      </TabsContent>
+
+      {/* Four-eyes on the payroll commit (settings/payroll-approval). The same switch PermissionsPanel offers
+          for access rules, on the step that moves money - and off by default for the same reason: a single
+          payroll admin has nobody else to approve, so the way out of that has to be this switch. */}
+      <TabsContent value="approval">
+        <Card>
+          <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/payroll-approval" label="Payroll approval"><span>Separate approver</span></AccessAction></CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">Approving a run is the point the money commits: it claims the pay period, unlocks the bank file, and cannot be undone except by deleting the run. With this on, whoever submitted a run for review cannot also approve it - a second person has to. If you are the only person who can approve, nobody can approve your runs; turn this back off to unblock.</p>
+            <label className="flex items-center gap-2 text-sm"><Checkbox checked={approval.enabled} onCheckedChange={(v) => setApproval({ enabled: v === true })} /> A payroll run must be approved by someone other than the person who submitted it</label>
+            <Button size="sm" onClick={saveApproval}><Save className="h-4 w-4" /> Save</Button>
           </CardContent>
         </Card>
       </TabsContent>

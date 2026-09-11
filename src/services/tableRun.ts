@@ -14,7 +14,7 @@
 // entitled to one of them. See `scopedTo` in loadSource.
 //
 // Cost discipline: one query per SOURCE per page, never one per row. A source nobody selected is never read.
-import { and, eq, ne, gt, gte, lt, lte, inArray, isNull, isNotNull, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, ne, not, gt, gte, lt, lte, inArray, isNull, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import { getTableConfig, type AnySQLiteColumn, type SQLiteTable } from "drizzle-orm/sqlite-core";
 import { getTableColumns } from "drizzle-orm";
 import * as schema from "../db/schema";
@@ -474,6 +474,26 @@ const FILTER_PARAM_BUDGET = 40;
 const filterParamCost = (f: ViewFilter): number =>
   f.op === "empty" || f.op === "not_empty" ? 0 : f.op === "in" ? inList(f.value).length : 1;
 
+/** Kinds whose values are TEXT, and so are compared case-insensitively - see `textual` below. */
+const TEXT_KINDS = new Set<ResolvedField["kind"]>(["text", "enum", "ref"]);
+
+/**
+ * `eq` / `ne` / `in` on a text column, compared case-insensitively.
+ *
+ * The two halves of every other operator already agree on case: `contains` is `LIKE` in SQL (case-insensitive
+ * for ASCII under SQLite's default `case_sensitive_like=OFF`) and `String(cell).toLowerCase().includes(...)`
+ * in memory. Equality did not: `eq(col, v)` is BINARY and case-SENSITIVE, while `matches()` lowercases both
+ * sides. So one saved filter meant two things depending on whether its column happened to sit on the base
+ * table - "Status is Active" found the rows when the column was behind a link and none of them when it was
+ * not. Same split the `likeEscape` note above this exists to close, one operator over.
+ *
+ * Case-insensitive is the direction that matches: it is what `contains` already does, what the in-memory half
+ * already does, and what someone typing a value into a report filter means. Only TEXT-valued kinds go through
+ * it - `coerce` turns a number, a boolean and a date into non-strings, which have no case to fold.
+ */
+const textual = (field: ResolvedField, v: string | number | boolean) => TEXT_KINDS.has(field.kind) && typeof coerce(field, v) === "string";
+const lowerEq = (col: unknown, v: string | number | boolean): SQL => sql`lower(${col as never}) = ${String(v).toLowerCase()}`;
+
 /** A filter on a plain base column, pushed into SQL. Returns undefined when it cannot be (then it is deferred). */
 function baseFilterSql(table: SQLiteTable & Record<string, any>, field: ResolvedField, f: ViewFilter): SQL | undefined {
   const col = table[field.leaf];
@@ -482,8 +502,8 @@ function baseFilterSql(table: SQLiteTable & Record<string, any>, field: Resolved
   switch (f.op) {
     case "empty": return isNull(col);
     case "not_empty": return isNotNull(col);
-    case "eq": return v == null ? undefined : eq(col, coerce(field, v));
-    case "ne": return v == null ? undefined : ne(col, coerce(field, v));
+    case "eq": return v == null ? undefined : textual(field, v) ? lowerEq(col, v) : eq(col, coerce(field, v));
+    case "ne": return v == null ? undefined : textual(field, v) ? not(lowerEq(col, v)) : ne(col, coerce(field, v));
     case "gt": return v == null ? undefined : gt(col, coerce(field, v));
     case "gte": return v == null ? undefined : gte(col, coerce(field, v));
     case "lt": return v == null ? undefined : lt(col, coerce(field, v));
@@ -491,7 +511,7 @@ function baseFilterSql(table: SQLiteTable & Record<string, any>, field: Resolved
     case "contains": return typeof v === "string" && v ? sql`${col} like ${`%${likeEscape(v)}%`} escape '\\'` : undefined;
     case "in": {
       const list = inList(v);
-      return list.length ? or(...list.map((x) => eq(col, coerce(field, x)))) : undefined;
+      return list.length ? or(...list.map((x) => (textual(field, x) ? lowerEq(col, x) : eq(col, coerce(field, x))))) : undefined;
     }
     default: return undefined;
   }

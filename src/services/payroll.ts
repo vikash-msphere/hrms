@@ -1,6 +1,6 @@
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 // FSM + LRO resource template. Uses the verified pure domain logic in domain/payroll.ts.
-import { and, eq, ne, isNull, inArray, gt, gte, lte, sql } from "drizzle-orm";
+import { and, eq, ne, isNull, inArray, gt, gte, lte, sql, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -82,7 +82,7 @@ async function withNames<T extends { submittedBy: string | null; approvedBy: str
 // it costs a query per input table (see runStaleness). A page of runs deliberately does not carry it, which is
 // why this is a helper the item paths call rather than the spec's `decorate`, which the factory also applies to
 // a list.
-export async function withStaleness<T extends { uuid: string; state: string; itemsBuiltAt: Date | null }>(deps: Deps, run: T) {
+export async function withStaleness<T extends { uuid: string; state: string; payPeriodId: string; itemsBuiltAt: Date | null }>(deps: Deps, run: T) {
   return { ...run, _staleness: await runStaleness(deps, run) };
 }
 
@@ -852,7 +852,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
 // paying the contracted stored split can be deliberate; the reviewer decides.
 export type SplitDrift = { stale: string[]; skipped: string[] }; // employee display names
 export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[]; split_drift?: SplitDrift };
-export async function runStaleness(deps: Deps, run: { uuid: string; state: string; itemsBuiltAt: Date | null }): Promise<RunStaleness> {
+export async function runStaleness(deps: Deps, run: { uuid: string; state: string; payPeriodId: string; itemsBuiltAt: Date | null }): Promise<RunStaleness> {
   const builtAt = run.itemsBuiltAt;
   if (!isEditable(run.state as RunState) || !builtAt) return { built_time: builtAt ? builtAt.toISOString() : null, stale: false, changes: [] };
   // Split drift for the people this run actually priced, named for the reviewer. Editable runs only: an approved
@@ -883,30 +883,97 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   // statement and the driver stamping it - post-dates the build and the run reports ITSELF stale. Which is
   // the permanent false alarm on the one banner that exists to be believed, and no clock comparison can rule
   // it out. `paid_run_id` can.
-  const sources: { label: string; table: { updatedAt: unknown }; ownRun?: unknown }[] = [
-    { label: "Employee records (joiners, tax verifications, EPF, status)", table: schema.employees },
-    { label: "Compensation revisions", table: schema.compensation, ownRun: schema.compensation.arrearsPaidRunId },
+  //
+  // EVERY PROBE IS NARROWED TO WHAT COULD MOVE *THIS* RUN'S MONEY. Each one used to ask its question of the
+  // whole table with no predicate but the timestamp, which was tolerable while this was a banner and is not
+  // now that `transition` GATES the approve on it with no override (see below). Org-wide, an editable run
+  // could not stay fresh long enough to be reviewed: `employees.updated_at` bumps when anyone uploads a photo,
+  // edits a bio or changes their notification preferences; `settings` is one row per key, so toggling the
+  // holiday feed or an asset-tag option counted; with LOP on, a single clock-in anywhere in the org counted.
+  // Payroll became unapprovable in any org with people in it, and the documented remedy (rebuild, then
+  // approve) raced exactly the same way.
+  //
+  // Two narrowings, both fail-SAFE - they can only remove rows that provably do not price this run:
+  //   - `employee`: the column naming who a row is about, correlated against this run's OWN items. A change to
+  //     somebody this run did not pay cannot change what it pays. One bound parameter (the run id) however
+  //     many people are in the run, which is why it is a sub-select and not an `IN` list of ids.
+  //   - `window`: for the date-shaped inputs, the run's pay period. A holiday next year, or a punch from
+  //     another month, is not an input to this period.
+  // A source with neither (the org-wide catalogs: pay components, salary structures) genuinely applies to
+  // everyone and stays unnarrowed - they are also the ones nobody edits mid-run.
+  //
+  // What this deliberately does NOT do is try to decide WHICH COLUMN moved. `updated_at` is one stamp for the
+  // whole row, so a profile edit to somebody who IS in the run still reports stale. That is the conservative
+  // direction and it stays: a rebuild is idempotent and cheap, and the alternative - a second "payroll inputs"
+  // timestamp that every relevant writer must remember to stamp - fails OPEN the first time one forgets, which
+  // is a wrong payslip instead of an extra rebuild.
+  type Source = {
+    label: string;
+    table: { updatedAt: unknown };
+    /** The column by which a row says THIS run paid it (the build's own markers). */
+    ownRun?: unknown;
+    /** The column naming the employee a row is about, correlated against this run's items. */
+    employee?: unknown;
+    /** Narrows a date-shaped input to the run's pay period. */
+    window?: SQL;
+  };
+  const period = (await deps.db
+    .select({ periodStart: schema.payPeriods.periodStart, periodEnd: schema.payPeriods.periodEnd })
+    .from(schema.payPeriods)
+    .where(eq(schema.payPeriods.uuid, run.payPeriodId))
+    .limit(1))[0];
+  // No period row (it was purged out from under the run) means no window to narrow by, so the date-shaped
+  // probes stay org-wide rather than silently matching nothing - the fail-safe direction.
+  const from = period ? +new Date(period.periodStart) : null;
+  const to = period ? +new Date(period.periodEnd) : null;
+  const inPeriod = (col: unknown): SQL | undefined =>
+    from === null || to === null ? undefined : sql`${col as never} >= ${from} and ${col as never} <= ${to}`;
+  // A leave request counts when it OVERLAPS the period, not when it starts in it: a leave spanning the month
+  // boundary docks days on both sides of it.
+  const overlapsPeriod = (start: unknown, end: unknown): SQL | undefined =>
+    from === null || to === null ? undefined : sql`${start as never} <= ${to} and ${end as never} >= ${from}`;
+
+  const sources: Source[] = [
+    { label: "Employee records (joiners, tax verifications, EPF, status)", table: schema.employees, employee: schema.employees.uuid },
+    { label: "Compensation revisions", table: schema.compensation, ownRun: schema.compensation.arrearsPaidRunId, employee: schema.compensation.employeeId },
     { label: "Pay components", table: schema.payComponents },
     { label: "Salary structures", table: schema.salaryStructures },
-    { label: "Bonuses", table: schema.bonuses, ownRun: schema.bonuses.paidRunId },
-    { label: "Leave encashments", table: schema.leaveEncashments, ownRun: schema.leaveEncashments.paidRunId },
-    { label: "Reimbursements", table: schema.reimbursements, ownRun: schema.reimbursements.paidRunId },
-    { label: "Overtime requests", table: schema.overtimeRequests, ownRun: schema.overtimeRequests.paidRunId },
-    { label: "Loans", table: schema.loans },
+    { label: "Bonuses", table: schema.bonuses, ownRun: schema.bonuses.paidRunId, employee: schema.bonuses.employeeId },
+    { label: "Leave encashments", table: schema.leaveEncashments, ownRun: schema.leaveEncashments.paidRunId, employee: schema.leaveEncashments.employeeId },
+    { label: "Reimbursements", table: schema.reimbursements, ownRun: schema.reimbursements.paidRunId, employee: schema.reimbursements.employeeId },
+    { label: "Overtime requests", table: schema.overtimeRequests, ownRun: schema.overtimeRequests.paidRunId, employee: schema.overtimeRequests.employeeId },
+    { label: "Loans", table: schema.loans, employee: schema.loans.employeeId },
     // A verified investment declaration reduces withholding, so it moves the TDS on an already-built run.
-    { label: "Investment / tax declarations", table: schema.taxDeclarations },
-    { label: "Pay-run settings (CTC / tax / overtime / PT)", table: schema.settings },
+    { label: "Investment / tax declarations", table: schema.taxDeclarations, employee: schema.taxDeclarations.employeeId },
+    // The `settings` table is one row per KEY, so an unnarrowed probe made every unrelated org preference - the
+    // holiday feed, an asset-tag option, a board default - an input to payroll. These are the keys the build
+    // actually reads (directly, and through loadTaxConfig / orgToday).
+    {
+      label: "Pay-run settings (CTC / tax / overtime / PT)",
+      table: schema.settings,
+      window: sql`${schema.settings.key} in ('attendance', 'ctc', 'loan-perquisite', 'organization', 'overtime', 'payslip', 'professional-tax', 'tax-config')`,
+    },
     // Holidays shift the working-days denominator that prorates mid-period joiners/leavers, so they move the
-    // money even with LOP off.
-    { label: "Holidays", table: schema.holidays },
+    // money even with LOP off - but only the ones falling INSIDE the period do.
+    { label: "Holidays", table: schema.holidays, window: inPeriod(schema.holidays.date) },
   ];
   // Loss-of-pay inputs only affect the run when LOP is enabled: approved leave (excuses an absence) and
   // attendance punches (worked minutes decide the absent day-units). Gate them on the setting so a routine
   // clock-in doesn't flag every run stale in an org that doesn't dock unauthorised absence.
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   if (att.lop_enabled) {
-    sources.push({ label: "Approved leave (loss-of-pay)", table: schema.leaveRequests });
-    sources.push({ label: "Attendance punches (loss-of-pay)", table: schema.attendanceSessions });
+    sources.push({
+      label: "Approved leave (loss-of-pay)",
+      table: schema.leaveRequests,
+      employee: schema.leaveRequests.employeeId,
+      window: overlapsPeriod(schema.leaveRequests.startDate, schema.leaveRequests.endDate),
+    });
+    sources.push({
+      label: "Attendance punches (loss-of-pay)",
+      table: schema.attendanceSessions,
+      employee: schema.attendanceSessions.employeeId,
+      window: inPeriod(schema.attendanceSessions.clockIn),
+    });
   }
   // All fourteen questions in ONE statement, as fourteen correlated EXISTS columns. Asked one at a time this was
   // a dozen-plus round trips on every read of an editable run - i.e. on the run page's own refresh - for what is
@@ -917,14 +984,35 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   const probes = sources.map((s, i) => {
     // A row this very run marked paid is the build's own write, whatever its stamp says.
     const notOurs = s.ownRun ? sql` and (${s.ownRun as never} is null or ${s.ownRun as never} <> ${run.uuid})` : sql``;
-    return sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${since}${notOurs} limit 1) as "c${sql.raw(String(i))}"`;
+    // One bound parameter (the run id), whatever the headcount - an `IN` list of the run's employee ids would
+    // be past D1's bound-parameter cap on any real payroll, and this statement carries fourteen of these.
+    const mine = s.employee
+      ? sql` and ${s.employee as never} in (select ${schema.payrollRunItems.employeeId} from ${schema.payrollRunItems} where ${schema.payrollRunItems.runId} = ${run.uuid})`
+      : sql``;
+    const win = s.window ? sql` and (${s.window})` : sql``;
+    return sql`exists (select 1 from ${s.table as never} where ${(s.table as { updatedAt: never }).updatedAt} > ${since}${notOurs}${mine}${win} limit 1) as "c${sql.raw(String(i))}"`;
   });
   const [row] = await deps.db.all<Record<string, number>>(sql`select ${sql.join(probes, sql`, `)}`);
   const changes = sources.filter((_, i) => !!row?.[`c${i}`]).map((s) => s.label);
   return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}) };
 }
 
-// :submit / :approve / :lock map here. Maker-checker enforced on approve.
+// Segregation of duties on the payroll commit, opt-in per org via the `payroll-approval` settings blob. Turned
+// on, the person who SUBMITTED a run for review may not be the one who approves it - the same four-eyes rule
+// services/accessRules.ts applies to a permission change, on the step that actually moves money.
+//
+// OFF by default, and the reason is the same one that file gives: an org with one payroll admin has nobody
+// else to approve, and a rule with no way out brings payroll to a stop. The escape is this setting, not an
+// override on the request - an override a caller can pass is not a control.
+//
+// Role-level separation is a different, already-enforced thing (the seeded grant denies `payroll-runs.*.approve`
+// to payroll_admin, so approving needs super). That says which ROLE may approve; this says which PERSON may not.
+async function separateApproverRequired(deps: Deps): Promise<boolean> {
+  const cfg = await getSettingValue<{ enabled?: boolean }>(deps, "payroll-approval", {});
+  return cfg.enabled === true;
+}
+
+// :submit / :approve / :lock map here.
 export async function transition(deps: Deps, actor: AppUser, runId: string, to: RunState, ifMatch?: string) {
   const run = await getRun(deps, runId);
   assertEtag(run, ifMatch);
@@ -940,6 +1028,12 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
     if (!run.itemsBuiltAt) throw failedPrecondition("build the run before approving it");
     const [anyItem] = await deps.db.select({ uuid: schema.payrollRunItems.uuid }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)).limit(1);
     if (!anyItem) throw failedPrecondition("this run has no payslip items - build it before approving");
+    // Four-eyes, when the org has asked for it. `submittedBy` is stamped on the DRAFT -> REVIEW step below, so
+    // it names the maker; a run with none (submitted before the setting existed) is not blocked by a rule it
+    // was never subject to.
+    if (run.submittedBy && run.submittedBy === actor.uuid && (await separateApproverRequired(deps))) {
+      throw failedPrecondition("a payroll run must be approved by someone other than the person who submitted it");
+    }
     const committed = await deps.db
       .select({ uuid: schema.payrollRuns.uuid })
       .from(schema.payrollRuns)

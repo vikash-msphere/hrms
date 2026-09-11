@@ -358,6 +358,56 @@ describe("payroll: employer contributions ride on the item and follow each compo
     expect(await runStaleness(deps, await getRun(deps, run.uuid))).toMatchObject({ stale: true, changes: ["Bonuses"] });
   });
 
+  // STALENESS IS NARROWED TO WHAT COULD MOVE *THIS* RUN. Every probe used to ask its question of the whole
+  // table with no predicate but the timestamp. That was survivable while this was a banner and is not now that
+  // approve GATES on it with no override: `employees.updated_at` bumps when anyone uploads a photo or changes
+  // their notification preferences, and `settings` is one row per key, so an asset-tag toggle counted. An
+  // editable run could not stay fresh long enough to be reviewed, and the documented remedy (rebuild, then
+  // approve) raced exactly the same way.
+  describe("staleness only reports changes that could price this run", () => {
+    const rebuiltRun = async () => {
+      const actor = await seedActor(await seedEmployee());
+      const emp = await seedEmployee({ code: short("04") });
+      await seedComp(emp, { basePay: 30000 });
+      const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+      await buildRunItems(deps, actor, run.uuid);
+      return { actor, emp, run };
+    };
+    const stale = async (runId: string) => runStaleness(deps, await getRun(deps, runId));
+
+    it("ignores an employee the run never paid, and still catches one it did", async () => {
+      const { emp, run } = await rebuiltRun();
+      // Somebody in another department, with no item in this run. A profile edit of theirs is not an input to
+      // a payroll that does not pay them.
+      const outsider = await seedEmployee({ code: short("09") });
+      await deps.db.update(schema.employees).set({ bio: "edited", updatedAt: new Date() }).where(eq(schema.employees.uuid, outsider));
+      expect(await stale(run.uuid)).toMatchObject({ stale: false, changes: [] });
+
+      // The same edit on somebody the run DID pay still reports: the narrowing is by population, not a blanket
+      // blinding of the probe.
+      await deps.db.update(schema.employees).set({ bio: "edited", updatedAt: new Date() }).where(eq(schema.employees.uuid, emp));
+      expect((await stale(run.uuid)).changes).toContain("Employee records (joiners, tax verifications, EPF, status)");
+    });
+
+    it("ignores a settings key payroll does not read, and still catches one it does", async () => {
+      const { run } = await rebuiltRun();
+      await seedSetting("asset-tags", { found_page: { enabled: true } });
+      expect(await stale(run.uuid)).toMatchObject({ stale: false, changes: [] });
+
+      await seedSetting("ctc", { basic_pct: 55 });
+      expect((await stale(run.uuid)).changes).toContain("Pay-run settings (CTC / tax / overtime / PT)");
+    });
+
+    it("ignores a holiday outside the pay period, and still catches one inside it", async () => {
+      const { run } = await rebuiltRun(); // the period is Jan 2026
+      await deps.db.insert(schema.holidays).values({ uuid: genId(), code: short("hol"), date: new Date("2026-08-15"), name: "Independence Day" });
+      expect(await stale(run.uuid)).toMatchObject({ stale: false, changes: [] });
+
+      await deps.db.insert(schema.holidays).values({ uuid: genId(), code: short("hol"), date: new Date("2026-01-26"), name: "Republic Day" });
+      expect((await stale(run.uuid)).changes).toContain("Holidays");
+    });
+  });
+
   it("keeps the employer ESI share in step with the employee's sticky eligibility", async () => {
     const actor = await seedActor(await seedEmployee());
     await seedComponent({ name: "ESI", kind: "deduction", method: "esi", rate: 0.75 });
@@ -441,6 +491,41 @@ describe("payroll: one committed run per pay period", () => {
     // Built, but nobody has compensation on record -> zero items. Still refused.
     await buildRunItems(deps, actor, run.uuid);
     await expect(transition(deps, actor, run.uuid, "APPROVED")).rejects.toThrow(/no payslip items/);
+  });
+
+  // SEGREGATION OF DUTIES on the payroll commit. `transition` carried a comment claiming maker-checker was
+  // enforced on approve, and nothing compared the approver with the submitter - only the seeded grant's
+  // role-level rule (payroll_admin cannot approve), which says which ROLE may approve, not which PERSON may
+  // not. On a deployment with one super admin that is no four-eyes at all, on the one step that moves money
+  // and never rolls back. Opt-in and off by default, exactly like `access-approval` for permission changes,
+  // because a one-admin org has nobody else to approve and a rule with no way out stops payroll.
+  describe("four-eyes on approve (settings/payroll-approval)", () => {
+    const builtAndSubmitted = async () => {
+      const emp = await seedEmployee();
+      const submitter = await seedActor(emp);
+      await seedComp(emp, { basePay: 30000 });
+      const run = await createRun(deps, submitter, `pay-periods/${await seedPeriod()}`);
+      await buildRunItems(deps, submitter, run.uuid);
+      await transition(deps, submitter, run.uuid, "REVIEW");
+      return { submitter, run };
+    };
+
+    it("OFF by default: the submitter may approve their own run", async () => {
+      const { submitter, run } = await builtAndSubmitted();
+      expect((await transition(deps, submitter, run.uuid, "APPROVED")).state).toBe("APPROVED");
+    });
+
+    it("ON: the submitter is refused, and a second person approves", async () => {
+      await seedSetting("payroll-approval", { enabled: true });
+      const { submitter, run } = await builtAndSubmitted();
+      await expect(transition(deps, submitter, run.uuid, "APPROVED")).rejects.toThrow(/someone other than the person who submitted/);
+
+      const checker = await seedActor(await seedEmployee({ code: short("04") }));
+      const approved = await transition(deps, checker, run.uuid, "APPROVED");
+      expect(approved.state).toBe("APPROVED");
+      expect(approved.approvedBy).toBe(checker.uuid);
+      expect(approved.submittedBy).toBe(submitter.uuid);
+    });
   });
 
   it("publishes a run exactly once, however many times :publish is called", async () => {

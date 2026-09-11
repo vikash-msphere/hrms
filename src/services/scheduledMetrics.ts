@@ -58,7 +58,10 @@ export async function computeEmployeeMetrics(
     deps.db.select({ e: schema.overtimeRequests.employeeId }).from(schema.overtimeRequests).where(eq(schema.overtimeRequests.state, "PENDING")),
     deps.db.select({ e: schema.remoteWorkRequests.employeeId }).from(schema.remoteWorkRequests).where(eq(schema.remoteWorkRequests.state, "PENDING")),
     deps.db.select({ e: schema.attendanceRegularizations.employeeId }).from(schema.attendanceRegularizations).where(eq(schema.attendanceRegularizations.state, "PENDING")),
-    deps.db.select({ e: schema.loans.employeeId }).from(schema.loans).where(eq(schema.loans.status, "PENDING")),
+    // `loans` is the one queue here that soft-deletes, and a deleted request is not sitting in anybody's
+    // approval pile - the same rule the card read below follows with `isNull(delete_time)`. The other five
+    // carry no `delete_time` at all, so their state column is the whole of their lifecycle.
+    deps.db.select({ e: schema.loans.employeeId }).from(schema.loans).where(and(eq(schema.loans.status, "PENDING"), isNull(schema.loans.deleteTime))),
   ]);
   for (const set of pendingSets) for (const r of set) bump(r.e);
 

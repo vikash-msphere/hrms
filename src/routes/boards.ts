@@ -58,8 +58,9 @@ export const boards = collectionRoutes<BoardInput, typeof schema.boards>({
     // A hard purge tears the board's children down bottom-up (movements, then cards) before the row itself.
     purge: (deps, actor, id, ifMatch) => purgeBoard(deps, actor, id, ifMatch),
   },
-  // Board visibility follows membership and department, so the list scopes by the caller.
-  list: (c, page) => listBoards(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken, page.showDeleted),
+  // Scoped by the caller exactly as the generic list is: `c.get("scope")` carries the breadth the middleware
+  // decided AND the caller's per-object shares/denies, and the service binds it with `applyScope`.
+  list: (c, page) => listBoards(c.get("deps"), c.get("user"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
   verbs: {
     configure: { schema: configureSchema, run: (deps, user, id, body) => configureBoard(deps, user, id, body) },
     metrics: {

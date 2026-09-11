@@ -1,14 +1,16 @@
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, type SQL } from "drizzle-orm";
 import { allocFlatCode, withFreshCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
+import type { ListScope } from "../domain/access";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
-import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
+import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
 
 export type SprintInput = {
@@ -22,12 +24,23 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 const dateOrNull = (s?: string | null) => (s ? new Date(Date.parse(s + "T00:00:00Z")) : null);
 
-export async function listSprints(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false) {
-  let rows = await deps.db.select().from(schema.sprints);
-  if (boardId) rows = rows.filter((r) => r.boardId === boardId);
-  const all = visibleByDelete(rows, showDeleted);
-  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "sprints" });
-  return { items: slice, nextPageToken };
+// THE CALLER'S SCOPE IS BOUND HERE. This used to take the actor and ignore it (`_actor`) while its route
+// claimed the list "scopes by the caller" - it read every sprint in the org and filtered the board in JS. The
+// breadth was the lesser half: `scope` also carries the caller's per-object shares and DENIES (resolved by
+// middleware/authz.ts for every collection-level list), and `applyScope` is the only thing that binds them, so
+// a per-object deny on a sprint had no effect on the list at all.
+//
+// `sprints` is a flat catalog with a `code` and no owner column, so an own-scoped caller gets nothing -
+// fail-closed, the same answer the generic list gives. The board filter moves into SQL with it (there is an
+// index on `board_id`), so a board's sprints cost a seek rather than a read of the table.
+export async function listSprints(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, boardId?: string, showDeleted = false) {
+  const conds: (SQL | undefined)[] = [applyScope(scope, schema.sprints.code, undefined)];
+  if (boardId) conds.push(eq(schema.sprints.boardId, boardId));
+  if (!showDeleted) conds.push(isNull(schema.sprints.deleteTime));
+  return keysetPage<typeof schema.sprints.$inferSelect>(deps, schema.sprints, "sprints", and(...conds.filter(Boolean) as SQL[]), {
+    max: maxPageSize,
+    pageToken,
+  });
 }
 
 async function getSprint(deps: Deps, _actor: AppUser, id: string) {

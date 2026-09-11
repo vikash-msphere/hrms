@@ -1,12 +1,14 @@
-import { eq, and, isNull, gt, or } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, gt, or, sql, type SQL } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
+import type { ListScope } from "../domain/access";
+import { applyScope } from "./listScope";
+import { keysetPage } from "./keysetPage";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition, forbidden } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
-import { paginate } from "../http/pagination";
 import { etagOf } from "../http/serialize";
 import { assertKeyName } from "../lib/apiKeyToken";
 import { parseScope, scopeToWire, type KeyScope } from "../domain/keyScope";
@@ -38,13 +40,37 @@ const DEFAULT_SCOPE: KeyScope = { collections: "*", maxLevel: "read", verbs: [] 
 // key past the first page. Deliberately a plain substring match over the labels and the public prefix, not the
 // FTS index: this collection is not in it, and adding credentials to the app-wide search index is a bigger
 // decision than a filter box.
-export async function listApiKeys(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string, deletedOnly = false) {
-  const rows = await deps.db.select().from(schema.apiKeys);
+// `%` and `_` inside the needle are escaped, not stripped: a key described as "50% sampler" must search for
+// what was typed. Same rule (and the same ESCAPE clause) as the saved-grid filter in services/tableRun.ts.
+// The backslash goes first, or a needle ending in one would escape the closing `%` this builds.
+const likeEscape = (s: string) => s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+
+export async function listApiKeys(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string, deletedOnly = false) {
+  // THE CALLER'S SCOPE IS BOUND HERE. This used to take the actor and ignore it (`_actor`) and read the whole
+  // table. The breadth is the lesser half of what that skipped: `scope` also carries the caller's per-object
+  // shares and DENIES (resolved by middleware/authz.ts for every collection-level list), and `applyScope` is
+  // the only thing that binds them - so a per-object deny on a credential had no effect on this list.
+  // `api-keys` is a flat catalog with a `code` and no owner column, so an own-scoped caller gets nothing.
+  const conds: (SQL | undefined)[] = [applyScope(scope, schema.apiKeys.code, undefined)];
+  if (deletedOnly) conds.push(isNotNull(schema.apiKeys.deleteTime));
+  else if (!showDeleted) conds.push(isNull(schema.apiKeys.deleteTime));
+  // Matched in SQL rather than over the fetched rows, for the reason above it: the page has to be the page
+  // AFTER the filter, or a search past the first page seeks into a different result set than it renders.
   const needle = (q ?? "").trim().toLowerCase();
-  const all = rows
-    .filter((r) => (deletedOnly ? r.deleteTime !== null : showDeleted || r.deleteTime === null))
-    .filter((r) => !needle || `${r.name} ${r.description ?? ""} ${r.prefix}`.toLowerCase().includes(needle));
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "api-keys" });
+  if (needle) {
+    const pat = `%${likeEscape(needle)}%`;
+    conds.push(
+      or(
+        sql`lower(${schema.apiKeys.name}) like ${pat} escape '\\'`,
+        sql`lower(coalesce(${schema.apiKeys.description}, '')) like ${pat} escape '\\'`,
+        sql`lower(${schema.apiKeys.prefix}) like ${pat} escape '\\'`,
+      ),
+    );
+  }
+  return keysetPage<typeof schema.apiKeys.$inferSelect>(deps, schema.apiKeys, "api-keys", and(...conds.filter(Boolean) as SQL[]), {
+    max: maxPageSize,
+    pageToken,
+  });
 }
 
 async function getApiKey(deps: Deps, _actor: AppUser, id: string) {

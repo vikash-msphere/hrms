@@ -20,7 +20,7 @@
 // only stable while the list is: one person joining the org between two passes shifts every index after them
 // and skips somebody, and one leaving duplicates somebody. The audience of a blast is decided once, when it
 // is sent, which is also the honest answer - "everyone" means everyone as at the moment of publication.
-import { inArray } from "drizzle-orm";
+import { and, inArray, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { allocFlatCode } from "./codeAlloc";
@@ -60,14 +60,20 @@ async function sendBatch(deps: Deps, payload: EmailFanOutPayload, batch: number)
   // One read for the slice's addresses. The slice is at most `batch`, well inside D1's bound-parameter cap,
   // so this never needs chunking - but it is read per batch rather than up front so a queued blast picks up
   // an address corrected after it started.
+  //
+  // AND SO THAT A REMOVAL LANDS TOO. The recipient list is frozen into the payload when the blast is queued,
+  // which is what makes the cursor an index into a list that cannot shift underneath it - but a frozen list is
+  // not a licence to mail somebody who has since been removed. A blast can sit in the queue across several
+  // five-minute ticks, and the soft delete is exactly the write that is supposed to stop company mail
+  // reaching a leaver. `delete_time` is read on the same query the address is, so this costs nothing.
   const emps = await deps.db
     .select({ uuid: schema.employees.uuid, workEmail: schema.employees.workEmail })
     .from(schema.employees)
-    .where(inArray(schema.employees.uuid, slice));
+    .where(and(inArray(schema.employees.uuid, slice), isNull(schema.employees.deleteTime)));
   const emailOf = new Map(emps.map((e) => [e.uuid, e.workEmail]));
   for (const id of slice) {
     const to = emailOf.get(id);
-    if (!to) continue; // no row, or no work email: attempted, nothing to send to
+    if (!to) continue; // no row, removed since the blast was queued, or no work email: nothing to send to
     try {
       await deps.email.send(to, payload.subject, payload.html);
     } catch (err) {

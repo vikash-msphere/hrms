@@ -44,6 +44,11 @@ const SETTINGS: Array<[string, unknown]> = [
   // on, every access-rule write queues as a pending change a SECOND access admin has to approve
   // (services/accessRules.ts) - the row carries the pending state, so nothing takes effect meanwhile.
   ["access-approval", { enabled: false }],
+  // Four-eyes on the PAYROLL commit, the same shape one line up and off for the same reason. Turned on, the
+  // person who submitted a run for review cannot also approve it (services/payroll.ts) - approve is the step
+  // that consumes the period, unlocks the bank file and never rolls back. Off by default because a one-admin
+  // org has nobody else to approve, and the way out of that is this switch.
+  ["payroll-approval", { enabled: false }],
   // Help-desk categories. Seeded rather than left to the service's fallback because the two are not equivalent
   // from the browser: the server falls back when the row is missing, but the SPA reads the settings row
   // directly, so with no row every ticket dialog offered an empty category picker and a permanently disabled

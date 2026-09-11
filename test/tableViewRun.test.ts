@@ -346,6 +346,27 @@ describe("running a grid", () => {
     expect(byCtc.rows.map((r) => r.cells.first_name)).toEqual(["Grace"]);
   });
 
+  // The two halves of `eq` disagreed about CASE. `eq(col, v)` is BINARY and case-sensitive; `matches()` folds
+  // both sides to lower. So one saved filter meant two things depending on whether its column happened to sit
+  // on the base table - the same split the `contains` escaping note in tableRun.ts exists to close, one
+  // operator over. Case-insensitive is the direction that matches: it is what `contains` already does on both
+  // sides, and what someone typing a value into a report filter means.
+  it("matches `eq` / `ne` / `in` case-insensitively, on a base column and behind a link alike", async () => {
+    await seed();
+    const rows = (filters: ViewFilter[], columns: { field: string }[] = [{ field: "first_name" }]) =>
+      runTableView(deps, SUPER(), allScopes(), { base: "employees", columns, filters }, { maxPageSize: 50 }).then((r) => r.rows.map((x) => x.cells.first_name));
+
+    // Base column -> SQL half.
+    expect(await rows([{ field: "first_name", op: "eq", value: "ada" }])).toEqual(["Ada"]);
+    expect(await rows([{ field: "first_name", op: "in", value: "ADA" }])).toEqual(["Ada"]);
+    expect(await rows([{ field: "first_name", op: "ne", value: "ada" }])).not.toContain("Ada");
+
+    // Linked column -> in-memory half. Both spellings agree, which is the point.
+    const linked = [{ field: "first_name" }, { field: "department_id.name", hidden: true }];
+    expect(await rows([{ field: "department_id.name", op: "eq", value: "engineering" }], linked)).toHaveLength(2);
+    expect(await rows([{ field: "department_id.name", op: "eq", value: "Engineering" }], linked)).toHaveLength(2);
+  });
+
   // A joined DATE cell is `ymd()` text by the time the in-memory half sees it, so comparing it numerically
   // gave NaN and every gt/gte/lt/lte answered false: a date range on any column behind a link or a source
   // returned an empty grid, always, while the same filter on a base column went to SQL and worked.
