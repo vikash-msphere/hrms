@@ -947,6 +947,30 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
     if (committed.some((o) => o.uuid !== runId)) {
       throw failedPrecondition("another run for this pay period is already approved; delete it before approving this one");
     }
+    // STALENESS IS A GATE HERE, not a banner. `runStaleness` has always been computed and surfaced on the run
+    // page, and approve ignored it: an input that moved after the build (a compensation revision, a leave
+    // approval, a new loan) left the items priced from superseded data, and approving shipped those figures.
+    // Approve is the commit point - it consumes the period slot above, unlocks the bank file, and APPROVED
+    // never rolls back, so the only way out is deleting the run. Every other irreversible step in this file is
+    // guarded server-side (the `bankFileAt` refusal on delete); a warning the caller can simply not read is
+    // not a guard, and an API caller never saw it at all.
+    //
+    // There is no override, because the remedy is always the same and always correct: rebuild, then approve.
+    // A rebuild is idempotent (it releases and re-marks the payables it had claimed), so nothing is lost by
+    // being made to do it.
+    //
+    // ONLY `stale`, deliberately - never `split_drift`. The two are different failures: `stale` means the
+    // inputs moved since the build and a rebuild fixes it, while split drift means the stored basic / Special
+    // Allowance no longer solves the promised CTC, which a rebuild does NOT fix (it needs a split re-apply
+    // first) and which can be a deliberate choice to pay the contracted stored split. Gating on that would
+    // deadlock the approve with no action that clears it; it stays the reviewer's call, as documented on
+    // `runStaleness`.
+    const freshness = await runStaleness(deps, run);
+    if (freshness.stale) {
+      throw failedPrecondition(
+        `this run was built before its inputs changed (${freshness.changes.join(", ")}); rebuild it before approving`,
+      );
+    }
   }
 
   const set: SetOf<typeof schema.payrollRuns> = { state: to, updatedAt: new Date() };

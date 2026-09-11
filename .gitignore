@@ -1,5 +1,8 @@
 node_modules
 web/dist
+# `tsc -p web` incremental state. A build artifact that was tracked: it is rewritten by every typecheck, so it
+# turned `npm run verify` into a dirty working tree and put a meaningless diff in front of every real one.
+web/tsconfig.tsbuildinfo
 .dev.vars
 # VAPID keypair from scripts/genVapidKeys.ts - holds the web-push PRIVATE key. Belongs in a password
 # manager and in `wrangler secret put`, never in the repo.

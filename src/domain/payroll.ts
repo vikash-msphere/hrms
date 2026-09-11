@@ -239,10 +239,40 @@ export function ctcLines(
   return { lines, ctcMonthly };
 }
 
-// TOP-DOWN split: given a target MONTHLY CTC, pin basic at `basic_pct`% of it and solve for the Special
-// Allowance that makes ctcLines() land on the target. CTC is monotonic increasing in the special allowance
-// (it lifts gross 1:1, plus employer ESI while eligible), so a bisection converges. Returns null when even a
-// zero plug already overshoots the target (basic % too high or fixed components too large to fit).
+/**
+ * TOP-DOWN split: given a target MONTHLY CTC, pin basic at `basic_pct`% of it and solve for the Special
+ * Allowance that makes ctcLines() land on the target. Returns null when no split hits the target - either the
+ * committed cost already overshoots it (basic % too high, fixed components too large) or no plug lands on it.
+ *
+ * CTC IS NOT MONOTONIC IN THE PLUG, though the comment here used to say it was. Employer ESI is charged only
+ * while the monthly gross is at or under the eligibility ceiling, so at the rupee where the plug pushes gross
+ * past that ceiling the ESI line drops to zero and the CTC steps DOWN by ~3.25% of the ceiling.
+ *
+ * That particular step happens to be survivable by a plain bisection, and the search was not silently wrong
+ * because of it: bisection maintains `ctcOf(lo) < target <= ctcOf(hi)`, and a step that goes DOWN as the plug
+ * rises cannot satisfy that straddle at the step itself, so it always converged on a real crossing. What was
+ * missing was any statement of that, and any check that it held - the function returned its converged point
+ * unexamined, so the first component method with a step the other way, or a target the shape simply cannot
+ * reach, would be answered with a split whose CTC is not the CTC that was typed in.
+ *
+ * So the search stopped depending on the shape. SCAN for a bracket, bisect INSIDE it, then CHECK. The scan
+ * finds every sub-interval where the sampled value crosses the target, so a crossing on the far side of a step
+ * is found rather than assumed away; bisection refines each candidate bracket in ascending order, preferring
+ * the smallest plug that works. `ctcLines` is pure arithmetic over a handful of components and this runs on a
+ * compensation edit (never per payroll row), so the extra samples cost nothing worth counting.
+ *
+ * The CHECK is the part that must not be dropped. What the caller stores is the ROUNDED plug, so the residual
+ * is measured on exactly that value, and the closest candidate wins - see CTC_TOL for why "closest" rather
+ * than "exact", and how far off is still an answer rather than a null.
+ */
+// ONE RUPEE, and the reason is the staircase rather than the arithmetic. Some targets are not attainable at
+// all: ESI is rounded UP to the next rupee (ESIC's own rule, domain/statutory.ts), so the CTC curve climbs in
+// one-rupee steps and a target can land in the gap between two of them. The closest reachable split is the
+// right answer there - it is off by under a rupee on a figure entered in whole currency - so the tolerance
+// admits the gap and nothing wider. A genuine failure (no crossing, an infeasible basic %) misses by
+// thousands, never by one.
+const CTC_TOL = 1;
+
 export function splitCtc(
   targetMonthlyCtc: number,
   components: CtcComponent[],
@@ -251,13 +281,54 @@ export function splitCtc(
 ): { basePay: number; specialAllowance: number } | null {
   const basePay = round2(targetMonthlyCtc * (cfg.basic_pct / 100));
   const ctcOf = (special: number) => ctcLines(basePay, components, epfEnrolled, special, cfg.pf_wage_basis ?? "basic").ctcMonthly;
-  if (ctcOf(0) > targetMonthlyCtc + 0.5) return null; // infeasible: committed cost already exceeds the target
-  let lo = 0, hi = targetMonthlyCtc; // root is in [0, target] since d(ctc)/d(special) >= 1
-  for (let i = 0; i < 48; i++) {
-    const mid = (lo + hi) / 2;
-    if (ctcOf(mid) < targetMonthlyCtc) lo = mid; else hi = mid;
+
+  const zero = ctcOf(0);
+  if (zero > targetMonthlyCtc + CTC_TOL) return null; // infeasible: committed cost already exceeds the target
+
+  // The best candidate seen, measured on the plug AS STORED - `round2` is what the caller persists, so the
+  // residual is taken on the rounded value and not on the converged real number behind it.
+  let bestPlug = 0;
+  let bestResidual = Infinity;
+  const consider = (special: number): void => {
+    const rounded = round2(special);
+    if (rounded < 0) return;
+    const residual = Math.abs(ctcOf(rounded) - targetMonthlyCtc);
+    if (residual < bestResidual) {
+      bestResidual = residual;
+      bestPlug = rounded;
+    }
+  };
+  consider(0); // a target the committed cost already meets needs no plug at all
+
+  // Coarse scan over [0, target] - a crossing cannot lie above it, since the plug lifts CTC at least one for
+  // one away from a step. Every sampled crossing becomes a bracket, walked in ascending order so that when two
+  // plugs are equally good the smaller one wins.
+  const SAMPLES = 64;
+  const brackets: [number, number][] = [];
+  let prevS = 0;
+  let prevV = zero;
+  for (let i = 1; i <= SAMPLES; i++) {
+    const s = (targetMonthlyCtc * i) / SAMPLES;
+    const v = ctcOf(s);
+    if (prevV <= targetMonthlyCtc && v >= targetMonthlyCtc) brackets.push([prevS, s]);
+    prevS = s;
+    prevV = v;
   }
-  return { basePay, specialAllowance: round2((lo + hi) / 2) };
+
+  for (const [from, to] of brackets) {
+    let lo = from;
+    let hi = to;
+    for (let i = 0; i < 48; i++) {
+      const mid = (lo + hi) / 2;
+      if (ctcOf(mid) < targetMonthlyCtc) lo = mid; else hi = mid;
+    }
+    // Rounding can push the converged point to either side of the crossing, so both ends are weighed too.
+    consider((lo + hi) / 2);
+    consider(lo);
+    consider(hi);
+    if (bestResidual === 0) break; // exact: nothing later can beat it, and the smaller plug is already held
+  }
+  return bestResidual <= CTC_TOL ? { basePay, specialAllowance: bestPlug } : null;
 }
 
 export type RunState = "DRAFT" | "REVIEW" | "APPROVED" | "PUBLISHED";

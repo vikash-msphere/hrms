@@ -397,6 +397,40 @@ describe("payroll: one committed run per pay period", () => {
     await expect(transition(deps, actor, runB.uuid, "APPROVED")).rejects.toThrow(/already approved/);
   });
 
+  it("refuses to approve a run built before its inputs moved, until it is rebuilt", async () => {
+    // Staleness is a GATE, not a banner. `runStaleness` has always been computed and rendered on the run page,
+    // and approve ignored it - so an input that moved after the build (here a compensation revision) shipped
+    // superseded figures to anyone who did not read the warning, and to every API caller, who never saw one.
+    // Approve is where that becomes irreversible: it consumes the period's one committed-run slot, unlocks the
+    // bank file, and APPROVED never rolls back.
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+    await transition(deps, actor, run.uuid, "REVIEW");
+
+    // The BUILD STAMP is rewound rather than the input advanced. Same relation - a compensation row whose
+    // `updated_at` post-dates the build - but it survives the rebuild below: pushing the input into the future
+    // instead would leave it ahead of the REBUILD's stamp too, so the run would still read stale afterwards
+    // and the test would be pinning "always refuses" rather than "refuses until rebuilt". The comparison is
+    // strict (`updated_at > built_at`), so the rebuild's own stamp clears it even landing in the same
+    // millisecond as the seeded row.
+    const built = (await getRun(deps, run.uuid)).itemsBuiltAt!;
+    await deps.db
+      .update(schema.payrollRuns)
+      .set({ itemsBuiltAt: new Date(+built - 60_000) })
+      .where(eq(schema.payrollRuns.uuid, run.uuid));
+    expect((await runStaleness(deps, await getRun(deps, run.uuid))).stale).toBe(true);
+
+    await expect(transition(deps, actor, run.uuid, "APPROVED")).rejects.toThrow(/rebuild it before approving/);
+
+    // The remedy, and the only one offered: rebuild (legal while the run is editable), then approve.
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await transition(deps, actor, run.uuid, "APPROVED")).state).toBe("APPROVED");
+  });
+
   it("refuses to approve a run that was never built, or built empty (it would lock the period and pay nobody)", async () => {
     const actor = await seedActor(await seedEmployee());
     const period = await seedPeriod();

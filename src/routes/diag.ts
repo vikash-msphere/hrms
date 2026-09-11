@@ -48,10 +48,18 @@ const relay = counter(600);
 function parseDsn(dsn: string): { origin: string; projectId: string } | null {
   try {
     const u = new URL(dsn);
-    // A DSN is https://<publicKey>@<host>/<projectId>; the project id is the whole path.
+    // A DSN is https://<publicKey>@<host>[:<port>]/<projectId>; the project id is the whole path.
     const projectId = u.pathname.replace(/^\//, "");
     if (!u.hostname || !/^\d+$/.test(projectId)) return null;
-    return { origin: `https://${u.hostname}`, projectId };
+    // The PORT is part of the destination. It is absent from every hosted DSN, which is why dropping it was
+    // invisible - but a self-hosted tracker on a non-443 port parsed to a portless origin, so the envelope was
+    // forwarded to :443 of the right host and the relay failed for a configuration that is otherwise valid.
+    // Both the configured DSN and the sent one go through here, so the equality check below stayed consistent
+    // either way; only the outbound URL was wrong.
+    //
+    // The SCHEME stays pinned to https rather than taken from the DSN: this is a server-to-server relay of
+    // telemetry the app collected, and a DSN edited to `http://` would silently downgrade it to plaintext.
+    return { origin: `https://${u.host}`, projectId };
   } catch {
     return null;
   }

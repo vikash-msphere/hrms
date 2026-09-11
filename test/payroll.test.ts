@@ -109,6 +109,36 @@ describe("top-down CTC split (splitCtc, pure)", () => {
     // basic_pct 100 => basic = full CTC, and the gratuity contribution on top already exceeds the target.
     expect(splitCtc(100000, [gratuity], false, { ...DEFAULT_CTC_CONFIG, basic_pct: 100 })).toBeNull();
   });
+
+  // Employer ESI is the one component that makes CTC NON-MONOTONIC in the plug: it is charged only while gross
+  // is at or under the eligibility ceiling, so at the rupee the plug pushes gross past it the ESI line drops to
+  // zero and the CTC steps DOWN by ~3.25% of the ceiling. The solver must still answer a plug that rebuilds the
+  // target on both sides of that step, and across the ceiling itself - which is precisely the band of salaries
+  // where most of an Indian org's headcount sits, so "it only bites at the edges" is not a defence.
+  //
+  // The sweep is the point: a single target proves a single crossing, and the failure this guards is a target
+  // landing somewhere the search does not look. The stride is deliberately not a round number, so the samples
+  // do not line up with the ceiling or with the solver's own scan grid.
+  it("reconstructs the target on both sides of the employer-ESI eligibility cliff", () => {
+    const esi = { kind: "employer_contribution" as const, method: "esi", name: "Employer ESI", rate: 3.25, cap: 21000, recurring: true };
+    for (let target = 18000; target <= 30000; target += 37) {
+      const split = splitCtc(target, [esi], false, DEFAULT_CTC_CONFIG);
+      expect(split, `no split for target ${target}`).not.toBeNull();
+      const back = ctcLines(split!.basePay, [esi], false, split!.specialAllowance).ctcMonthly;
+      // Within a rupee, not within a paise: ESI is rounded UP to the next rupee, so the reachable CTCs are a
+      // one-rupee staircase and some targets fall in a gap between two treads. Off by under a rupee is the
+      // closest a split can be; off by more would mean the solver settled somewhere that is not a crossing.
+      expect(Math.abs(back - target), `target ${target} reconstructed as ${back}`).toBeLessThan(1);
+    }
+  });
+
+  it("never answers a split that fails to reconstruct its own target", () => {
+    // The guarantee stated as itself: whatever the component mix, a non-null answer always rebuilds the target.
+    // A fixed employer cost larger than the whole target is unsolvable at any plug, and is answered with null
+    // rather than with the nearest thing to it.
+    const huge = { kind: "employer_contribution" as const, method: "fixed", name: "Unfunded cost", rate: 500000, cap: null, recurring: true };
+    expect(splitCtc(100000, [huge], false, DEFAULT_CTC_CONFIG)).toBeNull();
+  });
 });
 
 describe("monthly recurring gross (arrears base, pure)", () => {
