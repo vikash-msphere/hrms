@@ -755,7 +755,7 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "remote-work-requests:reject": ["remote-work-requests", "notifications"],
   "asset-requests:approve": ["asset-requests", "notifications"],
   "asset-requests:reject": ["asset-requests", "notifications"],
-  "asset-requests:cancel": ["asset-requests"],
+  "asset-requests:cancel": ["asset-requests", "notifications"],
   // Issuing hands over a real asset, so the inventory changes too (the asset lands in pending_ack).
   "asset-requests:issue": ["asset-requests", "assets", "notifications"],
   // A sighting hands back the reserialized asset and every caller folds that row straight into the store, so
@@ -769,20 +769,60 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   "stocktakes:close": ["stocktakes", "notifications"],
   "stocktakes:recordFound": [],
   "attendance-regularizations:approve": ["attendance-regularizations", "attendance", "notifications"],
-  "attendance-regularizations:reject": ["attendance-regularizations", "notifications"],
+  // Only APPROVAL rewrites the day's punches (the write is guarded on it in
+  // services/attendanceRegularizations.ts); reject and cancel just close the request. They carry `attendance`
+  // anyway because all three are one handler, so test/verbInvalidationDrift.test.ts - which reads the handler,
+  // not its branches - attributes the write to each of them. One extra list read on a refusal is the right
+  // price for a check that cannot be argued with about which branch ran.
+  "attendance-regularizations:reject": ["attendance-regularizations", "attendance", "notifications"],
+  "attendance-regularizations:cancel": ["attendance-regularizations", "attendance", "notifications"],
   "leave-encashments:approve": ["leave-encashments", "leave-balances", "notifications"],
   "leave-encashments:reject": ["leave-encashments", "notifications"],
+  // Cancelling gives the days back, so the balance moves here exactly as it does on approval.
+  "leave-encashments:cancel": ["leave-encashments", "leave-balances", "notifications"],
   "time-entries:approve": ["time-entries", "notifications"],
   "time-entries:reject": ["time-entries", "notifications"],
   // Hiring a candidate is the widest write in the app: it creates the employee, seeds their compensation and
   // (via the "Onboard a new hire" automation) opens their onboarding checklist and its tasks. Both routes into
   // it invalidate the same set, so the Onboarding page the pipeline hands off to reads the new rows.
-  "applications:hire": ["applications", "employees", "transitions", "transition-tasks", "compensation", "notifications"],
+  // `referrals` because a hire closes the referral that produced the candidate (and starts its bonus clock),
+  // so the referrer's own list is wrong the moment this lands.
+  "applications:hire": ["applications", "employees", "transitions", "transition-tasks", "compensation", "referrals", "notifications"],
   // A stage move runs the pipeline's rules inside the same request, so the records they create - a drafted
   // offer, a booked round, the hire itself - are already there when the response lands.
   "applications:advance": ["applications", "offers", "interviews", "job-requisitions", "employees", "transitions", "notifications"],
   "applications:reject": ["applications", "job-requisitions", "notifications"],
-  "offers:accept": ["offers", "applications", "employees", "transitions", "transition-tasks", "compensation", "notifications"],
+  "offers:accept": ["offers", "applications", "employees", "transitions", "transition-tasks", "compensation", "referrals", "notifications"],
+  // Appending a task adds a row the checklist is showing.
+  "transitions:appendTask": ["transitions", "transition-tasks", "notifications"],
+  // COMPLETING an offboarding moves the person: terminated + disabled, and their login disabled with them
+  // (services/transitions.ts terminateForOffboarding). Cancel and reopen do not - but all three are one
+  // handler, so the drift test attributes the write to each; see the note on the regularization verbs above
+  // for why they carry it rather than the check being taught about branches.
+  "transitions:complete": ["transitions", "employees", "users", "notifications"],
+  "transitions:cancel": ["transitions", "employees", "users", "notifications"],
+  "transitions:reopen": ["transitions", "employees", "users", "notifications"],
+  // Launching (or enrolling into) a cycle CREATES the reviews - the whole point of the press - and awarding
+  // variable pay writes the bonuses it reported.
+  "review-cycles:launch": ["review-cycles", "reviews", "notifications"],
+  "review-cycles:enroll": ["review-cycles", "reviews", "notifications"],
+  "review-cycles:award": ["review-cycles", "bonuses", "notifications"],
+  // `:variablePay` computes and reports; it writes nothing (the award is the second press).
+  "review-cycles:variablePay": [],
+  // Nominating a peer and accepting a suggested one both file the feedback request itself.
+  "reviews:nominate": ["reviews", "review-feedback", "notifications"],
+  "reviews:suggestFeedback": ["reviews", "review-feedback", "notifications"],
+  // A template stamps real goals onto real people - the row this verb answers with is the template, and the
+  // rows a reader wants to see are the goals.
+  "goal-templates:apply": ["goal-templates", "goals", "notifications"],
+  // Default enrolment creates the enrollment rows the Benefits tab lists.
+  "employees:enrollDefaultBenefits": ["employees", "benefit-enrollments", "notifications"],
+  // Closing a sprint moves every unfinished card out of it.
+  "sprints:complete": ["sprints", "cards", "notifications"],
+  // Publishing a run starts the payslip-generation Operation, so the job appears on the Operations page. The
+  // payslips themselves are written by that job, minutes later and out of band - a refetch here cannot see
+  // them, which is what the job's own progress is for.
+  "payroll-runs:publish": ["payroll-runs", "operations", "notifications"],
   "suggestions:respond": ["suggestions", "notifications"],
   // Votes hand back the reserialized suggestion and the page folds it in (optimistically applied first) -
   // same no-refetch shape as the board verbs below.
@@ -793,7 +833,10 @@ const VERB_SIDE_EFFECTS: Record<string, string[]> = {
   // reply, vote, and per post scrolled past (markRead fires on dwell).
   "announcements:markRead": [],
   "announcements:react": [],
-  "announcements:reply": [],
+  // A reply hands back the reserialized post like its siblings, so the FEED needs no refetch - but it also
+  // tells the post's author, and the bell is not the feed. `["notifications"]` is the pair said properly:
+  // nothing for the board, one read for the thing that did change.
+  "announcements:reply": ["notifications"],
   "announcements:vote": [],
   // Pin/unpin also hand back the reserialized post; the feed folds it in and re-sorts locally.
   "announcements:pin": [],
@@ -819,13 +862,34 @@ export function affectedCollections(path: string, verb?: string): string[] {
   if (verb) {
     const mapped = VERB_SIDE_EFFECTS[`${collection}:${verb}`];
     if (mapped) return mapped;
-    if (import.meta.env?.DEV && collection !== "preferences" && collection !== "cards") {
-      // Surface drift: a multi-collection verb with no map entry under-invalidates.
-      console.debug(`[resourceStore] invoke ${collection}:${verb} not in VERB_SIDE_EFFECTS; invalidating only ${collection}`);
-    }
+    // AN UNMAPPED VERB REFRESHES ITS OWN COLLECTION AND THE BELL.
+    //
+    // The map is hand-maintained and the fallback used to be `[collection]`, with a DEV-only console.debug as
+    // the entire drift signal - so a verb added without an entry under-invalidated silently, and several had:
+    // `expenses:approve/reject/pay` notified the submitter while their sibling `reimbursements:*` (identical
+    // shape, one collection over) were mapped and refreshed the bell, which is exactly the asymmetry nobody
+    // spots by reading either entry.
+    //
+    // Notifications are what nearly every unmapped verb has in common, because almost every verb in this app
+    // tells SOMEBODY: an approval, a rejection, an assignment, a comment, a nudge. Guessing "it might notify"
+    // costs one indexed list read; guessing "it cannot" leaves the bell wrong, which is the half of the UI a
+    // person checks to find out whether their action reached anyone. So the default errs toward the read.
+    //
+    // A verb that genuinely refreshes NOTHING (the board's react/vote/markRead, which fold the reserialized
+    // row back in themselves) still says so explicitly, as `[]` - the map is where a no-refetch decision is
+    // recorded, and `[]` is a decision. test/verbInvalidationDrift.test.ts holds the map against the verbs'
+    // own handlers, so a verb that writes a DIFFERENT collection cannot ride this default.
+    //
+    // Built on `always` rather than on `[collection]`, so the card->goal rollup below still applies to a card
+    // VERB (`:move` is the commonest write on the board, and it is the one that changes a goal's progress).
+    return [...always(collection), "notifications"];
   }
+  return always(collection);
+}
+
+/** What any write to `collection` refreshes, verb or not. */
+function always(collection: string): string[] {
   // A card's delivery/link/size/removal rolls up into its goal's progress server-side (recomputeGoalProgress),
   // and this holds for every card write (move verb, create, PATCH, delete) - so always refresh goals too.
-  if (collection === "cards") return ["cards", "goals"];
-  return [collection];
+  return collection === "cards" ? ["cards", "goals"] : [collection];
 }

@@ -296,7 +296,10 @@ export function patch<T>(path: string, body: Record<string, unknown>, etag?: str
   return withInvalidation(path, undefined, api<T>(`/${path}`, {
     ...init,
     method: "PATCH",
-    headers: { "Content-Type": "application/merge-patch+json", ...(etag ? { "If-Match": etag } : {}) },
+    // The caller's own headers are kept, not replaced: spreading `init` and then assigning `headers` dropped
+    // every one of them, so an `init` carrying a header would have been honoured on `api()` and silently lost
+    // here. Ours go first so the content type and the validator still win, which is what this helper is for.
+    headers: { ...(init?.headers ?? {}), "Content-Type": "application/merge-patch+json", ...(etag ? { "If-Match": etag } : {}) },
     body: JSON.stringify(body),
   }));
 }

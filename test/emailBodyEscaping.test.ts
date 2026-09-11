@@ -29,8 +29,12 @@ describe("textParagraphs", () => {
 });
 
 describe("escapeHtml", () => {
-  it("covers the four characters that matter in text and in a quoted attribute", () => {
-    expect(escapeHtml(`&<>"`)).toBe("&amp;&lt;&gt;&quot;");
+  // BOTH quote characters, not just the double one. Every attribute the layout writes today is double-quoted,
+  // so the apostrophe never had to be escaped - which is a fact about the current callers, not about the
+  // escaper, and it stops being true the first time someone writes `style='…'` in a template. An escaper whose
+  // guarantee depends on the caller's quoting style is not a guarantee.
+  it("covers the five characters that matter in text and in an attribute, on either quote", () => {
+    expect(escapeHtml(`&<>"'`)).toBe("&amp;&lt;&gt;&quot;&#39;");
   });
 });
 

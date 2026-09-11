@@ -132,6 +132,26 @@ export function ClockProvider({ me, children }: { me: Me; children: ReactNode })
   return <ActiveProvider me={me}>{children}</ActiveProvider>;
 }
 
+/**
+ * The current time, re-read on `everyMs` (default a minute).
+ *
+ * For a view whose ANSWER depends on the clock rather than only its display: which interviews are still
+ * upcoming, what is overdue, what is on today. Computing that inside a `useMemo` keyed on the rows captures
+ * the instant of the last data change, so the boundary stops moving - a round that started ten minutes ago
+ * sits in "upcoming" until something happens to refetch, which on a day somebody leaves the schedule open is
+ * most of the day.
+ *
+ * A minute is the granularity every such boundary in the app is stated at, and the re-render is a list sort.
+ */
+export function useNow(everyMs = 60_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(t);
+  }, [everyMs]);
+  return now;
+}
+
 // Minutes elapsed on an open session, re-rendered on `everyMs` (default 15s - the display is minute-grained,
 // so a per-second tick would just burn renders).
 export function useElapsedMinutes(since?: string, everyMs = 15000): number {

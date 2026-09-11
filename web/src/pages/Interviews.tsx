@@ -14,6 +14,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
+import { useNow } from "@/lib/clock";
 import { useIntent } from "@/lib/intent";
 import { SummaryStrip } from "@/components/common/SummaryStrip";
 import { useKpiFocus } from "@/lib/kpiFocus";
@@ -119,8 +120,13 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   });
 
   // Upcoming interviews first (soonest at the top), then past/finished ones newest-first.
+  //
+  // The boundary is read from a TICKING clock, not from `new Date()` inside the memo: keyed on the rows, that
+  // captured the instant of the last data change, so a round that started an hour ago stayed in "upcoming" for
+  // as long as the schedule sat open - which on an interview day is exactly when it is open.
+  const nowMs = useNow();
   const items = useMemo(() => {
-    const now = new Date().toISOString();
+    const now = new Date(nowMs).toISOString();
     const scoped = kf.apply(rows);
     const upcoming = scoped
       .filter((i) => i.status === "scheduled" && (i.scheduled_start_time ?? "") >= now)
@@ -129,7 +135,7 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
       .filter((i) => !upcoming.includes(i))
       .sort((a, b) => (b.scheduled_start_time ?? "").localeCompare(a.scheduled_start_time ?? ""));
     return [...upcoming, ...rest];
-  }, [rows, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rows, kf.focus, nowMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const todayCount = useMemo(() => rows.filter(isToday).length, [rows]);
 

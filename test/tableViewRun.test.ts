@@ -383,6 +383,28 @@ describe("running a grid", () => {
     expect((await run("gt", "2025-12-31")).rows).toHaveLength(2);
   });
 
+  // The same split as the case one above, on the kind rather than on the operator. The in-memory half compared
+  // `String(cell) === String(value)` for EVERY kind, which is only the right question for text: SQL compares a
+  // money column against `Number(value)`, so `eq 1200000.00` matched there and matched nothing here (and `ne`
+  // inverted it, excluding nobody). A saved grid filtering CTC therefore found everyone or nobody depending on
+  // whether the column sat on the base table or behind a link.
+  it("matches `eq` / `ne` / `in` on a NUMBER column by value, on a base column and behind a link alike", async () => {
+    await seed(); // Ada 1200000, Grace 1300000
+    const onBase = (f: ViewFilter) => // compensation.ctc_annual is a plain base column -> SQL half
+      runTableView(deps, SUPER(), allScopes(), { base: "compensation", columns: [{ field: "ctc_annual" }], filters: [f] }, { maxPageSize: 50 }).then((r) => r.rows.length);
+    const behindLink = (f: ViewFilter) => // @comp.ctc_annual is a source -> in-memory half
+      runTableView(deps, SUPER(), allScopes(), { base: "employees", columns: [{ field: "first_name" }], filters: [{ ...f, field: `@comp.${(f.field as string).replace(/^@comp\./, "")}` }] }, { maxPageSize: 50 }).then((r) => r.rows.length);
+    const both = async (f: ViewFilter) => ({ sql: await onBase(f), mem: await behindLink(f) });
+
+    // The plain spelling already agreed; it is the formatting of the SAME number that did not.
+    expect(await both({ field: "ctc_annual", op: "eq", value: "1200000" })).toEqual({ sql: 1, mem: 1 });
+    expect(await both({ field: "ctc_annual", op: "eq", value: "1200000.00" })).toEqual({ sql: 1, mem: 1 });
+    expect(await both({ field: "ctc_annual", op: "ne", value: "1200000.00" })).toEqual({ sql: 1, mem: 1 });
+    expect(await both({ field: "ctc_annual", op: "in", value: "1200000.00,1300000" })).toEqual({ sql: 2, mem: 2 });
+    // A value that is not a number matches nothing rather than falling back to a string compare.
+    expect(await both({ field: "ctc_annual", op: "eq", value: "not-a-number" })).toEqual({ sql: 0, mem: 0 });
+  });
+
   // `%` and `_` in a `contains` needle used to be STRIPPED on the SQL side and taken literally on the
   // in-memory side, so one saved filter meant two things depending on where its column lived.
   it("treats a wildcard in a `contains` needle as a literal character", async () => {

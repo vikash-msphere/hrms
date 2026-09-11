@@ -38,6 +38,26 @@ import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTit
 // filter, or a narrower base, not another page.
 const ROW_CEILING = 5000;
 
+// ONE PAGE IS NOT ONE SCREENFUL OF ROWS, and reading it as though it were is what made a working filter look
+// like an empty report.
+//
+// The runner pushes into SQL only the filters it can - a plain base column, inside the statement's bound-
+// parameter budget - and applies the rest over the page AFTER the cursor has cut it (services/tableRun.ts).
+// Every filter on a linked column or on a source field (`@comp.*`, `@identity.*`, `@personal.*`, `@bank.*`) is
+// in that second half, which is most of what a report filters by. So a page legitimately comes back short, or
+// empty, while `next_page_token` still names more: the matching rows are simply further down the cursor.
+//
+// Stopping at the first page therefore rendered "No rows - nothing you can see matches this table yet" for a
+// filter matching plenty, understated the count in the title, and exported the window rather than the report.
+// A load follows the cursor until it has a screenful or the report ends.
+//
+// Bounded twice, because the loop must not become a way to walk a collection: `PAGE_TARGET` is the screenful
+// that hands back to the explicit "Load more", and `MAX_PAGES_PER_LOAD` caps the requests ONE load may spend
+// when a filter matches almost nothing - the grid then honestly says there is more, instead of paging on by
+// itself. ROW_CEILING still bounds the whole table.
+const PAGE_TARGET = 100;
+const MAX_PAGES_PER_LOAD = 20;
+
 type ViewSpec = {
   columns: { field: string; label?: string; hidden?: boolean }[];
   params: Record<string, string>;
@@ -296,27 +316,43 @@ function OneTable({ id }: { id: string }) {
   }, [viewBase]);
 
   // The rows. One page, then more on request - a report is read to the end far more often than a list is.
-  const run = useCallback(async (pageToken?: string) => {
+  const runPage = useCallback(async (pageToken?: string) => {
     const qs = new URLSearchParams({ max_page_size: "100", ...params });
     if (pageToken) qs.set("page_token", pageToken);
     return api<TableRunResult>(`/table-views/${id}:run?${qs}`, { method: "POST", safeToRepeat: true });
   }, [id, params]);
 
+  // Pages from `pageToken` until `want` rows are in hand or the report ends - see PAGE_TARGET above for why a
+  // single page is not an answer. `have` is what the caller already holds, so the target is counted over the
+  // whole grid rather than over this load. The LAST page's envelope is kept (its `next_page_token` is the one
+  // that still names more; `columns` and `dropped` are the same on every page), with the rows concatenated.
+  const runFilled = useCallback(async (pageToken: string | undefined, want: number, have = 0) => {
+    let page = await runPage(pageToken);
+    const rows = [...page.rows];
+    for (let spent = 1; spent < MAX_PAGES_PER_LOAD; spent++) {
+      const total = have + rows.length;
+      if (!page.next_page_token || total >= want || total >= ROW_CEILING) break;
+      page = await runPage(page.next_page_token);
+      rows.push(...page.rows);
+    }
+    return { ...page, rows };
+  }, [runPage]);
+
   useEffect(() => {
     if (!view) return;
     let live = true;
     setState("loading");
-    run()
+    runFilled(undefined, PAGE_TARGET)
       .then((r) => { if (live) { setResult(r); setState("ready"); setError(null); } })
       .catch((e: unknown) => { if (live) { setState("error"); setError(e instanceof Error ? e.message : String(e)); } });
     return () => { live = false; };
-  }, [view, run, reloadKey]);
+  }, [view, runFilled, reloadKey]);
 
   async function loadMore() {
     if (!result?.next_page_token || loadingMore || result.rows.length >= ROW_CEILING) return;
     setLoadingMore(true);
     try {
-      const next = await run(result.next_page_token);
+      const next = await runFilled(result.next_page_token, result.rows.length + PAGE_TARGET, result.rows.length);
       setResult({ ...next, rows: [...result.rows, ...next.rows] });
     } catch (e) {
       toast({ title: "Couldn't load more rows", description: (e as Error).message, variant: "destructive" });

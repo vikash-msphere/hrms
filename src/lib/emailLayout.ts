@@ -32,7 +32,13 @@ const BRAND_GRADIENT = BRAND.gradient;
 const isHttpUrl = (s: string | undefined): s is string => !!s && /^https?:\/\//i.test(s);
 /** Text -> HTML text. Exported because `bodyHtml` is raw by contract, so every caller that folds a VALUE into
  *  it (a name, a title, an author's prose) needs the same escaping the shell itself uses. */
-export const escapeHtml = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+// The APOSTROPHE is escaped too, and it is the one people leave out. Every attribute this module writes today
+// is double-quoted, so `&quot;` is what actually closes the hole - but "safe as long as nobody writes
+// `style='…'`" is a property of the current callers, not of the escaper, and the caller that breaks it is a
+// one-character edit in a template nobody re-reads. An escaper whose guarantee depends on quoting style is
+// not one, so both quote characters go.
+export const escapeHtml = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const esc = escapeHtml;
 
 /**

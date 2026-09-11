@@ -334,10 +334,14 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // the assembled page. Filtering a page at a time is the same answer as filtering the union: each row is
   // judged on its own values.
   //
-  // It is applied AFTER the page was cut, though, so a page can come back short - or empty - while
-  // `next_page_token` still names more. That is not a truncated answer: the grid follows the cursor to the end
-  // of the report (see the sort note below), so the union it assembles is complete. A client that reads one
-  // page and stops would see fewer rows than exist, which is why no caller in this app does.
+  // It is applied AFTER the page was cut, though, so a page can come back short - or EMPTY - while
+  // `next_page_token` still names more: the rows that match are further down the cursor. A client that reads
+  // one page and stops therefore sees fewer rows than exist, and on a filter whose matches all sit past the
+  // first page boundary it sees none at all and renders an empty report.
+  //
+  // So this contract is on the CLIENT as much as here: a short page is not an answer, and `next_page_token` is
+  // what says so. The grid follows the cursor until it has a screenful or the report ends (PAGE_TARGET in
+  // web/src/pages/TableBuilder.tsx), which is also what makes the page-at-a-time sort below add up.
   const cellFor = (row: RunRow, key: string) =>
     key in row.cells ? row.cells[key] : judged.get(row.path.split("/").pop()!)?.[key];
   const filtered = deferred.length ? rows.filter((row) => deferred.every((f) => matches(cellFor(row, f.field), f, byKey.get(f.field)?.kind))) : rows;
@@ -533,10 +537,49 @@ function baseFilterSql(table: SQLiteTable & Record<string, any>, field: Resolved
 
 const coerce = (field: ResolvedField, v: string | number | boolean) => {
   if (field.kind === "number" || field.kind === "money") return Number(v);
-  if (field.kind === "bool") return v === true || v === "true" ? 1 : 0;
+  if (field.kind === "bool") return boolBit(v);
   if (field.kind === "date" || field.kind === "datetime") return new Date(String(v));
   return v;
 };
+
+/** A truthy/falsy filter value or cell as the 0/1 SQLite stores. One place, so `coerce` (the SQL half) and
+ *  `equalsValue` (the in-memory half) can never disagree about what "true" is. */
+const boolBit = (v: unknown): number => (v === true || v === 1 || v === "true" || v === "1" ? 1 : 0);
+
+/**
+ * Kind-aware equality for the in-memory half, asking the same question `baseFilterSql` asks SQL.
+ *
+ * It used to be `String(cell).toLowerCase() === String(value).toLowerCase()` for EVERY kind, which is only the
+ * right question for a text one. On a number or money column SQL compares `Number(value)` against the stored
+ * number, so `eq 1200000.00` matched - while the string form compared "1200000" with "1200000.00" and matched
+ * nothing. Same filter, two answers, decided by whether the column happened to sit on the base table: a saved
+ * grid filtering CTC found everyone when the column was `compensation.ctc_annual` and nobody when it was
+ * `@comp.ctc_annual` behind a link. `ne` inverted the same mistake and excluded nobody at all.
+ *
+ * This is the third instance of one split - `likeEscape` closed it for `contains`, `lowerEq` for text equality
+ * - so the rule is now stated per KIND in one function rather than per operator: numbers compare numerically,
+ * booleans as the 0/1 `coerce` binds, dates as instants (a `date` cell is `ymd()` by the time it reaches here
+ * and a `datetime` cell is ISO, and both parse to the instant SQL compares the column against), and everything
+ * else case-insensitively, which is what `lowerEq` does on the other side.
+ *
+ * A value that parses to nothing on a typed kind matches nothing, rather than falling back to a string compare
+ * that would answer a different question again.
+ */
+function equalsValue(cell: unknown, v: ViewFilter["value"], kind?: ResolvedField["kind"]): boolean {
+  if (v == null) return false;
+  if (kind === "number" || kind === "money") {
+    const l = Number(cell);
+    const r = Number(v);
+    return Number.isFinite(l) && Number.isFinite(r) && l === r;
+  }
+  if (kind === "bool") return boolBit(cell) === boolBit(v);
+  if (kind === "date" || kind === "datetime") {
+    const l = Date.parse(String(cell));
+    const r = Date.parse(String(v));
+    return Number.isFinite(l) && Number.isFinite(r) && l === r;
+  }
+  return String(cell).toLowerCase() === String(v).toLowerCase();
+}
 
 /**
  * The in-memory half, over an assembled cell. Same operators, same meaning as `baseFilterSql`.
@@ -568,12 +611,16 @@ function matches(cell: unknown, f: ViewFilter, kind?: ResolvedField["kind"]): bo
       default: return l <= r; // "lte"
     }
   }
-  const s = String(cell).toLowerCase();
   switch (f.op) {
-    case "eq": return s === String(v ?? "").toLowerCase();
-    case "ne": return s !== String(v ?? "").toLowerCase();
-    case "contains": return s.includes(String(v ?? "").toLowerCase());
-    case "in": return String(v ?? "").split(",").map((x) => x.trim().toLowerCase()).includes(s);
+    case "eq": return equalsValue(cell, v, kind);
+    case "ne": return !equalsValue(cell, v, kind);
+    // `contains` is `LIKE` on the other side, which SQLite answers over the column's text form - so this stays
+    // a string test on both halves whatever the kind is.
+    case "contains": return String(cell).toLowerCase().includes(String(v ?? "").toLowerCase());
+    // Split through the SAME `inList` the SQL half spends its parameters on, so the two can never disagree
+    // about how many items a list has (it drops empties; a bare `split(",")` kept them, and an empty item
+    // compared equal to an empty cell).
+    case "in": return inList(v).some((x) => equalsValue(cell, x, kind));
     default: return true;
   }
 }
