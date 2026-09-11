@@ -48,6 +48,36 @@ function baseResource(row: BaseRow, collection: string) {
 }
 const ref = (collection: string, id: string | null) => (id ? `${collection}/${id}` : undefined);
 
+/**
+ * Parse a stored JSON column, falling back rather than throwing.
+ *
+ * THE BLAST RADIUS IS THE PAGE, NOT THE ROW, which is what makes this worth a helper instead of a judgement
+ * call per column. A serializer runs inside `results.map(...)` in the collection factory, so a `JSON.parse`
+ * that throws on ONE malformed column takes the whole list response down as a 500 - every other row on the
+ * page included - and the caller has no way to page around it. A dozen sites in this file already had their
+ * own `try { … } catch { … }` around exactly this, written one at a time; the rest were raw, and the
+ * difference between the two sets is which columns somebody happened to worry about, not which ones can be
+ * malformed.
+ *
+ * And these columns have no CHECK constraint (SQLite does not validate `text`), so "the app only ever writes
+ * valid JSON" is a property of every writer, forever, plus every migration, seed and backup restore that has
+ * ever touched the table. A degraded field is a readable page with one value missing; a thrown parse is a
+ * dead page.
+ *
+ * `null`/`undefined`/empty string take the fallback too, so the `r.col ? parse(r.col) : fallback` shape this
+ * replaces collapses into one call. A stored literal `null` also takes it - a column whose value is the JSON
+ * null carries no more information than an absent one, and the callers all want the empty shape.
+ */
+function jsonOr<T>(s: string | null | undefined, fallback: T): T {
+  if (!s) return fallback;
+  try {
+    const v = JSON.parse(s) as T;
+    return v === null || v === undefined ? fallback : v;
+  } catch {
+    return fallback;
+  }
+}
+
 export function toPreferenceResource(r: any): Wire<"preference"> {
   return {
     path: `preferences/${r.key}`,
@@ -55,7 +85,7 @@ export function toPreferenceResource(r: any): Wire<"preference"> {
     update_time: iso(r.updatedAt),
     etag: etagOf(+new Date(r.updatedAt)),
     key: r.key,
-    value: r.value ? JSON.parse(r.value) : {},
+    value: jsonOr<Wire<"preference">["value"]>(r.value, {}),
   };
 }
 
@@ -90,13 +120,8 @@ export function toApiKeyResource(r: any): Wire<"api-key"> {
     ...(r.secret ? { secret: r.secret } : {}),
   };
 }
-const safeJson = (s: string | null | undefined): unknown => {
-  try {
-    return s ? JSON.parse(s) : null;
-  } catch {
-    return null;
-  }
-};
+/** The untyped form of `jsonOr`, for a value that is about to be validated by a parser of its own. */
+const safeJson = (s: string | null | undefined): unknown => jsonOr<unknown>(s, null);
 
 /**
  * The `photo` marker for an employee row, or `undefined` when they have none.
@@ -226,7 +251,7 @@ export function toEventResource(r: any): Wire<"event"> {
     description: r.description ?? undefined,
     // attendeeIds is stored as a JSON array of employee uuids; emit as employee refs (tokenized on the wire).
     attendees: ((): string[] => {
-      try { return (JSON.parse(r.attendeeIds ?? "[]") as string[]).map((id) => `employees/${id}`); } catch { return []; }
+      return jsonOr<string[]>(r.attendeeIds, []).map((id) => `employees/${id}`);
     })(),
     repeat: r.repeat ?? undefined,
     // Who is actually coming (attached by decorate). The tally is what an organiser needs; the individual
@@ -260,7 +285,7 @@ export function toSettingResource(r: any): Wire<"setting"> {
     update_time: iso(r.updatedAt),
     etag: etagOf(+new Date(r.updatedAt)),
     key: r.key,
-    value: r.value ? JSON.parse(r.value) : {},
+    value: jsonOr<Wire<"setting">["value"]>(r.value, {}),
   };
 }
 
@@ -333,7 +358,7 @@ export function toPolicyResource(r: any): Wire<"policy"> {
     update_time: iso(r.updatedAt),
     etag: etagOf(+new Date(r.updatedAt)),
     key: r.key,
-    value: r.valueJson ? JSON.parse(r.valueJson) : {},
+    value: jsonOr<Wire<"policy">["value"]>(r.valueJson, {}),
   };
 }
 
@@ -533,13 +558,9 @@ export function toGoalCommentResource(r: any) {
 }
 
 export function toBoardResource(r: any): Wire<"board"> {
-  const parse = (s: string | null | undefined) => {
-    try {
-      return s ? JSON.parse(s) : [];
-    } catch {
-      return [];
-    }
-  };
+  // Each of the three columns it reads has its own element shape in the wire contract, so the element type is
+  // the caller's to state - as it was before, when this was a bare `JSON.parse` with no annotation.
+  const parse = (s: string | null | undefined): any => jsonOr<any>(s, []);
   return {
     ...baseResource(r, "boards"),
     name: r.name,
@@ -575,8 +596,8 @@ export function toCardResource(r: any): Wire<"card"> {
     title: r.title,
     description: r.description ?? undefined,
     priority: r.priority,
-    labels: (() => { try { return r.labelsJson ? JSON.parse(r.labelsJson) : []; } catch { return []; } })(),
-    documents: (() => { try { return (r.documentsJson ? (JSON.parse(r.documentsJson) as string[]) : []).map((id) => ref("org-documents", id)).filter((x): x is string => !!x); } catch { return []; } })(),
+    labels: jsonOr<string[]>(r.labelsJson, []),
+    documents: jsonOr<string[]>(r.documentsJson, []).map((id) => ref("org-documents", id)).filter((x): x is string => !!x),
     size: r.size ?? undefined,
     due_date: r.dueDate ? iso(r.dueDate).slice(0, 10) : undefined,
     blocked: !!r.blocked,
@@ -629,12 +650,7 @@ export function toCardCommentResource(r: any) {
 // the wire; the client resolves name/avatar from its cached employees) with the email as a fallback. Lean by
 // design — the caller already knows which resource they asked about.
 export function toActivityResource(r: any) {
-  let meta: unknown;
-  try {
-    meta = r.meta ? JSON.parse(r.meta) : undefined;
-  } catch {
-    meta = undefined;
-  }
+  const meta = jsonOr<unknown>(r.meta, undefined);
   return {
     path: `activity/${r.uuid}`,
     action: r.action,
@@ -714,15 +730,15 @@ export function toReviewResource(r: any): Wire<"review"> {
     reviewer: ref("employees", r.reviewerId),
     state: r.state,
     self_comment: r.selfComment ?? undefined,
-    self_ratings: r.selfRatingsJson ? JSON.parse(r.selfRatingsJson) : undefined,
+    self_ratings: jsonOr<Wire<"review">["self_ratings"]>(r.selfRatingsJson, undefined),
     ack_comment: r.ackComment ?? undefined,
   };
   if (r._managerVisible) {
     out.manager_comment = r.managerComment ?? undefined;
     out.overall_rating = r.overallRating ?? undefined;
-    out.ratings = r.ratingsJson ? JSON.parse(r.ratingsJson) : {};
+    out.ratings = jsonOr<NonNullable<Wire<"review">["ratings"]>>(r.ratingsJson, {});
     // The per-goal verdicts are the manager's assessment too, so they travel with it, not with the goals.
-    if (r.goalRatingsJson) out.goal_ratings = JSON.parse(r.goalRatingsJson);
+    if (r.goalRatingsJson) out.goal_ratings = jsonOr<NonNullable<Wire<"review">["goal_ratings"]>>(r.goalRatingsJson, {});
     // What those competency ratings add up to on the framework's own weights - derived here, from the
     // catalogue the route attached, so the page, the PDF and the calibration grid quote one number. The
     // manager's `overall_rating` is their own judgement and is never replaced by it.
@@ -835,7 +851,7 @@ export function toCheckInResource(r: any, user?: AppUser): Wire<"check-in"> {
     counterpart_name: r.counterpartName ?? undefined,
     meeting_date: r.meetingDate ? iso(r.meetingDate).slice(0, 10) : undefined,
     notes: r.notes ?? undefined,
-    action_items: r.actionItemsJson ? JSON.parse(r.actionItemsJson) : [],
+    action_items: jsonOr<Wire<"check-in">["action_items"]>(r.actionItemsJson, []),
     cadence: r.cadence ?? undefined,
     private_note: mine,
     // Whether the OTHER side has kept a note. The text stays private; that one exists is not a secret, and
@@ -878,7 +894,7 @@ export function toBenefitEnrollmentResource(r: any): Wire<"benefit-enrollment"> 
     status: r.status,
     effective_date: r.effectiveDate ? iso(r.effectiveDate).slice(0, 10) : undefined,
     // Drop any blank id rather than emitting an undefined hole in the array.
-    dependents: (r.dependentsJson ? (JSON.parse(r.dependentsJson) as string[]) : [])
+    dependents: jsonOr<string[]>(r.dependentsJson, [])
       .map((id) => ref("dependents", id))
       .filter((p): p is string => !!p),
   };
@@ -1065,7 +1081,7 @@ export function toSettlementResource(r: any): Wire<"settlement"> {
     currency_code: r.currency,
     leave_days: r.leaveDays,
     notice_shortfall_days: r.noticeShortfallDays,
-    lines: JSON.parse(r.linesJson),
+    lines: jsonOr<Wire<"settlement">["lines"]>(r.linesJson, []),
     total_earnings: r.totalEarnings,
     taxable_earnings: r.taxableEarnings,
     total_deductions: r.totalDeductions,
@@ -1138,7 +1154,7 @@ export function toStocktakeResource(r: any): Wire<"stocktake"> {
     closed_by: r.closedBy ? ref("employees", r.closedBy) : undefined,
     closed_time: r.closedAt ? iso(r.closedAt) : undefined,
     found: parseFound(r.foundJson),
-    result: r.resultJson ? JSON.parse(r.resultJson) : undefined,
+    result: jsonOr<Wire<"stocktake">["result"]>(r.resultJson, undefined),
     notes: r.notes ?? undefined,
   };
 }
@@ -1204,7 +1220,7 @@ export function toAttendanceRegularizationResource(r: any): Wire<"attendance-reg
     ...baseResource(r, "attendance-regularizations"),
     employee: ref("employees", r.employeeId),
     date: iso(r.date).slice(0, 10),
-    sessions: (typeof r.sessions === "string" ? JSON.parse(r.sessions) : r.sessions) ?? [],
+    sessions: (typeof r.sessions === "string" ? jsonOr<Wire<"attendance-regularization">["sessions"]>(r.sessions, []) : r.sessions) ?? [],
     reason: r.reason ?? undefined,
     state: r.state,
     decided_by: r.decidedBy ?? undefined,
@@ -1340,20 +1356,18 @@ export function toLetterheadResource(r: any): Wire<"letterhead"> {
     // `{ screen: {} }`, so an uploaded image was invisible to the editor while the renderer drew it fine. The
     // bytes come from `:image?variant=&slot=`, never inline: a full sheet of stationery has no business in a
     // list response. `r2Key` is deliberately dropped - the client addresses images by slot, not by key.
-    assets: r.assetsJson
-      ? Object.fromEntries(
-          Object.entries(JSON.parse(r.assetsJson) as Record<string, Record<string, { content_type?: string; size_bytes?: number }>>).map(
-            ([variant, slots]) => [
-              variant,
-              Object.fromEntries(Object.entries(slots).map(([slot, a]) => [slot, { content_type: a.content_type, size_bytes: a.size_bytes }])),
-            ]
-          )
-        )
-      : {},
+    assets: Object.fromEntries(
+      Object.entries(jsonOr<Record<string, Record<string, { content_type?: string; size_bytes?: number }>>>(r.assetsJson, {})).map(
+        ([variant, slots]) => [
+          variant,
+          Object.fromEntries(Object.entries(slots).map(([slot, a]) => [slot, { content_type: a.content_type, size_bytes: a.size_bytes }])),
+        ]
+      )
+    ),
     // The stored page design, or undefined for a letterhead that prints on the stock page.
-    design: r.designJson ? (JSON.parse(r.designJson) as Record<string, unknown>) : undefined,
+    design: jsonOr<Record<string, unknown> | undefined>(r.designJson, undefined),
     // The print page, when this letterhead has one; absent means it prints as it renders.
-    print_design: r.printDesignJson ? (JSON.parse(r.printDesignJson) as Record<string, unknown>) : undefined,
+    print_design: jsonOr<Record<string, unknown> | undefined>(r.printDesignJson, undefined),
   };
 }
 
@@ -1566,7 +1580,7 @@ export function toInterviewResource(r: any): Wire<"interview"> {
     mode: r.mode,
     scheduled_start_time: r.scheduledStart ? iso(r.scheduledStart) : undefined,
     scheduled_end_time: r.scheduledEnd ? iso(r.scheduledEnd) : undefined,
-    interviewers: ((): string[] => { try { return (JSON.parse(r.interviewerIds ?? "[]") as string[]).map((id) => `employees/${id}`); } catch { return []; } })(),
+    interviewers: jsonOr<string[]>(r.interviewerIds, []).map((id) => `employees/${id}`),
     location: r.location ?? undefined,
     status: r.status,
   };
@@ -1578,7 +1592,7 @@ export function toInterviewFeedbackResource(r: any): Wire<"interview-feedback"> 
     ...baseResource(r, "interview-feedback"),
     interview: ref("interviews", r.interviewId),
     author: ref("employees", r.authorId),
-    ratings: ((): Record<string, number> => { try { return JSON.parse(r.ratingsJson ?? "{}"); } catch { return {}; } })(),
+    ratings: jsonOr<Record<string, number>>(r.ratingsJson, {}),
     overall_rating: r.overallRating ?? undefined,
     recommendation: r.recommendation ?? undefined,
     comment: r.comment ?? undefined,
@@ -1716,11 +1730,7 @@ export function toOrgDocumentResource(r: any): Wire<"org-document"> {
 // The stored sign-anchor blob. Parsed defensively: a malformed row must not take the whole response down,
 // and the shape is the contract's own so a schema change lands here.
 function safeParse(s: string): NonNullable<Wire<"org-document">["sign_anchor"]> | undefined {
-  try {
-    return JSON.parse(s) as NonNullable<Wire<"org-document">["sign_anchor"]>;
-  } catch {
-    return undefined;
-  }
+  return jsonOr<NonNullable<Wire<"org-document">["sign_anchor"]> | undefined>(s, undefined);
 }
 
 export function toPersonalDocumentResource(r: any): Wire<"personal-document"> {
@@ -1822,7 +1832,7 @@ export function toOperationResource(job: {
     path: `operations/${job.uuid}`,
     done,
     ...(job.status === "error" ? { error: { title: "Operation failed", detail: job.lastError ?? "error" } } : {}),
-    ...(job.status === "done" && job.resultJson ? { response: JSON.parse(job.resultJson) } : {}),
+    ...(job.status === "done" && job.resultJson ? { response: jsonOr<Record<string, unknown>>(job.resultJson, {}) } : {}),
     // AEP operations carry free-form metadata: the admin-facing detail (kind/live status/attempts/timing)
     // lives here so the LRO contract (path/done/error/response) stays clean.
     metadata: {
@@ -1861,7 +1871,7 @@ export function toEventLogResource(r: {
   createdAt: Date | number;
   updatedAt: Date | number;
 }, redactPayload = false): Wire<"event_log_entry"> {
-  const payload = r.payloadJson ? JSON.parse(r.payloadJson) : {};
+  const payload = jsonOr<any>(r.payloadJson, {});
   return {
     path: `event-log/${r.uuid}`,
     create_time: iso(r.createdAt),
@@ -1898,9 +1908,16 @@ export function toAutomationResource(r: {
     name: r.name,
     ...(r.description ? { description: r.description } : {}),
     trigger_type: r.triggerType,
-    condition: r.conditionJson ? JSON.parse(r.conditionJson) : null,
-    actions: JSON.parse(r.actionsJson),
-    schedule: r.scheduleJson ? JSON.parse(r.scheduleJson) : null,
+    // `any`, as this was before: the generated wire type for `condition`/`schedule` is non-nullable while the
+    // column and this serializer both use `null` for "none". Pinning the generic here would change the emitted
+    // value to satisfy the type, which is a contract change, not a parse fix - so the shape stays exactly as
+    // it was and only the throw is removed.
+    condition: jsonOr<any>(r.conditionJson, null),
+    // `[]`, not a throw: a rule whose actions column is unreadable is a rule that does nothing, which is what
+    // the row already means to the engine (it reads the same column). A 500 here would take the whole
+    // Automations list down over one bad row and hide every healthy rule beside it.
+    actions: jsonOr<Wire<"automation">["actions"]>(r.actionsJson, []),
+    schedule: jsonOr<any>(r.scheduleJson, null),
     ...(r.lastScheduledOn ? { last_scheduled_on: r.lastScheduledOn } : {}),
     enabled: !r.disabled,
   };
@@ -1923,7 +1940,7 @@ export function toAutomationRunResource(r: {
   updatedAt: Date | number;
 }, redactResult = false): Wire<"automation_run"> {
   // Non-super viewers get action kind + status only (the `detail` string can carry ids/paths from the run).
-  const result = r.resultJson ? JSON.parse(r.resultJson) : undefined;
+  const result = jsonOr<any>(r.resultJson, undefined);
   const shown = redactResult && Array.isArray(result) ? result.map((o) => ({ kind: o?.kind, status: o?.status })) : result;
   return {
     path: `automation-runs/${r.uuid}`,
@@ -1967,7 +1984,7 @@ export function toWorkflowInstanceResource(r: {
     ...(r.automationId ? { automation: ref("automations", r.automationId) } : {}),
     status: r.status,
     ...(r.awaitedTypes ? { awaited_types: r.awaitedTypes.split(",") } : {}),
-    arms: JSON.parse(r.armsJson),
+    arms: jsonOr<any>(r.armsJson, []),
     ...(r.originType ? { origin_type: r.originType } : {}),
     ...(r.subject ? { subject: r.subject } : {}),
     ...(r.employeeId ? { employee: ref("employees", r.employeeId) } : {}),
@@ -2000,20 +2017,14 @@ export function toCronRunResource(r: {
     ...(r.finishedAt ? { end_time: iso(r.finishedAt) } : {}),
     ...(r.durationMs != null ? { duration_ms: r.durationMs } : {}),
     ...(r.error ? { error: r.error } : {}),
-    ...(r.summaryJson ? { summary: JSON.parse(r.summaryJson) } : {}),
+    ...(r.summaryJson ? { summary: jsonOr<Wire<"cron_run">["summary"]>(r.summaryJson, {}) } : {}),
   };
 }
 
 // A saved custom grid. The DEFINITION travels on the wire (base, columns, filters, sort, params); the rows it
 // produces are a separate call (`:run`), because they are re-read under each reader's own scopes.
 export function toTableViewResource(r: any): Wire<"table-view"> {
-  const spec = (() => {
-    try {
-      return JSON.parse(r.specJson ?? "{}") as { columns?: unknown[]; filters?: unknown[]; sort?: unknown[]; params?: Record<string, unknown> };
-    } catch {
-      return {};
-    }
-  })();
+  const spec = jsonOr<{ columns?: unknown[]; filters?: unknown[]; sort?: unknown[]; params?: Record<string, unknown> }>(r.specJson, {});
   return {
     ...baseResource(r, "table-views"),
     display_name: r.name,

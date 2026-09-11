@@ -1,16 +1,25 @@
 # 04 — Testing
 
-`npm test` runs the whole suite with Vitest under `@cloudflare/vitest-pool-workers`: **186 files, 2202
+`npm test` runs the whole suite with Vitest under `@cloudflare/vitest-pool-workers`: **232 files, 2744
 tests**. Pure-domain files need no Worker runtime and are the fastest signal; service, route and flow files
 run against the real `workerd` with live D1 and R2 bindings, applying the migrations from
 `src/db/migrations/` into a fresh database per file.
 
-`npm run verify` (`api:lint` → `typecheck` → `test`) is the only gate that matters. It runs as a pre-commit
-hook (`.husky/pre-commit`, installed by `npm install`) and in CI (`.github/workflows/verify.yml`).
+`npm run verify` (`api:lint` → `lint` → `typecheck` → `test:gate`) is the only gate that matters. It runs as a
+pre-commit hook (`.husky/pre-commit`, installed by `npm install`) and in CI
+(`.github/workflows/verify.yml`), and `npm run deploy` chains it after `preflight`.
 
-> **A false green to know about.** If the local command sandbox denies `.dev.vars`, the pool fails to build
-> its Miniflare options, vitest reports `Test Files no tests` and still **exits 0**. A run that says "no
-> tests" has not tested anything. Rerun outside the sandbox and confirm the counts.
+> **Why the gate runs `test:gate` and not `test`.** Vitest can exit **0 having run no tests**: when the
+> workers pool fails while building its Miniflare options — `parseProjectOptions` reads `wrangler.toml` and
+> `.dev.vars` through wrangler, so a denied file (the local command sandbox does exactly this), a malformed
+> config or a wrangler bump can throw there — it prints the error, collects nothing, and still succeeds. On
+> the one check standing between a payroll change and production, that is the failure mode that looks like a
+> pass.
+>
+> `scripts/testGate.mjs` runs the same vitest and then asserts the JSON summary: the run succeeded, and it
+> contained tests — at least `MIN_TESTS`/`MIN_FILES`, a floor set well under the real totals so it stays quiet
+> while tests are added and fires the moment the suite collapses. `npm test` stays the bare `vitest run` for
+> the edit/run loop, where `-t`, a file path or `--watch` should not have to argue with a floor.
 
 ## The suite by family
 

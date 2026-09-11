@@ -18,10 +18,11 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "npm run api:types && tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
+    "test:gate": "node scripts/testGate.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "e2e:stack": "scripts/e2eStack.sh",
-    "verify": "npm run api:lint && npm run lint && npm run typecheck && npm run test",
+    "verify": "npm run api:lint && npm run lint && npm run typecheck && npm run test:gate",
     "precommit": "npm run verify",
     "prepare": "husky"
   },
@@ -105,7 +106,10 @@
   },
   "overrides": {
     "browserslist": "^4.28.7",
-    "baseline-browser-mapping": "^2.11.0"
+    "baseline-browser-mapping": "^2.11.0",
+    "ws": "^8.21.3",
+    "undici": "^7.29.1",
+    "sharp": "^0.35.4"
   },
   "allowScripts": {
     "workerd@1.20260310.1": true,

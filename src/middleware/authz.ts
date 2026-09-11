@@ -272,6 +272,22 @@ export async function approvalScopesFor(deps: Deps, user: AppUser): Promise<Map<
   return out;
 }
 
+/**
+ * A denial the resolution block DECIDED, raised as a throw only because it has to unwind out of the middle of
+ * the lane structure below.
+ *
+ * The lanes are a chain of `if/else if/else` that each assign `decision`, so a gate sitting ABOVE them cannot
+ * simply assign and fall through - the lane it lands in would overwrite the verdict. Throwing skips them; this
+ * type is how the catch tells "we decided no" apart from "we could not decide", which are the same fail-closed
+ * ANSWER but very different events, and the reason string is what separates them in the log and in the
+ * `access.denied` audit row.
+ */
+class AuthzDenied extends Error {
+  constructor(readonly denyReason: string) {
+    super(denyReason);
+  }
+}
+
 export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
   let decision: Decision | null = null;
   let pathname = "";
@@ -323,7 +339,12 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
         // Resolved off the raw pathname: the collection token and the level/verb do not depend on the
         // id -> code substitution that the coded path below performs.
         const asked = resolveRequest(c.req.method, pathname, force);
-        if (!inScope(asked, user.apiKey.scope)) throw forbidden("outside api key scope");
+        // `AuthzDenied`, not `forbidden`: this is a DECISION, and the catch below turns it back into one. It
+        // used to throw the HTTP error, which the catch swallowed into `decision = null` - so the request was
+        // still refused (fail-closed held), but the reason was replaced by "unresolved request" in both the
+        // DENY log and the `access.denied` audit row. A key acting outside its scope is the single most
+        // load-bearing entry that row can carry, and it was the one case that could not be read back.
+        if (!inScope(asked, user.apiKey.scope)) throw new AuthzDenied("outside api key scope");
       }
 
       // Global search: `search` is a TRANSPORT, not a resource - it owns no data and widens nothing, like the
@@ -421,8 +442,20 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       }
       }
     }
-  } catch {
-    decision = null; // any resolution error -> deny below (FAIL CLOSED; there is no backstop)
+  } catch (e) {
+    // A DECIDED denial carries its reason through; anything else is a failure to decide.
+    if (e instanceof AuthzDenied) {
+      decision = { allow: false, reason: e.denyReason };
+    } else {
+      // FAIL CLOSED (there is no backstop) - and SAY SO. This block used to discard the error entirely, which
+      // is the one swallow in this file that had no log beside it. The cost is not a wrong answer: a D1 blip,
+      // a throw inside uuidToCode/buildCodedPath/resolveItemState, or a malformed policy row all reach the
+      // caller as "you do not have permission" with the DENY line reading `reason="unresolved request"` - an
+      // outage wearing the shape of a permissions bug, with nothing anywhere naming the real failure. With
+      // [observability] on, this is the only trace it will ever leave.
+      console.error(`[authz] resolution failed [${c.get("requestId") ?? "-"}] ${c.req.method} ${pathname}:`, e);
+      decision = null;
+    }
   }
 
   // Audit (best-effort; NEVER affects the decision). Records every denial (access.denied - the abuse

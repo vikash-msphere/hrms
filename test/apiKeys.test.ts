@@ -213,6 +213,20 @@ describe("the ceiling", () => {
     expect(typeof body.now).toBe("number");
     expect(Array.isArray(body.collections)).toBe(true);
   });
+
+  // The `access.denied` row is the abuse signal, and "a key acted outside its scope" is the single most
+  // useful thing it can say. The ceiling check raises its refusal from the middle of the lane structure, and
+  // the resolution block's catch used to swallow every throw into `decision = null` - so the request was
+  // still refused, but the row and the DENY log both read "unresolved request (fail-closed)", which is what
+  // an unparseable path says too. The two are not the same event and must not read the same.
+  it("records WHY a key was refused, not a generic fail-closed", async () => {
+    const owner = await seedOwner();
+    const token = await mintKey(owner, { collections: ["holidays"], maxLevel: "read", verbs: [] });
+    expect((await call("/v1/users", token)).status).toBe(403);
+    const rows = await deps.db.select().from(schema.auditLog).where(eq(schema.auditLog.action, "access.denied"));
+    const reasons = rows.map((r) => (JSON.parse(r.meta ?? "{}") as { reason?: string }).reason);
+    expect(reasons).toContain("outside api key scope");
+  });
 });
 
 describe("what a key may never do", () => {
