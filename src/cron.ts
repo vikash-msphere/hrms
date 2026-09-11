@@ -23,13 +23,14 @@ import { purgeExpiredAccessRules } from "./services/accessRules";
 import { rollRecurringCards } from "./services/cards";
 import { creditHolidayCompOff } from "./services/compOff";
 import { getSettingValue } from "./services/settings";
-import { orgToday, orgDayFromToday, orgYear, dayStartMs } from "./services/orgDay";
+import { orgToday, orgDayFromToday, orgTimezone, orgYear, dayStartMs } from "./services/orgDay";
+import { localDay } from "./domain/attendance";
 import { renderEmail, loadEmailBrand, escapeHtml } from "./lib/emailLayout";
 import { notify, notifyMany } from "./services/notifications";
 import { leaveCaps, encashedDaysThisYearAll, createAutoEncashment } from "./services/leaveEncashments";
 import { splitCarryForward, splitCarryForwardCumulative, splitEncashExcess } from "./domain/carryForward";
 import { custodyPolicy, daysBetween } from "./domain/assetCustody";
-import { addDaysUtc, addMonthsUtc, advanceUntilAfter, isAnniversaryOf } from "./domain/calendar";
+import { addDaysUtc, addMonthsFromAnchor, advanceUntilAfter, isAnniversaryOf, seriesAnchorDay } from "./domain/calendar";
 
 import { round2 } from "./domain/money";
 import { byIdChunks, runBatchChecked, type CheckedStmt } from "./lib/dbBatch";
@@ -258,13 +259,13 @@ const OWNER_NOTIFIED_KINDS = new Set(["payslip.generateRun"]);
 
 // Tell the job's owner when it has given up for good. `notify` is itself best-effort (it swallows), so this
 // cannot turn a job failure into a tick failure.
-async function notifyJobDeadLetter(deps: Deps, job: JobRow, error: string): Promise<void> {
+async function notifyJobDeadLetter(deps: Deps, job: JobRow, error: string, why = `after ${MAX_JOB_ATTEMPTS} attempts`): Promise<void> {
   if (!job.employeeId || !OWNER_NOTIFIED_KINDS.has(job.kind)) return;
   await notify(deps, {
     recipient: job.employeeId,
     type: "system.jobFailed",
     title: "Background job failed",
-    body: `${job.kind} gave up after ${MAX_JOB_ATTEMPTS} attempts: ${error.slice(0, 300)}`,
+    body: `${job.kind} gave up ${why}: ${error.slice(0, 300)}`,
     link: "operations",
     subject: `operations/${job.uuid}`,
     priority: "high",
@@ -275,15 +276,11 @@ async function notifyJobDeadLetter(deps: Deps, job: JobRow, error: string): Prom
 // Run one job through its state machine. Returns "requeued" if an LRO asked to resume next tick (state
 // unchanged from the queue's perspective), "skipped" if another drain claimed it first, else "done"/"error".
 // Idempotent per call; never throws.
-/** The correlation id an enqueued job carries, when it carries one. Best-effort: an unreadable payload is the
- *  job's own problem and must not stop it running. */
-function jobTrace(payload: string): string | undefined {
-  try {
-    const v = JSON.parse(payload) as { correlationId?: unknown };
-    return typeof v?.correlationId === "string" ? v.correlationId : undefined;
-  } catch {
-    return undefined;
-  }
+/** The correlation id an enqueued job carries, when it carries one. Best-effort: a payload with no
+ *  correlation id is ordinary, not an error. */
+function jobTrace(payload: unknown): string | undefined {
+  const v = payload as { correlationId?: unknown } | null;
+  return typeof v?.correlationId === "string" ? v.correlationId : undefined;
 }
 
 async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" | "requeued" | "skipped"> {
@@ -298,17 +295,36 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
     .where(and(eq(schema.jobs.uuid, job.uuid), eq(schema.jobs.status, "queued")))
     .returning({ uuid: schema.jobs.uuid });
   if (!claim.length) return "skipped";
+
+  // PARSED ONCE, OUTSIDE THE RETRY. Every branch below used to `JSON.parse(job.payload)` inside the try, so a
+  // payload that is not JSON at all threw a SyntaxError into the retry ladder and walked the whole thing -
+  // 1 minute, 5, 15, an hour - before dead-lettering. Nothing about a malformed payload changes between
+  // attempts: it is the one failure that is permanent by construction, and the backoff exists for the ones
+  // that are not (a vendor blip, a contended write). So it fails terminally here, with the same dead-letter
+  // notice a job that genuinely exhausted its attempts gets, and the four wasted drain slots go back to work
+  // that can still succeed.
+  let payload: unknown;
+  try {
+    payload = JSON.parse(job.payload);
+  } catch (e) {
+    const attempts = job.attempts + 1;
+    await deps.db.update(schema.jobs).set({ status: "error", attempts, lastError: String(e) }).where(eq(schema.jobs.uuid, job.uuid));
+    console.error(`job ${job.kind} ${job.uuid} has an unreadable payload (terminal, not retried)`, e);
+    await notifyJobDeadLetter(deps, job, String(e), "without retrying (its payload is not readable)");
+    return "error";
+  }
+
   // The job belongs to the ACT that enqueued it, not to the tick that happens to drain it. Publishing a run
   // and the payslips that publish generated are one thing a person did; without this they land under two
   // different traces - the request's and the cron's - and the async half of every long operation is orphaned
   // from the action it came from. The engine already threads this through its own deferred jobs; the same
   // rule now covers every kind.
-  const enqueuedTrace = jobTrace(job.payload);
+  const enqueuedTrace = jobTrace(payload);
   const tickTrace = deps.trace;
   if (enqueuedTrace) deps.trace = enqueuedTrace;
   try {
     if (job.kind === "payslip.generateRun") {
-      const res = await processPayslipRunJob(deps, job.uuid, JSON.parse(job.payload));
+      const res = await processPayslipRunJob(deps, job.uuid, payload as { runId: string });
       if (!res.done) {
         // Clear any backoff left over from an earlier failed attempt: this is a healthy LRO asking to continue
         // next tick, and it must not inherit an hour-long delay set when the same job last errored.
@@ -317,18 +333,18 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
       }
     } else if (job.kind === "automation.action") {
       // A deferred (`wait`) automation payload whose delay has elapsed - run its actions with system authority.
-      await runDeferredActions(deps, JSON.parse(job.payload));
+      await runDeferredActions(deps, payload as Parameters<typeof runDeferredActions>[1]);
     } else if (job.kind === "workflow.timer") {
       // A durable timer arm of a suspended `waitFor` whose delay elapsed before any event arm fired.
-      await runWorkflowTimer(deps, JSON.parse(job.payload));
+      await runWorkflowTimer(deps, payload as Parameters<typeof runWorkflowTimer>[1]);
     } else if (job.kind === CARRY_FORWARD_JOB) {
       // Another pass over whoever still owes a rollover. Idempotent per calendar year, so it needs no cursor -
       // the `last_carry_forward_year` stamp is what makes an already-rolled row invisible to the next pass -
       // and it requeues on the REMAINING count rather than on what it just did, so a pass that only met rows
       // it could not claim still comes back. `queueRemainder` is false: this row IS the continuation.
-      const payload = JSON.parse(job.payload) as { year: string; pass?: number };
+      const carry = payload as { year: string; pass?: number };
       const res = await rollCarryForward(deps, false);
-      const pass = (payload.pass ?? 0) + 1;
+      const pass = (carry.pass ?? 0) + 1;
       // The pass counter is a RUNAWAY BACKSTOP, not the termination condition - `remaining === 0` is. Without
       // one, the single case the rollover deliberately gives up on (rows whose balance keeps changing under
       // every attempt) leaves `remaining` unchanged and requeues for ever, burning a drain slot every five
@@ -337,7 +353,7 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
       if (res.remaining > 0 && pass < CARRY_FORWARD_MAX_PASSES) {
         await deps.db
           .update(schema.jobs)
-          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...payload, pass }) })
+          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...carry, pass }) })
           .where(eq(schema.jobs.uuid, job.uuid));
         return "requeued";
       }
@@ -345,24 +361,24 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
     } else if (job.kind === REMINDER_EMAIL_JOB) {
       // The night's reminder mail past the first batch. Same LRO shape as the payslip run above: a bounded
       // number of vendor calls per invocation, requeued with the advanced cursor until the list is exhausted.
-      const payload = JSON.parse(job.payload) as { day: string; after?: string };
-      const res = await processReminderEmailJob(deps, payload);
+      const reminder = payload as { day: string; after?: string };
+      const res = await processReminderEmailJob(deps, reminder);
       if (!res.done) {
         await deps.db
           .update(schema.jobs)
-          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...payload, after: res.after }) })
+          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...reminder, after: res.after }) })
           .where(eq(schema.jobs.uuid, job.uuid));
         return "requeued";
       }
     } else if (job.kind === EMAIL_FANOUT_JOB) {
       // One message to many people, past the batch the originating action sent inline. The recipient list
       // rides IN the payload, so the cursor is an index into a list that cannot shift underneath it.
-      const payload = JSON.parse(job.payload) as EmailFanOutPayload;
-      const res = await processEmailFanOutJob(deps, payload);
+      const fanOut = payload as EmailFanOutPayload;
+      const res = await processEmailFanOutJob(deps, fanOut);
       if (!res.done) {
         await deps.db
           .update(schema.jobs)
-          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...payload, cursor: res.cursor }) })
+          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...fanOut, cursor: res.cursor }) })
           .where(eq(schema.jobs.uuid, job.uuid));
         return "requeued";
       }
@@ -961,11 +977,13 @@ export async function rollRecurringCheckIns(deps: Deps): Promise<number> {
   let failed = 0;
   for (const r of rows) {
     if (!r.cadence || !r.meetingDate) continue; // narrowing only; SQL already excluded both
-    // Month steps CLAMP the day (domain/calendar.ts): a monthly 1:1 on the 31st moved to 3 March and lost
-    // February, then kept the 3rd from then on - the series walked off its day-of-month a month at a time.
+    // The series' day of the month, carried onto the successor below. A month step clamps into a short month
+    // (domain/calendar.ts), and stepping from where that clamp landed is what moved a monthly 1:1 on the 31st
+    // to the 28th at its first February and kept it there. The anchor puts it back on the 31st in March.
     const cadence = r.cadence;
+    const anchorDay = seriesAnchorDay(+new Date(r.meetingDate), r.cadenceAnchorDay);
     const next = advanceUntilAfter(new Date(+new Date(r.meetingDate)), todayMs - 1, (d) =>
-      cadence === "monthly" ? addMonthsUtc(d, 1) : addDaysUtc(d, cadence === "weekly" ? 7 : 14));
+      cadence === "monthly" ? addMonthsFromAnchor(d, 1, anchorDay) : addDaysUtc(d, cadence === "weekly" ? 7 : 14));
     // GUARDED, like the attendee list in rollRepeatingEvents below. This parse used to be bare, so one row
     // whose `action_items_json` could not be read threw out of the whole subtask and every OTHER series went
     // unrolled that night - a single bad blob stopping every recurring 1:1 in the org. An unreadable list is
@@ -1003,6 +1021,7 @@ export async function rollRecurringCheckIns(deps: Deps): Promise<number> {
           meetingDate: next,
           actionItemsJson: open.length ? JSON.stringify(open.map((i) => ({ text: i.text, done: false }))) : null,
           cadence: r.cadence,
+          cadenceAnchorDay: anchorDay, // the series' day travels with the cadence, onto the one row that carries it
         })
         .returning())[0]!;
       const when = next.toISOString().slice(0, 10);
@@ -1052,6 +1071,12 @@ export async function rollRecurringCheckIns(deps: Deps): Promise<number> {
 // RSVPs deliberately do NOT carry over: "coming to the all-hands on the 3rd" is not a promise about the 10th.
 export async function rollRepeatingEvents(deps: Deps): Promise<number> {
   const nowMs = +deps.clock.now();
+  // Resolved ONCE for the whole pass, not per row: `orgTimezone` reads settings, and a cron tick has no
+  // request to memoize that read against (see services/orgDay.ts), so a per-row call is a D1 read per rolled
+  // event. Used below to name the successor's date in the ORG's calendar - `start_date` is a real instant, so
+  // rendering it with toISOString() names the UTC day, which in IST is the previous date for anything starting
+  // before 05:30 local. A 6am stand-up was announced as happening yesterday.
+  const tz = await orgTimezone(deps);
   // The loop's own conditions, in SQL: live, repeat-bearing, and finished. One row of a series carries the
   // repeat, so this reads a handful rather than the whole calendar on every tick.
   const rows = await deps.db
@@ -1062,11 +1087,15 @@ export async function rollRepeatingEvents(deps: Deps): Promise<number> {
   let failed = 0;
   for (const r of rows) {
     if (!r.repeat) continue; // narrowing only; SQL already excluded the null case
+    // The series' day of the month, resolved once and carried onto the successor below. Without it a monthly
+    // all-hands on the 31st moved to the 28th at its first February and stayed there, and a yearly event on
+    // 29 February never saw another leap day. See domain/calendar.ts#seriesAnchorDay for what re-anchors it.
+    const anchorDay = seriesAnchorDay(+new Date(r.startTime), r.repeatAnchorDay);
     // Step until the occurrence is in the future: a series nobody touched for two months lands on its next
     // real date rather than replaying every date it missed.
-    let { start, end } = nextOccurrence(+new Date(r.startTime), +new Date(r.endTime), r.repeat);
+    let { start, end } = nextOccurrence(+new Date(r.startTime), +new Date(r.endTime), r.repeat, anchorDay);
     let guard = 0;
-    while (end < nowMs && guard++ < 400) ({ start, end } = nextOccurrence(start, end, r.repeat));
+    while (end < nowMs && guard++ < 400) ({ start, end } = nextOccurrence(start, end, r.repeat, anchorDay));
     // Minted here so the failure path can ask whether the successor landed - see rollRecurringCheckIns above.
     const nextId = genId();
     const claimed = await deps.db
@@ -1091,6 +1120,7 @@ export async function rollRepeatingEvents(deps: Deps): Promise<number> {
           description: r.description,
           attendeeIds: r.attendeeIds,
           repeat: r.repeat,
+          repeatAnchorDay: anchorDay, // the series' day travels with the repeat, onto the one row that carries it
         })
         .returning())[0]!;
       // The people it is aimed at hear about it, so an RSVP has something to answer. A company-wide event (no
@@ -1101,7 +1131,7 @@ export async function rollRepeatingEvents(deps: Deps): Promise<number> {
       } catch {
         attendees = [];
       }
-      const when = new Date(start).toISOString().slice(0, 10);
+      const when = localDay(start, tz);
       // One batch for the whole attendee list. An all-hands with two hundred named attendees was two hundred
       // notify() round-trips for a single rolled occurrence, all of them carrying identical text.
       await notifyMany(deps, attendees, {

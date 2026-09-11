@@ -19,9 +19,14 @@ const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 let deps: Deps;
 const b = env as unknown as Bindings;
 
-// A payload that is not JSON: every job kind parses its payload first, so this fails every kind identically
-// and deterministically, without needing the work behind it to be reachable.
-const BAD_PAYLOAD = "not-json";
+// A payload that is READABLE but not runnable: valid JSON carrying none of the fields the work needs, so every
+// kind throws on it identically and deterministically without the work behind it being reachable.
+//
+// Deliberately not "not-json". An unparseable payload is a PERMANENT failure and the queue treats it as one
+// (src/cron.ts parses before the try), so it never reaches the retry ladder most of these tests are about -
+// see the case that pins exactly that.
+const FAILING_PAYLOAD = JSON.stringify({ deliberately: "unrunnable" });
+const UNPARSEABLE_PAYLOAD = "not-json";
 
 beforeAll(async () => {
   (b as Record<string, unknown>).FIELD_ENCRYPTION_KEY = KEY;
@@ -51,7 +56,7 @@ async function seedEmployee(): Promise<string> {
 async function seedJob(over: Partial<typeof schema.jobs.$inferInsert> = {}): Promise<string> {
   const uuid = genId();
   await deps.db.insert(schema.jobs).values({
-    uuid, code: genId().slice(0, 6), kind: "automation.action", payload: BAD_PAYLOAD, status: "queued", ...over,
+    uuid, code: genId().slice(0, 6), kind: "automation.action", payload: FAILING_PAYLOAD, status: "queued", ...over,
   });
   return uuid;
 }
@@ -69,7 +74,7 @@ describe("job queue: a failure retries before it becomes a dead letter", () => {
     const job = await jobRow(id);
     expect(job.status).toBe("queued"); // retryable, not parked
     expect(job.attempts).toBe(1);
-    expect(job.lastError).toContain("JSON");
+    expect(job.lastError).toBeTruthy();
     // First retry waits a minute; the drain honours run_after, so this is what defers it.
     expect(+new Date(job.runAfter!)).toBe(+at + 60_000);
   });
@@ -95,6 +100,21 @@ describe("job queue: a failure retries before it becomes a dead letter", () => {
     expect(job.status).toBe("error"); // terminal: the Operations page lists it with a Retry button
     expect(job.attempts).toBe(5);
     expect(job.runAfter).toBeNull(); // no further automatic pickup
+  });
+
+  it("does not retry a payload it cannot read - that failure is permanent", async () => {
+    // The retry ladder is for failures that can clear: a vendor blip, a contended write. A payload that is not
+    // JSON will not become JSON on the fourth attempt, and walking the full ladder for it burned four drain
+    // slots and held the dead letter back by over an hour for no possible gain.
+    const id = await seedJob({ payload: UNPARSEABLE_PAYLOAD });
+
+    await runJob(deps, id);
+
+    const job = await jobRow(id);
+    expect(job.status).toBe("error"); // terminal on the FIRST attempt, not the fifth
+    expect(job.attempts).toBe(1);
+    expect(job.runAfter).toBeNull();
+    expect(job.lastError).toContain("JSON");
   });
 
   it("leaves a backed-off job alone until its delay has passed", async () => {
@@ -163,7 +183,7 @@ describe("job queue: at most one runner per job", () => {
       await runScheduled("*/5 * * * *", deps); // a whole drain, which selects only `queued` rows
 
       const job = await jobRow(id);
-      // The seeded payload is unparseable, so ANY claim would have spent an attempt and left an error behind.
+      // The seeded payload cannot run, so ANY claim would have spent an attempt and left an error behind.
       expect(job.attempts, status).toBe(0);
       expect(job.lastError, status).toBeNull();
       expect(job.status, status).toBe(status);
@@ -180,11 +200,11 @@ describe("job queue: at most one runner per job", () => {
     await runJob(deps, id);
 
     const job = await jobRow(id);
-    // It really ran: the unparseable payload failed it again, spending the attempt a human bought it. Back to
-    // terminal rather than quietly earning itself another five automatic rounds.
+    // It really ran: the payload failed it again, spending the attempt a human bought it. Back to terminal
+    // rather than quietly earning itself another five automatic rounds.
     expect(job.attempts).toBe(6);
     expect(job.status).toBe("error");
-    expect(job.lastError).toContain("JSON");
+    expect(job.lastError).not.toBe("the old failure");
   });
 
   it("revives an orphan a human asks for, but never one still in flight", async () => {

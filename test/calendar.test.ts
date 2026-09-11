@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { addDaysUtc, addMonthsUtc, advanceUntilAfter, daysInMonthUtc, isAnniversaryOf } from "../src/domain/calendar";
+import { addDaysUtc, addMonthsFromAnchor, addMonthsUtc, advanceUntilAfter, daysInMonthUtc, isAnniversaryOf, seriesAnchorDay } from "../src/domain/calendar";
 
 // The two primitives every recurring thing in this app steps with. They exist because `setUTCMonth(+1)` is
 // not "next month": JS normalizes an impossible date forward, so 31 January became 3 March, and a series
@@ -40,6 +40,64 @@ describe("addMonthsUtc clamps instead of rolling over", () => {
     // Three months from 31 December is 31 March - the clamp must not shorten a step that has a 31st to land
     // on just because an intervening month is short.
     expect(ymd(addMonthsUtc(at("2026-12-31"), 3))).toBe("2027-03-31");
+  });
+});
+
+describe("a series keeps its own day of the month", () => {
+  // addMonthsUtc clamps but does not remember, so a series stepping from its own last occurrence leaves a
+  // month-end day for good at the first short month: 31 Jan -> 28 Feb -> 28 Mar, and nothing brings it back.
+  // Every recurring thing in this app had that shape - cards, 1:1s, events, expense templates.
+  it("borrows a short month's last day and takes its own day back afterwards", () => {
+    const anchor = 31;
+    let d = at("2026-01-31");
+    const series: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      d = addMonthsFromAnchor(d, 1, anchor);
+      series.push(ymd(d));
+    }
+    expect(series).toEqual(["2026-02-28", "2026-03-31", "2026-04-30", "2026-05-31", "2026-06-30"]);
+    // Contrast, so the difference is stated rather than assumed: the memoryless step never returns.
+    let m = at("2026-01-31");
+    const drifted: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      m = addMonthsUtc(m, 1);
+      drifted.push(ymd(m));
+    }
+    expect(drifted).toEqual(["2026-02-28", "2026-03-28", "2026-04-28", "2026-05-28", "2026-06-28"]);
+  });
+
+  it("takes a leap day back in the next leap year", () => {
+    expect(ymd(addMonthsFromAnchor(at("2029-02-28"), 36, 29))).toBe("2032-02-29");
+  });
+
+  it("keeps an ordinary day and the time of day", () => {
+    const withTime = new Date("2026-03-15T09:30:45.250Z");
+    expect(addMonthsFromAnchor(withTime, 1, 15).toISOString()).toBe("2026-04-15T09:30:45.250Z");
+  });
+
+  it("clamps an out-of-range anchor rather than rolling over", () => {
+    expect(ymd(addMonthsFromAnchor(at("2026-01-15"), 1, 99))).toBe("2026-02-28");
+    expect(ymd(addMonthsFromAnchor(at("2026-01-15"), 1, 0))).toBe("2026-02-01");
+  });
+});
+
+describe("seriesAnchorDay decides whether the stored day still applies", () => {
+  it("takes the day from the occurrence when nothing is stored yet", () => {
+    expect(seriesAnchorDay(at("2026-01-31"), null)).toBe(31);
+    expect(seriesAnchorDay(at("2026-03-09"), undefined)).toBe(9);
+  });
+
+  it("keeps the stored day while the occurrence sits where that day puts it", () => {
+    expect(seriesAnchorDay(at("2026-02-28"), 31)).toBe(31); // February borrowed the date
+    expect(seriesAnchorDay(at("2026-04-30"), 31)).toBe(31);
+    expect(seriesAnchorDay(at("2026-03-31"), 31)).toBe(31);
+  });
+
+  it("re-anchors when somebody has moved the occurrence", () => {
+    // A date the anchor would not have produced was chosen by a person, and the series follows them rather
+    // than snapping back to a day they just rejected.
+    expect(seriesAnchorDay(at("2026-02-10"), 31)).toBe(10);
+    expect(seriesAnchorDay(at("2026-03-15"), 31)).toBe(15);
   });
 });
 

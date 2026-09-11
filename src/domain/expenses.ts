@@ -1,6 +1,6 @@
 // Pure expense domain (NO I/O): budget-period keys/bounds, spend rollup, recurrence next-date. Shared by the
 // expense-budgets service (utilization), the cron (recurring generation + budget alerts), and tests.
-import { addMonthsUtc } from "./calendar";
+import { addMonthsFromAnchor, seriesAnchorDay } from "./calendar";
 import { round2 } from "./money";
 
 export type RecurrenceRule = "monthly" | "quarterly" | "yearly";
@@ -37,10 +37,12 @@ export function periodBounds(type: PeriodType, key: string): { start: number; en
   return { start: Date.UTC(y, mo, 1), end: Date.UTC(y, mo + 1, 1) };
 }
 
-// Advance a UTC date by one recurrence step. The end-of-month clamp (Jan 31 + 1mo -> Feb 28/29) is the shared
-// primitive's - see domain/calendar.ts for why plain `setUTCMonth` cannot be used for this.
-export function advanceRecurrence(d: Date, rule: RecurrenceRule): Date {
-  return addMonthsUtc(d, rule === "monthly" ? 1 : rule === "quarterly" ? 3 : 12);
+// Advance a UTC date by one recurrence step. `anchorDay` is the series' own day of the month - pass it, or a
+// template written for the 31st spends the rest of its life on the 28th after one February (see
+// domain/calendar.ts#addMonthsFromAnchor). Omitted, the day is taken from `d`, which is right for the first
+// step of a series and for a one-off "when is this due next".
+export function advanceRecurrence(d: Date, rule: RecurrenceRule, anchorDay?: number | null): Date {
+  return addMonthsFromAnchor(d, rule === "monthly" ? 1 : rule === "quarterly" ? 3 : 12, seriesAnchorDay(d, anchorDay));
 }
 
 // Utilization from a cap + spent (+ spend still awaiting approval). `remaining` goes negative on overspend;

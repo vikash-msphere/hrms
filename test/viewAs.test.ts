@@ -59,6 +59,11 @@ async function seedPerson(code: string, first: string, role: string) {
   return { userId: uuid, employeeId, code, email: `${first.toLowerCase()}@test.example` };
 }
 
+// The header speaks WIRE TOKENS, exactly as the SPA does (src/lib/viewAs.ts). It used to accept a bare
+// internal id "because tests speak internal ids", which put a test affordance on a production header; the
+// tests encode instead.
+const viewAs = async (kind: "users" | "employees", id: string) => `${kind}/${await deps.idCodec.encode(kind, id)}`;
+
 const req = (path: string, headers: Record<string, string> = {}, init: RequestInit = {}) =>
   app.request(path, { ...init, headers: { "X-Requested-By": "hrms-spa", ...headers } }, b as unknown as Record<string, unknown>);
 
@@ -71,7 +76,7 @@ describe("view as - the simulation is enforced server-side", () => {
     const plain = (await (await req("/v1/users/me")).json()) as { email: string };
     expect(plain.email).toBe(admin.email);
 
-    const simulated = (await (await req("/v1/users/me", { "X-View-As": `users/${diya.userId}` })).json()) as { email: string };
+    const simulated = (await (await req("/v1/users/me", { "X-View-As": await viewAs("users", diya.userId) })).json()) as { email: string };
     expect(simulated.email).toBe(diya.email);
   });
 
@@ -83,9 +88,9 @@ describe("view as - the simulation is enforced server-side", () => {
 
     const target = `/v1/employees/${aarav.employeeId}/bank-account`;
     expect((await req(target)).status).not.toBe(403); // the admin holds it (super)
-    expect((await req(target, { "X-View-As": `users/${diya.userId}` })).status).toBe(403); // Diya never could
+    expect((await req(target, { "X-View-As": await viewAs("users", diya.userId) })).status).toBe(403); // Diya never could
     // Their OWN record still resolves - the simulation narrows, it doesn't blind.
-    expect((await req(`/v1/employees/${diya.employeeId}`, { "X-View-As": `users/${diya.userId}` })).status).toBe(200);
+    expect((await req(`/v1/employees/${diya.employeeId}`, { "X-View-As": await viewAs("users", diya.userId) })).status).toBe(200);
   });
 
   it("simulates a person who has never signed in (no users row) instead of 404ing the shell", async () => {
@@ -96,7 +101,7 @@ describe("view as - the simulation is enforced server-side", () => {
     await deps.db.insert(schema.employees).values({ uuid: nobodyId, code: "04-009", firstName: "Priya", lastName: "Test", workEmail: "priya@test.example", status: "active" });
     (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
 
-    const res = await req("/v1/users/me", { "X-View-As": `employees/${nobodyId}` });
+    const res = await req("/v1/users/me", { "X-View-As": await viewAs("employees", nobodyId) });
     expect(res.status).toBe(200);
     const me = (await res.json()) as { email: string; role: string; caller_access?: { capabilities: string[] } };
     expect(me.email).toBe("priya@test.example"); // graded as the account she WOULD get on first login
@@ -104,12 +109,28 @@ describe("view as - the simulation is enforced server-side", () => {
     expect(me.caller_access?.capabilities).toContain("employees.read");
   });
 
+  it("refuses a raw internal id in the header - the subject is a wire token", async () => {
+    const admin = await seedPerson("04-001", "Admin", "super_admin");
+    const diya = await seedPerson("04-002", "Diya", "employee");
+    (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
+
+    // The internal primary key is never an inbound identifier, on this header or anywhere else.
+    const res = await req("/v1/users/me", { "X-View-As": `users/${diya.userId}` });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { detail?: string }).detail).toMatch(/must be users\/<id> or employees\/<id>/);
+
+    // A token minted for the OTHER collection is not this one's, either: the codec binds a token to its
+    // collection, so an employees token presented as a user fails the tag check rather than resolving.
+    const crossed = await deps.idCodec.encode("employees", diya.employeeId);
+    expect((await req("/v1/users/me", { "X-View-As": `users/${crossed}` })).status).toBe(404);
+  });
+
   it("is read-only: any write while simulating is refused", async () => {
     const admin = await seedPerson("04-001", "Admin", "super_admin");
     const diya = await seedPerson("04-002", "Diya", "employee");
     (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
 
-    const res = await req(`/v1/employees/${diya.employeeId}`, { "X-View-As": `users/${diya.userId}`, "Content-Type": "application/merge-patch+json" }, {
+    const res = await req(`/v1/employees/${diya.employeeId}`, { "X-View-As": await viewAs("users", diya.userId), "Content-Type": "application/merge-patch+json" }, {
       method: "PATCH",
       body: JSON.stringify({ first_name: "Nope" }),
     });
@@ -124,15 +145,15 @@ describe("view as - the simulation is enforced server-side", () => {
 
     // An hr_admin without access-rules.preview cannot simulate at all.
     (b as Record<string, unknown>).DEV_FAKE_EMAIL = hr.email;
-    let res = await req("/v1/users/me", { "X-View-As": `users/${diya.userId}` });
+    let res = await req("/v1/users/me", { "X-View-As": await viewAs("users", diya.userId) });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { detail?: string }).detail).toMatch(/may not simulate/);
 
     // Granted preview, they may simulate an employee - but not step into the super admin.
     await deps.db.insert(schema.accessRules).values({ subject: "hr_admin", subjectKind: "role", namespace: "access-rules", pattern: "access-rules.preview", scopeKind: "all", scopeCode: "", matchCode: null, level: null, effect: "allow" });
     clearCache();
-    expect((await req("/v1/users/me", { "X-View-As": `users/${diya.userId}` })).status).toBe(200);
-    res = await req("/v1/users/me", { "X-View-As": `users/${admin.userId}` });
+    expect((await req("/v1/users/me", { "X-View-As": await viewAs("users", diya.userId) })).status).toBe(200);
+    res = await req("/v1/users/me", { "X-View-As": await viewAs("users", admin.userId) });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { detail?: string }).detail).toMatch(/super admin/);
   });
@@ -143,7 +164,7 @@ describe("view as - the simulation is enforced server-side", () => {
     (b as Record<string, unknown>).DEV_FAKE_EMAIL = admin.email;
 
     // A denied request is always audited (abuse signal) - the cheapest row to assert on.
-    await req(`/v1/employees/${admin.employeeId}/bank-account`, { "X-View-As": `users/${diya.userId}` });
+    await req(`/v1/employees/${admin.employeeId}/bank-account`, { "X-View-As": await viewAs("users", diya.userId) });
     const rows = await deps.db.select().from(schema.auditLog).where(eq(schema.auditLog.actorEmail, admin.email));
     expect(rows.length).toBeGreaterThan(0);
     expect(JSON.parse(rows[0]!.meta ?? "{}")).toMatchObject({ viewing_as: diya.email });

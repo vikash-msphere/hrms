@@ -20,6 +20,7 @@ import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { getSettingValue } from "./settings";
 import { advanceRecurrence, type RecurrenceRule } from "../domain/expenses";
+import { seriesAnchorDay } from "../domain/calendar";
 
 export type ExpenseInput = {
   employee?: string | null;
@@ -186,8 +187,15 @@ export async function updateExpense(deps: Deps, actor: AppUser, id: string, patc
     if (!paused && row.paused && row.recurrenceRule && !has("next_occurrence_on")) {
       let next = row.nextOccurrenceOn ? new Date(row.nextOccurrenceOn) : null;
       const today = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
-      while (next && next < today) next = advanceRecurrence(next, row.recurrenceRule as RecurrenceRule);
-      if (next) set.nextOccurrenceOn = next;
+      // The template's own day of the month, resolved once and held for the whole catch-up. A template paused
+      // over a February and resumed in the spring used to step 31 -> 28 -> 28 -> 28, so unpausing quietly moved
+      // a monthly bill three days early for good. See domain/calendar.ts#seriesAnchorDay.
+      const anchorDay = next ? seriesAnchorDay(next, row.recurrenceAnchorDay) : null;
+      while (next && next < today) next = advanceRecurrence(next, row.recurrenceRule as RecurrenceRule, anchorDay);
+      if (next) {
+        set.nextOccurrenceOn = next;
+        set.recurrenceAnchorDay = anchorDay;
+      }
     }
   }
   const updated = (await deps.db.update(schema.expenses).set(set).where(eq(schema.expenses.uuid, id)).returning())[0]!;
@@ -324,11 +332,15 @@ export async function generateRecurringExpenses(deps: Deps, now: Date = new Date
   for (const t of templates) {
     if (!t.nextOccurrenceOn || !t.recurrenceRule) continue;
     const occurrenceOn = new Date(t.nextOccurrenceOn);
-    const advanced = advanceRecurrence(occurrenceOn, t.recurrenceRule as RecurrenceRule);
+    // The template's day of the month, stamped back with the advance so every later step reads it. Without it
+    // a rent or retainer template written for the 31st filed on the 28th from its first February onwards, and
+    // nothing about it ever came back to the 31st.
+    const anchorDay = seriesAnchorDay(occurrenceOn, t.recurrenceAnchorDay);
+    const advanced = advanceRecurrence(occurrenceOn, t.recurrenceRule as RecurrenceRule, anchorDay);
     // Claim this occurrence: advance the template guarded on the unchanged nextOccurrenceOn (0 rows => taken).
     const claimed = await deps.db
       .update(schema.expenses)
-      .set({ nextOccurrenceOn: advanced, lastGeneratedOn: now, updatedAt: now })
+      .set({ nextOccurrenceOn: advanced, recurrenceAnchorDay: anchorDay, lastGeneratedOn: now, updatedAt: now })
       .where(and(eq(schema.expenses.uuid, t.uuid), eq(schema.expenses.nextOccurrenceOn, occurrenceOn)))
       .returning();
     if (!claimed.length) continue;

@@ -28,16 +28,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
 import { useToast } from "@/components/ui/use-toast";
-import { addMonthsUtc } from "../../../src/domain/calendar";
+import { addMonthsFromAnchor } from "../../../src/domain/calendar";
 
 const plusDays = addDaysYmd;
 // One step along a cadence, mirroring the cron that creates the next 1:1: weeks in days, monthly by calendar
-// month, both stepping from the previous date so the weekday or day-of-month sticks.
-const stepCadence = (iso: string, cadence: string) => {
+// month. `anchorDay` is the series' own day of the month - the cron carries it on the row, and the preview
+// carries it down the chain below, so a monthly 1:1 on the 31st reads "28 Feb · 31 Mar · 30 Apr" rather than
+// dropping to the 28th for good after one short month (domain/calendar.ts#addMonthsFromAnchor).
+const stepCadence = (iso: string, cadence: string, anchorDay: number) => {
   if (cadence !== "monthly") return plusDays(iso, cadence === "weekly" ? 7 : 14);
-  // Clamped, like the cron's own step (domain/calendar.ts): a monthly 1:1 on the 31st shows 28 February, not
-  // 3 March - which is what a bare `setUTCMonth` answers, and it skips the month the meeting belonged to.
-  return addMonthsUtc(new Date(`${iso}T00:00:00Z`), 1).toISOString().slice(0, 10);
+  return addMonthsFromAnchor(new Date(`${iso}T00:00:00Z`), 1, anchorDay).toISOString().slice(0, 10);
 };
 // "Today" / "Tomorrow" / "In n days" for the near future, where a calendar date makes you do the math yourself.
 const relativeDay = (iso: string): string | null => {
@@ -792,9 +792,10 @@ function NewDialog({ me, employees, initial, existing, nameOf, onClose, onCreate
   // The next few dates a cadence will produce, before it is saved - a repeat you can't see is a repeat nobody
   // trusts. Steps the way the cron does (weeks by days, monthly by calendar month, from the previous date), so
   // the dates shown here are the dates that will exist.
+  const anchorDay = form.date ? Number(form.date.slice(8, 10)) : 1;
   const nextDates = form.cadence === "none" || !form.date
     ? []
-    : [1, 2, 3].reduce<string[]>((acc) => [...acc, stepCadence(acc[acc.length - 1] ?? form.date, form.cadence)], []);
+    : [1, 2, 3].reduce<string[]>((acc) => [...acc, stepCadence(acc[acc.length - 1] ?? form.date, form.cadence, anchorDay)], []);
   const rel = form.date ? relativeDay(form.date) : null;
   const withName = form.counterpart ? nameOf(form.counterpart) : "your manager";
 

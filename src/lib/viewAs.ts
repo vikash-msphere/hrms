@@ -58,7 +58,14 @@ export async function resolveViewAs(c: Context<AppEnv>, deps: Deps, real: AppUse
   const kind = slash > 0 ? ref.slice(0, slash) : "";
   const rawId = ref.slice(slash + 1);
   if (kind !== "users" && kind !== "employees") throw invalidArgument("view as: subject must be users/<id> or employees/<id>");
-  const id = TOKEN_RE.test(rawId) ? await deps.idCodec.decode(kind, rawId) : rawId;
+  // WIRE TOKEN ONLY. This used to fall back to treating an unrecognised value as an INTERNAL id, annotated
+  // "tests speak internal ids" - a test affordance that was live in production. It was never an escalation
+  // (the caller must already hold `access-rules.preview`, and the read-only and no-super-subject rails below
+  // still apply), but it was the one place in the app where an internal primary key was an accepted inbound
+  // identifier, which is precisely what the codec exists to prevent: ids stay non-enumerable and the edge
+  // stays the only place they cross. The tests encode now, like the SPA always did.
+  if (!TOKEN_RE.test(rawId)) throw invalidArgument("view as: subject must be users/<id> or employees/<id>");
+  const id = await deps.idCodec.decode(kind, rawId);
   if (!id) throw notFound("view as: subject not found");
 
   // A subject is a sign-in account OR a person. A person with an account is graded as that account; one who has

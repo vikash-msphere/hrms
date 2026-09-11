@@ -425,6 +425,11 @@ export const events = sqliteTable("events", {
   // and MOVES the repeat onto it - the same "exactly one row carries it" shape recurring 1:1s use, so there is
   // never a generator quietly filling the calendar years ahead.
   repeat: text("repeat", { enum: ["weekly", "monthly", "yearly"] }),
+  // The series' own day of the month, held so a month step can put the next occurrence back on it. Without
+  // it a series steps from wherever the last one landed, and one February moves a 29th/30th/31st series to the
+  // 28th for good (domain/calendar.ts#addMonthsFromAnchor). Null until the first roll, which takes it from the
+  // occurrence's own date - the last moment that day is still the one the series was written with.
+  repeatAnchorDay: integer("repeat_anchor_day"),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
@@ -1098,6 +1103,11 @@ export const cards = sqliteTable("cards", {
   // the cadence) and MOVES the cadence onto it - so exactly one card in a series carries it, the same
   // invariant recurring 1:1s run on. Null = a one-off card, which is every card written before this existed.
   cadence: text("cadence", { enum: ["weekly", "biweekly", "monthly", "quarterly"] }),
+  // The series' own day of the month, held so a month step can put the next occurrence back on it. Without
+  // it a series steps from wherever the last one landed, and one February moves a 29th/30th/31st series to the
+  // 28th for good (domain/calendar.ts#addMonthsFromAnchor). Null until the first roll, which takes it from the
+  // occurrence's own date - the last moment that day is still the one the series was written with.
+  cadenceAnchorDay: integer("cadence_anchor_day"),
   committedAt: integer("committed_at", { mode: "timestamp_ms" }),
   startedAt: integer("started_at", { mode: "timestamp_ms" }),
   deliveredAt: integer("delivered_at", { mode: "timestamp_ms" }),
@@ -1231,6 +1241,11 @@ export const checkIns = sqliteTable("check_ins", {
   // Recurring 1:1s: when set and meetingDate passes, the nightly cron creates the next one (carrying open
   // action items forward) and MOVES the cadence onto it - so exactly one row per pair carries the cadence.
   cadence: text("cadence", { enum: ["weekly", "biweekly", "monthly"] }),
+  // The series' own day of the month, held so a month step can put the next occurrence back on it. Without
+  // it a series steps from wherever the last one landed, and one February moves a 29th/30th/31st series to the
+  // 28th for good (domain/calendar.ts#addMonthsFromAnchor). Null until the first roll, which takes it from the
+  // occurrence's own date - the last moment that day is still the one the series was written with.
+  cadenceAnchorDay: integer("cadence_anchor_day"),
   // Everything above is shared with the other party by design. These two are not.
   //
   // A 1:1 whose every word is read by both people is a 1:1 where the honest half goes in a private notebook
@@ -2349,6 +2364,11 @@ export const expenses = sqliteTable("expenses", {
   paused: integer("paused", { mode: "boolean" }).notNull().default(false),
   recurrenceRule: text("recurrence_rule", { enum: ["monthly", "quarterly", "yearly"] }),
   nextOccurrenceOn: integer("next_occurrence_on", { mode: "timestamp_ms" }),
+  // The series' own day of the month, held so a month step can put the next occurrence back on it. Without
+  // it a series steps from wherever the last one landed, and one February moves a 29th/30th/31st series to the
+  // 28th for good (domain/calendar.ts#addMonthsFromAnchor). Null until the first roll, which takes it from the
+  // occurrence's own date - the last moment that day is still the one the series was written with.
+  recurrenceAnchorDay: integer("recurrence_anchor_day"),
   lastGeneratedOn: integer("last_generated_on", { mode: "timestamp_ms" }),
   templateId: text("template_id").references((): AnySQLiteColumn => expenses.uuid), // the recurring template this was cloned from
   createdAt: created(),

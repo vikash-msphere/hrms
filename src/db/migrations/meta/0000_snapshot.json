@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b5042e1d-8e86-47fa-885a-4c196797cd90",
+  "id": "c554b5cf-303f-43f2-858d-fd2d1df6f256",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -4244,6 +4244,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "cadence_anchor_day": {
+          "name": "cadence_anchor_day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "committed_at": {
           "name": "committed_at",
           "type": "integer",
@@ -4511,6 +4518,13 @@
         "cadence": {
           "name": "cadence",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "cadence_anchor_day": {
+          "name": "cadence_anchor_day",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -6425,6 +6439,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "repeat_anchor_day": {
+          "name": "repeat_anchor_day",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "delete_time": {
           "name": "delete_time",
           "type": "integer",
@@ -6876,6 +6897,13 @@
         },
         "next_occurrence_on": {
           "name": "next_occurrence_on",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "recurrence_anchor_day": {
+          "name": "recurrence_anchor_day",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

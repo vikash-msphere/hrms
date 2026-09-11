@@ -1383,9 +1383,17 @@ export async function processPayslipRunJob(deps: Deps, jobId: string, payload: {
   const run = await getRun(deps, payload.runId);
   const ctx = await payslipRunContext(deps, run);
 
+  let written = 0;
   for (const it of todo) {
     const data = await payslipDataForItem(deps, ctx, it);
-    if (!data) continue; // employee row gone - nothing to render
+    if (!data) {
+      // Employee row gone - nothing to render. NAMED, not silently skipped: this item will never produce a
+      // payslip, and the only surviving trace of that is this line plus the shortfall reported on the job
+      // result below. A run item whose employee was hard-deleted between the build and the publish is the one
+      // way an approved payroll ships fewer documents than it priced, and somebody has to be able to find out.
+      console.warn(`[payroll] run item ${it.uuid} has no employee row; no payslip generated`);
+      continue;
+    }
     const pdf = await renderPayslipPdf(data, ctx.template, ctx.letterhead);
     const key = `payslips/${it.employeeId}/${it.uuid}.pdf`;
     await deps.docs.put(key, pdf, "application/pdf");
@@ -1398,6 +1406,7 @@ export async function processPayslipRunJob(deps: Deps, jobId: string, payload: {
     } catch (e) {
       console.error("[payroll] payslip.published emit failed (non-fatal)", e);
     }
+    written++;
   }
 
   const remaining = items.length - (existing.size + todo.length);
@@ -1405,6 +1414,23 @@ export async function processPayslipRunJob(deps: Deps, jobId: string, payload: {
     await deps.db.update(schema.jobs).set({ status: "queued" }).where(eq(schema.jobs.uuid, jobId)); // resume next tick
     return { done: false };
   }
-  await deps.db.update(schema.jobs).set({ resultJson: JSON.stringify({ payslips_generated: items.length, run: `payroll-runs/${payload.runId}` }) }).where(eq(schema.jobs.uuid, jobId));
+  // WHAT WAS ACTUALLY WRITTEN, not how many items the run had. `items.length` counts run items, and an item
+  // the loop skipped (employee row gone) produces no payslip - so the Operations page reported a clean full
+  // run for a payroll that shipped fewer documents than it priced, with nothing anywhere saying so. Exact
+  // without carrying state between passes: every earlier pass's slips are already in `existing`, and this
+  // pass's are `written`, so the two together are every payslip this run has. `skipped` is the shortfall, and
+  // it is only ever non-zero in the case above.
+  const generated = existing.size + written;
+  const skipped = items.length - generated;
+  await deps.db
+    .update(schema.jobs)
+    .set({
+      resultJson: JSON.stringify({
+        payslips_generated: generated,
+        ...(skipped > 0 ? { payslips_skipped: skipped } : {}),
+        run: `payroll-runs/${payload.runId}`,
+      }),
+    })
+    .where(eq(schema.jobs.uuid, jobId));
   return { done: true };
 }

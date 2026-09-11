@@ -3,7 +3,7 @@ import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import type { ListScope } from "../domain/access";
-import { addDaysUtc, addMonthsUtc, advanceUntilAfter } from "../domain/calendar";
+import { addDaysUtc, addMonthsFromAnchor, advanceUntilAfter, seriesAnchorDay } from "../domain/calendar";
 import { sum2 } from "../domain/money";
 import { systemActor } from "../lib/systemActor";
 import * as schema from "../db/schema";
@@ -155,11 +155,15 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
     // due the 12th - born three weeks overdue - and every occurrence after it inherited that lag. Month steps
     // clamp the day (domain/calendar.ts), so a monthly chore on the 31st goes to 28 February instead of
     // rolling over to 3 March and skipping the month.
-    const anchor = new Date(+new Date(r.dueDate ?? r.deliveredAt!));
+    const from = new Date(+new Date(r.dueDate ?? r.deliveredAt!));
     const cadence = r.cadence;
-    const next = advanceUntilAfter(anchor, today, (d) =>
-      cadence === "monthly" ? addMonthsUtc(d, 1)
-        : cadence === "quarterly" ? addMonthsUtc(d, 3)
+    // The series' day of the month, carried onto the successor below. The clamp above lands a 31st series on
+    // 28 February, and stepping from THERE next month kept the 28th - so a monthly access review written for
+    // the 31st spent the rest of its life three days early. The anchor puts it back on the 31st in March.
+    const anchorDay = seriesAnchorDay(from, r.cadenceAnchorDay);
+    const next = advanceUntilAfter(from, today, (d) =>
+      cadence === "monthly" ? addMonthsFromAnchor(d, 1, anchorDay)
+        : cadence === "quarterly" ? addMonthsFromAnchor(d, 3, anchorDay)
         : addDaysUtc(d, cadence === "weekly" ? 7 : 14));
 
     // Claim the series: clearing the cadence under a WHERE that still sees it means a second tick (or another
@@ -197,6 +201,10 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
         cadence: r.cadence,
         initial_todos: todos.map((t) => t.text),
       }, nextId);
+      // The series' day travels with the cadence, onto the one card that carries it. Written here rather than
+      // through `CardInput` because it is not something a caller of `createCard` ever sets - it is bookkeeping
+      // the roll owns, the same way the reporter below is.
+      await deps.db.update(schema.cards).set({ cadenceAnchorDay: anchorDay }).where(eq(schema.cards.uuid, created.uuid));
       // The reporter carries down the series. `createCard` stamps the ACTOR, which here is the nightly tick and
       // nobody - but the chore was filed by a person, and the next instance of it is not suddenly nobody's.
       if (r.reporterId) {
@@ -232,7 +240,7 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
       if (!landed) {
         await deps.db
           .update(schema.cards)
-          .set({ cadence: r.cadence, updatedAt: new Date() })
+          .set({ cadence: r.cadence, cadenceAnchorDay: r.cadenceAnchorDay, updatedAt: new Date() })
           .where(and(eq(schema.cards.uuid, r.uuid), isNull(schema.cards.cadence)));
       }
       failed++;
