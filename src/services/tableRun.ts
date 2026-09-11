@@ -169,10 +169,19 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // - "narrow by department without showing the department") or a field the view filters on and never
   // displays. Its cell is computed below into a side map, used for the predicate and never returned.
   //
+  // THE SAME IS TRUE OF A SORT, and that half was missed. `cleanSort` (services/tableViews.ts) validates a
+  // sort key's SHAPE and never that it names a selected column, so "order by hire date, don't show hire date"
+  // saves fine - and the sort below read `row.cells[s.field]`, which is `undefined` for every row of a field
+  // that was never selected. `compareCells(undefined, undefined)` is 0, so the sort was a silent no-op on a
+  // view that looked correctly configured. The `byKey.has` guard in front of it made it look handled: `byKey`
+  // holds every RESOLVED field, selected or not, so it passed.
+  //
   // RESOLVED HERE, above the sources, because the PII gate down there has to cover these fields too - see the
   // note on `ofSource`. `gated` is therefore the whole set of fields this request can ACT on, displayed or
-  // not, and is what every access decision below is taken over.
-  const judgedOnly = [...new Set(deferred.map((f) => f.field))]
+  // not, and is what every access decision below is taken over - which is also why the sort's fields have to
+  // join it rather than being computed later: a field the caller may not read must not become one a sort can
+  // order the page by.
+  const judgedOnly = [...new Set([...deferred.map((f) => f.field), ...(spec.sort ?? []).map((s) => s.field)])]
     .map((key) => byKey.get(key))
     .filter((f): f is ResolvedField => !!f && !selected.some((s) => s.field.key === f.key));
   const gated: ResolvedField[] = [...selected.map((s) => s.field), ...judgedOnly];
@@ -338,10 +347,15 @@ export async function runTableView(deps: Deps, user: AppUser, scopes: Map<string
   // collection. The grid follows the cursor to the end of the report and DataTable then sorts the whole set,
   // so a multi-page view still reads in the author's order; this is what makes a one-page view and an export
   // come out sorted without the client having to.
+  //
+  // Read through `cellFor`, NOT `row.cells` - a sort key need not be a displayed column (see `judgedOnly`), and
+  // `cells` only ever holds the selected ones. Reading it directly made every sort by a hidden or unselected
+  // field compare `undefined` with `undefined` for every pair, which is a stable no-op: the page came back in
+  // cursor order with nothing to say it had ignored the view's sort.
   for (const s of [...(spec.sort ?? [])].reverse()) {
     if (!byKey.has(s.field)) continue;
     const dir = s.dir === "asc" ? 1 : -1;
-    filtered.sort((a, b) => dir * compareCells(a.cells[s.field], b.cells[s.field]));
+    filtered.sort((a, b) => dir * compareCells(cellFor(a, s.field), cellFor(b, s.field)));
   }
 
   // ---- Audit ---------------------------------------------------------------------------------------------

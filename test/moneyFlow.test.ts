@@ -1695,3 +1695,110 @@ describe("compensation: a self-service read is priced by the server and carries 
     expect(decorated.every((r) => toCompensationResource(r).breakdown === undefined)).toBe(true);
   });
 });
+
+// A run that cannot price somebody must SAY SO. The build walks every employee who has not left and skips
+// anyone with no compensation in force at the period end, because there is no salary to price - correct, but
+// it used to be silent, and a skipped person leaves no trace anywhere else: they have no run item, and every
+// other warning the run carries (staleness, split drift) is computed FROM the items. So the one employee the
+// run is wrong about was the one employee it could not mention, and the symptom was not an error - it was
+// somebody quietly not being paid, found when they asked.
+describe("payroll: an employee the run could not price is named, not dropped", () => {
+  it("lists someone employed in the period who has no compensation on record", async () => {
+    const paid = await seedEmployee({ firstName: "Priya", lastName: "Paid", startDate: new Date("2025-01-01") });
+    const missed = await seedEmployee({ firstName: "Nadia", lastName: "Nocomp", startDate: new Date("2025-01-01") });
+    const actor = await seedActor(paid);
+    await seedComp(paid, { basePay: 30000 });
+    // `missed` deliberately gets no compensation row at all - the new-joiner-never-set-up case.
+    const period = await seedPeriod();
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    await buildRunItems(deps, actor, run.uuid);
+
+    // The run pays exactly one person...
+    const items = await listRunItems(deps, run.uuid);
+    expect(items).toHaveLength(1);
+    // ...and says who it could not.
+    const freshness = await runStaleness(deps, await getRun(deps, run.uuid));
+    expect(freshness.unpriced).toEqual(["Nadia Nocomp"]);
+  });
+
+  it("says nothing when everyone was priced", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2025-01-01") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await runStaleness(deps, await getRun(deps, run.uuid))).unpriced).toBeUndefined();
+  });
+
+  it("does not cry about a FUTURE joiner, who is correctly unpriced", async () => {
+    const emp = await seedEmployee({ startDate: new Date("2025-01-01") });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    // The period is Jan 2026 (seedPeriod); this person starts after it closes, so they are not owed anything
+    // and their absence is the right answer. A warning that fires on every start date in the diary is a
+    // warning nobody reads.
+    await seedEmployee({ firstName: "Later", lastName: "Joiner", startDate: new Date("2026-06-01") });
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await runStaleness(deps, await getRun(deps, run.uuid))).unpriced).toBeUndefined();
+  });
+
+  it("clears the list on a rebuild that can price everybody", async () => {
+    const paid = await seedEmployee({ startDate: new Date("2025-01-01") });
+    const missed = await seedEmployee({ firstName: "Fixed", lastName: "Later", startDate: new Date("2025-01-01") });
+    const actor = await seedActor(paid);
+    await seedComp(paid, { basePay: 30000 });
+    const run = await createRun(deps, actor, `pay-periods/${await seedPeriod()}`);
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await runStaleness(deps, await getRun(deps, run.uuid))).unpriced).toEqual(["Fixed Later"]);
+
+    // The remedy the banner asks for: enter their compensation, rebuild.
+    await seedComp(missed, { basePay: 25000 });
+    await buildRunItems(deps, actor, run.uuid);
+    expect((await listRunItems(deps, run.uuid))).toHaveLength(2);
+    expect((await runStaleness(deps, await getRun(deps, run.uuid))).unpriced).toBeUndefined();
+  });
+});
+
+// The salary timeline is written as close-the-old-row + open-the-new-one. Those are two statements, and they
+// used to be two ROUND TRIPS with a code allocation awaited in between: a failure in the gap committed the
+// close and never landed the insert, leaving the employee with every compensation row closed - no current
+// salary - which `compAsOf` answers `undefined` for and the payroll build then silently skips.
+describe("compensation: a revision leaves the timeline whole", () => {
+  it("keeps exactly one open row through a chain of revisions", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 600000, effective_from: "2025-01-01" });
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 720000, effective_from: "2025-07-01" });
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 840000, effective_from: "2026-01-01" });
+
+    const rows = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp));
+    expect(rows).toHaveLength(3);
+    const open = rows.filter((r) => r.effectiveTo === null);
+    expect(open).toHaveLength(1);
+    expect(open[0]!.ctcAnnual).toBe(840000);
+    // Half-open and contiguous: each closed row ends exactly where the next begins, so there is no instant the
+    // employee has no salary and none where they have two.
+    const byFrom = [...rows].sort((a, b) => +new Date(a.effectiveFrom) - +new Date(b.effectiveFrom));
+    expect(+new Date(byFrom[0]!.effectiveTo!)).toBe(+new Date(byFrom[1]!.effectiveFrom));
+    expect(+new Date(byFrom[1]!.effectiveTo!)).toBe(+new Date(byFrom[2]!.effectiveFrom));
+  });
+
+  it("refuses the loser of a concurrent revision instead of opening a second current row", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 600000, effective_from: "2025-01-01" });
+
+    // Both read the same open row, both try to close it and open their own.
+    const results = await Promise.allSettled([
+      reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 700000, effective_from: "2025-07-01" }),
+      reviseCompensation(deps, actor, { employee: `employees/${emp}`, annual_ctc: 800000, effective_from: "2025-08-01" }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+
+    // Whichever won, the invariant holds: one current salary, and the loser wrote nothing at all.
+    const rows = await deps.db.select().from(schema.compensation).where(eq(schema.compensation.employeeId, emp));
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.effectiveTo === null)).toHaveLength(1);
+  });
+});

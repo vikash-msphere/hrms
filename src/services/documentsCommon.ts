@@ -110,6 +110,23 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 // SVG is deliberately NOT allowed: it can carry inline script and is a stored-XSS vector if ever served
 // inline. (The API CSP + attachment disposition also defend, but the file type is refused outright.)
+//
+// Nor is anything else the browser would treat as a DOCUMENT. SVG was refused by name while `text/html` was
+// not, which made the rule read as "no SVG" when what it is actually for is "nothing that executes when the
+// bytes come back". These are the rest of that family: markup the browser will parse and run script from, and
+// the XML types it will follow a stylesheet out of.
+const EXECUTABLE_TYPES = new Set([
+  "image/svg+xml",
+  "text/html",
+  "application/xhtml+xml",
+  "text/xml",
+  "application/xml",
+  "text/javascript",
+  "application/javascript",
+  "application/ecmascript",
+  "text/ecmascript",
+]);
+const EXECUTABLE_EXTENSIONS = new Set(["svg", "svgz", "html", "htm", "xhtml", "xml", "js", "mjs"]);
 
 /** The bare media type: lowercased, parameters stripped.
  *
@@ -125,11 +142,15 @@ const mediaType = (contentType?: string): string | undefined =>
 
 export function isAllowedUpload(fileName?: string, contentType?: string): boolean {
   const ext = fileName?.split(".").pop()?.toLowerCase();
-  if (ext === "svg") return false;
+  if (ext && EXECUTABLE_EXTENSIONS.has(ext)) return false;
   const ct = mediaType(contentType);
-  // The SVG refusal comes before the extension allow-list, not after it: the media type is what the file IS,
-  // and a name is only what it was called. `logo.png` declaring `image/svg+xml` is an SVG.
-  if (ct === "image/svg+xml") return false;
+  // The executable refusals come before the extension allow-list, not after it: the media type is what the
+  // file IS, and a name is only what it was called. `logo.png` declaring `image/svg+xml` is an SVG - and
+  // `resume.pdf` declaring `text/html` is a web page, which is the case this arm used to walk straight past.
+  // The extension arm below RETURNS, so anything it accepted was never shown the media type at all; the
+  // declared type is then stored and echoed back by every download route, so "the name ends in .pdf" was
+  // enough to choose the `Content-Type` the server would later serve those bytes under.
+  if (ct && EXECUTABLE_TYPES.has(ct)) return false;
   if (ext && ALLOWED_EXTENSIONS.has(ext)) return true;
   if (ct) {
     if (ct.startsWith("image/")) return true;
@@ -137,6 +158,28 @@ export function isAllowedUpload(fileName?: string, contentType?: string): boolea
     if (/word|opendocument|msword|excel|spreadsheet|sheet|presentation|powerpoint/.test(ct)) return true;
   }
   return false;
+}
+
+/**
+ * The `Content-Type` an uploaded file is STORED under, which is also the one every download route echoes back.
+ *
+ * `isAllowedUpload` decides whether the bytes may be kept at all; this decides what the server is willing to
+ * claim they are. The two are separate questions because the first one has to stay permissive - a `.pages` or
+ * `.numbers` file arrives under a vendor media type nobody can enumerate, and refusing what we cannot name
+ * would break ordinary uploads - while the second must not be, because the answer is a header the browser acts
+ * on. Anything outside the set the app itself produces or recognises is stored as `application/octet-stream`:
+ * the file downloads exactly as before (every route sends `Content-Disposition: attachment`), and the caller
+ * no longer picks the type their own bytes come back as.
+ *
+ * Defence in depth, not the only defence - the attachment disposition, `X-Content-Type-Options: nosniff` and
+ * the `/v1` CSP (`default-src 'none'`, middleware/securityHeaders.ts) each independently stop a stored page
+ * from executing. It is here because none of those three is a reason for the server to describe a file as
+ * something the uploader made up.
+ */
+export function storedContentType(contentType?: string | null): string {
+  const ct = mediaType(contentType ?? undefined);
+  if (!ct || EXECUTABLE_TYPES.has(ct)) return "application/octet-stream";
+  return ct in EXT_BY_TYPE || ct === "application/rtf" ? ct : "application/octet-stream";
 }
 
 // A policy that requires acknowledgement must be a PDF: the signed copy filed for each employee is the policy

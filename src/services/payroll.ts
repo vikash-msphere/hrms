@@ -325,7 +325,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // Un-stamp the build: until the commit batch below lands, this run has no items, and a `built_time` left
     // pointing at the previous build would read as "built and up to date" for an EMPTY run (runStaleness
     // compares inputs against it) - which an approver could then approve and publish, paying nobody.
-    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null }).where(eq(schema.payrollRuns.uuid, runId)),
+    // The unpriced list is cleared with it: it describes ONE build, and a list outliving the items it was
+    // written beside would name people against a run that has not priced anybody.
+    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null, unpricedJson: null }).where(eq(schema.payrollRuns.uuid, runId)),
   ]);
   const periodEndMs = period ? +new Date(period.periodEnd) : undefined;
   const now = new Date();
@@ -361,6 +363,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   const paidReimbIds: string[] = [];
   const loanEntries: { loanId: string; amount: number }[] = [];
   const itemRows: (typeof schema.payrollRunItems.$inferInsert)[] = [];
+  // Employees the loop below considered and could not price. Recorded on the run so the omission is visible -
+  // see `payroll_runs.unpriced_json` in db/schema.ts for why a silent skip is the wrong failure mode here.
+  const unpriced: string[] = [];
 
   // Loss-of-pay for unexcused absences (opt-in via settings/attendance.lop_enabled). Assemble the period's
   // holidays, approved leave and attendance punches ONCE; the per-employee absent-day count + amount follow.
@@ -453,7 +458,23 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   for (const e of employees) {
     const compRows = compByEmp.get(e.uuid) ?? [];
     const comp = compAsOf(compRows, periodEndMs);
-    if (!comp) continue;
+    // No salary in force for this period, so there is nothing to price. RECORDED, not merely skipped: this is
+    // the state a new joiner whose compensation was never entered is in, and a run that drops them without
+    // saying so pays everyone except the one person nobody has checked on.
+    //
+    // Recorded only for someone who was actually EMPLOYED during the period, though. A future joiner already
+    // on the roster has no salary in force yet and is correctly absent from this run - listing them would make
+    // the warning fire on every run that has a start date in the diary, which is how a warning stops being
+    // read. Same at the other end for a leaver dated out before the period opened. What is left is the case
+    // the list exists for: somebody who worked this period and has no compensation on record.
+    if (!comp) {
+      const startMs = e.startDate ? +new Date(e.startDate) : null;
+      const endMs = e.endDate ? +new Date(e.endDate) : null;
+      const employedInPeriod =
+        !period || ((startMs === null || startMs <= +new Date(period.periodEnd)) && (endMs === null || endMs >= +new Date(period.periodStart)));
+      if (employedInPeriod) unpriced.push(e.uuid);
+      continue;
+    }
     if ((comp.currency || "INR") !== orgCurrency) {
       throw failedPrecondition(`${e.firstName} ${e.lastName}'s compensation is in ${comp.currency || "INR"}, but payroll runs in ${orgCurrency}`);
     }
@@ -798,7 +819,12 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     ...loanWrites.stmts,
     ...insertBatches(itemRows, (rows) => deps.db.insert(schema.payrollRunItems).values(rows)),
     // Stamp the build time: any income-affecting input touched after this makes the run stale (see runStaleness).
-    deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: builtAt, updatedAt: builtAt }).where(eq(schema.payrollRuns.uuid, runId)),
+    // The unpriced list rides the SAME statement, so who the run could not price is written by the same atomic
+    // batch as what it did price - the two can never describe different builds.
+    deps.db
+      .update(schema.payrollRuns)
+      .set({ itemsBuiltAt: builtAt, unpricedJson: unpriced.length ? JSON.stringify(unpriced) : null, updatedAt: builtAt })
+      .where(eq(schema.payrollRuns.uuid, runId)),
   ];
   const drifted = await runBatchChecked(deps.db, stmts);
   if (drifted.length) {
@@ -808,7 +834,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     await runBatch(deps.db, [
       deps.db.delete(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, runId)),
       ...(await releasePaidByRun(deps, runId)),
-      deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null }).where(eq(schema.payrollRuns.uuid, runId)),
+      deps.db.update(schema.payrollRuns).set({ itemsBuiltAt: null, unpricedJson: null }).where(eq(schema.payrollRuns.uuid, runId)),
     ]);
     throw failedPrecondition(`payables changed while the run was building (${[...new Set(drifted)].join(", ")}) - nothing was paid; build the run again`);
   }
@@ -827,10 +853,15 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
   // a headcount cannot answer and a diff against the previous build's totals can. Rounded like every other
   // money figure in this file (see the monetary invariant in db/schema.ts).
   const built = { gross: round2(itemRows.reduce((s, r) => s + r.gross, 0)), net: round2(itemRows.reduce((s, r) => s + r.net, 0)), tax: round2(itemRows.reduce((s, r) => s + (r.tax ?? 0), 0)) };
+  // COUNTED AS PRICED, not as considered. `employees.length` is everyone the build walked, which includes the
+  // people it could not price - so a run that silently dropped someone recorded the headcount it meant to pay
+  // rather than the one it did, and the diff against the previous build showed no movement on the very number
+  // that had moved. `itemRows.length` is what the run actually pays; the omission is named beside it.
   await audit(deps, actor, "payroll.build", "payroll-runs", runId, {
-    employees: employees.length,
+    employees: itemRows.length,
+    ...(unpriced.length ? { unpriced: unpriced.length } : {}),
     diff: {
-      employees: { from: priorTotals?.employees ?? null, to: employees.length },
+      employees: { from: priorTotals?.employees ?? null, to: itemRows.length },
       gross: { from: priorTotals?.gross ?? null, to: built.gross },
       totalTax: { from: priorTotals?.tax ?? null, to: built.tax },
       net: { from: priorTotals?.net ?? null, to: built.net },
@@ -850,29 +881,69 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
 // the numbers are wrong even on a freshly built run. It needs a split re-apply and THEN a rebuild, so it is
 // reported separately rather than folded into `changes`. Warning only - the run still submits/approves, because
 // paying the contracted stored split can be deliberate; the reviewer decides.
+/** The employee-id list a run stamped, or [] for an absent/unreadable one - a warning must never be the thing
+ *  that fails the read it rides on. */
+function parseIdList(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json) as unknown;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Display names for a handful of employees, by id, chunked under D1's bound-parameter cap. */
+async function employeeNameMap(deps: Deps, ids: string[]): Promise<Map<string, string>> {
+  return new Map(
+    (await byIdChunks([...new Set(ids)], (group) =>
+      deps.db
+        .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName })
+        .from(schema.employees)
+        .where(inArray(schema.employees.uuid, group)),
+    )).map((e) => [e.uuid, `${e.firstName} ${e.lastName}`]),
+  );
+}
+
+/** The same, sorted and flattened - an id survives as itself when the row is gone, so a name can never be the
+ *  reason the list is short. */
+async function employeeNames(deps: Deps, ids: string[]): Promise<string[]> {
+  const named = await employeeNameMap(deps, ids);
+  return ids.map((id) => named.get(id) ?? id).sort();
+}
+
+// `unpriced` is a third, different thing again, and the one that is NOT about the numbers being wrong: these
+// are people the build walked and could not price at all, so they are absent from the run rather than wrong in
+// it. Read straight off the stamp the build wrote (`payroll_runs.unpriced_json`) - it needs no recomputation,
+// which is why it is the one warning here that is reported in EVERY state. Split drift stops at the editable
+// runs because re-solving a split under a committed run says nothing actionable; an approved or published run
+// that left somebody out is the case where saying so matters most, and by then it is the only trace there is.
 export type SplitDrift = { stale: string[]; skipped: string[] }; // employee display names
-export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[]; split_drift?: SplitDrift };
-export async function runStaleness(deps: Deps, run: { uuid: string; state: string; payPeriodId: string; itemsBuiltAt: Date | null }): Promise<RunStaleness> {
+export type RunStaleness = { built_time: string | null; stale: boolean; changes: string[]; split_drift?: SplitDrift; unpriced?: string[] };
+export async function runStaleness(deps: Deps, run: { uuid: string; state: string; payPeriodId: string; itemsBuiltAt: Date | null; unpricedJson?: string | null }): Promise<RunStaleness> {
   const builtAt = run.itemsBuiltAt;
-  if (!isEditable(run.state as RunState) || !builtAt) return { built_time: builtAt ? builtAt.toISOString() : null, stale: false, changes: [] };
+  // Ids only; names are resolved below, in the same read the split-drift names use.
+  const unpricedIds = parseIdList(run.unpricedJson);
+  if (!isEditable(run.state as RunState) || !builtAt) {
+    const built_time = builtAt ? builtAt.toISOString() : null;
+    if (!unpricedIds.length) return { built_time, stale: false, changes: [] };
+    return { built_time, stale: false, changes: [], unpriced: await employeeNames(deps, unpricedIds) };
+  }
   // Split drift for the people this run actually priced, named for the reviewer. Editable runs only: an approved
   // or published run is a historical record, and re-solving splits under it would say nothing actionable.
   const items = await deps.db.select({ employeeId: schema.payrollRunItems.employeeId }).from(schema.payrollRunItems).where(eq(schema.payrollRunItems.runId, run.uuid));
   const drift = await splitDriftFor(deps, items.map((i) => i.employeeId));
   let split_drift: SplitDrift | undefined;
+  // ONE name read for all three lists. They are disjoint by construction (an unpriced employee has no item, so
+  // `splitDriftFor` never saw them), but they are named by the same query so a run with both kinds of problem
+  // still costs the reviewer one lookup rather than two.
+  const toName = [...new Set([...drift.stale, ...drift.skipped, ...unpricedIds])];
+  const named = toName.length ? await employeeNameMap(deps, toName) : new Map<string, string>();
+  const names = (ids: string[]) => ids.map((id) => named.get(id) ?? id).sort();
   if (drift.stale.length || drift.skipped.length) {
-    // Only the people who actually drifted, which is normally a handful and often one - not the whole table.
-    const named = new Map(
-      (await byIdChunks([...new Set([...drift.stale, ...drift.skipped])], (group) =>
-        deps.db
-          .select({ uuid: schema.employees.uuid, firstName: schema.employees.firstName, lastName: schema.employees.lastName })
-          .from(schema.employees)
-          .where(inArray(schema.employees.uuid, group)),
-      )).map((e) => [e.uuid, `${e.firstName} ${e.lastName}`]),
-    );
-    const names = (ids: string[]) => ids.map((id) => named.get(id) ?? id).sort();
     split_drift = { stale: names(drift.stale), skipped: names(drift.skipped) };
   }
+  const unpriced = unpricedIds.length ? names(unpricedIds) : undefined;
   // Each source: does any row's updatedAt post-date the build? `updatedAt` also bumps on create + soft-delete
   // + enable/disable, so joiners, removals and toggles are all covered by the same comparison.
   // `ownRun`: the column by which a row says THIS run paid it. Those rows are the build's own markers, and a
@@ -994,7 +1065,7 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   });
   const [row] = await deps.db.all<Record<string, number>>(sql`select ${sql.join(probes, sql`, `)}`);
   const changes = sources.filter((_, i) => !!row?.[`c${i}`]).map((s) => s.label);
-  return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}) };
+  return { built_time: builtAt.toISOString(), stale: changes.length > 0, changes, ...(split_drift ? { split_drift } : {}), ...(unpriced ? { unpriced } : {}) };
 }
 
 // Segregation of duties on the payroll commit, opt-in per org via the `payroll-approval` settings blob. Turned
@@ -1059,6 +1130,12 @@ export async function transition(deps: Deps, actor: AppUser, runId: string, to: 
     // first) and which can be a deliberate choice to pay the contracted stored split. Gating on that would
     // deadlock the approve with no action that clears it; it stays the reviewer's call, as documented on
     // `runStaleness`.
+    //
+    // `unpriced` is not gated on either, for that same reason rather than by oversight. It names people the
+    // build could not price, and while the usual remedy (enter their compensation, rebuild) is the right one,
+    // it is not the ONLY correct reading: an employee genuinely owed nothing for the period - on unpaid leave
+    // for all of it, or hired into a period their compensation deliberately starts after - is unpriced and
+    // should be. Blocking on it would stop a correct payroll with no action that clears it. It is a banner.
     const freshness = await runStaleness(deps, run);
     if (freshness.stale) {
       throw failedPrecondition(

@@ -15,7 +15,7 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, stateMeta } from "../lib/audit";
 import { aborted, invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { getSettingValue, getDefaultDepartmentId } from "./settings";
-import { assertUploadSize, isAllowedUpload } from "./documentsCommon";
+import { assertUploadSize, isAllowedUpload, storedContentType } from "./documentsCommon";
 import { parseAttachments, safeAttachmentName, MAX_TICKET_ATTACHMENTS, type TicketAttachment } from "../domain/ticketAttachments";
 import { DEFAULT_TICKET_WORKFLOW, transitionFor } from "../domain/stateMachines";
 import { shareTicketWith, grantTicketRead, revokeTicketRead, usersForEmployees } from "./ticketShares";
@@ -385,7 +385,11 @@ export async function attachToTicket(
   if (parseAttachments(t.attachmentsJson).length >= MAX_TICKET_ATTACHMENTS)
     throw invalidArgument(`a ticket can hold ${MAX_TICKET_ATTACHMENTS} attachments; remove one first`);
   const key = `tickets/${id}/${crypto.randomUUID()}`;
-  const contentType = opts.contentType || "application/octet-stream";
+  // Normalized like every other upload lane (services/documentsCommon.ts#storedContentType). This route's own
+  // download already hardcodes `application/octet-stream`, so nothing here echoes it today - but the value is
+  // stored on the attachment entry and rendered, and one server-side rule for "what we say a file is" is
+  // better than one lane that happens not to need it.
+  const contentType = storedContentType(opts.contentType);
   await deps.docs.put(key, bytes, contentType);
   const entry: TicketAttachment = {
     key,

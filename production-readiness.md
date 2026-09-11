@@ -11,7 +11,7 @@ Last verified against the working tree on **2026-09-11**.
 
 | Gate | Result |
 |------|--------|
-| `npm test` (vitest) | 2701 tests across 228 files, 0 failures |
+| `npm test` (vitest) | 2719 tests across 229 files, 0 failures |
 | `npm run typecheck` | 0 errors (api + web + e2e) |
 | `npm run lint` (eslint, `--max-warnings 0`) | 0 issues |
 | `npm run api:lint` (spectral) | 0 errors (23 infos) |

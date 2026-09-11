@@ -7,7 +7,9 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
-import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
+import { runBatchChecked } from "../lib/dbBatch";
+import { genId } from "../lib/idCodec";
+import { invalidArgument, notFound, failedPrecondition, aborted, isOpenTimelineCollision } from "../lib/errors";
 import { type CrudSpec } from "./crud";
 
 // Effective-dated role history (designation/department/location). A promotion or transfer is a NEW row
@@ -77,14 +79,40 @@ export async function changeRole(deps: Deps, actor: AppUser, input: PositionInpu
   const jobTitle = input.job_title !== undefined ? input.job_title?.trim() || null : current?.jobTitle ?? emp.jobTitle ?? null;
   const location = input.location !== undefined ? input.location?.trim() || null : current?.location ?? null;
 
+  // Everything the write needs, resolved BEFORE the batch: the code allocation is a read-then-write of its own
+  // (services/codeAlloc.ts) and the row id is minted here so the successor can be read back by it. Nothing
+  // below this line may fail for a reason other than the writes themselves.
+  const code = await allocOwnedCode(deps, schema.positions, schema.positions.employeeId, employeeId);
+  const uuid = genId();
+  const now = new Date();
+
   // Half-open intervals: the prior row ends where the new one begins.
-  if (current) {
-    await deps.db.update(schema.positions).set({ effectiveTo: new Date(from), updatedAt: new Date() }).where(eq(schema.positions.uuid, current.uuid));
-  }
-  const row = (await deps.db
-    .insert(schema.positions)
-    .values({
-      code: await allocOwnedCode(deps, schema.positions, schema.positions.employeeId, employeeId),
+  //
+  // ONE ATOMIC BATCH, and the close is GUARDED - the same pair services/compensation.ts uses on the salary
+  // timeline, which this table mirrors and which it was missing both halves of.
+  //
+  //   - Guarded (`isNull(effectiveTo)` + a checked row count): two concurrent role changes both read the same
+  //     open row, and the loser has to stop rather than close a row that is already closed and open a second
+  //     current one. `pos_open_idx` is the DB backstop for the ordering this check cannot see.
+  //   - Atomic (D1 executes a batch as one implicit transaction, see lib/dbBatch.ts): close, insert and the
+  //     denormalized sync onto `employees` are one row change described three ways, and a failure between them
+  //     left the employee with every position row closed - no current role at all - or with a
+  //     `employees.department_id` that names a department no position row mentions. That column is a scope key.
+  const short = await runBatchChecked(deps.db, [
+    ...(current
+      ? [{
+          stmt: deps.db
+            .update(schema.positions)
+            .set({ effectiveTo: new Date(from), updatedAt: now })
+            .where(and(eq(schema.positions.uuid, current.uuid), isNull(schema.positions.effectiveTo)))
+            .returning({ uuid: schema.positions.uuid }),
+          expect: 1,
+          label: "close the current role",
+        }]
+      : []),
+    deps.db.insert(schema.positions).values({
+      uuid,
+      code,
       employeeId,
       jobTitle,
       departmentId,
@@ -92,10 +120,18 @@ export async function changeRole(deps: Deps, actor: AppUser, input: PositionInpu
       note: input.note?.trim() || null,
       effectiveFrom: new Date(from),
       effectiveTo: null,
-    })
-    .returning())[0]!;
-  // Keep the employee's live current designation/department in sync (the rest of the app reads these).
-  await deps.db.update(schema.employees).set({ jobTitle, departmentId, updatedAt: new Date() }).where(eq(schema.employees.uuid, employeeId));
+    }),
+    // Keep the employee's live current designation/department in sync (the rest of the app reads these).
+    deps.db.update(schema.employees).set({ jobTitle, departmentId, updatedAt: now }).where(eq(schema.employees.uuid, employeeId)),
+  ]).catch((e: unknown) => {
+    // The other ordering of the same race: our close matched nothing and the insert then collided on
+    // `pos_open_idx`, so D1 rolled the whole batch back. Same answer as the short count below.
+    if (isOpenTimelineCollision(e)) throw aborted("this employee's role was changed concurrently; reload and try again");
+    throw e;
+  });
+  if (short.length) throw aborted("this employee's role was changed concurrently; reload and try again");
+
+  const row = (await deps.db.select().from(schema.positions).where(eq(schema.positions.uuid, uuid)).limit(1))[0]!;
   await audit(deps, actor, "position.change", "positions", row.uuid, { employee: `employees/${employeeId}` });
   return row;
 }

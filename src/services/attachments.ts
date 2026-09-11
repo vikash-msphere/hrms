@@ -8,7 +8,7 @@ import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument, notFound } from "../lib/errors";
 import { genId } from "../lib/idCodec";
-import { isAllowedUpload } from "./documentsCommon";
+import { isAllowedUpload, storedContentType } from "./documentsCommon";
 import { getSettingValue } from "./settings";
 
 const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -64,11 +64,16 @@ export async function putAttachment(
   const max = await maxUploadBytes(deps);
   if (args.bytes.byteLength > max) throw invalidArgument(`file exceeds the ${Math.round(max / 1048576)} MB upload limit`);
 
+  // What the server is willing to CLAIM these bytes are, which is not the same question as whether it will
+  // keep them (see storedContentType). Every download route below echoes this column straight into the
+  // response's `Content-Type`, so the raw `?content_type=` the caller sent must not be what lands in it.
+  const contentType = storedContentType(args.contentType);
+
   const existing = await getAttachment(deps, args.collection, args.objectId, slot);
   const uuid = existing?.uuid ?? genId();
   const r2Key = existing?.r2Key ?? `attachments/${args.collection}/${args.objectId}/${uuid}`;
-  await deps.docs.put(r2Key, args.bytes, args.contentType ?? "application/octet-stream"); // encrypted by the docstore wrapper
-  const meta = { fileName: args.fileName ?? null, contentType: args.contentType ?? null, sizeBytes: args.bytes.byteLength, uploadedBy: actor.uuid };
+  await deps.docs.put(r2Key, args.bytes, contentType); // encrypted by the docstore wrapper
+  const meta = { fileName: args.fileName ?? null, contentType, sizeBytes: args.bytes.byteLength, uploadedBy: actor.uuid };
   if (existing) {
     await deps.db.update(schema.attachments).set({ ...meta, updatedAt: new Date() }).where(eq(schema.attachments.uuid, uuid));
   } else {

@@ -1702,7 +1702,19 @@ export const positions = sqliteTable("positions", {
   effectiveTo: integer("effective_to", { mode: "timestamp_ms" }), // null = current
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("pos_emp_idx").on(t.employeeId) }));
+  // At most ONE open (current) row per employee, for the same reason `comp_open_idx` exists on the salary
+  // timeline above - this table is the same shape and had neither half of that guard. Two concurrent role
+  // changes (a double-click, a retried submit) both read the same open row, both close it and both insert,
+  // leaving TWO current positions. Nothing downstream can tell them apart: `location` is read last-wins for
+  // the regional holiday calendar and comp-off credit (services/holidays.ts, leaveRequests.ts, compOff.ts),
+  // and the `employees.department_id` copy written alongside can end up matching neither - which is a scope
+  // key, so a wrong one is an access-control fact and not only a display one.
+  // No `delete_time` term: a position row is history and is never soft-deleted (the collection is list+get,
+  // see services/positions.ts), so the open row is the only thing the predicate has to be narrowed to.
+}, (t) => ({
+  empIdx: index("pos_emp_idx").on(t.employeeId),
+  openUniq: uniqueIndex("pos_open_idx").on(t.employeeId).where(sql`${t.effectiveTo} is null`),
+}));
 
 // One-off awards (performance/joining/retention bonus, incentive). A flat per-employee log (no effective-
 // dating); the bonus/incentive letter cites the most recent award. Payout is handled separately via payroll.
@@ -2147,6 +2159,17 @@ export const payrollRuns = sqliteTable("payroll_runs", {
   // leaves the company, and deleting a run RELEASES every payable it paid back into the queue - so once this
   // is stamped the run can no longer be deleted, otherwise the next run would pay the same one-offs again.
   bankFileAt: integer("bank_file_at", { mode: "timestamp_ms" }),
+  // Employee ids the last build CONSIDERED but could not price - a JSON array, written by the same atomic
+  // batch that writes the items and cleared whenever the run is reset to "never built".
+  //
+  // The build walks every employee who has not left and skips anyone with no compensation row in force at the
+  // period end, because there is no salary to price. That skip is correct; being SILENT about it was not.
+  // Nothing downstream could see it either: a skipped person has no `payroll_run_items` row, and every other
+  // warning this run carries (staleness, split drift) is computed from the items - so the one employee the run
+  // is wrong about is the one employee it cannot mention. The visible symptom was not an error, it was someone
+  // quietly not being paid, found when they asked. Every other money path already refuses this state out loud
+  // (services/settlements.ts, services/leaveEncashments.ts: "the employee has no compensation on record").
+  unpricedJson: text("unpriced_json"),
   createdAt: created(),
   updatedAt: updated(),
   // At most ONE committed (APPROVED/PUBLISHED) run per pay period, enforced by the DB. Drafts are unrestricted

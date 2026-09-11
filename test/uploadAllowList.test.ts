@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isAllowedUpload, isPdfUpload, documentFileName } from "../src/services/documentsCommon";
+import { isAllowedUpload, isPdfUpload, documentFileName, storedContentType } from "../src/services/documentsCommon";
 
 // The upload allow-list is server-authoritative, and every decision it makes is a comparison against a bare
 // media type. A `Content-Type` may carry parameters - `image/svg+xml; charset=utf-8` names the same type as
@@ -38,6 +38,64 @@ describe("isAllowedUpload - the media type decides, parameters and all", () => {
     expect(isAllowedUpload("payload.html", "text/html")).toBe(false);
     expect(isAllowedUpload("run.exe", "application/octet-stream")).toBe(false);
     expect(isAllowedUpload(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("an allowed EXTENSION does not excuse an executable media type", () => {
+  // The extension arm returned before the media type was ever consulted, so a name ending in an allowed
+  // extension was enough to declare any type at all - and that declared type is what the upload STORED and
+  // every download route echoes back into the response's `Content-Type`. `payload.html` was refused (no
+  // allowed extension, no allowed type) while `resume.pdf` carrying `text/html` sailed through, which is the
+  // same file under a different name.
+  it("refuses text/html however the file is named", () => {
+    expect(isAllowedUpload("resume.pdf", "text/html")).toBe(false);
+    expect(isAllowedUpload("sheet.xlsx", "text/html; charset=utf-8")).toBe(false);
+    expect(isAllowedUpload("photo.png", "TEXT/HTML")).toBe(false);
+  });
+
+  it("refuses the rest of the family SVG was standing in for", () => {
+    for (const ct of ["application/xhtml+xml", "text/xml", "application/xml", "application/javascript", "text/javascript"]) {
+      expect(isAllowedUpload("notes.txt", ct)).toBe(false);
+    }
+  });
+
+  it("refuses an executable EXTENSION even with a harmless declared type", () => {
+    expect(isAllowedUpload("payload.html", "text/plain")).toBe(false);
+    expect(isAllowedUpload("payload.htm", "application/pdf")).toBe(false);
+    expect(isAllowedUpload("payload.js", "text/plain")).toBe(false);
+    expect(isAllowedUpload("logo.svgz", "image/png")).toBe(false);
+  });
+
+  it("leaves the legitimate uploads alone", () => {
+    expect(isAllowedUpload("resume.pdf", "application/pdf")).toBe(true);
+    expect(isAllowedUpload("notes.txt", "text/plain; charset=utf-8")).toBe(true);
+    expect(isAllowedUpload("deck.pptx", undefined)).toBe(true);
+    // A vendor type nobody can enumerate, on an allowed extension: still accepted, because refusing what we
+    // cannot name would break ordinary uploads. `storedContentType` is what keeps it from being echoed.
+    expect(isAllowedUpload("plan.pages", "application/x-iwork-pages-sffpages")).toBe(true);
+  });
+});
+
+describe("storedContentType - what the server is willing to CLAIM a file is", () => {
+  it("keeps the types the app produces and recognises", () => {
+    expect(storedContentType("application/pdf")).toBe("application/pdf");
+    expect(storedContentType("image/png")).toBe("image/png");
+    expect(storedContentType("text/plain; charset=utf-8")).toBe("text/plain");
+    expect(storedContentType("APPLICATION/PDF")).toBe("application/pdf");
+    expect(storedContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")).toBe(
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+  });
+
+  it("collapses anything else to octet-stream rather than echoing it back", () => {
+    // The point of the whole exercise: the caller does not get to choose the Content-Type their own bytes are
+    // later served under, even where the bytes themselves were allowed to be stored.
+    expect(storedContentType("text/html")).toBe("application/octet-stream");
+    expect(storedContentType("image/svg+xml")).toBe("application/octet-stream");
+    expect(storedContentType("application/x-iwork-pages-sffpages")).toBe("application/octet-stream");
+    expect(storedContentType(undefined)).toBe("application/octet-stream");
+    expect(storedContentType(null)).toBe("application/octet-stream");
+    expect(storedContentType("")).toBe("application/octet-stream");
   });
 });
 

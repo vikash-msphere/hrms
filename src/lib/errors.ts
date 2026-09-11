@@ -144,6 +144,19 @@ export function isCompOffDuplicate(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bcomp_off_credits\.(employee_id|worked_date)\b/i.test(errorChainText(err));
 }
 
+/** Two concurrent writes to one employee's effective-dated timeline both tried to leave it with an open row.
+ *
+ *  `comp_open_idx` / `pos_open_idx` are partial unique indexes on `employee_id where effective_to is null`, so
+ *  they are what stops a salary or a role history from ending up with two "current" rows when two revisions
+ *  race (services/compensation.ts, services/positions.ts). Both writers guard their close on the row still
+ *  being open and both run close+insert as one atomic batch, so the loser normally stops on the short count -
+ *  this matcher is for the ordering where it does not: the loser's close matched nothing AND its insert then
+ *  collided, which D1 raises as a constraint failure that rolls the whole batch back. Either way the answer
+ *  is the same and it is not a 500: read the timeline again and re-apply. */
+export function isOpenTimelineCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\b(compensation|positions)\.employee_id\b/i.test(errorChainText(err));
+}
+
 /** A DELETE that SQLite refused because another table still points at the row.
  *
  *  A hard purge tears down what a row OWNS first (services/softDelete.ts `cascade`), so reaching this means

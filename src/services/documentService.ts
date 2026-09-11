@@ -16,7 +16,7 @@ import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDele
 import { hasPrintVersion } from "./letterheads";
 import { assertNotLocked } from "./lifecycle";
 import { genId } from "../lib/idCodec";
-import { VALID_DOC_TYPES, idFromPath, isAllowedUpload, isPdfUpload, assertUploadSize, documentFileName, type DocumentInput, type DocType } from "./documentsCommon";
+import { VALID_DOC_TYPES, idFromPath, isAllowedUpload, isPdfUpload, assertUploadSize, documentFileName, storedContentType, type DocumentInput, type DocType } from "./documentsCommon";
 import { notifyAudience, type Audience } from "./notifications";
 import { emitEvent } from "./eventBus";
 import { getSettingValue } from "./settings";
@@ -228,7 +228,10 @@ export function makeDocumentService(cfg: Cfg) {
     // A document requiring acknowledgement must be a PDF (the signature is stamped in place onto it).
     if (acknowledgeable && row.requiresAck && !isPdfUpload(opts.fileName, opts.contentType))
       throw invalidArgument("a document that requires acknowledgement must be a PDF");
-    const ct = opts.contentType || row.contentType || "application/octet-stream";
+    // Normalized, never the raw header: this column is echoed into the download's `Content-Type` (see the
+    // `download` lane below), so the caller must not get to name the type their own bytes come back as.
+    // See services/documentsCommon.ts#storedContentType.
+    const ct = opts.contentType ? storedContentType(opts.contentType) : row.contentType || "application/octet-stream";
     await deps.docs.put(row.r2Key, bytes, ct);
     const set: Record<string, unknown> = { sizeBytes: bytes.byteLength, contentType: ct, fileName: opts.fileName ?? row.fileName ?? null, updatedAt: new Date() };
     // Replacing the file of a document that requires acknowledgement is a NEW version: bump so everyone re-signs.

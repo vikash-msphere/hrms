@@ -1549,6 +1549,7 @@ CREATE TABLE `payroll_runs` (
 	`lock_time` integer,
 	`items_built_at` integer,
 	`bank_file_at` integer,
+	`unpriced_json` text,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`pay_period_id`) REFERENCES `pay_periods`(`uuid`) ON UPDATE no action ON DELETE no action,
@@ -1647,6 +1648,7 @@ CREATE TABLE `positions` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `positions_code_unique` ON `positions` (`code`);--> statement-breakpoint
 CREATE INDEX `pos_emp_idx` ON `positions` (`employee_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `pos_open_idx` ON `positions` (`employee_id`) WHERE "positions"."effective_to" is null;--> statement-breakpoint
 CREATE TABLE `preferences` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,

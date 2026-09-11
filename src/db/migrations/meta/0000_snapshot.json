@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8a7008e3-7f26-4fd7-9b48-7e7ecc031062",
+  "id": "263c7462-aae9-428e-b03c-2585c024ffb1",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -11199,6 +11199,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "unpriced_json": {
+          "name": "unpriced_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -11892,6 +11899,14 @@
             "employee_id"
           ],
           "isUnique": false
+        },
+        "pos_open_idx": {
+          "name": "pos_open_idx",
+          "columns": [
+            "employee_id"
+          ],
+          "isUnique": true,
+          "where": "\"positions\".\"effective_to\" is null"
         }
       },
       "foreignKeys": {

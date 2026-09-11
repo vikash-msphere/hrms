@@ -413,6 +413,41 @@ describe("running a grid", () => {
     expect(desc.rows.map((r) => r.cells.first_name)).toEqual(["Grace", "Ada"]);
   });
 
+  // "Order by X, don't show X" is an ordinary thing to build a report out of, and `cleanSort` validates a sort
+  // key's SHAPE only - never that it names a selected column - so it saves fine. The sort then read
+  // `row.cells[field]`, which only ever holds the SELECTED columns: every comparison was `undefined` against
+  // `undefined`, which `compareCells` answers 0 for, so the sort was a stable no-op. The page came back in
+  // cursor order with nothing to say the view's sort had been ignored, and the `byKey.has` guard in front of it
+  // made it look handled (`byKey` holds every resolved field, selected or not, so it passed).
+  it("sorts by a column it does not display", async () => {
+    await seed();
+    const bare = { base: "employees", columns: [{ field: "@comp.ctc_annual" }] };
+
+    // Hidden: the author asked for the column and then hid it.
+    const hidden = await runTableView(
+      deps, SUPER(), allScopes(),
+      { ...bare, columns: [...bare.columns, { field: "first_name", hidden: true }], sort: [{ field: "first_name", dir: "desc" }] },
+      { maxPageSize: 50, unmask: true },
+    );
+    // The hidden column is not returned...
+    expect(hidden.columns.map((c) => c.key)).toEqual(["@comp.ctc_annual"]);
+    // ...but it did the ordering. Ada and Grace have different CTCs, so the visible column proves the order.
+    const byName = await runTableView(
+      deps, SUPER(), allScopes(), { ...bare, columns: [{ field: "first_name" }, ...bare.columns], sort: [{ field: "first_name", dir: "desc" }] },
+      { maxPageSize: 50, unmask: true },
+    );
+    expect(byName.rows.map((r) => r.cells.first_name)).toEqual(["Grace", "Ada"]);
+    expect(hidden.rows.map((r) => r.cells["@comp.ctc_annual"])).toEqual(byName.rows.map((r) => r.cells["@comp.ctc_annual"]));
+
+    // And the same for a field the view never names as a column at all, which a saved spec can carry.
+    const unlisted = await runTableView(
+      deps, SUPER(), allScopes(), { ...bare, sort: [{ field: "first_name", dir: "asc" }] }, { maxPageSize: 50, unmask: true },
+    );
+    expect(unlisted.rows.map((r) => r.cells["@comp.ctc_annual"])).toEqual(
+      [...hidden.rows.map((r) => r.cells["@comp.ctc_annual"])].reverse(),
+    );
+  });
+
   it("never offers a bare foreign key as a column - the link's own fields are what a grid shows", async () => {
     await seed();
     const catalogue = await buildCatalogue(deps, "employees", new Set(TABLE_SOURCE_COLLECTIONS));

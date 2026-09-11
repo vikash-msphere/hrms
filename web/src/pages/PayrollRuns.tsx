@@ -99,7 +99,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   const reviewFor = useRef<string | null>(null);
   const [items, setItems] = useState<PayrollRunItem[] | null>(null);
   type SplitDrift = { stale: string[]; skipped: string[] };
-  const [reviewStale, setReviewStale] = useState<{ stale: boolean; changes: string[]; split_drift?: SplitDrift } | null>(null);
+  const [reviewStale, setReviewStale] = useState<{ stale: boolean; changes: string[]; split_drift?: SplitDrift; unpriced?: string[] } | null>(null);
   // Re-apply machinery for the split-drift warning below (prompt-only; the banner here is the surface).
   const { canReapply, reapplying, reapply: doReapply } = useSplitStaleness({ auto: false });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -111,7 +111,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
   const [comparing, setComparing] = useState(false);
   // Fetch the run DETAIL (carries staleness: inputs changed since the last build) + the per-employee breakdown.
   // The detail response has a fresh etag, so it's stored as reviewRun and drives an in-place rebuild.
-  type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift };
+  type RunDetail = PayrollRun & { stale?: boolean; changes?: string[]; built_time?: string | null; split_drift?: SplitDrift; unpriced?: string[] };
   async function openReview(run: PayrollRun) {
     reviewFor.current = idOf(run.path);
     setReviewRun(run);
@@ -129,7 +129,7 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
       // no longer open, and setting the run again would put it back on screen.
       if (reviewFor.current !== idOf(run.path)) return;
       setReviewRun(detail);
-      setReviewStale({ stale: !!detail.stale, changes: detail.changes ?? [], split_drift: detail.split_drift });
+      setReviewStale({ stale: !!detail.stale, changes: detail.changes ?? [], split_drift: detail.split_drift, unpriced: detail.unpriced });
       setItems(r.results ?? []);
     } catch (e) {
       if (reviewFor.current !== idOf(run.path)) return;
@@ -732,6 +732,26 @@ export default function PayrollRuns({ me, tab, openId }: { me: Me; tab?: string;
               <div>
                 <p className="font-medium">{reviewStale.split_drift.skipped.length} employee{reviewStale.split_drift.skipped.length === 1 ? "'s" : "s'"} CTC no longer fits the components.</p>
                 <p className="mt-0.5 text-xs">{reviewStale.split_drift.skipped.join(", ")} - no split fits that CTC, so re-applying can't fix it. Raise the CTC or trim components.</p>
+              </div>
+            </div>
+          ) : null}
+          {/* People the build walked and could not price: they are ABSENT from the breakdown below rather than
+              wrong in it, which is why no amount of reading the item list finds them. Destructive colour, like
+              the CTC-doesn't-fit case: both mean the run is not yet a correct payroll and both need a data fix
+              before a rebuild. A warning rather than a block - somebody genuinely owed nothing for the period
+              is correctly unpriced, so the reviewer decides (see the note on `transition` in services/payroll.ts). */}
+          {reviewStale?.unpriced?.length ? (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium">
+                  {reviewStale.unpriced.length} employee{reviewStale.unpriced.length === 1 ? " is" : "s are"} not on this run.
+                </p>
+                <p className="mt-0.5 text-xs">
+                  {reviewStale.unpriced.join(", ")} - no compensation is in force for this period, so there was nothing to price and they are
+                  missing from the breakdown entirely. Set their compensation, then rebuild. If they are genuinely owed nothing for this period,
+                  this is expected.
+                </p>
               </div>
             </div>
           ) : null}

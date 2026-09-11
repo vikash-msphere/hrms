@@ -12,9 +12,10 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, auditMany, diffMeta } from "../lib/audit";
-import { runBatch, byIdChunks, type BatchStmt } from "../lib/dbBatch";
+import { runBatch, runBatchChecked, byIdChunks, type BatchStmt } from "../lib/dbBatch";
+import { genId } from "../lib/idCodec";
 import { etagOf } from "../http/serialize";
-import { invalidArgument, notFound, failedPrecondition, aborted } from "../lib/errors";
+import { invalidArgument, notFound, failedPrecondition, aborted, isOpenTimelineCollision } from "../lib/errors";
 import { notify } from "./notifications";
 import { refPayComponents, refPayPeriods, refPayGrades, refSalaryStructures } from "../lib/refData";
 
@@ -309,39 +310,58 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
   const until = Math.min(nowMs, next ? +new Date(next.effectiveFrom) : nowMs);
   const priced = await priceRevision(deps, employeeId, emp.epfEnrolled, annualCtc, structureId, from, until, prev);
 
+  // Everything the write needs, resolved BEFORE the batch: the code allocation and the currency lookup are
+  // reads of their own, and the row id is minted here so the successor can be read back by it. Past this line
+  // nothing may fail for a reason other than the writes themselves - which is what makes the batch below the
+  // whole of the operation.
+  const code = await allocOwnedCode(deps, schema.compensation, schema.compensation.employeeId, employeeId);
+  // The org's own currency, never a literal: the app is single-currency and payroll rejects a payable that is
+  // not in it, so a first compensation row minted as "INR" in a non-INR org blocks every run.
+  const currency = input.currency_code?.trim() || prev?.currency || next?.currency || (await orgCurrency(deps));
+  const uuid = genId();
+  const now = new Date();
+
   // Half-open intervals: the prior row ends where the new one begins.
-  if (prev && !next) {
-    // `prev` is the OPEN row. Guarded on it still being open, so closing it is EXACTLY-ONCE: two concurrent
-    // revisions both read the same current row, and the loser must stop here rather than insert a second open
-    // row - which would leave an ambiguous current salary and pay the arrears delta twice. (`comp_open_idx`,
-    // the partial unique index on the open live row, is the DB backstop.)
-    const [closed] = await deps.db
-      .update(schema.compensation)
-      .set({ effectiveTo: new Date(from), updatedAt: new Date() })
-      .where(and(eq(schema.compensation.uuid, prev.uuid), isNull(schema.compensation.effectiveTo)))
-      .returning();
-    if (!closed) throw aborted("this employee's compensation was revised concurrently; reload and try again");
-  } else if (prev) {
-    // A middle insert: `prev` is already closed (at `next`'s start), and now ends here instead. Guarded on the
-    // end date we read, so a second insert into the same gap loses rather than silently overlapping.
-    const [closed] = await deps.db
-      .update(schema.compensation)
-      .set({ effectiveTo: new Date(from), updatedAt: new Date() })
-      .where(and(eq(schema.compensation.uuid, prev.uuid), eq(schema.compensation.effectiveTo, new Date(prev.effectiveTo!))))
-      .returning();
-    if (!closed) throw aborted("this employee's compensation was revised concurrently; reload and try again");
-  }
-  const row = (await deps.db
-    .insert(schema.compensation)
-    .values({
-      code: await allocOwnedCode(deps, schema.compensation, schema.compensation.employeeId, employeeId),
+  //
+  // ONE ATOMIC BATCH (D1 runs a batch as a single implicit transaction - see lib/dbBatch.ts). Closing the
+  // predecessor and opening the successor are two halves of one move, and they were two separate statements
+  // with a code allocation awaited between them: a failure in the gap (an exhausted allocation retry, a D1
+  // blip, the invocation's CPU ceiling) committed the close and never landed the insert, leaving the employee
+  // with EVERY compensation row closed. `compAsOf` then answers undefined, and services/payroll.ts skips an
+  // employee it cannot price - so the visible symptom is not an error, it is someone quietly not being paid.
+  //
+  // The close stays GUARDED, and the guard is now a checked row count rather than a returned row: two
+  // concurrent revisions both read the same neighbour, and the loser must stop rather than close a row that is
+  // already closed and open a second current one - which would leave an ambiguous current salary and pay the
+  // arrears delta twice. (`comp_open_idx`, the partial unique index on the open live row, is the DB backstop.)
+  const closeStmt = prev
+    ? {
+        stmt: deps.db
+          .update(schema.compensation)
+          .set({ effectiveTo: new Date(from), updatedAt: now })
+          .where(
+            and(
+              eq(schema.compensation.uuid, prev.uuid),
+              // The OPEN row when this revision becomes the latest; a MIDDLE insert's predecessor is already
+              // closed (at `next`'s start) and now ends here instead, so it is guarded on the end date we read.
+              next ? eq(schema.compensation.effectiveTo, new Date(prev.effectiveTo!)) : isNull(schema.compensation.effectiveTo),
+            ),
+          )
+          .returning({ uuid: schema.compensation.uuid }),
+        expect: 1,
+        label: "close the preceding revision",
+      }
+    : null;
+  const short = await runBatchChecked(deps.db, [
+    ...(closeStmt ? [closeStmt] : []),
+    deps.db.insert(schema.compensation).values({
+      uuid,
+      code,
       employeeId,
       ctcAnnual: annualCtc,
       basePay: priced.basePay,
       specialAllowance: priced.specialAllowance,
-      // The org's own currency, never a literal: the app is single-currency and payroll rejects a payable that
-      // is not in it, so a first compensation row minted as "INR" in a non-INR org blocks every run.
-      currency: input.currency_code?.trim() || prev?.currency || next?.currency || await orgCurrency(deps),
+      currency,
       payGradeId,
       structureId,
       variablePayTarget: input.variable_pay_target ?? prev?.variablePayTarget ?? null,
@@ -350,8 +370,16 @@ export async function reviseCompensation(deps: Deps, actor: AppUser, input: Comp
       effectiveTo: next ? new Date(next.effectiveFrom) : null,
       arrearsAmount: priced.arrearsAmount,
       arrearsBaseAmount: priced.arrearsBaseAmount,
-    })
-    .returning())[0]!;
+    }),
+  ]).catch((e: unknown) => {
+    // The other ordering of the same race: our close matched nothing and the insert then collided on
+    // `comp_open_idx`, so D1 rolled the whole batch back. Same answer as the short count below.
+    if (isOpenTimelineCollision(e)) throw aborted("this employee's compensation was revised concurrently; reload and try again");
+    throw e;
+  });
+  if (short.length) throw aborted("this employee's compensation was revised concurrently; reload and try again");
+
+  const row = (await deps.db.select().from(schema.compensation).where(eq(schema.compensation.uuid, uuid)).limit(1))[0]!;
   // What the salary WAS and what it now IS - a revision is a from->to by nature, and the feed renders
   // `meta.diff` as exactly that. Without it the trail says only "revised", which is the one thing the reader
   // could already see. `prev` is the revision this one supersedes, so on a first-ever row the "from" is empty.

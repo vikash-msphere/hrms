@@ -3594,6 +3594,11 @@ components:
           properties:
             stale: { type: array, items: { type: string }, description: "Names whose split a re-apply would change." }
             skipped: { type: array, items: { type: string }, description: "Names whose CTC no longer fits the components at all - a re-apply cannot fix these; raise the CTC or trim components." }
+        unpriced:
+          type: array
+          readOnly: true
+          items: { type: string }
+          description: "Names the last build walked but could not price, because no compensation revision is in force at the period end - so they are ABSENT from this run rather than wrong in it. Only people employed during the period are listed (a future joiner already on the roster is correctly unpriced). A warning, not a block: enter their compensation and rebuild, or accept it if they are genuinely owed nothing. Absent when everyone was priced. Detail GET only; reported in every state, unlike split_drift."
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
