@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeRunItem, canTransition, isEditable, overtimePay, ctcLines, splitCtc, employerCostLines, pfWagesOf, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG } from "../src/domain/payroll";
+import { computeRunItem, canTransition, isEditable, overtimePay, ctcLines, splitCtc, employerCostLines, pfWagesOf, DEFAULT_CTC_CONFIG, DEFAULT_OVERTIME_CONFIG, type RunState } from "../src/domain/payroll";
 import { monthlyRecurringGross } from "../src/services/taxProjection";
 import { grantFor } from "../src/domain/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
@@ -180,6 +180,16 @@ describe("payroll run state machine (pure)", () => {
     expect(canTransition("PUBLISHED", "APPROVED")).toBe(false);
     expect(isEditable("APPROVED")).toBe(false);
     expect(isEditable("DRAFT")).toBe(true);
+  });
+  it("refuses every transition out of a state it does not know, instead of throwing", () => {
+    // `RunState` is a TypeScript type; `payroll_runs.state` is plain TEXT with no CHECK constraint, and
+    // services/payroll.ts reaches this function through `run.state as RunState` - an unchecked cast. So a row
+    // holding anything else is reachable without any code here being wrong, and the answer has to be "no
+    // transition", which the caller renders as failedPrecondition. It used to be a TypeError on the index,
+    // i.e. a 500 naming nothing, for a run an operator would then have no way to read the state of.
+    const unknown = "ARCHIVED" as unknown as RunState;
+    expect(canTransition(unknown, "REVIEW")).toBe(false);
+    expect(canTransition(unknown, "PUBLISHED")).toBe(false);
   });
 });
 

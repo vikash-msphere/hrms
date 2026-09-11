@@ -31,7 +31,7 @@ import { MAX_COLUMNS, type ViewFilter, type ViewSpec } from "../domain/tableFiel
 import { resolveFields, type ResolvedField } from "./tableCatalog";
 import { getFieldDefs, maskIdentityValue } from "./identityDetails";
 import { maskAccount } from "./bankDetails";
-import { refPayComponents, refPayPeriods } from "../lib/refData";
+import { refPayComponents, refPayPeriods, refPayGrades, refSalaryStructures } from "../lib/refData";
 import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
 import { applyStructure, ctcLines, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
@@ -625,8 +625,11 @@ async function loadSource(
       );
       const components = await refPayComponents(deps);
       const pfBasis = (await getSettingValue<CtcConfig>(deps, "ctc", DEFAULT_CTC_CONFIG)).pf_wage_basis ?? "basic";
-      const grades = await deps.db.select().from(schema.payGrades);
-      const structures = await deps.db.select().from(schema.salaryStructures);
+      // Through lib/refData, like `components` above: both are whole-catalog reads that resolve a stored
+      // foreign key to a name, and a grid run alongside a compensation read in the same request (or the same
+      // batch envelope, which shares one Deps) would otherwise pay each of them twice.
+      const grades = await refPayGrades(deps);
+      const structures = await refSalaryStructures(deps);
       const gradeName = new Map(grades.map((g) => [g.uuid, g.name]));
       const structureName = new Map(structures.map((s) => [s.uuid, s.name]));
       // Newest effective row per employee - the one in force, the same pick letters and payroll make.

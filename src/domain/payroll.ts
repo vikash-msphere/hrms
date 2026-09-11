@@ -340,8 +340,13 @@ const TRANSITIONS: Record<RunState, RunState[]> = {
   PUBLISHED: [],
 };
 
+// `?? []` because `from` is only a RunState to TypeScript. The column is plain TEXT - drizzle's `enum` is a
+// compile-time type, not a CHECK constraint (see the migration), so nothing in the DATABASE stops a value
+// outside the four. A bare `TRANSITIONS[from]` on such a row is a TypeError, which reaches the caller as a
+// 500; unknown state means no transition is permitted, which is a `failedPrecondition` the operator can read.
+// Fail closed and say so, rather than fail loudly and say nothing.
 export function canTransition(from: RunState, to: RunState): boolean {
-  return TRANSITIONS[from].includes(to);
+  return (TRANSITIONS[from] ?? []).includes(to);
 }
 
 export const isEditable = (s: RunState) => s === "DRAFT" || s === "REVIEW";

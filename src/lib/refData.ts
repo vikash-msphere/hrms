@@ -21,7 +21,15 @@ import type { Deps } from "../deps";
 //
 // Consumers get the SHARED array - treat it as immutable (map/filter, never sort or splice in place).
 
-export type RefTable = "settings" | "pay_components" | "leave_types" | "holidays" | "departments" | "pay_periods";
+export type RefTable =
+  | "settings"
+  | "pay_components"
+  | "leave_types"
+  | "holidays"
+  | "departments"
+  | "pay_periods"
+  | "pay_grades"
+  | "salary_structures";
 
 /** Create the per-request memo. Called by the request middleware; absent everywhere else. */
 export const makeRefCache = (): Map<string, Promise<unknown>> => new Map();
@@ -44,6 +52,15 @@ export const refLeaveTypes = (deps: Deps) => once(deps, "leave_types", () => dep
 export const refHolidays = (deps: Deps) => once(deps, "holidays", () => deps.db.select().from(schema.holidays));
 export const refDepartments = (deps: Deps) => once(deps, "departments", () => deps.db.select().from(schema.departments));
 export const refPayPeriods = (deps: Deps) => once(deps, "pay_periods", () => deps.db.select().from(schema.payPeriods));
+// The two ladder catalogs. Every compensation answer decorates its rows with the grade's name/band and the
+// structure's name (services/compensation.ts withGrades), and the custom-grid `comp` source needs the same two
+// maps - so they are read whole, repeatedly, by the surfaces that read compensation. They belong here for the
+// reason every table above does: a `batch:run` carrying several compensation sub-requests shares one Deps, so
+// without the memo it paid both catalogs once per sub-request. Deleted rows are deliberately INCLUDED: these
+// reads resolve a name for a stored foreign key, and a grade retired after a revision was signed still names
+// the grade that revision was priced at.
+export const refPayGrades = (deps: Deps) => once(deps, "pay_grades", () => deps.db.select().from(schema.payGrades));
+export const refSalaryStructures = (deps: Deps) => once(deps, "salary_structures", () => deps.db.select().from(schema.salaryStructures));
 
 /**
  * Drop this request's snapshot of a table, so a later read in the SAME request sees a write it just made.

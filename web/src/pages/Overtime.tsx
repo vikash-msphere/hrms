@@ -148,7 +148,12 @@ export default function Overtime({ me }: { me: Me }) {
         const ends = sessions
           .filter((s) => s.employee && idOf(s.employee) === idOf(form.employee) && s.clock_out && localDay(s.clock_out, tz) === formDay)
           .map((s) => s.clock_out!);
-        const last = ends.sort()[ends.length - 1];
+        // Compared as INSTANTS, not as strings. A bare `.sort()` orders lexicographically, which agrees with
+        // chronological order only while every value is the same spelling of the same zone - and `clock_out`
+        // is a timestamp off the wire, so an offset form (`+05:30`) or a different fractional-second width is
+        // all it takes for the two orders to part. Picking the wrong "last punch out" here does not fail; it
+        // pre-fills the overtime dialog with an earlier departure, which is a shorter claim nobody queries.
+        const last = [...ends].sort((a, b) => +new Date(a) - +new Date(b))[ends.length - 1];
         // Only a departure comfortably past the shift end is overtime worth offering.
         if (!cancelled) {
           const past = last && localMinutes(last, tz) > hhmmToMin(sched.shift_end) + 15;

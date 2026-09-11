@@ -16,7 +16,7 @@ import { runBatch, byIdChunks, type BatchStmt } from "../lib/dbBatch";
 import { etagOf } from "../http/serialize";
 import { invalidArgument, notFound, failedPrecondition, aborted } from "../lib/errors";
 import { notify } from "./notifications";
-import { refPayComponents, refPayPeriods } from "../lib/refData";
+import { refPayComponents, refPayPeriods, refPayGrades, refSalaryStructures } from "../lib/refData";
 
 // Effective-dated base pay. A salary revision (increment/appraisal) is a NEW row effective from a chosen date;
 // the previously-current row is closed (effective_to set). Payroll prices each period at the row effective
@@ -206,13 +206,22 @@ async function refsOf(deps: Deps, input: { pay_grade?: string | null; salary_str
 }
 
 // Decorate compensation rows with their pay grade (name + band, for compa-ratio/in-band) and salary-structure
-// name, so the serializer can render them. One read per catalog for the whole set.
+// name, so the serializer can render them.
+//
+// Both catalogs come from lib/refData, NOT from a select here. They are read whole either way - resolving a
+// handful of stored foreign keys to names is what they are for, and an `inArray` of the ids on a full page
+// would spend most of the D1 parameter cap to read the same small table - so the question is only whether the
+// read is memoized for the request. It was not, and these were the only two reference tables in the app that
+// were not: this function runs on every compensation list, get, create and update, a `batch:run` shares one
+// Deps across its sub-requests, and the custom grid's `comp` source needs the same two maps. So a batch
+// carrying several compensation reads paid both catalogs once per sub-request, on the one surface that reads
+// them most. Now it pays them once, like every other catalog the money path touches.
 async function withGrades<T extends { payGradeId: string | null; structureId: string | null }>(deps: Deps, rows: T[]) {
   const gradeIds = new Set(rows.map((r) => r.payGradeId).filter(Boolean) as string[]);
   const structIds = new Set(rows.map((r) => r.structureId).filter(Boolean) as string[]);
   if (!gradeIds.size && !structIds.size) return rows;
-  const grades = gradeIds.size ? new Map((await deps.db.select().from(schema.payGrades)).filter((g) => gradeIds.has(g.uuid)).map((g) => [g.uuid, g])) : new Map();
-  const structs = structIds.size ? new Map((await deps.db.select().from(schema.salaryStructures)).filter((s) => structIds.has(s.uuid)).map((s) => [s.uuid, s])) : new Map();
+  const grades = gradeIds.size ? new Map((await refPayGrades(deps)).filter((g) => gradeIds.has(g.uuid)).map((g) => [g.uuid, g])) : new Map();
+  const structs = structIds.size ? new Map((await refSalaryStructures(deps)).filter((s) => structIds.has(s.uuid)).map((s) => [s.uuid, s])) : new Map();
   return rows.map((r) => ({
     ...r,
     ...(r.payGradeId ? { grade: grades.get(r.payGradeId) } : {}),

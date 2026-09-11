@@ -238,6 +238,10 @@ async function resolveAttachments(deps: Deps, ctx: EvalContext, specs: EmailAtta
       let r2Key: string | null = null;
       let filename = spec.filename ?? "";
       let contentType = "application/pdf";
+      // Only two of these four branches test soft-delete, and that is correct rather than an oversight:
+      // `payslips` and `attachments` carry no `delete_time` column at all (see schema.ts - a payslip is
+      // deleted with its run, an attachment with its parent row), so there is no deleted state for them to
+      // be in. The two document collections do, and check it.
       if (collection === "payslips") {
         const row = (await deps.db.select({ r2Key: schema.payslips.r2Key }).from(schema.payslips).where(eq(schema.payslips.uuid, id)).limit(1))[0];
         r2Key = row?.r2Key ?? null;
