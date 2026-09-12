@@ -25,6 +25,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
 import { invalidateCodeCache } from "../lib/authzResolve";
+import { clearCachePrefix } from "../lib/cache";
 import { invalidArgument } from "../lib/errors";
 import { runBatch, type BatchStmt } from "../lib/dbBatch";
 
@@ -100,6 +101,56 @@ export const HIERARCHICAL_TABLES: HierTable[] = [
 const HIER_COLLECTIONS = HIERARCHICAL_TABLES.map((h) => h.collection).filter((c): c is string => c !== null);
 
 /**
+ * The id-position tokens that are SCOPE WORDS, not codes. Never rewritten, and the guard is not cosmetic.
+ *
+ * `me` and `my-dept` are resolved per caller (domain/permissions.ts matchToken), so they carry no literal code
+ * and a move must leave them alone. The reason they need an explicit skip rather than falling out of the
+ * prefix test is that a CODE SEGMENT CAN SPELL THEM: segments come from the Crockford alphabet
+ * (domain/codes.ts), which contains m, y, e and d - so a two-character department really can be coded `my`,
+ * and `"my-dept".startsWith("my-")` is true. Without this list, re-parenting that department would rewrite
+ * every `my-dept` rule in the app into a subtree rule for the moved department - turning "your own department"
+ * into "that one", for every holder, silently. `*` / `**` have no separator and could not match anyway; they
+ * are listed because the set is "tokens that are not codes", not "tokens that happen to be safe".
+ */
+const SCOPE_WORDS = new Set(["me", "my-dept", "*", "**"]);
+
+/**
+ * One access-rule pattern, retargeted from `oldPrefix` to `newPrefix`, or null when it names no moved code.
+ *
+ * WHY THIS EXISTS AT ALL. The cascade rewrote `match_code` and `scope_code` and left `pattern` alone - and
+ * `pattern` is the one that decides. schema.ts says so on the column ("VERBATIM grant pattern - the decision
+ * input, never re-derived") and domain/compileGrants.ts says the others are "DERIVED narrowing keys the DB
+ * uses to fetch a SUPERSET of candidate rows". So after a move the narrowing key found the rule and the engine
+ * then failed to match it: `decide()` compared the stored `employees.04-002.**` against the resource
+ * `employees.05-001` and answered no.
+ *
+ * That is a SILENT revocation of every per-object share and every subtree rule pointing into the moved
+ * subtree, and it displayed as working: services/accessRules.ts resolves a rule's `scope_ref` from
+ * `match_code`, the column that WAS updated, so the manage-access modal went on showing the rule as active and
+ * pointing at the moved record. Fail-closed (access is lost, never gained) and invisible, which is the pair
+ * that makes it worth a helper of its own rather than an inline expression.
+ *
+ * The code lives at token[1] - the id position - in every shape the ACL authors (`<col>.<code>.**`,
+ * `<col>.<code>.<field>.**`, `<col>.<code>.<verb>`, and the subtree form `<col>.<code>-*.**`). Only that token
+ * is touched, so a field path or a verb tail rides through untouched.
+ *
+ * PURE, and exported, because the shapes it must refuse are the ones no scenario test naturally produces.
+ */
+export function reprefixPattern(pattern: string, oldPrefix: string, newPrefix: string): string | null {
+  const toks = pattern.split(".");
+  const id = toks[1];
+  if (id === undefined || SCOPE_WORDS.has(id)) return null;
+  // The subtree spelling carries a `-*` tail on the code; strip it, rewrite the code, put it back.
+  const subtree = id.endsWith("-*");
+  const code = subtree ? id.slice(0, -2) : id;
+  // Exactly the containment `reprefixSubtree` selects rows by: the moved row itself, or something under it.
+  // Boundary-anchored, so the neighbour `04-0029` is not caught by a move of `04-002`.
+  if (code !== oldPrefix && !code.startsWith(`${oldPrefix}-`)) return null;
+  toks[1] = `${newPrefix}${code.slice(oldPrefix.length)}${subtree ? "-*" : ""}`;
+  return toks.join(".");
+}
+
+/**
  * Rewrite every hierarchical row under `oldPrefix` to sit under `newPrefix`, preserving the child segments
  * (`newPrefix || substr(code, len(oldPrefix)+1)`: the self row -> newPrefix exactly, a child `oldPrefix-x` ->
  * `newPrefix-x`). Also fixes any access-rule that references a moved code (per-object `match_code` shares and
@@ -155,9 +206,46 @@ export async function reprefixSubtree(deps: Deps, oldPrefix: string, newPrefix: 
       .set({ scopeCode: sql`${newPrefix} || substr(${schema.accessRules.scopeCode}, ${from})`, updatedAt: new Date() })
       .where(and(hierNs, under(schema.accessRules.scopeCode))),
   );
+  // AND THE PATTERN, which is the column that actually decides - see `reprefixPattern` for what leaving it
+  // behind cost. Rewritten row by row rather than by `substr` arithmetic in SQL, because the code does not sit
+  // at a fixed offset in a pattern: the id token is preceded by a namespace of any length and followed by an
+  // optional field path or verb, and the subtree spelling carries a `-*` tail that shifts every offset after
+  // it by two. One narrow read (hierarchical namespaces, rules whose id position can hold a literal code, and
+  // only those under the moved prefix) buys an unambiguous rewrite, on an action an org performs rarely.
+  //
+  // The updates ride the SAME batch as everything above, so the pattern and the narrowing keys that fetch it
+  // can never disagree about where a rule points - which is exactly the split that produced the defect.
+  const patternRules = await deps.db
+    .select({ uuid: schema.accessRules.uuid, pattern: schema.accessRules.pattern })
+    .from(schema.accessRules)
+    .where(and(
+      hierNs,
+      inArray(schema.accessRules.scopeKind, ["exact", "subtree"]),
+      or(under(schema.accessRules.matchCode), under(schema.accessRules.scopeCode)),
+    ));
+  for (const r of patternRules) {
+    const next = reprefixPattern(r.pattern, oldPrefix, newPrefix);
+    if (!next) continue; // names no moved code (a scope word, or a neighbour the boundary test excludes)
+    stmts.push(
+      deps.db
+        .update(schema.accessRules)
+        .set({ pattern: next, updatedAt: new Date() })
+        .where(eq(schema.accessRules.uuid, r.uuid)),
+    );
+  }
   await runBatch(deps.db, [...stmts, ...also]);
   // Codes changed: drop this isolate's uuid->code cache immediately (others self-heal via its TTL).
   invalidateCodeCache();
+  // AND THE CACHED AUTHORITY, for the same reason services/accessRules.ts busts it after a rule edit: the rows
+  // this just rewrote ARE the compiled grant, and lib/policyLoad.ts caches them (`grant:` per role, `userGrant:`
+  // per user, `objRules:` per caller) for a few seconds. Without this the isolate that performed the move goes
+  // on deciding from the pre-move patterns until the TTL lapses - so the admin who just re-parented someone is
+  // the one person guaranteed to see the old scope. Best-effort and per-isolate exactly like the rule-edit
+  // path; other isolates converge on the same TTL. Whole bands, because a move touches whoever holds a rule
+  // into the subtree rather than one named subject.
+  clearCachePrefix("grant:");
+  clearCachePrefix("userGrant:");
+  clearCachePrefix("objRules:");
 }
 
 // Move an employee into a new department (null = top-level/unassigned). Allocates the employee's new segment

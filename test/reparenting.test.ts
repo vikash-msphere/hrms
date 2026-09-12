@@ -11,7 +11,9 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { createDepartment, updateDepartment } from "../src/services/departments";
 import { createEmployee, updateEmployee } from "../src/services/employees";
-import { HIERARCHICAL_TABLES } from "../src/services/codeCascade";
+import { HIERARCHICAL_TABLES, reprefixPattern } from "../src/services/codeCascade";
+import { decide } from "../src/domain/permissions";
+import { rulesToGrant } from "../src/domain/compileGrants";
 import { RESOURCE_COLLECTIONS } from "../src/lib/authzResolve";
 
 // Re-parenting cascade: moving an employee (or a whole department subtree) recomputes the internal `code` for
@@ -209,5 +211,78 @@ describe("re-parenting: coverage tripwire", () => {
       return prop && flatCoded.has(prop) && !h.ownedWhen;
     }).map((h) => h.collection ?? "(internal)");
     expect(ungated).toEqual([]);
+  });
+});
+
+// ---- The access rules move with the codes ----------------------------------------------------------------
+//
+// The cascade rewrote `match_code` and `scope_code` and left `pattern` alone - and `pattern` is the column that
+// decides (schema.ts: "VERBATIM grant pattern - the decision input, never re-derived"; compileGrants: the
+// others are "DERIVED narrowing keys ... to fetch a SUPERSET of candidate rows"). So after a move the narrowing
+// key found the rule and `decide()` then failed to match it, silently revoking every per-object share and every
+// subtree rule pointing into the moved subtree.
+//
+// It displayed as working, which is what made it invisible: services/accessRules.ts resolves a rule's
+// `scope_ref` from `match_code` - the column that WAS updated - so the manage-access modal went on showing the
+// rule as active and pointing at the moved record.
+describe("reprefixPattern: only the code in the id position moves", () => {
+  it("rewrites the exact and subtree spellings, keeping any field path or verb tail", () => {
+    expect(reprefixPattern("employees.04-002.**", "04-002", "05-001")).toBe("employees.05-001.**");
+    expect(reprefixPattern("employees.04-002-*.**", "04-002", "05-001")).toBe("employees.05-001-*.**");
+    // A descendant of the moved row keeps its own trailing segments.
+    expect(reprefixPattern("goals.04-002-100.**", "04-002", "05-001")).toBe("goals.05-001-100.**");
+    // A field path and a verb tail are not the id token and ride through untouched.
+    expect(reprefixPattern("employees.04-002.identity.uan.**", "04-002", "05-001")).toBe("employees.05-001.identity.uan.**");
+    expect(reprefixPattern("leave-requests.04-002.approve", "04-002", "05-001")).toBe("leave-requests.05-001.approve");
+  });
+
+  it("leaves scope words alone even when a code could spell one", () => {
+    // THE TRAP. Segments come from the Crockford alphabet, which has m, y, e and d - so a department really can
+    // be coded `my`, and "my-dept".startsWith("my-") is true. Without the scope-word guard, re-parenting that
+    // department would rewrite every `my-dept` rule in the app into a subtree rule for the moved department:
+    // "your own department" silently becomes "that one", for every holder.
+    expect(reprefixPattern("employees.my-dept.**", "my", "05")).toBeNull();
+    expect(reprefixPattern("employees.me.**", "me", "05")).toBeNull();
+    expect(reprefixPattern("employees.**", "04-002", "05-001")).toBeNull();
+    expect(reprefixPattern("employees.*.bio.**", "04-002", "05-001")).toBeNull();
+  });
+
+  it("is boundary-anchored, so a prefix-collision neighbour is not caught", () => {
+    // The same containment `reprefixSubtree` selects rows by: `04-0029` is not under `04-002`.
+    expect(reprefixPattern("employees.04-0029.**", "04-002", "05-001")).toBeNull();
+    expect(reprefixPattern("employees.04-003.**", "04-002", "05-001")).toBeNull();
+  });
+});
+
+describe("re-parenting: an access rule keeps deciding about the row it named", () => {
+  it("moves the pattern with the code, so the share still allows after the move", async () => {
+    const a = await createDepartment(deps, actor, { display_name: "Alpha" });
+    const bDept = await createDepartment(deps, actor, { display_name: "Bravo" });
+    const emp = await createEmployee(deps, actor, { first_name: "Ada", last_name: "L", work_email: "ada@test.example", department: `departments/${a.uuid}` });
+    const before = await codeOfEmp(emp.uuid);
+
+    // Exactly what the ACL modal writes for "share this record" and for "this subtree".
+    await deps.db.insert(schema.accessRules).values([
+      { uuid: genId(), subject: "u-reader", subjectKind: "user", namespace: "employees", pattern: `employees.${before}.**`, scopeKind: "exact", scopeCode: before, matchCode: before, level: "read", effect: "allow" },
+      { uuid: genId(), subject: "u-reader", subjectKind: "user", namespace: "employees", pattern: `employees.${before}-*.**`, scopeKind: "subtree", scopeCode: before, matchCode: null, level: "read", effect: "allow" },
+    ]);
+
+    await updateEmployee(deps, actor, emp.uuid, { department: `departments/${bDept.uuid}` });
+    const after = await codeOfEmp(emp.uuid);
+    expect(after).not.toBe(before);
+
+    const rules = await deps.db.select().from(schema.accessRules).where(eq(schema.accessRules.subject, "u-reader"));
+    // The narrowing keys moved before this fix; the PATTERN is the half that did not.
+    expect(rules.map((r) => r.pattern).sort()).toEqual([`employees.${after}-*.**`, `employees.${after}.**`].sort());
+    expect(rules.every((r) => r.scopeCode === after)).toBe(true);
+
+    // And the thing that actually matters: the engine still allows, over the rebuilt grant, on the NEW code.
+    const grant = rulesToGrant(rules.map((r) => ({ namespace: r.namespace, pattern: r.pattern, scopeKind: r.scopeKind, scopeCode: r.scopeCode, matchCode: r.matchCode, level: r.level, effect: r.effect })));
+    const self = { employeeCode: null };
+    expect(decide(grant, { kind: "standard", resource: `employees.${after}`, level: "read" }, self).allow).toBe(true);
+    // A row owned by the moved employee rides the subtree half.
+    expect(decide(grant, { kind: "standard", resource: `employees.${after}-100`, level: "read" }, self).allow).toBe(true);
+    // The vacated code is not a way back in.
+    expect(decide(grant, { kind: "standard", resource: `employees.${before}`, level: "read" }, self).allow).toBe(false);
   });
 });

@@ -182,6 +182,23 @@ const taskKey = (card: CardT) => card.key ?? `#${idOf(card.path).slice(0, 5).toU
 
 const toggleSet = (s: Set<string>, k: string) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; };
 
+/**
+ * The order cards are drawn in: by rank, then by a STABLE tiebreaker.
+ *
+ * Rank alone is not a total order. Two people dropping into the same gap compute the same midpoint (`rankAt`
+ * below is pure arithmetic over the neighbours, and the server stores what it is sent - `rank` carries no
+ * unique constraint), and repeated midpoints into one gap eventually exhaust double precision, at which point
+ * the new rank EQUALS its neighbour's. With nothing after the subtraction, the relative order of a tied pair
+ * then falls out of whatever order the rows arrived in - so the same board can read differently for two people
+ * looking at it, and a card can appear to move on its own between renders.
+ *
+ * `path` is the tiebreaker for the same reason services/keysetPage.ts breaks its own ties on `uuid`: it is
+ * unique, stable, and identical for every viewer. Byte order carries no meaning, which is fine - a tie has no
+ * meaning either. What it buys is that everybody sees the same one.
+ */
+const byRank = (a: CardT, b: CardT) =>
+  (a.rank ?? 0) - (b.rank ?? 0) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
 // Fractional rank for inserting at position `idx` in a rank-sorted list (midpoint of the two neighbours).
 const rankAt = (items: CardT[], idx: number) => {
   const lo = idx > 0 ? (items[idx - 1]!.rank ?? 0) : (items.length ? (items[0]!.rank ?? 0) - RANK_STEP : 0);
@@ -548,7 +565,7 @@ function BoardView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const cardsIn = (colKey: string, laneKey: string) =>
     visible
       .filter((c) => c.column_key === colKey && (board.swimlane_mode === "none" || laneKeyOf(c) === laneKey))
-      .sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+      .sort(byRank);
 
   // Apply the board's swimlane display prefs: optionally drop lanes with no cards under the current
   // filter. Never applies in "none" mode (single implicit lane).
@@ -2203,7 +2220,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
   const blockerKeyOf = (c: CardT) => (c.blocked_by ? (cardById.get(idOf(c.blocked_by)) && taskKey(cardById.get(idOf(c.blocked_by))!)) || undefined : undefined);
 
   const filter = useCardFilter(me.employee_id, `boards:filter:${boardId}`);
-  const backlog = useMemo(() => cards.filter((c) => !c.sprint).sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0)), [cards]);
+  const backlog = useMemo(() => cards.filter((c) => !c.sprint).sort(byRank), [cards]);
   const sprintCards = useMemo(() => (sprint ? cards.filter((c) => c.sprint && idOf(c.sprint) === idOf(sprint.path)) : []), [cards, sprint]);
   const pts = (list: CardT[]) => list.reduce((s, c) => s + (c.size ?? 0), 0);
 
@@ -2400,7 +2417,7 @@ function ScrumView({ board, me, openId }: { board: Board; me: Me; openId?: strin
         {/* The selected sprint's board */}
         {sprint ? (
           board.columns.map((col) => {
-            const items = sprintCards.filter((c) => c.column_key === col.key && filter.match(c)).sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
+            const items = sprintCards.filter((c) => c.column_key === col.key && filter.match(c)).sort(byRank);
             const zid = `col:${col.key}`;
             return (
               // 86vw on a phone: the column all but fills the screen, with a sliver of the next one showing so

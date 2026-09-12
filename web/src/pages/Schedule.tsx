@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, Check, ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { getAllPages, create, patch, remove } from "@/api";
 import { useCollection, useCollectionHasMore } from "@/hooks/useCollection";
@@ -73,7 +73,21 @@ export default function Schedule({ me }: { me: Me }) {
   // linter cannot check - it has to take on trust that it means what the body reads. Named here, the fetch
   // and its dependencies are the same two strings by construction.
   const [from, to] = [days[0]!, days[6]!];
+  // THE WEEK THIS LOAD IS FOR, so a response that lands after the reader has moved on is dropped.
+  //
+  // `getAllPages` follows the cursor, so this is several sequential round-trips, not one - a much wider window
+  // than a single fetch. Page the week twice quickly and the slower FIRST request resolves last and overwrites
+  // the newer rows, painting one week's roster under the other week's column headers. The cells are keyed by
+  // (employee, date), so what the scheduler actually sees is EMPTY cells for shifts that exist - which is the
+  // failure the cursor-following note below was written to remove ("a roster that is short is a roster that is
+  // WRONG"), reached by a different route. They then roster over it and the day's unique index refuses the
+  // save with "already rostered", which is safe and inexplicable.
+  //
+  // A generation counter rather than the `let live` cleanup flag its sibling uses (web/src/pages/Documents.tsx),
+  // because `load` is also called directly after a write, where there is no effect cleanup to hang it on.
+  const reqSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++reqSeq.current;
     try {
       // THE CURSOR IS FOLLOWED, because a roster that is short is a roster that is WRONG. This asked for
       // `max_page_size=500`; the server caps a page at 100 and says so only through `next_page_token`, which
@@ -81,12 +95,15 @@ export default function Schedule({ me }: { me: Me }) {
       // days reaches that at twenty people) the grid rendered EMPTY CELLS for shifts that exist. A scheduler
       // then rosters over them, and the person is assigned twice.
       const r = await getAllPages<ShiftAssignment>(`shift-assignments?from=${from}&to=${to}`, ROSTER_ROW_CAP);
+      if (seq !== reqSeq.current) return; // a newer week is already loading (or loaded) - this answer is stale
       setAssignments(r.results);
       setRosterTruncated(r.truncated);
     } catch (e) {
+      if (seq !== reqSeq.current) return;
       toast({ title: "Couldn't load the roster", description: (e as Error).message, variant: "destructive" });
     } finally {
-      setLoaded(true);
+      // The spinner belongs to the LATEST request, so a superseded one must not clear it.
+      if (seq === reqSeq.current) setLoaded(true);
     }
   }, [from, to, toast]);
   useEffect(() => { void load(); }, [load]);

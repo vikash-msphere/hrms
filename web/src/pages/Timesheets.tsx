@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Timer, ChevronLeft, ChevronRight, CopyPlus, Minus, Plus, Send, Check, X, Trash2 } from "lucide-react";
 import { get, getAllPages, create, patch, remove, invoke } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -96,16 +96,27 @@ export default function Timesheets({ me }: { me: Me }) {
   // The week's edges as named values: `days[0]` inside a dependency array is an expression the linter cannot
   // check, so the fetch and its dependencies are held together by hand. Named, they are the same two strings.
   const [weekFrom, weekTo] = [days[0]!, days[6]!];
+  // THE WEEK THIS LOAD IS FOR - see the identical guard in web/src/pages/Schedule.tsx.
+  //
+  // `getAllPages` follows the cursor, so a week load is several sequential round-trips and the race window is
+  // wide. Page the week twice quickly and the slower first request lands last, replacing `mine` with another
+  // week's rows - and `mine` is what BOTH the grid cells and `weekCharts` are derived from, so the page shows
+  // one week's hours, and one week's totals, under a different week's dates. That is the failure the note
+  // below already names ("a short read is a wrong timesheet, not a short one") arrived at from the other side,
+  // and a timesheet is submitted from what it displays.
+  const reqSeq = useRef(0);
   const loadWeek = useCallback(async () => {
     if (!meRef) { setWeekLoaded(true); return; }
+    const seq = ++reqSeq.current;
     try {
       // The grid keys its cells `(project, date)` off these rows and totals the week from them, so a short read
       // is a wrong timesheet, not a short one. `max_page_size=500` was clamped to 100 by the server without
       // saying so; the cursor is followed instead, within a ceiling a week cannot legitimately reach.
       const r = await getAllPages<TimeEntry>(`time-entries?employee=${encodeURIComponent(meRef)}&from=${weekFrom}&to=${weekTo}`, ENTRY_ROW_CAP);
+      if (seq !== reqSeq.current) return; // a newer week is already in flight - this answer is for a week nobody is looking at
       setMine(r.results);
-    } catch (e) { toast({ title: "Couldn't load the week's entries", description: (e as Error).message, variant: "destructive" }); }
-    finally { setWeekLoaded(true); }
+    } catch (e) { if (seq === reqSeq.current) toast({ title: "Couldn't load the week's entries", description: (e as Error).message, variant: "destructive" }); }
+    finally { if (seq === reqSeq.current) setWeekLoaded(true); }
   }, [meRef, weekFrom, weekTo, toast]);
   const loadPending = useCallback(async () => {
     if (!canApprove) return;
