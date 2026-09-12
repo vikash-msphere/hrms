@@ -120,6 +120,9 @@ const SYSTEM_ACTOR = systemActor();
  * everything that makes it the same chore. Deliberately not carried: the linked GOAL (a series would inflate
  * that goal's task count forever) and the SPRINT (a time box the next one is not in).
  */
+/** How many delivered series one tick rolls. See the note on the slice below for why there is a cap at all. */
+const MAX_ROLLS_PER_TICK = 15;
+
 export async function rollRecurringCards(deps: Deps): Promise<number> {
   // The board is JOINED, and live-only, for a reason the claim below makes sharp: soft-deleting a board does
   // not touch its cards (boards have no `remove` override - see routes/boards.ts), so a delivered recurring
@@ -127,7 +130,7 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
   // series was then claimed - its cadence cleared - and the create it was claimed for threw, which is the one
   // outcome that cannot be undone by the next tick. Filtered out here instead, the series lies dormant with
   // its cadence intact and rolls again if the board is restored.
-  const rows = (await deps.db
+  const due = (await deps.db
     .select()
     .from(schema.cards)
     .innerJoin(schema.boards, eq(schema.cards.boardId, schema.boards.uuid))
@@ -136,7 +139,18 @@ export async function rollRecurringCards(deps: Deps): Promise<number> {
       isNull(schema.boards.deleteTime),
       isNotNull(schema.cards.cadence),
       isNotNull(schema.cards.deliveredAt),
-    ))).map((r) => r.cards);
+    ))
+    .orderBy(asc(schema.cards.deliveredAt), asc(schema.cards.uuid))).map((r) => r.cards);
+  // CAPPED PER TICK, for the reason the recurring-expense sweep is (services/expenses.ts): each series below
+  // costs the better part of a dozen subrequests - the claim, the checklist read, the create, the anchor and
+  // reporter stamps, the watcher insert, the landed check - and none of it batches, because the claim decides
+  // whether the create happens at all. Unbounded, a board with many delivered series would spend the
+  // invocation's whole subrequest budget (lib/dbBatch.ts) in the nightly tick and take every subtask after it
+  // down with it. A deferred series keeps its `cadence`, so it is still claimable and the next tick rolls it;
+  // oldest delivery first, so a long backlog drains in order rather than starving.
+  const rows = due.slice(0, MAX_ROLLS_PER_TICK);
+  const deferred = due.length - rows.length;
+  if (deferred > 0) console.warn(`[cards] ${deferred} recurring series deferred to the next tick (cap ${MAX_ROLLS_PER_TICK})`);
   // The ORG's calendar day, anchored at UTC midnight - `advanceUntilAfter` reads it with getUTC* below, so
   // this anchor is the day the org is actually living in. The tick fires at 02:00 UTC, which is the previous
   // evening west of UTC, and a UTC-derived "today" therefore filed the next occurrence a day early there.

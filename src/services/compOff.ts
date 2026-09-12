@@ -4,15 +4,15 @@
 //
 // Opt-in (settings/holidays `comp_off_on_holiday_work`), because plenty of orgs pay overtime for this instead -
 // and the overtime lane already exists. Nothing here is retroactive: it only ever looks at one day.
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { allocOwnedCode, withFreshCode, CODE_WIDTH } from "./codeAlloc";
-import { isCompOffDuplicate } from "../lib/errors";
+import { allocOwnedCodesFor } from "./codeAlloc";
+import { byIdChunks, insertBatches, runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { getSettingValue } from "./settings";
 import { DEFAULT_ATTENDANCE, localDay, type AttendanceConfig } from "../domain/attendance";
 import { holidayApplies } from "./holidays";
-import { notify } from "./notifications";
+import { notifyMany } from "./notifications";
 import { refLeaveTypes } from "../lib/refData";
 
 const DAY_MS = 86_400_000;
@@ -20,43 +20,8 @@ const DEFAULT_TYPE_NAME = "Compensatory Off";
 
 export type CompOffPolicy = { comp_off_on_holiday_work?: boolean; comp_off_leave_type?: string };
 
-/**
- * Add `owed` days to one employee's balance of one leave type, or create the balance row. Returns whether the
- * credit landed: the caller holds a written idempotency claim, so "the guard matched nothing" has to be
- * distinguishable from "credited" rather than looking like success.
- */
-async function creditBalance(deps: Deps, employeeId: string, leaveTypeId: string, owed: number): Promise<boolean> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const existing = (
-      await deps.db
-        .select()
-        .from(schema.leaveBalances)
-        .where(and(eq(schema.leaveBalances.employeeId, employeeId), eq(schema.leaveBalances.leaveTypeId, leaveTypeId)))
-        .limit(1)
-    )[0];
-    if (!existing) {
-      try {
-        await deps.db.insert(schema.leaveBalances).values({
-          code: await allocOwnedCode(deps, schema.leaveBalances, schema.leaveBalances.employeeId, employeeId),
-          employeeId,
-          leaveTypeId,
-          balanceDays: owed,
-        });
-        return true;
-      } catch {
-        continue; // another writer created the row first - re-read and add to it
-      }
-    }
-    // Compare-and-set on the balance we read, the same guard the accrual credit uses.
-    const [updated] = await deps.db
-      .update(schema.leaveBalances)
-      .set({ balanceDays: Math.round((existing.balanceDays + owed) * 2) / 2, updatedAt: new Date() })
-      .where(and(eq(schema.leaveBalances.uuid, existing.uuid), eq(schema.leaveBalances.balanceDays, existing.balanceDays)))
-      .returning({ uuid: schema.leaveBalances.uuid });
-    if (updated) return true;
-  }
-  return false;
-}
+/** Leave days are stored in halves, so a credit lands on the same increment the rest of the module uses. */
+const toHalfDays = (n: number): number => Math.round(n * 2) / 2;
 
 /**
  * Credit comp-off to everyone who worked yesterday's holiday. Returns how many employees were credited.
@@ -111,8 +76,21 @@ export async function creditHolidayCompOff(deps: Deps): Promise<number> {
 
   const full = att.full_day_minutes ?? DEFAULT_ATTENDANCE.full_day_minutes ?? 480;
   const half = att.half_day_minutes ?? DEFAULT_ATTENDANCE.half_day_minutes ?? 240;
-  let credited = 0;
 
+  // ---- Plan the whole roster in memory, touching the database not at all -----------------------------------
+  //
+  // This walk used to do the writing as it went, and cost about ten subrequests per credited person: an owned-
+  // code allocation (two) and a claim insert, then a balance read and a compare-and-set, then a whole `notify`
+  // (the recipient read, another allocation, another insert). A holiday twenty people worked was two hundred
+  // sequential round trips against a per-invocation ceiling (lib/dbBatch.ts) - in the nightly tick, as its
+  // LAST subtask, after twenty-one others had already spent from the same budget. When it ran out, the loop
+  // failed per employee, and the failure is not recoverable: the tick only ever looks at yesterday, so nobody
+  // gets a second try at the day.
+  //
+  // Same three passes as the leave accrual next door (services/leaveAccrual.ts): plan, reserve every code in
+  // one go, write once.
+  type Credit = { employeeId: string; owed: number; holidayName: string; holidayId: string };
+  const planned: Credit[] = [];
   for (const [employeeId, minutes] of minutesByEmployee) {
     const days = minutes >= full ? 1 : minutes >= half ? 0.5 : 0;
     if (!days) continue;
@@ -123,55 +101,103 @@ export async function creditHolidayCompOff(deps: Deps): Promise<number> {
     const holiday = applicable.find((h) => !h.halfDay) ?? applicable[0];
     if (!holiday) continue; // the day was a working day for this employee - overtime's problem, not comp-off's
     // A half-day holiday only owes back the half the office was shut for.
-    const owed = holiday.halfDay ? Math.min(days, 0.5) : days;
-
-    // Claim the day first. A duplicate (this employee, this date) means another run already credited it, and
-    // that is the ONLY failure this skips on.
-    //
-    // It used to skip on every failure - `catch { continue }` - which read as "the duplicate case" and was in
-    // fact three cases wearing one coat. A lost code race (two writes composing the same next code, the thing
-    // `withFreshCode` exists for) was treated as "already credited" and the day was dropped; so was a
-    // transient D1 error. Neither was logged, and neither gets a second chance: the tick credits YESTERDAY's
-    // holiday, so there is no later run that would find this work again. A day of leave the employee earned
-    // by working a holiday went missing with nothing anywhere to say so.
-    try {
-      await withFreshCode(async (attempt) => {
-        // `attempt > 1` re-establishes this person's counter against what is actually on disk, the same
-        // resync the notification insert does on a retry (services/notifications.ts).
-        const code = await allocOwnedCode(deps, schema.compOffCredits, schema.compOffCredits.employeeId, employeeId, CODE_WIDTH.owned, attempt > 1);
-        await deps.db.insert(schema.compOffCredits).values({
-          code,
-          employeeId,
-          workedDate: new Date(dayMs),
-          days: owed,
-          holidayId: holiday.uuid,
-        });
-      });
-    } catch (e) {
-      if (isCompOffDuplicate(e)) continue; // already credited by an earlier run - the idempotency this relies on
-      // Anything else is a real failure and the day is lost, so it has to be visible. Not rethrown: one
-      // employee's credit failing must not abandon the rest of the roster.
-      console.error(`comp-off: could not claim ${owed} day for ${employeeId} on ${ymd}`, e);
-      continue;
-    }
-
-    // Move the balance, and only keep the claim if it actually moved. The credit row above is what makes a
-    // re-run skip this employee, so a compare-and-set that quietly matched nothing (any concurrent write to the
-    // same balance - a leave approval landing during the tick) would burn the claim and lose the day for good.
-    // Retry on a lost race; release the claim if it still won't land, so tomorrow's tick tries again.
-    if (!(await creditBalance(deps, employeeId, leaveType.uuid, owed))) {
-      await deps.db.delete(schema.compOffCredits).where(and(eq(schema.compOffCredits.employeeId, employeeId), eq(schema.compOffCredits.workedDate, new Date(dayMs))));
-      console.warn(`comp-off: could not credit ${owed} day to ${employeeId} for ${ymd}; claim released for the next run`);
-      continue;
-    }
-    await notify(deps, {
-      recipient: employeeId,
-      type: "leave.comp_off_credited",
-      title: `${owed === 1 ? "A day" : "Half a day"} of comp-off credited`,
-      body: `You worked ${holiday.name} on ${ymd}, so ${owed} day of ${leaveType.name} was added to your balance.`,
-      link: "leave-requests",
-    });
-    credited++;
+    planned.push({ employeeId, owed: holiday.halfDay ? Math.min(days, 0.5) : days, holidayName: holiday.name, holidayId: holiday.uuid });
   }
-  return credited;
+  if (!planned.length) return 0;
+
+  const workedDate = new Date(dayMs);
+  // THE IDEMPOTENCY, now a read rather than a caught constraint violation. `comp_off_credits` is unique per
+  // (employee, date), and the loop above relied on that insert failing to know a re-run had already credited
+  // someone - which cannot work inside a batch, because a violation aborts every other employee's write with
+  // it. One read says the same thing up front, and a genuine concurrent tick still hits the index and fails
+  // the whole batch loudly (the cron wrapper turns that into a red `cron_runs` row) rather than half-crediting.
+  const claimed = new Set(
+    (
+      await byIdChunks(planned.map((p) => p.employeeId), (group) =>
+        deps.db
+          .select({ employeeId: schema.compOffCredits.employeeId })
+          .from(schema.compOffCredits)
+          .where(and(eq(schema.compOffCredits.workedDate, workedDate), inArray(schema.compOffCredits.employeeId, group))))
+    ).map((r) => r.employeeId),
+  );
+  const todo = planned.filter((p) => !claimed.has(p.employeeId));
+  if (!todo.length) return 0;
+
+  // The balance rows these credits land in - one read for the whole roster, where the loop read one per person.
+  const balances = await byIdChunks(todo.map((p) => p.employeeId), (group) =>
+    deps.db
+      .select({ uuid: schema.leaveBalances.uuid, employeeId: schema.leaveBalances.employeeId, balanceDays: schema.leaveBalances.balanceDays })
+      .from(schema.leaveBalances)
+      .where(and(eq(schema.leaveBalances.leaveTypeId, leaveType.uuid), inArray(schema.leaveBalances.employeeId, group))));
+  const balanceOf = new Map(balances.map((b) => [b.employeeId, b]));
+
+  // Every code for the night in two reservations: one claim per person, plus a balance row for anyone who has
+  // none of this leave type yet. Sequential rather than concurrent - two batches against the same D1 session.
+  const creditCodes = await allocOwnedCodesFor(deps, schema.compOffCredits, schema.compOffCredits.employeeId, todo.map((p) => p.employeeId));
+  const needBalance = todo.filter((p) => !balanceOf.has(p.employeeId));
+  const balanceCodes = needBalance.length
+    ? await allocOwnedCodesFor(deps, schema.leaveBalances, schema.leaveBalances.employeeId, needBalance.map((p) => p.employeeId))
+    : new Map<string, string>();
+
+  // ---- One write --------------------------------------------------------------------------------------
+  const now = new Date();
+  const stmts: (BatchStmt | CheckedStmt)[] = [];
+  stmts.push(
+    ...insertBatches(
+      todo.map((p) => ({ code: creditCodes.get(p.employeeId)!, employeeId: p.employeeId, workedDate, days: p.owed, holidayId: p.holidayId })),
+      (group) => deps.db.insert(schema.compOffCredits).values(group),
+    ),
+  );
+  if (needBalance.length) {
+    stmts.push(
+      ...insertBatches(
+        needBalance.map((p) => ({ code: balanceCodes.get(p.employeeId)!, employeeId: p.employeeId, leaveTypeId: leaveType.uuid, balanceDays: p.owed })),
+        (group) => deps.db.insert(schema.leaveBalances).values(group),
+      ),
+    );
+  }
+  // Compare-and-set on the balance that was read, for the reason the accrual credit guards the same way: the
+  // value written is ABSOLUTE and the snapshot above was taken before the batch, so writing it blind would undo
+  // any debit committed in between (a leave approval landing during the tick) and hand back days the employee
+  // has already spent. A guard that matches nothing is not an error - it means somebody else moved the row -
+  // and `runBatchChecked` reports it by label so the claim can be released below.
+  for (const p of todo) {
+    const bal = balanceOf.get(p.employeeId);
+    if (!bal) continue;
+    stmts.push({
+      label: p.employeeId,
+      expect: 1,
+      stmt: deps.db
+        .update(schema.leaveBalances)
+        .set({ balanceDays: toHalfDays(bal.balanceDays + p.owed), updatedAt: now })
+        .where(and(eq(schema.leaveBalances.uuid, bal.uuid), eq(schema.leaveBalances.balanceDays, bal.balanceDays)))
+        .returning({ uuid: schema.leaveBalances.uuid }),
+    });
+  }
+  const short = new Set(await runBatchChecked(deps.db, stmts));
+
+  // A claim whose balance did not move must not survive: the claim is what makes tomorrow's re-run skip this
+  // person, so keeping it would lose the day for good. Released in one statement, not one per employee.
+  if (short.size) {
+    await deps.db
+      .delete(schema.compOffCredits)
+      .where(and(eq(schema.compOffCredits.workedDate, workedDate), inArray(schema.compOffCredits.employeeId, [...short])));
+    console.warn(`comp-off: ${short.size} credit(s) for ${ymd} lost a race on the leave balance; claims released for the next run`);
+  }
+
+  const credited = todo.filter((p) => !short.has(p.employeeId));
+  // One fan-out, not a `notify()` each: the wording differs per person (their holiday, their half or whole
+  // day), which is exactly what `titleFor`/`bodyFor` exist for - see the note on notifyMany.
+  const byId = new Map(credited.map((p) => [p.employeeId, p]));
+  await notifyMany(deps, [...byId.keys()], {
+    type: "leave.comp_off_credited",
+    title: "Comp-off credited",
+    link: "leave-requests",
+    titleFor: (rid) => (byId.get(rid)?.owed === 1 ? "A day of comp-off credited" : "Half a day of comp-off credited"),
+    bodyFor: (rid) => {
+      const p = byId.get(rid);
+      return p ? `You worked ${p.holidayName} on ${ymd}, so ${p.owed} day of ${leaveType.name} was added to your balance.` : null;
+    },
+  });
+  return credited.length;
 }

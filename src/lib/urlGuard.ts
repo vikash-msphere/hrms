@@ -178,14 +178,31 @@ export function assertPublicHttpsUrl(raw: string): URL {
       if (blockedIpv4(((b << 16) | c) >>> 0)) reject();
       return u;
     }
-    // fc00::/7 unique-local, fe80::/10 link-local, ff00::/8 multicast.
-    if ((a & 0xfe00) === 0xfc00 || (a & 0xffc0) === 0xfe80 || (a & 0xff00) === 0xff00) reject();
+    // fc00::/7 unique-local, fe80::/10 link-local, fec0::/10 site-local, ff00::/8 multicast.
+    //
+    // SITE-LOCAL is in the list even though RFC 3879 deprecated it in 2004. The mask above is `fe80::/10`,
+    // which covers fe80-febf and stops exactly where fec0::/10 begins - so `fec0::`-`feff::` fell through
+    // every test in this function and was blessed as an ordinary public address. Deprecated is not the same as
+    // unreachable: plenty of kit still assigns and routes these, and the whole point of this guard is that an
+    // author cannot name an internal address directly. One more mask costs nothing.
+    if ((a & 0xfe00) === 0xfc00 || (a & 0xffc0) === 0xfe80 || (a & 0xffc0) === 0xfec0 || (a & 0xff00) === 0xff00) reject();
     // 100::/64 is the discard-only prefix (RFC 6666): a black hole, so nothing is ever there to webhook.
     if (a === 0x0100 && b === 0 && c === 0 && d === 0) reject();
     // 2001:db8::/32 is the documentation range (RFC 3849) - the v6 counterpart of the three v4 doc ranges
     // blockedIpv4 already refuses, and blocked for the same reason: nothing routes there, so a rule naming one
     // is a copied example or a probe, and examples are exactly how such an address ends up saved.
     if (a === 0x2001 && b === 0x0db8) reject();
+    // 2001::/32 is Teredo (RFC 4380): the address EMBEDS a v4 endpoint the same way the four spellings above
+    // do - hextets 3-4 are the tunnel server's address and the last two are the client's, obfuscated by
+    // complement. It is the one embedded-v4 form this function did not judge by the v4 rules, so it is judged
+    // by them now: both halves, because either one naming a private or loopback address is an author pointing
+    // the webhook inside. The client half is stored complemented, hence the XOR.
+    if (a === 0x2001 && b === 0x0000) {
+      const server = ((c << 16) | d) >>> 0;
+      const client = (((g << 16) | i) ^ 0xffffffff) >>> 0;
+      if (blockedIpv4(server) || blockedIpv4(client)) reject();
+      return u;
+    }
     return u;
   }
   if (host.includes(":")) reject(); // colon-bearing but not a parseable IPv6 literal

@@ -2,11 +2,12 @@
 // `compliance_events` from active rules. Flat company-wide; NO access control here (middleware gates by path +
 // grants, private by default). Generation is idempotent (dedupe by rule + due_date) so it's safe to run on
 // every rule edit AND on the daily cron roll-forward.
-import { eq } from "drizzle-orm";
-import { allocFlatCode } from "./codeAlloc";
+import { inArray } from "drizzle-orm";
+import { allocFlatCodes } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
+import { byIdChunks, insertBatches, runBatch } from "../lib/dbBatch";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { idFromPath } from "./documentsCommon";
 import { dueDatesInRange, periodLabelFor } from "../domain/complianceRecurrence";
@@ -33,42 +34,84 @@ const startOfTodayUTC = (deps: Deps): number => {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 };
 
-// Create the rule's upcoming occurrences within the horizon that don't already exist (dedupe by due date,
-// including soft-deleted ones so a deleted occurrence isn't resurrected). Returns how many were created.
-export async function generateForRule(deps: Deps, rule: RuleRow): Promise<number> {
-  if (!rule.active || rule.deleteTime) return 0;
+/**
+ * Materialise the missing occurrences of every rule given, within the horizon (dedupe by rule + due date,
+ * including soft-deleted ones so a deleted occurrence isn't resurrected). Returns how many were created.
+ *
+ * BATCHED, NOT LOOPED, and the whole point of the shape. A D1 query is a Worker subrequest against a
+ * per-invocation ceiling (lib/dbBatch.ts), and this used to spend two of them PER OCCURRENCE - a counter take
+ * and an insert - inside a per-rule loop that also read that rule's existing events. bootstrap.sql seeds eight
+ * rules, six of them monthly, so the FIRST nightly tick had ~77 occurrences to write: about 163 sequential
+ * round trips, in the one invocation shared with twenty-one other subtasks, several of which (`sendReminders`,
+ * `flushDigests`, `creditHolidayCompOff`) run after it and would have found the budget already spent. The same
+ * loop ran synchronously on every rule create and edit, where a single monthly rule cost ~25 subrequests on
+ * top of the write that triggered it.
+ *
+ * So: ONE read for every rule's existing occurrences, ONE counter take for every code, ONE insert batch. The
+ * cost is a constant handful of subrequests whatever the horizon holds. The batch is atomic (db.batch is an
+ * implicit transaction), so a night either files its whole horizon or files none of it and is retried by the
+ * next tick - which is the safe direction for an idempotent generator.
+ */
+async function generateForRules(deps: Deps, rules: RuleRow[]): Promise<number> {
+  const active = rules.filter((r) => r.active && !r.deleteTime);
+  if (!active.length) return 0;
   const from = startOfTodayUTC(deps);
-  const due = dueDatesInRange({ frequency: rule.frequency, dueDay: rule.dueDay, anchorMonth: rule.anchorMonth }, from, from + HORIZON_MS);
-  if (due.length === 0) return 0;
-  const existing = await deps.db.select({ dueDate: schema.complianceEvents.dueDate }).from(schema.complianceEvents).where(eq(schema.complianceEvents.ruleId, rule.uuid));
-  const have = new Set(existing.map((e) => +new Date(e.dueDate)));
-  let created = 0;
-  for (const ms of due) {
-    if (have.has(ms)) continue;
-    await deps.db.insert(schema.complianceEvents).values({
-      code: await allocFlatCode(deps, schema.complianceEvents),
-      title: rule.title,
-      category: rule.category,
-      frequency: rule.frequency,
-      dueDate: new Date(ms),
-      periodLabel: periodLabelFor({ frequency: rule.frequency, dueDay: rule.dueDay, anchorMonth: rule.anchorMonth }, ms),
-      status: "pending",
-      assigneeId: rule.assigneeId,
-      notes: rule.notes,
-      ruleId: rule.uuid,
-    });
-    have.add(ms);
-    created++;
+
+  // Every rule's existing due dates in one read, chunked for the D1 parameter cap. Soft-deleted rows count:
+  // an occurrence somebody deleted must not come back on the next roll-forward.
+  const existing = await byIdChunks(active.map((r) => r.uuid), (group) =>
+    deps.db
+      .select({ ruleId: schema.complianceEvents.ruleId, dueDate: schema.complianceEvents.dueDate })
+      .from(schema.complianceEvents)
+      .where(inArray(schema.complianceEvents.ruleId, group)));
+  const have = new Map<string, Set<number>>();
+  for (const e of existing) {
+    if (!e.ruleId) continue;
+    const seen = have.get(e.ruleId) ?? new Set<number>();
+    seen.add(+new Date(e.dueDate));
+    have.set(e.ruleId, seen);
   }
-  return created;
+
+  // What is missing, decided in full before anything is written - the codes below are reserved as one run, so
+  // the count has to be final first.
+  const pending: { rule: RuleRow; ms: number }[] = [];
+  for (const rule of active) {
+    const seen = have.get(rule.uuid) ?? new Set<number>();
+    const due = dueDatesInRange({ frequency: rule.frequency, dueDay: rule.dueDay, anchorMonth: rule.anchorMonth }, from, from + HORIZON_MS);
+    for (const ms of due) {
+      if (seen.has(ms)) continue;
+      seen.add(ms); // a recurrence that names one due date twice must still write it once
+      pending.push({ rule, ms });
+    }
+    have.set(rule.uuid, seen);
+  }
+  if (!pending.length) return 0;
+
+  const codes = await allocFlatCodes(deps, schema.complianceEvents, pending.length);
+  const rows = pending.map(({ rule, ms }, i) => ({
+    code: codes[i]!,
+    title: rule.title,
+    category: rule.category,
+    frequency: rule.frequency,
+    dueDate: new Date(ms),
+    periodLabel: periodLabelFor({ frequency: rule.frequency, dueDay: rule.dueDay, anchorMonth: rule.anchorMonth }, ms),
+    status: "pending" as const,
+    assigneeId: rule.assigneeId,
+    notes: rule.notes,
+    ruleId: rule.uuid,
+  }));
+  await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.complianceEvents).values(group)));
+  return rows.length;
+}
+
+// Create ONE rule's upcoming occurrences within the horizon that don't already exist. Returns how many.
+export async function generateForRule(deps: Deps, rule: RuleRow): Promise<number> {
+  return generateForRules(deps, [rule]);
 }
 
 // Roll the horizon forward for every active rule (the daily cron + post-edit top-up). Returns total created.
 export async function generateComplianceOccurrences(deps: Deps): Promise<number> {
-  const rules = await deps.db.select().from(schema.complianceRules);
-  let total = 0;
-  for (const r of rules) if (r.active && !r.deleteTime) total += await generateForRule(deps, r);
-  return total;
+  return generateForRules(deps, await deps.db.select().from(schema.complianceRules));
 }
 
 function validate(input: ComplianceRuleInput) {

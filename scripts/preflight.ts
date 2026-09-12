@@ -80,6 +80,35 @@ if (plan === "free" && hasLimits) {
   warns.push("CF_PLAN=paid but wrangler.toml has no [limits] block - PDF/Form-16 rendering runs without an explicit CPU ceiling.");
 }
 
+// --- 2a. The local auth bypass must never reach a DEPLOYED environment --------------------------------
+// `DEV_FAKE_EMAIL` + `ALLOW_DEV_AUTH="true"` together turn off authentication outright: middleware/auth.ts
+// resolves EVERY request to that one identity with no token check of any kind, and deps.ts assertConfigured
+// accepts the pair as a valid auth mode, so nothing else in the app objects. It is the single most severe
+// misconfiguration this repo can carry, and until now it was the only one guarded by prose alone
+// (docs/deploy.md, docs/deploy-security.md §3) while strictly milder ones - a staging placeholder, an email
+// sink - were hard errors here.
+//
+// Fatal for EVERY environment in the file, not just the one being deployed, which is where this differs from
+// the email checks below: a redirect sink is the right setting for a rehearsal environment, and an auth
+// bypass is never the right setting for anything that is deployed at all. The bypass belongs in `.dev.vars`,
+// which is local-only and git-ignored and is not read from here.
+//
+// What this cannot see: `wrangler deploy --var`, and a variable set by hand in the dashboard. The runbook
+// covers both; this covers the file, which is the way one actually gets committed.
+{
+  let section: string | undefined;
+  for (const line of wrangler.split("\n")) {
+    const header = line.match(/^\s*\[+\s*(?:env\.([a-z0-9_-]+)|[a-z0-9_.]+)/i);
+    if (header) section = header[1];
+    const hit = line.match(/^\s*(ALLOW_DEV_AUTH|DEV_FAKE_EMAIL)\s*=/);
+    if (!hit) continue;
+    const where = section ? `env.${section}` : "the default (production) environment";
+    errors.push(
+      `wrangler.toml: ${hit[1]} is set in ${where} - with DEV_FAKE_EMAIL and ALLOW_DEV_AUTH="true" both present the Worker authenticates nobody and answers every request as that one identity (src/middleware/auth.ts). Remove it; the bypass belongs in .dev.vars, which is never deployed.`,
+    );
+  }
+}
+
 // --- 2b. The email sink must not reach production -----------------------------------------------------
 // EMAIL_PROVIDER=console writes "would send to …" to the log and posts nothing (src/lib/email.ts). It is the
 // right setting for the browser suite and for a preview stack, and a silent disaster in production: every

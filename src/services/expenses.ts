@@ -3,7 +3,7 @@
 // Owner-embedded code on the submitter (like reimbursements), so a manager's dept breadth sees their reports'
 // expenses and finance (all breadth) sees everything. `departmentId` is cost-centre attribution, not the scope key.
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
-import { eq, and, lte, lt, gte, ne } from "drizzle-orm";
+import { eq, and, asc, lte, lt, gte, ne } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
@@ -313,12 +313,16 @@ export async function payExpense(deps: Deps, actor: AppUser, id: string, input: 
 // advance the template. Claim-first (advance the template's nextOccurrenceOn guarded on its current value)
 // so a concurrent tick / retry can't double-generate; the clone is inserted only after the claim succeeds.
 // Best-effort per template (a failure on one never aborts the batch). Returns the count generated.
+
+/** How many due templates one tick files. See the note on the slice below for why there is a cap at all. */
+const MAX_RECURRING_PER_TICK = 25;
+
 export async function generateRecurringExpenses(deps: Deps, now: Date = new Date()): Promise<number> {
   const defaultState = ((await expenseSettings(deps)).recurring_default_state === "DRAFT") ? "DRAFT" : "SUBMITTED";
   // A stopped or paused schedule must stop: a CANCELLED template is done for good (:cancel is how the UI ends
   // a schedule) and a `paused` one is on hold, so neither generates. Without this a template kept filing
   // expenses forever, whatever the UI said.
-  const templates = await deps.db
+  const due = await deps.db
     .select()
     .from(schema.expenses)
     .where(and(
@@ -326,7 +330,19 @@ export async function generateRecurringExpenses(deps: Deps, now: Date = new Date
       lte(schema.expenses.nextOccurrenceOn, now),
       ne(schema.expenses.state, "CANCELLED"),
       eq(schema.expenses.paused, false),
-    ));
+    ))
+    .orderBy(asc(schema.expenses.nextOccurrenceOn), asc(schema.expenses.uuid));
+  // CAPPED PER TICK. Each template below costs roughly seven subrequests - the claim, an owned-code allocation,
+  // the clone, an audit row, an event and a manager notification - and they cannot be batched, because each one
+  // is a guarded claim whose outcome decides whether the clone is written at all. Unbounded, a payables
+  // schedule that grew past a few dozen templates would spend the invocation's whole subrequest budget
+  // (lib/dbBatch.ts) in the nightly tick shared with twenty-one other subtasks, and every subtask after it
+  // would fail too. A deferred template is NOT lost: its `nextOccurrenceOn` is untouched, so it is still due
+  // and the next tick takes it - the same self-healing the year-end rollover relies on (src/cron.ts
+  // CARRY_FORWARD_JOB). Oldest due date first, so nothing can be starved by a steady stream of newer ones.
+  const templates = due.slice(0, MAX_RECURRING_PER_TICK);
+  const deferred = due.length - templates.length;
+  if (deferred > 0) console.warn(`[expenses] ${deferred} recurring template(s) deferred to the next tick (cap ${MAX_RECURRING_PER_TICK})`);
   let generated = 0;
   let failed = 0;
   for (const t of templates) {

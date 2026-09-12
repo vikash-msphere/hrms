@@ -1,5 +1,5 @@
 import { eq, and, inArray } from "drizzle-orm";
-import { allocOwnedCode, allocOwnedCodesFor } from "./codeAlloc";
+import { allocOwnedCodesFor } from "./codeAlloc";
 import { insertBatches, runBatch, type BatchStmt } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
 import { applyScope } from "./listScope";
@@ -127,14 +127,34 @@ export async function suggestFeedback(deps: Deps, actor: AppUser, reviewId: stri
   const already = new Map(rows.filter((r) => r.state === "SUGGESTED").map((r) => [r.a, r.uuid] as const));
 
   // Drop the suggestions that were withdrawn, keep the ones that stayed, add the new ones.
-  for (const [authorId, uuid] of already) {
-    if (!ids.includes(authorId)) await deps.db.delete(schema.reviewFeedback).where(eq(schema.reviewFeedback.uuid, uuid));
+  //
+  // BATCHED, for the reason `nominateFeedback` above is batched, and this path was the one that never got it:
+  // a withdrawal was a DELETE per row and an addition was an owned-code allocation (two round trips of its own)
+  // plus an insert, all sequential, on a list the route caps at twenty. A caller replacing a full set of twenty
+  // suggestions with twenty different people spent about eighty-five subrequests on one request - against a
+  // per-invocation ceiling (lib/dbBatch.ts), on a verb somebody presses while editing a list.
+  //
+  // One atomic batch, so a half-replaced set - some withdrawals applied, some additions missing - is not a
+  // state the reviewee can land in and then have to guess their way out of.
+  const wanted = new Set(ids);
+  const withdrawn = [...already].filter(([authorId]) => !wanted.has(authorId)).map(([, uuid]) => uuid);
+  const fresh = ids.filter((authorId) => !already.has(authorId) && !live.has(authorId));
+  const stmts: BatchStmt[] = withdrawn.length
+    ? [deps.db.delete(schema.reviewFeedback).where(inArray(schema.reviewFeedback.uuid, withdrawn))]
+    : [];
+  if (fresh.length) {
+    // The SAME per-(table, owner) counters `allocOwnedCode` takes from - see codeAlloc.ts allocOwnedCodesFor.
+    const codes = await allocOwnedCodesFor(deps, schema.reviewFeedback, schema.reviewFeedback.authorId, fresh);
+    const newRows = fresh.map((authorId) => ({
+      code: codes.get(authorId)!,
+      reviewId,
+      revieweeId: review.employeeId,
+      authorId,
+      state: "SUGGESTED" as const,
+    }));
+    stmts.push(...insertBatches(newRows, (group) => deps.db.insert(schema.reviewFeedback).values(group)));
   }
-  for (const authorId of ids) {
-    if (already.has(authorId) || live.has(authorId)) continue;
-    const code = await allocOwnedCode(deps, schema.reviewFeedback, schema.reviewFeedback.authorId, authorId);
-    await deps.db.insert(schema.reviewFeedback).values({ code, reviewId, revieweeId: review.employeeId, authorId, state: "SUGGESTED" });
-  }
+  await runBatch(deps.db, stmts);
   await audit(deps, actor, "review.suggestFeedback", "reviews", reviewId, {
     employee: `employees/${review.employeeId}`,
     fields: ids.slice(0, 12).map((i) => `employees/${i}`),

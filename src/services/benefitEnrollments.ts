@@ -1,5 +1,6 @@
 import { eq, and, isNull } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, allocOwnedCodeRuns } from "./codeAlloc";
+import { insertBatches, runBatch } from "../lib/dbBatch";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -33,20 +34,27 @@ export async function enrollDefaultBenefits(deps: Deps, actor: AppUser, employee
     .from(schema.benefitEnrollments)
     .where(and(eq(schema.benefitEnrollments.employeeId, employeeId), isNull(schema.benefitEnrollments.deleteTime)));
   const have = new Set(existing.map((r) => r.planId));
-  let enrolled = 0;
-  for (const plan of plans) {
-    if (have.has(plan.uuid)) continue;
-    await deps.db.insert(schema.benefitEnrollments).values({
-      code: await allocOwnedCode(deps, schema.benefitEnrollments, schema.benefitEnrollments.employeeId, employeeId),
-      employeeId,
-      planId: plan.uuid,
-      status: "enrolled",
-      effectiveDate: new Date(),
-    });
-    enrolled++;
+  const missing = plans.filter((p) => !have.has(p.uuid));
+  if (!missing.length) {
+    await audit(deps, actor, "benefit-enrollment.enrollDefaults", "employees", employeeId, { enrolled: 0 });
+    return { enrolled: 0 };
   }
-  await audit(deps, actor, "benefit-enrollment.enrollDefaults", "employees", employeeId, { enrolled });
-  return { enrolled };
+  // Batched, not looped. Every D1 round trip is a Worker subrequest against a per-invocation ceiling
+  // (lib/dbBatch.ts), and this ran an owned-code allocation (two of them) plus an insert per plan - inside the
+  // request that created the employee, because the automation wires it to `employee.created`. One reservation
+  // of the whole run from the same per-(table, owner) counter, and one insert batch.
+  const effectiveDate = new Date();
+  const codes = (await allocOwnedCodeRuns(deps, schema.benefitEnrollments, schema.benefitEnrollments.employeeId, new Map([[employeeId, missing.length]]))).get(employeeId) ?? [];
+  const rows = missing.map((plan, i) => ({
+    code: codes[i]!,
+    employeeId,
+    planId: plan.uuid,
+    status: "enrolled" as const,
+    effectiveDate,
+  }));
+  await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.benefitEnrollments).values(group)));
+  await audit(deps, actor, "benefit-enrollment.enrollDefaults", "employees", employeeId, { enrolled: rows.length });
+  return { enrolled: rows.length };
 }
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
