@@ -16,6 +16,7 @@ import { etagOf } from "../http/serialize";
 import { getSettingValue } from "./settings";
 import { DEFAULT_TRANSITION_TEMPLATES, type TaskAssignee, type TransitionTemplate } from "../domain/transitions";
 import { notify } from "./notifications";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type TransitionInput = {
   employee?: string | null;
@@ -145,7 +146,7 @@ export async function createTransition(deps: Deps, actor: AppUser, input: Transi
 export async function updateTransition(deps: Deps, actor: AppUser, id: string, patch: TransitionInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.transitions).where(eq(schema.transitions.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("transition not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.transitions> = { updatedAt: new Date() };
   const has = (k: keyof TransitionInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) { if (!patch.name?.trim()) throw invalidArgument("name is required"); set.name = patch.name.trim(); }
@@ -167,7 +168,7 @@ export async function updateTransition(deps: Deps, actor: AppUser, id: string, p
     // A process opened without a template carries the generic name; the chosen template renames it.
     if (!has("name") && (row.name === "Onboarding" || row.name === "Offboarding")) set.name = tpl.name;
   }
-  const updated = (await deps.db.update(schema.transitions).set(set).where(eq(schema.transitions.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.transitions, "transition", row, set);
   if (tpl) {
     const subject = (await deps.db.select({ managerId: schema.employees.managerId }).from(schema.employees).where(eq(schema.employees.uuid, row.employeeId)).limit(1))[0];
     await instantiateTemplate(deps, actor, tpl, id, row.employeeId, subject?.managerId ?? null, updated.anchorDate ? +new Date(updated.anchorDate) : NaN);

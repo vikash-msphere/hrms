@@ -8,8 +8,8 @@ import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 import { notFound, aborted, failedPrecondition, isForeignKeyViolation } from "../lib/errors";
-import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lockGuard";
+import { atVersion, checkEtag, versionConflict } from "./versionGuard";
 
 // Drizzle tables are heavily generic; we treat them structurally here.
 type Table = any;
@@ -65,27 +65,9 @@ async function fetchRow(deps: Deps, table: Table, id: string): Promise<Row | und
   return rows[0];
 }
 
-function checkEtag(row: Row, ifMatch?: string) {
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-}
-
-/**
- * The version half of every guarded write below: `uuid = ? AND updated_at = <what we read>`.
- *
- * Comparing `ifMatch` against the row we just read (checkEtag) is a read-then-write race, not optimistic
- * concurrency - two callers holding the same ETag both pass it and both write. The version has to be in the
- * WHERE so the DB is the one that decides whether the write still applies. Applies with or without an
- * If-Match header: a caller who sent none asked not to be bothered about a stale read, not to be allowed to
- * delete a row somebody else had just changed.
- */
-const atVersion = (table: Table, row: Row) => and(eq(table.uuid, row.uuid), eq(table.updatedAt, new Date(row.updatedAt)));
-
-/** Raised when the guarded write matched nothing: the row moved (409) or is now gone (404). One read, conflict path only. */
-async function versionConflict(deps: Deps, table: Table, singular: string, id: string): Promise<never> {
-  const still = (await deps.db.select({ uuid: table.uuid }).from(table).where(eq(table.uuid, id)).limit(1))[0];
-  if (!still) throw notFound(`${singular} not found`);
-  throw aborted("the record changed since it was read; re-read it and try again");
-}
+// `atVersion`, `checkEtag` and `versionConflict` come from services/versionGuard.ts. They used to live here,
+// privately, which is how the thirty hand-written updates across the services came to have no guard at all:
+// the only thing that could reach them was this file. One implementation, importable, is the fix for that.
 
 /** Filter helper for list services: drop soft-deleted rows unless showDeleted. */
 export function visibleByDelete<T extends { deleteTime?: Date | number | null }>(rows: T[], showDeleted: boolean): T[] {

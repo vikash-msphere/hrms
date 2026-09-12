@@ -17,6 +17,7 @@ import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
 import { DEFAULT_REFERRALS_CONFIG, milestoneReached, resolveBonusAmount, type ReferralsConfig } from "../domain/referrals";
 import { systemActor } from "../lib/systemActor";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type ReferralInput = {
   referrer?: string | null;
@@ -85,7 +86,7 @@ export async function createReferral(deps: Deps, actor: AppUser, input: Referral
 export async function updateReferral(deps: Deps, actor: AppUser, id: string, patch: ReferralInput, ifMatch?: string) {
   const row = await getReferral(deps, actor, id);
   if (row.deleteTime) throw notFound("referral not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.referrals> = { updatedAt: new Date() };
   if (patch.candidate_name !== undefined) { const n = (patch.candidate_name ?? "").trim(); if (!n) throw invalidArgument("candidate_name cannot be blank"); set.candidateName = n; }
   if (patch.candidate_email !== undefined) set.candidateEmail = patch.candidate_email?.trim() || null;
@@ -99,7 +100,7 @@ export async function updateReferral(deps: Deps, actor: AppUser, id: string, pat
     if (patch.bonus_amount != null && !(patch.bonus_amount > 0)) throw invalidArgument("bonus_amount must be greater than 0");
     set.bonusAmount = patch.bonus_amount ?? null;
   }
-  const updated = (await deps.db.update(schema.referrals).set(set).where(eq(schema.referrals.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.referrals, "referral", row, set);
   await audit(deps, actor, "referral.update", "referrals", id, diffMeta(row, updated, set, "referrals"), updated);
   // Keep the referrer in the loop as recruiting moves their candidate along (skip a no-op or self-update).
   if (patch.status !== undefined && updated.status !== row.status && row.referrerId !== actor.employeeId)

@@ -14,6 +14,7 @@ import { pushToEmployee } from "./webPush";
 import { insertBatches, runBatch } from "../lib/dbBatch";
 import { activeDelegatesFor } from "./approvalDelegations";
 import { ENCODABLE } from "../middleware/encodeWireIds";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Full name of an employee-ish row, or null. Used to denormalize the actor's display name onto a notification.
 const nameOf = (p?: { firstName?: string | null; lastName?: string | null } | null): string | null =>
@@ -356,7 +357,7 @@ export async function patchNotification(
   ifMatch?: string,
 ) {
   const row = await getNotification(deps, actor, id);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: Partial<typeof schema.notifications.$inferInsert> = { updatedAt: new Date() };
   if (input.read === true) set.readTime = row.readTime ?? new Date();
   if (input.read === false) set.readTime = null;
@@ -366,7 +367,7 @@ export async function patchNotification(
     set.readTime = row.readTime ?? new Date();
   }
   if (input.dismissed === false) set.dismissedTime = null;
-  const updated = (await deps.db.update(schema.notifications).set(set).where(eq(schema.notifications.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.notifications, "record", row, set);
   return updated;
 }
 

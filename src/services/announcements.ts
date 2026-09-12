@@ -22,6 +22,7 @@ import { normalizeIllustration, normalizeIllustrationLayout, normalizeRecipientL
 import { richExcerpt, richToPlain } from "../domain/richText";
 import { notifyMentions } from "./mentions";
 import { boardPostLink, postedTitle, boardOrderSql, boardOrderValue } from "../domain/board";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Where a board mention lands and which category it is filed under. Named once because four call sites
 // (publish, scheduled publish, edit, reply) all mean the same thing by it: the post that named you, opened
@@ -333,7 +334,7 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
   const row = (await deps.db.select().from(schema.announcements).where(eq(schema.announcements.uuid, id)).limit(1))[0];
   if (!row) throw notFound("announcement not found");
   assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: Record<string, unknown> = { updatedAt: new Date() };
   const has = (k: keyof AnnouncementInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("title")) set.title = patch.title;
@@ -406,7 +407,7 @@ export async function updateAnnouncement(deps: Deps, actor: AppUser, id: string,
       set.points = pointsForLevel(await getSettingValue(deps, "kudos", DEFAULT_KUDOS_CONFIG), level);
     }
   }
-  const updated = (await deps.db.update(schema.announcements).set(set).where(eq(schema.announcements.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.announcements, "announcement", row, set);
   await audit(deps, actor, "announcement.update", "announcements", id, diffMeta(row, updated, set, "announcements"), updated);
   // An edit notifies the people it NEWLY names (the old body is the baseline, so nobody hears about the same
   // mention twice). A draft stays silent - publishing is what tells anyone anything about it.

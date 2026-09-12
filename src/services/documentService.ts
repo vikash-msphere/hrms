@@ -25,6 +25,7 @@ import { getProvider, assertProviderConfigured } from "./esign";
 import { DEFAULT_ESIGN, type EsignConfig } from "../domain/esign";
 import { stampSignature, type SignAnchor } from "../lib/pdfStamp";
 import { orgToday } from "./orgDay";
+import { checkEtag, updateAtVersion, type VersionedRow } from "./versionGuard";
 
 // Audience the publisher picked for an org-document (refs are wire-decoded inbound to internal ids).
 type NotifyAudienceInput = { kind: "everyone" | "department" | "employees" | "none"; department?: string | null; employees?: string[] };
@@ -185,7 +186,7 @@ export function makeDocumentService(cfg: Cfg) {
     const row = await loadRow(deps, id);
     if (!row || row.deleteTime) throw notFound(`${singular} not found`);
     assertNotLocked(row);
-    if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw forbidden("etag mismatch");
+    checkEtag(row as VersionedRow, ifMatch);
     const set: Record<string, unknown> = { updatedAt: new Date() };
     const has = (k: keyof CreateInput) => Object.prototype.hasOwnProperty.call(patch, k);
     if (has("display_name")) set.title = patch.display_name;
@@ -212,7 +213,7 @@ export function makeDocumentService(cfg: Cfg) {
       // Switching acknowledgement ON starts the chase-up clock; a row that already required it keeps its own.
       if (has("requires_ack") && patch.requires_ack && !row.requiresAck) set.ackVersionTime = new Date();
     }
-    const updated = (await deps.db.update(table).set(set).where(eq(table.uuid, id)).returning() as any[])[0]!;
+    const updated = await updateAtVersion(deps, table, singular, row as VersionedRow, set);
     await audit(deps, actor, `${singular}.update`, collection, id, diffMeta(row, updated, set, collection), updated);
     return updated;
   }

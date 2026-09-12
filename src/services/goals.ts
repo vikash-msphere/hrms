@@ -18,6 +18,7 @@ import { softDeleteRow, restoreRow } from "./softDelete";
 import { getSettingValue } from "./settings";
 import { DEFAULT_PERFORMANCE, type PerformanceFramework } from "../domain/performance";
 import { round2 } from "../domain/money";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Emit the progress + (when reaching 100 / completed) completion events for a goal row post-write.
 async function emitGoalProgress(deps: Deps, actor: AppUser, row: typeof schema.goals.$inferSelect) {
@@ -458,7 +459,7 @@ export async function createGoal(deps: Deps, actor: AppUser, input: GoalInput, i
 export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: GoalInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("goal not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.goals> = { updatedAt: new Date() };
   const has = (k: keyof GoalInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("title")) {
@@ -520,7 +521,7 @@ export async function updateGoal(deps: Deps, actor: AppUser, id: string, patch: 
   // Reaching the target completes the goal, the same way dragging the slider to 100 does. Nothing auto-reopens
   // a completed goal: closing one is a decision, and a corrected number should not undo it.
   if (set.progress === 100 && row.status !== "completed" && !has("status")) set.status = "completed";
-  const updated = (await deps.db.update(schema.goals).set(set).where(eq(schema.goals.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.goals, "goal", row, set);
   await audit(deps, actor, "goal.update", "goals", id, diffMeta(row, updated, set, "goals"), updated);
   if (has("progress") || has("status") || set.progress != null) await emitGoalProgress(deps, actor, updated);
   // A key result that moved (or moved house) re-rolls the objective(s) it left and joined.

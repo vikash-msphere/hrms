@@ -58,7 +58,23 @@ async function labelFromDb(deps: Deps, entity: string, entityId: string): Promis
  * the feed while costing a kilobyte of a D1 row; an R2 object key names a file nobody can open from here. A
  * create that lists twenty of those buries the two fields the reader came for.
  */
-const SECRETISH = /secret|token|hash|password|salt|nonce|otp|signature/i;
+// `enc$` IS PART OF THE SECRETS HALF, and it was the half that was missing. Every field encrypted at rest
+// lands in a column named `<what>Enc` - `nationalIdEnc`, `bankDetailsEnc`, `identityDetailsEnc`,
+// `personalDetailsEnc`, `taxDetailsEnc` (db/schema.ts) - and not one of those names matches any word above,
+// nor the `(Json|Key)$` noise rule below. So the generic row walk treated them as ordinary strings: they sit
+// within the first 24 non-structural columns of `employees`, which means soft-deleting or purging ANY employee
+// copied all five ciphertexts, truncated to MAX_AUDIT_LEN, straight into `audit_log.meta`.
+//
+// The write paths never did this - bank, identity and personal details each audit through `fieldsMeta` (names
+// only, no values), deliberately. It was only `rowValues`, reached from `createdMeta` / `removedMeta`, which
+// walks whatever columns a row happens to have.
+//
+// "It is only ciphertext" is not the answer. AES-GCM is CTR underneath, so with the field key the stored
+// prefix decrypts to real plaintext even though the tag is gone - a key compromise would turn the audit table
+// into a partial second copy of the PII, in a table whose readership is deliberately wider than the record's.
+// And the rule this list states is not "no plaintext", it is that material whose own access control lives
+// somewhere else must not be copied here.
+const SECRETISH = /secret|token|hash|password|salt|nonce|otp|signature|enc$/i;
 const STRUCTURAL = new Set(["uuid", "code", "id", "createdAt", "updatedAt", "deleteTime"]);
 /** Enough to describe a record; past this it is a dump, not a trail. */
 const MAX_AUDIT_FIELDS = 24;

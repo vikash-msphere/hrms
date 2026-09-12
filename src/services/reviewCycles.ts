@@ -14,6 +14,7 @@ import { etagOf } from "../http/serialize";
 import { visibleByDelete, softDeleteRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { byIdChunks, chunk, insertBatches, runBatch } from "../lib/dbBatch";
 import { notifyMany } from "./notifications";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type ReviewCycleInput = {
   name?: string;
@@ -88,7 +89,7 @@ export async function createReviewCycle(deps: Deps, actor: AppUser, input: Revie
 export async function updateReviewCycle(deps: Deps, actor: AppUser, id: string, patch: ReviewCycleInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.reviewCycles).where(eq(schema.reviewCycles.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("review cycle not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.reviewCycles> = { updatedAt: new Date() };
   const has = (k: keyof ReviewCycleInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) {
@@ -103,7 +104,7 @@ export async function updateReviewCycle(deps: Deps, actor: AppUser, id: string, 
   // An empty list means "all of them", the same as never having chosen - so it clears rather than storing a
   // selection that would narrow every review to nothing.
   if (has("competency_keys")) set.competencyKeysJson = patch.competency_keys?.length ? JSON.stringify([...new Set(patch.competency_keys)]) : null;
-  const updated = (await deps.db.update(schema.reviewCycles).set(set).where(eq(schema.reviewCycles.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.reviewCycles, "review cycle", row, set);
   await audit(deps, actor, "review-cycle.update", "review-cycles", id, diffMeta(row, updated, set, "review-cycles"), updated);
   return updated;
 }

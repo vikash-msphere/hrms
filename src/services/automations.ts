@@ -18,6 +18,7 @@ import { assertNotLocked } from "./lifecycle";
 import { validateAutomation, evalCondition, isScheduled, privilegedActionKinds, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
 import { invalidateAutomationCache } from "./automationEngine";
 import type { DomainEvent } from "../domain/events";
+import { atVersion, checkEtag, updateAtVersion, versionConflict } from "./versionGuard";
 
 export type AutomationInput = {
   name?: string;
@@ -127,7 +128,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
   const row = (await deps.db.select().from(schema.automations).where(eq(schema.automations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("automation not found");
   assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const has = (k: keyof AutomationInput) => Object.prototype.hasOwnProperty.call(patch, k);
   // Validate the merged result so a partial patch can't produce an invalid rule.
   const merged = toAutomation(
@@ -158,7 +159,7 @@ export async function updateAutomation(deps: Deps, actor: AppUser, id: string, p
     set.scheduleJson = isScheduled(merged) && merged.schedule ? JSON.stringify(merged.schedule) : null;
     set.lastScheduledOn = null;
   }
-  const updated = (await deps.db.update(schema.automations).set(set).where(eq(schema.automations.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.automations, "automation", row, set);
   await audit(deps, actor, "automation.update", "automations", id, diffMeta(row, updated, set, "automations"), updated);
   invalidateAutomationCache();
   return updated;
@@ -169,14 +170,18 @@ export async function deleteAutomation(deps: Deps, actor: AppUser, id: string, i
   if (!row) throw notFound("automation not found");
   assertMayActOnStored(actor, row);
   assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   // Bottom-up, because both children are foreign keys SQLite refuses the delete over - which is what made
   // removing any rule that had ever fired a 500. Neither outlives the rule: a suspended workflow instance is
   // runtime state that can never resume without the rule to resume INTO, and a run row exists only to explain
   // one of that rule's firings. What the rule WAS survives in the audit entry written below.
   await deps.db.delete(schema.workflowInstances).where(eq(schema.workflowInstances.automationId, id));
   await deps.db.delete(schema.automationRuns).where(eq(schema.automationRuns.automationId, id));
-  await deps.db.delete(schema.automations).where(eq(schema.automations.uuid, id));
+  // GUARDED AT VERSION like every other delete (services/softDelete.ts): the children are already gone by
+  // here, so a rule somebody edited between our read and this write must not be removed on the strength of the
+  // version we read - it answers 409 and the operator re-reads.
+  const gone = await deps.db.delete(schema.automations).where(atVersion(schema.automations, row)).returning({ uuid: schema.automations.uuid });
+  if (!gone.length) await versionConflict(deps, schema.automations, "automation", id);
   // A hard delete: the rule and its trigger/action wiring survive only as this entry.
   await audit(deps, actor, "automation.delete", "automations", id, removedMeta(row, "automations"), row);
   invalidateAutomationCache();
@@ -191,7 +196,7 @@ export async function setAutomationEnabled(deps: Deps, actor: AppUser, id: strin
   if (!row) throw notFound("automation not found");
   // Arming (or silencing) a rule whose actions run as super is the authoring act - see assertMayActOnStored.
   assertMayActOnStored(actor, row);
-  const updated = (await deps.db.update(schema.automations).set({ disabled: !enabled, updatedAt: new Date() }).where(eq(schema.automations.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.automations, "automation", row, { disabled: !enabled, updatedAt: new Date() });
   // A rule silently switched off is the hardest automation bug to find, so record the flip explicitly.
   await audit(deps, actor, `automation.${enabled ? "enable" : "disable"}`, "automations", id, { diff: { disabled: { from: row.disabled, to: !enabled } } }, updated);
   invalidateAutomationCache();

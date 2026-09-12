@@ -12,6 +12,7 @@ import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/e
 import { etagOf } from "../http/serialize";
 import { softDeleteRow, restoreRow, purgeRow, type PurgeCascade } from "./softDelete";
 import { emitEvent } from "./eventBus";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type SprintInput = {
   board?: string;
@@ -77,7 +78,7 @@ export async function createSprint(deps: Deps, actor: AppUser, input: SprintInpu
 export async function updateSprint(deps: Deps, actor: AppUser, id: string, patch: SprintInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.sprints).where(eq(schema.sprints.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("sprint not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.sprints> = { updatedAt: new Date() };
   const has = (k: keyof SprintInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) {
@@ -87,7 +88,7 @@ export async function updateSprint(deps: Deps, actor: AppUser, id: string, patch
   if (has("goal")) set.goal = patch.goal?.trim() || null;
   if (has("start_date")) set.startDate = dateOrNull(patch.start_date);
   if (has("end_date")) set.endDate = dateOrNull(patch.end_date);
-  const updated = (await deps.db.update(schema.sprints).set(set).where(eq(schema.sprints.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.sprints, "sprint", row, set);
   await audit(deps, actor, "sprint.update", "sprints", id, diffMeta(row, updated, set, "sprints"), updated);
   return updated;
 }

@@ -12,6 +12,7 @@ import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { createTransition, terminateForOffboarding } from "./transitions";
 import { notify, managerIdOf } from "./notifications";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Notice-period tracking: a departing employee's notice + last working day, with a derived countdown.
 // Employee-owned + code-scoped (own/dept/all); NO access control here (middleware gates by path + grants,
@@ -106,7 +107,7 @@ export async function createNoticePeriod(deps: Deps, actor: AppUser, input: Noti
 
 export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string, patch: NoticePeriodInput, ifMatch?: string) {
   const row = await getNoticePeriod(deps, actor, id);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   validate(patch);
   const has = (k: keyof NoticePeriodInput) => Object.prototype.hasOwnProperty.call(patch, k);
   const set: SetOf<typeof schema.noticePeriods> = { updatedAt: new Date() };
@@ -120,7 +121,7 @@ export async function updateNoticePeriod(deps: Deps, actor: AppUser, id: string,
   const notice = +new Date((set.noticeDate as Date) ?? row.noticeDate);
   const lwd = +new Date((set.lastWorkingDay as Date) ?? row.lastWorkingDay);
   if (lwd < notice) throw invalidArgument("last_working_day cannot be before notice_date");
-  const updated = (await deps.db.update(schema.noticePeriods).set(set).where(eq(schema.noticePeriods.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.noticePeriods, "record", row, set);
   // Keep a linked offboarding transition in sync: the last working day -> its anchor; the notice status ->
   // its state (completed -> COMPLETED, withdrawn -> CANCELLED, serving -> ACTIVE).
   if (updated.transitionId && (has("last_working_day") || has("status"))) {

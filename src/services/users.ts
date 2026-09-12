@@ -10,6 +10,7 @@ import { audit, diffMeta } from "../lib/audit";
 import { notFound, aborted, invalidArgument, isUserEmployeeCollision, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { EVERYONE_ROLE } from "../domain/grants";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type UserInput = { role?: string; status?: string; employee?: string | null };
 
@@ -37,7 +38,7 @@ export async function getUser(deps: Deps, actor: AppUser, id: string) {
 export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: UserInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.users).where(eq(schema.users.uuid, id)).limit(1))[0];
   if (!row) throw notFound("user not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
 
   const set: SetOf<typeof schema.users> = { updatedAt: new Date() };
   const has = (k: keyof UserInput) => Object.prototype.hasOwnProperty.call(patch, k);
@@ -65,7 +66,7 @@ export async function updateUser(deps: Deps, actor: AppUser, id: string, patch: 
   // is an ordinary mistake an admin makes in a picker, so it answers as one rather than as a 500.
   let updated: typeof row;
   try {
-    updated = (await deps.db.update(schema.users).set(set).where(eq(schema.users.uuid, id)).returning())[0]!;
+    updated = await updateAtVersion(deps, schema.users, "user", row, set);
   } catch (e) {
     if (!isUserEmployeeCollision(e)) throw e;
     throw invalidArgument("that employee already has a sign-in account; unlink it before linking this one");

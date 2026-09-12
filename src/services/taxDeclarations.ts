@@ -11,6 +11,7 @@ import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/e
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { notify } from "./notifications";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 type Status = typeof schema.taxDeclarations.$inferSelect.status;
 export type TaxDeclarationInput = {
@@ -76,7 +77,7 @@ export async function updateTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   const row = (await deps.db.select().from(schema.taxDeclarations).where(eq(schema.taxDeclarations.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("declaration not found");
   if (row.status === "VERIFIED") throw failedPrecondition("a verified declaration can't be edited");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.taxDeclarations> = { updatedAt: new Date(), status: "DECLARED" };
   const has = (k: keyof TaxDeclarationInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("financial_year")) { if (!patch.financial_year?.trim()) throw invalidArgument("financial_year is required"); set.financialYear = patch.financial_year.trim(); }
@@ -84,7 +85,7 @@ export async function updateTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   if (has("label")) set.label = patch.label?.trim() || null;
   if (has("declared_amount")) { if ((patch.declared_amount ?? 0) < 0) throw invalidArgument("declared_amount must be >= 0"); set.declaredAmount = patch.declared_amount ?? 0; }
   if (has("note")) set.note = patch.note?.trim() || null;
-  const updated = (await deps.db.update(schema.taxDeclarations).set(set).where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.taxDeclarations, "declaration", row, set);
   await audit(deps, actor, "tax-declaration.update", "tax-declarations", id, diffMeta(row, updated, set, "tax-declarations"), updated);
   return updated;
 }

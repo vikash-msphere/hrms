@@ -17,6 +17,7 @@ import {
   normalizePrefix, derivePrefix, parseColumns, type SwimlaneMode, SWIMLANE_MODES,
 } from "../domain/boards";
 import { computeBoardMetrics } from "../domain/boardMetrics";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type BoardInput = {
   name?: string;
@@ -106,7 +107,7 @@ export async function createBoard(deps: Deps, actor: AppUser, input: BoardInput,
 export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch: BoardInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.boards).where(eq(schema.boards.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("board not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.boards> = { updatedAt: new Date() };
   const has = (k: keyof BoardInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("name")) {
@@ -116,7 +117,7 @@ export async function updateBoard(deps: Deps, actor: AppUser, id: string, patch:
   if (has("description")) set.description = patch.description?.trim() || null;
   if (has("task_prefix")) set.taskPrefix = normalizePrefix(patch.task_prefix);
   if (has("mode")) set.mode = patch.mode === "scrum" ? "scrum" : "kanban";
-  const updated = (await deps.db.update(schema.boards).set(set).where(eq(schema.boards.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.boards, "board", row, set);
   await audit(deps, actor, "board.update", "boards", id, diffMeta(row, updated, set, "boards"), updated);
   return updated;
 }

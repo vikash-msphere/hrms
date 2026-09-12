@@ -63,6 +63,26 @@ describe("audit meta: what a create, a delete and a transition record", () => {
     expect(fieldDiff({ hash: "old" }, { hash: "new" }, ["hash"])).toEqual({});
   });
 
+  // ENCRYPTED-AT-REST COLUMNS ARE SECRETS TOO, and they were the half the denylist missed: every one of them
+  // is named `<what>Enc`, which matches none of the secret WORDS and none of the `(Json|Key)$` noise rule. So
+  // the generic row walk treated them as ordinary strings, and soft-deleting or purging any employee copied
+  // all five ciphertexts (truncated, but AES-GCM is CTR underneath, so a prefix still decrypts under the field
+  // key) into `audit_log.meta` - a table whose readership is deliberately wider than the record's own.
+  it("never records an encrypted-at-rest column", () => {
+    const row = {
+      firstName: "Asha",
+      nationalIdEnc: "ZW5jcnlwdGVkLW5hdGlvbmFsLWlk",
+      bankDetailsEnc: "ZW5jcnlwdGVkLWJhbms=",
+      identityDetailsEnc: "ZW5jcnlwdGVkLWlkZW50aXR5",
+      personalDetailsEnc: "ZW5jcnlwdGVkLXBlcnNvbmFs",
+      taxDetailsEnc: "ZW5jcnlwdGVkLXRheA==",
+    };
+    expect(rowValues(row, "employees")).toEqual({ firstName: "Asha" });
+    expect(JSON.stringify(removedMeta(row, "employees"))).not.toMatch(/ZW5jcnlwdGVk/);
+    // And on the update path, which diffs whatever columns a mapper happened to set.
+    expect(fieldDiff({ nationalIdEnc: "old" }, { nationalIdEnc: "new" }, ["nationalIdEnc"])).toEqual({});
+  });
+
   // A foreign key stored as its bare column value is two problems at once: unreadable, and an INTERNAL id on
   // the wire (middleware/encodeWireIds only tokenizes `<collection>/<id>` strings, so a bare one is published
   // raw). Both are fixed by the same thing - writing it as a ref - so both are asserted here.

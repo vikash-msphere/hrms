@@ -17,6 +17,7 @@ import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
 import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from "../domain/employeeNumber";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Wire input is snake_case (matches the OpenAPI schema). national_id/bank_details are write-only.
 export type EmployeeInput = {
@@ -213,9 +214,10 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("employee not found");
   assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
 
   const set: SetOf<typeof schema.employees> = { updatedAt: new Date() };
+  let moved = false; // a re-parent writes this row itself - see the note by the guarded write below
   const has = (k: keyof EmployeeInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("first_name")) set.firstName = patch.first_name;
   if (has("last_name")) set.lastName = patch.last_name;
@@ -234,7 +236,7 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
     // access-rule codes. moveEmployee sets departmentId itself, so it's not added to `set`.
     // Refs, not the bare ids the column holds: an internal id must not reach the wire, and `departments/<id>`
     // is a thing the reader's client resolves to the department's NAME.
-    if (next !== row.departmentId) { await moveEmployee(deps, id, row.code!, next); await audit(deps, actor, "employee.reparent", "employees", id, { from: row.departmentId ? `departments/${row.departmentId}` : null, to: next ? `departments/${next}` : null }); }
+    if (next !== row.departmentId) { await moveEmployee(deps, id, row.code!, next); moved = true; await audit(deps, actor, "employee.reparent", "employees", id, { from: row.departmentId ? `departments/${row.departmentId}` : null, to: next ? `departments/${next}` : null }); }
   }
   if (has("manager")) set.managerId = idFromPath(patch.manager) ?? null;
   if (has("start_date")) set.startDate = dateMs(patch.start_date);
@@ -243,7 +245,12 @@ export async function updateEmployee(deps: Deps, actor: AppUser, id: string, pat
   if (has("eps_excluded")) set.epsExcluded = !!patch.eps_excluded;
   if (has("national_id")) set.nationalIdEnc = patch.national_id ? await deps.encryptor.encrypt(patch.national_id) : null;
 
-  const [updated] = await deps.db.update(schema.employees).set(set).where(eq(schema.employees.uuid, id)).returning();
+  // THE CASCADE ABOVE REWRITES THIS VERY ROW, so the version to guard the write below with is the one that
+  // exists AFTER it, not the one read at the top. The guard is there to refuse somebody ELSE'S concurrent
+  // write; pinning the pre-cascade version would make this request conflict with itself and answer 409 for a
+  // re-parent that was working perfectly. Re-read only on the path that moved something.
+  const version = moved ? (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, id)).limit(1))[0] ?? row : row;
+  const updated = await updateAtVersion(deps, schema.employees, "employee", version, set);
   // Diff non-sensitive fields (never the encrypted national id) for the activity trail; fall back to field names.
   // The sign-in account is keyed by email, so a corrected work address has to move with it - otherwise the
   // account keeps the old address and the person's next login mints a SECOND one under the new email.

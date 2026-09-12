@@ -23,6 +23,7 @@ import { notify } from "./notifications";
 import { notifyMentions } from "./mentions";
 import { parseColumns, commitmentIndex, columnIndex, normalizeLabelKeys, CARD_PRIORITIES, type CardPriority } from "../domain/boards";
 import { runBatch, insertBatches, byIdChunks } from "../lib/dbBatch";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Notify a card's assignee when they are newly assigned it (not a re-save to the same person, not self-assign).
 async function notifyCardAssigned(deps: Deps, actor: AppUser, card: typeof schema.cards.$inferSelect, prevAssigneeId: string | null) {
@@ -571,7 +572,7 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
 export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: CardInput, ifMatch?: string) {
   const row = await getCard(deps, actor, id);
   if (row.deleteTime) throw notFound("card not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.cards> = { updatedAt: new Date() };
   const has = (k: keyof CardInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("title")) {
@@ -598,7 +599,7 @@ export async function updateCard(deps: Deps, actor: AppUser, id: string, patch: 
   if (has("goal")) set.goalId = idFromPath(patch.goal) ?? null;
   if (has("cadence")) set.cadence = patch.cadence ?? null;
   const oldGoalId = row.goalId;
-  const updated = (await deps.db.update(schema.cards).set(set).where(eq(schema.cards.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.cards, "card", row, set);
   // `diffMeta(..., "cards")` rather than a bare field diff: naming the collection is what turns the FK columns
   // (assignee, department, sprint, goal) into `<collection>/<id>` refs instead of the raw internal ids they are
   // in the row - an internal id must not reach the wire, and a ref is what the feed resolves to a NAME. It also

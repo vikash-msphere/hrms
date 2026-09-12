@@ -11,6 +11,7 @@ import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { orgToday, dayStartMs } from "./orgDay";
+import { atVersion, checkEtag, versionConflict } from "./versionGuard";
 
 export type ApprovalDelegationInput = {
   delegator?: string | null;
@@ -66,8 +67,12 @@ async function assertNoOverlap(deps: Deps, delegatorId: string, from: Date, to: 
 export async function deleteApprovalDelegation(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.approvalDelegations).where(eq(schema.approvalDelegations.uuid, id)).limit(1))[0];
   if (!row) throw notFound("approval delegation not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
-  await deps.db.delete(schema.approvalDelegations).where(eq(schema.approvalDelegations.uuid, id));
+  checkEtag(row, ifMatch);
+  // GUARDED AT VERSION, like every soft delete (services/softDelete.ts): this delete is permanent and the row
+  // is what decides who approves for whom, so removing one that somebody re-pointed between our read and this
+  // write is exactly the change optimistic concurrency exists to refuse.
+  const gone = await deps.db.delete(schema.approvalDelegations).where(atVersion(schema.approvalDelegations, row)).returning({ uuid: schema.approvalDelegations.uuid });
+  if (!gone.length) await versionConflict(deps, schema.approvalDelegations, "approval delegation", id);
   // A hard delete (see above): who was covering for whom, and when, survives only here.
   await audit(deps, actor, "approvalDelegation.delete", "approval-delegations", id, removedMeta(row, "approval-delegations"), row);
 }

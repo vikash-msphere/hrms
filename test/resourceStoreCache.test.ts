@@ -290,7 +290,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
   };
 
   it("serves a stored copy without reading it when nothing has changed", async () => {
-    changesAnswer = { now: Date.now(), collections: [] };
+    changesAnswer = { now: Date.now(), collections: [], authz_version: "v1" };
     seed("t1@x.test", "leave-requests", [{ path: "leave-requests/1" }], 10 * 60_000); // long past its 20s tier
     await identity("t1@x.test");
     expect(storedCopiesTrusted()).toBe(true);
@@ -300,7 +300,7 @@ describe("resource store: trusting stored copies against the change feed", () =>
   });
 
   it("re-reads exactly the collections the feed named, and no others", async () => {
-    changesAnswer = { now: Date.now(), collections: ["holidays"] };
+    changesAnswer = { now: Date.now(), collections: ["holidays"], authz_version: "v1" };
     seed("t2@x.test", "holidays", [{ path: "holidays/1" }], 10 * 60_000);
     seed("t2@x.test", "departments", [{ path: "departments/1" }], 10 * 60_000);
     await identity("t2@x.test");
@@ -341,6 +341,22 @@ describe("resource store: trusting stored copies against the change feed", () =>
     expect(storedCopiesTrusted()).toBe(false);
     await ensureFetch("goals", {});
     expect(listed).toContain("goals");
+  });
+
+  // The UNKNOWN case, which used to be read as "nothing moved". `authzMoved` required a stamp on BOTH sides
+  // before it would compare them, so a feed answer carrying none - or a sync point written before the app
+  // stamped one - meant every stored row was adopted unchecked. That is the one comparison guarding rows whose
+  // redactions and `access.can` hints were computed under permissions the caller may no longer hold, so the
+  // unknown answer belongs on the same side as "changed": give the cache up and pay for one round of reads.
+  it("gives up every stored copy when the feed carries no access version at all", async () => {
+    changesAnswer = { now: Date.now(), collections: [] }; // no authz_version
+    seed("t6b@x.test", "shifts", [{ path: "shifts/1" }], 10 * 60_000);
+    seedSync("t6b@x.test", 60_000, "v1");
+    await setResourceStoreUser("t6b@x.test");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(storedCopiesTrusted()).toBe(false);
+    await ensureFetch("shifts", {});
+    expect(listed).toContain("shifts");
   });
 
   // The case no collection stamp can report. A stored row carries the `access.can` hints and the field

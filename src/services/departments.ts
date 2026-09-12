@@ -14,6 +14,7 @@ import { assertNotLocked } from "./lifecycle";
 import { crudService, type CrudSpec, type SetOf } from "./crud";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 export type DepartmentInput = { display_name?: string; parent?: string | null; managers?: string[] | null };
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -54,8 +55,9 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
   const row = (await deps.db.select().from(schema.departments).where(eq(schema.departments.uuid, id)).limit(1))[0];
   if (!row) throw notFound("department not found");
   assertNotLocked(row);
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.departments> = { updatedAt: new Date() };
+  let moved = false; // a re-parent writes this row itself - see the note by the guarded write below
   const has = (k: keyof DepartmentInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("display_name")) set.name = patch.display_name;
   if (has("managers")) set.managerIds = managerIdsJson(patch.managers);
@@ -64,9 +66,14 @@ export async function updateDepartment(deps: Deps, actor: AppUser, id: string, p
     // Re-parent: recompute this dept's code + cascade the whole subtree (sub-depts, employees, owned rows) +
     // any access-rule codes. moveDepartment sets parentId itself, so it's not in `set`.
     // Refs, not the bare ids the column holds - same rule as every other FK in an audit meta (lib/audit).
-    if (next !== row.parentId) { await moveDepartment(deps, id, row.code!, next); await audit(deps, actor, "department.reparent", "departments", id, { from: row.parentId ? `departments/${row.parentId}` : null, to: next ? `departments/${next}` : null }); }
+    if (next !== row.parentId) { await moveDepartment(deps, id, row.code!, next); moved = true; await audit(deps, actor, "department.reparent", "departments", id, { from: row.parentId ? `departments/${row.parentId}` : null, to: next ? `departments/${next}` : null }); }
   }
-  const [updated] = await deps.db.update(schema.departments).set(set).where(eq(schema.departments.uuid, id)).returning();
+  // THE CASCADE ABOVE REWRITES THIS VERY ROW, so the version to guard the write below with is the one that
+  // exists AFTER it, not the one read at the top. The guard is there to refuse somebody ELSE'S concurrent
+  // write; pinning the pre-cascade version would make this request conflict with itself and answer 409 for a
+  // re-parent that was working perfectly. Re-read only on the path that moved something.
+  const version = moved ? (await deps.db.select().from(schema.departments).where(eq(schema.departments.uuid, id)).limit(1))[0] ?? row : row;
+  const updated = await updateAtVersion(deps, schema.departments, "department", version, set);
   await audit(deps, actor, "department.update", "departments", id, diffMeta(row, updated, set, "departments"), updated);
   return updated;
 }

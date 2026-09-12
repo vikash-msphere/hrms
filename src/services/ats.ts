@@ -28,6 +28,7 @@ import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
 import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
 import { buildTimedIcs } from "../lib/ics";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 const cfgOf = (deps: Deps) => getSettingValue<AtsConfig>(deps, "ats", DEFAULT_ATS_CONFIG);
 const parseDate = (s: string, field: string): Date => {
@@ -109,7 +110,7 @@ export async function createRequisition(deps: Deps, actor: AppUser, input: Requi
 export async function updateRequisition(deps: Deps, actor: AppUser, id: string, patch: RequisitionInput, ifMatch?: string) {
   const row = await getRequisition(deps, id);
   if (row.deleteTime) throw notFound("requisition not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.jobRequisitions> = { updatedAt: new Date() };
   if (patch.title !== undefined) { const t = (patch.title ?? "").trim(); if (!t) throw invalidArgument("title cannot be blank"); set.title = t; }
   if (patch.department !== undefined) set.departmentId = patch.department ? idFromPath(patch.department) : null;
@@ -129,7 +130,7 @@ export async function updateRequisition(deps: Deps, actor: AppUser, id: string, 
     if (s === "open" && !row.openedDate && patch.opened_date === undefined) set.openedDate = deps.clock.now();
     if ((s === "closed" || s === "filled") && !row.closedDate && patch.closed_date === undefined) set.closedDate = deps.clock.now();
   }
-  const updated = (await deps.db.update(schema.jobRequisitions).set(set).where(eq(schema.jobRequisitions.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.jobRequisitions, "requisition", row, set);
   await audit(deps, actor, "requisition.update", "job-requisitions", id, diffMeta(row, updated, set, "job-requisitions"), updated);
   return updated;
 }
@@ -184,7 +185,7 @@ export async function createCandidate(deps: Deps, actor: AppUser, input: Candida
 export async function updateCandidate(deps: Deps, actor: AppUser, id: string, patch: CandidateInput, ifMatch?: string) {
   const row = await getCandidate(deps, id);
   if (row.deleteTime) throw notFound("candidate not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.candidates> = { updatedAt: new Date() };
   if (patch.name !== undefined) { const n = (patch.name ?? "").trim(); if (!n) throw invalidArgument("name cannot be blank"); set.name = n; }
   if (patch.email !== undefined) set.email = patch.email?.trim() || null;
@@ -194,7 +195,7 @@ export async function updateCandidate(deps: Deps, actor: AppUser, id: string, pa
   if (patch.referral !== undefined) set.referralId = patch.referral ? idFromPath(patch.referral) : null;
   if (patch.tags !== undefined) set.tags = patch.tags?.trim() || null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
-  const updated = (await deps.db.update(schema.candidates).set(set).where(eq(schema.candidates.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.candidates, "candidate", row, set);
   await audit(deps, actor, "candidate.update", "candidates", id, diffMeta(row, updated, set, "candidates"), updated);
   return updated;
 }
@@ -360,14 +361,14 @@ async function setStage(deps: Deps, actor: AppUser, id: string, stage: string): 
 export async function updateApplication(deps: Deps, actor: AppUser, id: string, patch: ApplicationInput & { status?: string | null }, ifMatch?: string) {
   const row = await getApplication(deps, id);
   if (row.deleteTime) throw notFound("application not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   if (patch.stage !== undefined && patch.stage) return setStage(deps, actor, id, patch.stage);
   const set: SetOf<typeof schema.applications> = { updatedAt: new Date() };
   if (patch.source !== undefined) set.source = patch.source?.trim() || null;
   if (patch.referral !== undefined) set.referralId = patch.referral ? idFromPath(patch.referral) : null;
   if (patch.applied_date !== undefined) set.appliedDate = patch.applied_date ? parseDate(patch.applied_date, "applied_date") : null;
   if (patch.status !== undefined && patch.status === "withdrawn") set.status = "withdrawn";
-  const updated = (await deps.db.update(schema.applications).set(set).where(eq(schema.applications.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.applications, "application", row, set);
   await audit(deps, actor, "application.update", "applications", id, diffMeta(row, updated, set, "applications"), updated);
   return updated;
 }
@@ -504,7 +505,7 @@ export async function createInterview(deps: Deps, actor: AppUser, input: Intervi
 export async function updateInterview(deps: Deps, actor: AppUser, id: string, patch: InterviewInput, ifMatch?: string) {
   const row = await getInterview(deps, id);
   if (row.deleteTime) throw notFound("interview not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.interviews> = { updatedAt: new Date() };
   if (patch.title !== undefined) { const t = (patch.title ?? "").trim(); if (!t) throw invalidArgument("title cannot be blank"); set.title = t; }
   if (patch.mode !== undefined) set.mode = patch.mode ? oneOf(patch.mode, INTERVIEW_MODES, "invalid mode") : "video";
@@ -512,7 +513,7 @@ export async function updateInterview(deps: Deps, actor: AppUser, id: string, pa
   if (patch.scheduled_end_time !== undefined) set.scheduledEnd = patch.scheduled_end_time ? parseTs(patch.scheduled_end_time, "scheduled_end_time") : null;
   if (patch.interviewers !== undefined) set.interviewerIds = interviewersJson(patch.interviewers);
   if (patch.location !== undefined) set.location = patch.location?.trim() || null;
-  const updated = (await deps.db.update(schema.interviews).set(set).where(eq(schema.interviews.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.interviews, "interview", row, set);
   await audit(deps, actor, "interview.update", "interviews", id, diffMeta(row, updated, set, "interviews"), updated);
   // A reschedule notifies every interviewer; a changed panel notifies only the newly-added interviewers.
   const timeChanged = set.scheduledStart !== undefined && +new Date(row.scheduledStart ?? 0) !== +new Date(updated.scheduledStart ?? 0);
@@ -666,13 +667,13 @@ export async function createInterviewFeedback(deps: Deps, actor: AppUser, input:
 export async function updateInterviewFeedback(deps: Deps, actor: AppUser, id: string, patch: FeedbackInput, ifMatch?: string) {
   const row = await getInterviewFeedback(deps, id);
   if (row.deleteTime) throw notFound("scorecard not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.interviewFeedback> = { updatedAt: new Date() };
   if (patch.ratings !== undefined) set.ratingsJson = patch.ratings ? JSON.stringify(patch.ratings) : null;
   if (patch.overall_rating !== undefined) set.overallRating = patch.overall_rating ?? null;
   if (patch.recommendation !== undefined) set.recommendation = patch.recommendation ? oneOf(patch.recommendation, RECOMMENDATIONS, "invalid recommendation") : null;
   if (patch.comment !== undefined) set.comment = patch.comment?.trim() || null;
-  const updated = (await deps.db.update(schema.interviewFeedback).set(set).where(eq(schema.interviewFeedback.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.interviewFeedback, "scorecard", row, set);
   await audit(deps, actor, "interview-feedback.update", "interview-feedback", id, diffMeta(row, updated, set, "interview-feedback"), updated);
   return updated;
 }
@@ -734,7 +735,7 @@ export async function createOffer(deps: Deps, actor: AppUser, input: OfferInput,
 export async function updateOffer(deps: Deps, actor: AppUser, id: string, patch: OfferInput, ifMatch?: string) {
   const row = await getOffer(deps, id);
   if (row.deleteTime) throw notFound("offer not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   if (row.status !== "draft") throw failedPrecondition("only a draft offer can be edited");
   const set: SetOf<typeof schema.offers> = { updatedAt: new Date() };
   if (patch.base_comp !== undefined) set.baseComp = patch.base_comp ?? null;
@@ -743,7 +744,7 @@ export async function updateOffer(deps: Deps, actor: AppUser, id: string, patch:
   if (patch.join_date !== undefined) set.joinDate = patch.join_date ? parseDate(patch.join_date, "join_date") : null;
   if (patch.expiry_date !== undefined) set.expiryDate = patch.expiry_date ? parseDate(patch.expiry_date, "expiry_date") : null;
   if (patch.notes !== undefined) set.notes = patch.notes?.trim() || null;
-  const updated = (await deps.db.update(schema.offers).set(set).where(eq(schema.offers.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.offers, "offer", row, set);
   await audit(deps, actor, "offer.update", "offers", id, diffMeta(row, updated, set, "offers"), updated);
   return updated;
 }

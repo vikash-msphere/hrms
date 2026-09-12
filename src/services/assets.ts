@@ -28,6 +28,7 @@ import {
 } from "../domain/assetCustody";
 import { allocTagRun, FALLBACK_TAG_CODE, formatAssetTag, nextSeq, normalizeTagConfig, type AssetTagConfig } from "../domain/assetTag";
 import { requireOpenStocktake } from "./stocktakes";
+import { atVersion, checkEtag, updateAtVersion, versionConflict } from "./versionGuard";
 
 export type AssetInput = {
   asset_tag?: string | null;
@@ -438,7 +439,7 @@ async function notifyAssignee(deps: Deps, actor: AppUser, row: typeof schema.ass
 export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch: AssetInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, id)).limit(1))[0];
   if (!row) throw notFound("asset not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const has = (k: keyof AssetInput) => Object.prototype.hasOwnProperty.call(patch, k);
   const set: SetOf<typeof schema.assets> = { updatedAt: new Date() };
   // A tag can be corrected but not removed: it is what the sticker on the thing says, and an untagged row
@@ -488,7 +489,7 @@ export async function updateAsset(deps: Deps, actor: AppUser, id: string, patch:
     set.status = provableStatus(policy, patch.status!, handedOver ? null : row.acknowledgedAt);
   }
   if (set.status !== undefined && set.status !== row.status) set.custodySince = isPending(set.status as string) ? new Date() : null;
-  const [updated] = await deps.db.update(schema.assets).set(set).where(eq(schema.assets.uuid, id)).returning();
+  const updated = await updateAtVersion(deps, schema.assets, "asset", row, set);
   await audit(deps, actor, "asset.update", "assets", id, diffMeta(row, updated, set, "assets"), updated);
   // Newly assigned to someone (a reassignment) notifies the new owner - with the "scan it" ask when the
   // org requires acknowledgement.
@@ -613,7 +614,7 @@ export async function reissueTag(deps: Deps, actor: AppUser, id: string) {
 export async function deleteAsset(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.assets).where(eq(schema.assets.uuid, id)).limit(1))[0];
   if (!row) throw notFound("asset not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   // An asset row has no `delete_time` - a delete here is permanent - and `asset_requests.issued_asset_id`
   // points at it with ON DELETE no action, so a thing that was ever handed over against a request cannot go.
   // Say so: without this check D1 raises FOREIGN KEY constraint failed and the caller gets a 500 for what is
@@ -624,7 +625,11 @@ export async function deleteAsset(deps: Deps, actor: AppUser, id: string, ifMatc
     .where(eq(schema.assetRequests.issuedAssetId, id))
     .limit(1);
   if (issued) throw failedPrecondition("this asset was handed over against an asset request, so its history cannot be deleted - retire it instead");
-  await deps.db.delete(schema.assets).where(eq(schema.assets.uuid, id));
+  // GUARDED AT VERSION, like every soft delete (services/softDelete.ts). This one is permanent, and the
+  // precondition above was read before it: a custody scan or a reassignment landing in between would be
+  // destroyed by a delete that was decided against an older row.
+  const gone = await deps.db.delete(schema.assets).where(atVersion(schema.assets, row)).returning({ uuid: schema.assets.uuid });
+  if (!gone.length) await versionConflict(deps, schema.assets, "asset", id);
   // Assets have no delete_time - this is permanent, so the row survives only as this entry.
   await audit(deps, actor, "asset.delete", "assets", id, removedMeta(row, "assets"), row);
 }

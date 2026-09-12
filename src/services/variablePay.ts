@@ -15,7 +15,7 @@ import { audit } from "../lib/audit";
 import { failedPrecondition, invalidArgument, isVariablePayCollision, notFound } from "../lib/errors";
 import { goalAttainment, type GoalSnapshot } from "../domain/performance";
 import { round2 } from "../domain/money";
-import { recordBonus } from "./bonuses";
+import { recordBonus, recordBonusesForCycle } from "./bonuses";
 import { cycleGoalsFor } from "./reviews";
 import { byIdChunks } from "../lib/dbBatch";
 import { orgToday } from "./orgDay";
@@ -204,6 +204,14 @@ export async function awardVariablePay(
   let currency = "INR";
   /** What this press actually paid, per employee ref, so the answer can be patched rather than re-read. */
   const paid = new Map<string, number>();
+  // The lines this press is actually paying, decided first, then written as ONE batched award.
+  //
+  // This loop used to call `recordBonus` per line - a duplicate read, a counter statement, an insert, an audit
+  // entry and a `notify()` each - which is the per-employee fan-out this module's own comment above already
+  // names as the thing that made a two-hundred-person cycle stop working. `recordBonusesForCycle` does the
+  // whole group in a couple of statements; the idempotence story is unchanged, because it is the UNIQUE index
+  // that settles a race either way (see that function).
+  const payable: { employeeId: string; amount: number; currency: string; line: string }[] = [];
   for (const line of lines) {
     if (!ids.has(idFromPath(line.employee)!)) continue;
     if (line.blocked || line.recommended == null || line.recommended <= 0) {
@@ -211,38 +219,20 @@ export async function awardVariablePay(
       continue;
     }
     currency = line.currency;
-    // `cycleId` is the award's idempotence key (see awardedForCycle). `reason` stays the human sentence it
-    // always was - it is what an auditor reads on the bonus row - but nothing keys off it any more.
-    //
-    // The `already_awarded` check above is a READ taken before this loop started, so it answers for the state
-    // the run began in and not for the state at the moment of the write: two overlapping `:award` calls (two
-    // admins, or one double press that outran the button) both read "nothing paid" and both paid. The
-    // DATABASE settles it - `bonus_cycle_emp_idx` admits one payout per person per cycle - and the loser
-    // counts as skipped, which is exactly what the pre-read would have said had it seen the winner's row.
-    // Nothing is retried: the row that now exists IS this award.
-    try {
-      await recordBonus(deps, actor, {
-        employee: line.employee,
-        amount: line.recommended,
-        currency_code: line.currency,
-        kind: VARIABLE_PAY_KIND,
-        reason: reasonFor(cycle.name),
-        award_date: awardDate,
-      }, { cycleId });
-    } catch (e) {
-      if (!isVariablePayCollision(e)) throw e;
-      skipped++;
-      continue;
+    payable.push({ employeeId: idFromPath(line.employee)!, amount: line.recommended, currency: line.currency, line: line.employee });
+  }
+  if (payable.length) {
+    const res = await recordBonusesForCycle(deps, actor, cycleId, VARIABLE_PAY_KIND, reasonFor(cycle.name), awardDate, payable);
+    // A refusal is somebody else's concurrent award having already paid that person, which is exactly what the
+    // pre-read would have said had it seen their row - so it counts as skipped, as it always did.
+    skipped += res.skipped;
+    const written = new Set(res.awardedEmployeeIds);
+    for (const a of payable) {
+      if (!written.has(a.employeeId)) continue;
+      awarded++;
+      total = round2(total + a.amount);
+      paid.set(a.line, round2((paid.get(a.line) ?? 0) + a.amount));
     }
-    awarded++;
-    total = round2(total + line.recommended);
-    // The line now reads as paid, in place. The route used to get this by running the whole thing a SECOND
-    // time - which doubled the cost of the most expensive call in the module for information this loop
-    // already holds exactly: it knows which lines it paid and at what figure, and nothing else about the
-    // cycle moved. A re-read could also disagree with what was just written (another admin awarding
-    // concurrently), and reporting somebody else's award as the outcome of this press is worse than not
-    // reporting it.
-    paid.set(line.employee, round2((paid.get(line.employee) ?? 0) + line.recommended));
   }
   // The trail records the CYCLE the money came out of, because "why was this bonus paid" is the question an
   // auditor opens with and the bonus row itself only carries a sentence.

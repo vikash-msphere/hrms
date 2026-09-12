@@ -15,6 +15,7 @@ import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { purgeRow, type PurgeCascade } from "./softDelete";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 // Suggestion box: employee ideas, optionally anonymous, peer-upvoted, HR-responded. NO access control here
 // (middleware gates by path + grants; private by default, open box = grant read/write to `everyone`). Owned by
@@ -108,14 +109,14 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
 export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, patch: SuggestionInput, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.suggestions).where(eq(schema.suggestions.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("suggestion not found");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const has = (k: keyof SuggestionInput) => Object.prototype.hasOwnProperty.call(patch, k);
   const set: SetOf<typeof schema.suggestions> = { updatedAt: new Date() };
   if (has("title")) { const t = (patch.title ?? "").trim(); if (!t) throw invalidArgument("title cannot be empty"); set.title = t; }
   if (has("body")) { const b = (patch.body ?? "").trim(); if (!b) throw invalidArgument("body cannot be empty"); set.body = b; }
   if (has("category")) set.category = patch.category?.trim() || null;
   if (has("anonymous")) set.anonymous = !!patch.anonymous;
-  const updated = (await deps.db.update(schema.suggestions).set(set).where(eq(schema.suggestions.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.suggestions, "suggestion", row, set);
   await audit(deps, actor, "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
   return updated;
 }

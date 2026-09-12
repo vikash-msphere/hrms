@@ -362,7 +362,15 @@ async function syncChanges(point: SyncPoint) {
     // rows carry the old `access.can` hints and the old redaction shape, and a collection they have just lost
     // cannot be named in the answer at all. Give the lot up. Compared for INEQUALITY - it is a hash of what
     // they may do, not a clock, so "different" is the only question it answers.
-    const authzMoved = !!r.authz_version && !!point.authz && r.authz_version !== point.authz;
+    //
+    // A MISSING stamp on either side counts as MOVED, which is the opposite of what it used to do. Requiring
+    // both to be present (`!!r.authz_version && !!point.authz && …`) made the one comparison that guards
+    // stale redactions fail OPEN: a stored sync point with no stamp, or a response that did not carry one,
+    // answered "not moved" and every stored row was adopted unchecked. Neither is reachable today - the
+    // server always sends it and the write below always records it - which is exactly why it could sit there.
+    // Giving the cache up costs one round of refetching; trusting it wrongly serves rows carrying permissions
+    // the caller no longer holds, so the unknown case belongs on the safe side of the question.
+    const authzMoved = r.authz_version !== point.authz;
     if (authzMoved || r.unknown_window) {
       trustDisk = false;
       clearCache();

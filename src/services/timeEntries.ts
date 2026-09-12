@@ -11,6 +11,7 @@ import { notify, notifyManager } from "./notifications";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 
 type Status = typeof schema.timeEntries.$inferSelect.status;
 export type TimeEntryInput = {
@@ -98,7 +99,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   const row = (await deps.db.select().from(schema.timeEntries).where(eq(schema.timeEntries.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("time entry not found");
   if (row.status === "APPROVED") throw failedPrecondition("an approved entry can't be edited");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.timeEntries> = { updatedAt: new Date() };
   const has = (k: keyof TimeEntryInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("project")) { const p = idFromPath(patch.project); if (!p) throw invalidArgument("project is required"); await assertActiveProject(deps, p); set.projectId = p; }
@@ -107,7 +108,7 @@ export async function updateTimeEntry(deps: Deps, actor: AppUser, id: string, pa
   if (has("hours")) { if (patch.hours == null || patch.hours < 0 || patch.hours > 24) throw invalidArgument("hours must be between 0 and 24"); set.hours = patch.hours; }
   if (has("description")) set.description = patch.description?.trim() || null;
   if (has("billable")) set.billable = !!patch.billable;
-  const updated = (await deps.db.update(schema.timeEntries).set(set).where(eq(schema.timeEntries.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.timeEntries, "time entry", row, set);
   await audit(deps, actor, "time-entry.update", "time-entries", id, diffMeta(row, updated, set, "time-entries"), updated);
   return updated;
 }

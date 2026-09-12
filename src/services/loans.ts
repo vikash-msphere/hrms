@@ -29,6 +29,7 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 import { round2 } from "../domain/money";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
+import { checkEtag, updateAtVersion } from "./versionGuard";
 const MANUAL_REPAY_DEDUP_MS = 60_000; // an identical manual repayment within 60s = accidental double-submit
 
 export async function listLoans(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employee?: string, status?: string, showDeleted = false) {
@@ -75,7 +76,7 @@ export async function updateLoan(deps: Deps, actor: AppUser, id: string, patch: 
   const row = (await deps.db.select().from(schema.loans).where(eq(schema.loans.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("loan not found");
   if (row.status !== "PENDING") throw failedPrecondition("only a pending loan can be edited");
-  if (ifMatch && ifMatch !== etagOf(+new Date(row.updatedAt))) throw aborted("etag mismatch");
+  checkEtag(row, ifMatch);
   const set: SetOf<typeof schema.loans> = { updatedAt: new Date() };
   const has = (k: keyof LoanInput) => Object.prototype.hasOwnProperty.call(patch, k);
   if (has("kind")) set.kind = patch.kind === "advance" ? "advance" : "loan";
@@ -83,7 +84,7 @@ export async function updateLoan(deps: Deps, actor: AppUser, id: string, patch: 
   if (has("installments")) set.installments = Math.max(1, Math.round(patch.installments ?? 1));
   if (has("reason")) set.reason = patch.reason?.trim() || null;
   if (has("start_date")) { if (patch.start_date && Number.isNaN(dayMs(patch.start_date))) throw invalidArgument("start_date is invalid"); set.startDate = patch.start_date ? new Date(dayMs(patch.start_date)) : null; }
-  const updated = (await deps.db.update(schema.loans).set(set).where(eq(schema.loans.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.loans, "loan", row, set);
   await audit(deps, actor, "loan.update", "loans", id, diffMeta(row, updated, set, "loans"), updated);
   return updated;
 }

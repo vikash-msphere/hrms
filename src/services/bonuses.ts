@@ -1,4 +1,4 @@
-import { allocOwnedCode } from "./codeAlloc";
+import { allocOwnedCode, allocOwnedCodeRuns } from "./codeAlloc";
 import { and, eq, inArray, isNull, gte, sql, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -7,9 +7,10 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { genId } from "../lib/idCodec";
+import { byIdChunks, insertBatches, runBatch } from "../lib/dbBatch";
 import { audit } from "../lib/audit";
-import { invalidArgument, notFound } from "../lib/errors";
-import { notify } from "./notifications";
+import { invalidArgument, isVariablePayCollision, notFound } from "../lib/errors";
+import { notify, notifyMany } from "./notifications";
 import { orgCurrency } from "./settings";
 import { round2 } from "../domain/money";
 
@@ -128,6 +129,77 @@ export type AwardInput = {
 // Award a flat bonus across a scope - company-wide, a department, or one employee - materializing ONE row per
 // in-scope active employee (so it shows on each profile and is paid, taxable, by the next payroll run). Group
 // awards share a batch id. Returns the created rows.
+/**
+ * Every in-scope employee, as ids - by the SCOPE's own predicate, in SQL.
+ *
+ * This used to be `select().from(employees).where(status = 'active')` - every column of every active person,
+ * including the five encrypted PII blobs - filtered down to the target set in the isolate. D1 bills rows READ,
+ * so a one-person `individual` award paid for the whole directory, and a company award paid for it twice over
+ * (once here, once in the payload it never looked at). Same shape services/payroll.ts was rewritten out of.
+ */
+async function targetsFor(deps: Deps, scope: "company" | "department" | "individual", input: AwardInput): Promise<{ ids: string[]; scopeRef: string | null }> {
+  const live = [eq(schema.employees.status, "active"), isNull(schema.employees.deleteTime)];
+  if (scope === "individual") {
+    const empId = idFromPath(input.employee);
+    if (!empId) throw invalidArgument("employee is required");
+    const rows = await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(and(...live, eq(schema.employees.uuid, empId)));
+    if (!rows.length) throw notFound("employee not found");
+    return { ids: rows.map((r) => r.uuid), scopeRef: null };
+  }
+  if (scope === "department") {
+    const deptId = idFromPath(input.department);
+    if (!deptId) throw invalidArgument("department is required");
+    const rows = await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(and(...live, eq(schema.employees.departmentId, deptId)));
+    return { ids: rows.map((r) => r.uuid), scopeRef: `departments/${deptId}` };
+  }
+  const rows = await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(and(...live));
+  return { ids: rows.map((r) => r.uuid), scopeRef: null };
+}
+
+/**
+ * The employees among `ids` who already hold an identical unpaid award inside the dedup window, as one read
+ * for the whole roster instead of one per person. Same match key as the single-award guard above.
+ */
+async function recentDuplicates(
+  deps: Deps,
+  ids: string[],
+  key: { amount: number; kind: string | null; reason: string | null; awardDateMs: number; scope: string; scopeRef: string | null },
+  now: number,
+): Promise<Map<string, typeof schema.bonuses.$inferSelect>> {
+  const cutoff = new Date(now - DEDUP_WINDOW_MS);
+  const rows = await byIdChunks(ids, (group) =>
+    deps.db.select().from(schema.bonuses).where(and(inArray(schema.bonuses.employeeId, group), isNull(schema.bonuses.paidRunId), gte(schema.bonuses.createdAt, cutoff))),
+  );
+  const out = new Map<string, typeof schema.bonuses.$inferSelect>();
+  for (const r of rows) {
+    if (out.has(r.employeeId)) continue;
+    if (
+      r.amount === key.amount &&
+      (r.kind ?? null) === key.kind &&
+      (r.reason ?? null) === key.reason &&
+      +new Date(r.awardDate) === key.awardDateMs &&
+      (r.scope ?? null) === key.scope &&
+      (r.scopeRef ?? null) === key.scopeRef
+    ) out.set(r.employeeId, r);
+  }
+  return out;
+}
+
+// Award a flat bonus across a scope - company-wide, a department, or one employee - materializing ONE row per
+// in-scope active employee (so it shows on each profile and is paid, taxable, by the next payroll run). Group
+// awards share a batch id. Returns the created rows.
+//
+// FANNED OUT IN BATCHES, NOT ROW BY ROW. This loop used to do, per employee: a duplicate-check SELECT, a
+// counter statement for the code, an INSERT, and a `notify()` - which is itself a read, a counter statement
+// and an insert. That is ~6 subrequests each against a per-invocation budget, so a company-wide award stopped
+// working somewhere around a hundred and fifty people, and was slow long before that. The identical mistake is
+// described in services/notifications.ts#notifyMany, which exists because the nightly cron made it: "one
+// subtask spent more than the invocation's whole subrequest budget on a real headcount". The cron was
+// converted; this - the interactive path, with no cap on the roster it walks - was not.
+//
+// Every primitive it needs already existed: `allocOwnedCodeRuns` reserves a code per owner in one batch,
+// `insertBatches` + `runBatch` write the rows as a single statement group, and `notifyMany` does the bells in
+// one fan-out. The cost is now a handful of statements whatever the headcount.
 export async function awardBonus(deps: Deps, actor: AppUser, input: AwardInput) {
   const scope = input.scope ?? "individual";
   if (typeof input.amount !== "number" || input.amount <= 0) throw invalidArgument("amount must be greater than 0");
@@ -136,47 +208,144 @@ export async function awardBonus(deps: Deps, actor: AppUser, input: AwardInput) 
   if (!(amount > 0)) throw invalidArgument("amount must be greater than 0");
   if (Number.isNaN(when)) throw invalidArgument("award_date is required");
 
-  const active = (await deps.db.select().from(schema.employees).where(eq(schema.employees.status, "active"))).filter((e) => !e.deleteTime);
-  let targets = active;
-  let scopeRef: string | null = null;
-  if (scope === "company") {
-    targets = active;
-  } else if (scope === "department") {
-    const deptId = idFromPath(input.department);
-    if (!deptId) throw invalidArgument("department is required");
-    scopeRef = `departments/${deptId}`;
-    targets = active.filter((e) => e.departmentId === deptId);
-  } else {
-    const empId = idFromPath(input.employee);
-    if (!empId) throw invalidArgument("employee is required");
-    targets = active.filter((e) => e.uuid === empId);
-    if (!targets.length) throw notFound("employee not found");
-  }
-  if (!targets.length) throw invalidArgument("no active employees in the selected scope");
+  const { ids, scopeRef } = await targetsFor(deps, scope, input);
+  if (!ids.length) throw invalidArgument("no active employees in the selected scope");
 
   const batchId = scope === "individual" ? null : genId();
   const currency = input.currency_code?.trim() || await orgCurrency(deps);
   const kind = input.kind?.trim() || null;
   const reason = input.reason?.trim() || null;
   const now = +deps.clock.now();
-  const created: (typeof schema.bonuses.$inferSelect)[] = [];
-  for (const e of targets) {
-    // Reuse an identical unpaid award from a recent double-submit (per employee), so a re-clicked group award
-    // returns the same rows instead of doubling every payable. A wholly-new award (outside the window) inserts.
-    const dup = await findRecentDuplicate(deps, { employeeId: e.uuid, amount, kind, reason, awardDateMs: when, scope, scopeRef }, now);
-    if (dup) { created.push(dup); continue; }
-    const row = (await deps.db
-      .insert(schema.bonuses)
-      .values({
-        code: await allocOwnedCode(deps, schema.bonuses, schema.bonuses.employeeId, e.uuid),
-        employeeId: e.uuid, amount, currency, kind, reason, awardDate: new Date(when), scope, scopeRef, batchId,
-      })
-      .returning())[0]!;
-    created.push(row);
-    await notify(deps, { recipient: e.uuid, type: "bonus.awarded", title: "Bonus awarded", body: `${currency} ${amount}${reason ? ` - ${reason}` : ""} (paid in your next payroll run).`, link: "payslips", subject: `bonuses/${row.uuid}`, actorId: actor.employeeId });
+
+  // Reuse an identical unpaid award from a recent double-submit, so a re-clicked group award returns the same
+  // rows instead of doubling every payable.
+  const dupes = await recentDuplicates(deps, ids, { amount, kind, reason, awardDateMs: when, scope, scopeRef }, now);
+  const fresh = ids.filter((id) => !dupes.has(id));
+
+  // One counter batch for the whole roster. Allocating per employee is what `allocOwnedCodeRuns` was written
+  // to replace - see its note on the nightly accrual running out of subrequests mid-roster.
+  const codes = await allocOwnedCodeRuns(deps, schema.bonuses, schema.bonuses.employeeId, new Map(fresh.map((id) => [id, 1])));
+  const rows = fresh.map((employeeId) => ({
+    uuid: genId(), // minted here so the notifications can name each award without reading the inserts back
+    code: codes.get(employeeId)![0]!,
+    employeeId,
+    amount,
+    currency,
+    kind,
+    reason,
+    awardDate: new Date(when),
+    scope,
+    scopeRef,
+    batchId,
+  }));
+  if (rows.length) await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.bonuses).values(group)));
+  // Read back for the server-side stamps the caller's ETag rides on (a batched insert returns nothing).
+  const created = rows.length
+    ? await byIdChunks(rows.map((r) => r.uuid), (group) => deps.db.select().from(schema.bonuses).where(inArray(schema.bonuses.uuid, group)))
+    : [];
+  const byId = new Map(created.map((r) => [r.uuid, r]));
+  const inserted = rows.map((r) => byId.get(r.uuid)!).filter(Boolean);
+
+  // The bell, once for the whole fan-out. `subjectFor` keeps each person's link pointing at their OWN award -
+  // the one thing that differs per recipient - which is exactly what that parameter is for.
+  const subjectByEmployee = new Map(inserted.map((r) => [r.employeeId, `bonuses/${r.uuid}`]));
+  await notifyMany(deps, [...subjectByEmployee.keys()], {
+    type: "bonus.awarded",
+    title: "Bonus awarded",
+    body: `${currency} ${amount}${reason ? ` - ${reason}` : ""} (paid in your next payroll run).`,
+    link: "payslips",
+    subjectFor: (employeeId) => subjectByEmployee.get(employeeId),
+    actorId: actor.employeeId,
+  });
+
+  // Scope order, with the reused duplicates folded back in where they belong, so the answer describes the whole
+  // scope the caller asked for and not only what this press happened to write. Keyed through a map rather than
+  // a `find` per id - this list is a whole company on the scope that matters.
+  const freshByEmployee = new Map(rows.map((r) => [r.employeeId, r.uuid]));
+  const result = ids
+    .map((id) => dupes.get(id) ?? byId.get(freshByEmployee.get(id) ?? ""))
+    .filter(Boolean) as (typeof schema.bonuses.$inferSelect)[];
+  if (!result.length) throw invalidArgument("no active employees in the selected scope");
+  await audit(deps, actor, "bonus.award", "bonuses", batchId ?? result[0]!.uuid, { scope, scopeRef, count: result.length });
+  return result;
+}
+
+/**
+ * One variable-pay award per named employee, written as BATCHES rather than one call each.
+ *
+ * `awardVariablePay` (services/variablePay.ts) used to loop `recordBonus`, which is the same per-employee
+ * fan-out `awardBonus` above was written out of - a duplicate read, a counter statement, an insert, an audit
+ * entry and a `notify()` per person, against one invocation's subrequest budget. A review cycle is exactly the
+ * shape that has a whole roster in it, and that module's own comment already says what that costs: "a
+ * two-hundred-person cycle spent the invocation's whole subrequest budget and the run simply stopped working".
+ *
+ * Answers with WHICH employees were written, not just how many: on the fallback path the caller has to patch
+ * its own lines, and a count cannot say whose.
+ *
+ * `cycle_id + employee_id` is UNIQUE (`bonus_cycle_emp_idx`), which is what makes this award idempotent, and
+ * an atomic batch is all-or-nothing - so a single person already paid by a concurrent run would otherwise
+ * abort the whole group. The batch is therefore tried first and, only if the index refuses it, the group falls
+ * back to one insert at a time so each duplicate is skipped individually and everyone else is still paid. That
+ * keeps the exact per-row semantics the caller had while making the ordinary path a couple of statements.
+ */
+export async function recordBonusesForCycle(
+  deps: Deps,
+  actor: AppUser,
+  cycleId: string,
+  kind: string,
+  reason: string,
+  awardDateYmd: string,
+  awards: { employeeId: string; amount: number; currency: string }[],
+): Promise<{ awardedEmployeeIds: string[]; skipped: number }> {
+  if (!awards.length) return { awardedEmployeeIds: [], skipped: 0 };
+  const when = dayMs(awardDateYmd);
+  if (Number.isNaN(when)) throw invalidArgument("award_date is required");
+  const ids = awards.map((a) => a.employeeId);
+  const codes = await allocOwnedCodeRuns(deps, schema.bonuses, schema.bonuses.employeeId, new Map(ids.map((id) => [id, 1])));
+  const rows = awards.map((a) => ({
+    uuid: genId(),
+    code: codes.get(a.employeeId)![0]!,
+    employeeId: a.employeeId,
+    amount: round2(a.amount),
+    currency: a.currency,
+    kind,
+    reason,
+    awardDate: new Date(when),
+    scope: "individual" as const,
+    cycleId,
+  }));
+
+  let written = rows;
+  try {
+    await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.bonuses).values(group)));
+  } catch (e) {
+    if (!isVariablePayCollision(e)) throw e;
+    // The batch rolled back, so nothing landed: replay it row by row and let the index refuse the duplicates.
+    written = [];
+    for (const r of rows) {
+      try {
+        await deps.db.insert(schema.bonuses).values(r);
+        written.push(r);
+      } catch (inner) {
+        if (!isVariablePayCollision(inner)) throw inner;
+      }
+    }
   }
-  await audit(deps, actor, "bonus.award", "bonuses", batchId ?? created[0]!.uuid, { scope, scopeRef, count: created.length });
-  return created;
+  if (!written.length) return { awardedEmployeeIds: [], skipped: rows.length };
+
+  const writtenByEmployee = new Map(written.map((r) => [r.employeeId, r.uuid]));
+  await notifyMany(deps, [...writtenByEmployee.keys()], {
+    type: "bonus.awarded",
+    title: "Bonus awarded",
+    body: reason,
+    link: "payslips",
+    subjectFor: (employeeId) => {
+      const mine = writtenByEmployee.get(employeeId);
+      return mine ? `bonuses/${mine}` : undefined;
+    },
+    actorId: actor.employeeId,
+  });
+  return { awardedEmployeeIds: written.map((r) => r.employeeId), skipped: rows.length - written.length };
 }
 
 // Bonuses awarded to an employee but not yet paid by any run (the next run pays them as a taxable earning).
