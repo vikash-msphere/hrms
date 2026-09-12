@@ -198,10 +198,23 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
     leaveByEmp.set(l.employeeId, arr);
   }
   const workedByEmp = new Map<string, Map<string, number>>(); // employee -> day -> worked minutes
+  // SUPERSEDED PUNCHES ARE NOT PUNCHES. An approved attendance regularization marks the day's existing
+  // sessions `superseded_by` and writes the corrected pairs beside them (services/attendanceRegularizations.ts),
+  // so the day recomputes from the corrections ALONE - that is the whole contract of a correction. Read
+  // unfiltered, this summed the originals AND their replacements into one day's worked minutes, and the error
+  // only ever runs one way: extra minutes can only take a day past `half_day_minutes`/`full_day_minutes` and
+  // REMOVE loss of pay (domain/attendance.ts lopDayUnits). A correction that shortens a day - a forgotten
+  // clock-out recorded as fourteen hours, corrected to three - therefore left seventeen on the day and the
+  // absence was never docked. Every other reader of this table already filters it (services/attendance.ts,
+  // services/compOff.ts, services/peopleAnalytics.ts, and the regularization's own supersede query).
   for (const s of await deps.db
     .select()
     .from(schema.attendanceSessions)
-    .where(and(gte(schema.attendanceSessions.clockIn, new Date(startMs)), lte(schema.attendanceSessions.clockIn, new Date(endMs + 86_400_000))))) {
+    .where(and(
+      isNull(schema.attendanceSessions.supersededBy),
+      gte(schema.attendanceSessions.clockIn, new Date(startMs)),
+      lte(schema.attendanceSessions.clockIn, new Date(endMs + 86_400_000)),
+    ))) {
     const ms = +new Date(s.clockIn);
     if (ms < startMs || ms > endMs + 86_400_000) continue;
     const day = localDay(ms, tz);

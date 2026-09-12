@@ -121,14 +121,34 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
   },
 });
 
+/**
+ * The object code every per-field decision is made against (`employees.<code>.<sub>.<key>`), or a refusal.
+ *
+ * FAIL CLOSED, which is what this was not. The five redaction sites below each read `c.get("itemCode")` and
+ * then wrote `code ? redact(view) : view` - so a row whose `code` is null was served RAW, and every per-field
+ * deny on it silently evaporated. That is the one spelling of this decision in the app that failed open:
+ * http/tableFieldAccess.ts denies every key on a null code, services/listScope.ts answers `1 = 0`, and
+ * http/accessHint.ts hints nothing. `employees.code` is a nullable TEXT column with no CHECK, so "it is always
+ * set" is a property of every writer forever rather than of the schema - the same assumption
+ * domain/permissions.ts#matchToken was hardened against.
+ *
+ * A refusal rather than a blank view: a decision that cannot be made is not a decision that came back empty,
+ * and the caller needs to know which.
+ */
+function fieldScopeCode(c: Context<AppEnv>): string {
+  const code = c.get("itemCode");
+  if (!code) throw forbidden("you do not have permission to perform this action");
+  return code;
+}
+
 // The three identity-document verbs differ only in what they do once the per-field grant is checked.
 async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "download" | "clear") {
   const deps = c.get("deps");
   const user = c.get("user");
   const field = c.req.query("field");
   if (!field) throw invalidArgument("field is required");
-  const code = c.get("itemCode");
-  if (code && deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }).has(field)) {
+  const code = fieldScopeCode(c);
+  if (deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }).has(field)) {
     throw forbidden("you do not have permission to perform this action");
   }
   const slot = identityDocSlot(field);
@@ -148,66 +168,67 @@ async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "d
 // The singleton sub-resources hang off an employee (they are not collections): each is one row's worth of
 // fields, gated by the same path grant and redacted per field. Registered before the collection lane so their
 // two-segment paths win.
+// EVERY ANSWER THAT CARRIES ONE OF THESE VIEWS IS REDACTED, AND THAT INCLUDES THE WRITE'S OWN ANSWER.
+//
+// Only `tax` used to do this, and the reason written over it holds for all four: a caller's write grant and
+// their read grant are decided separately, so somebody who may WRITE a field (the middleware gates the body
+// per key, domain/manifests.ts SUBRESOURCE_BODY) need not be able to READ it back. All three of these services
+// answer with the WHOLE record rather than with what was sent - `setIdentityDetails` and `setPersonalDetails`
+// merge the patch over the stored blob and return the merged result - so a PATCH naming one writable key was
+// handed every other field on the record, per-field denies and all. A deny that a GET honours and a PATCH
+// hands over is not a deny; it is a longer way of asking.
+const redactedSub = <T extends Record<string, unknown>>(c: Context<AppEnv>, sub: "bank-account" | "personal-info" | "tax", view: T): T =>
+  redactFlat(view, sub, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode });
+
 export const employees = new Hono<AppEnv>()
   // Singleton sub-resources (bank account, identity, personal info). Access (owner/HR/super_admin)
   // is enforced inside each service. JSON merge-patch on the PATCH.
   .get("/:employee_id/bank-account", async (c) => {
     const id = c.req.param("employee_id")!;
     const view = await getBankDetails(c.get("deps"), c.get("user"), id);
-    const code = c.get("itemCode");
-    const out = code ? redactFlat(view, "bank-account", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
-    return c.json({ path: `employees/${id}/bank-account`, ...out });
+    return c.json({ path: `employees/${id}/bank-account`, ...redactedSub(c, "bank-account", view) });
   })
   .patch("/:employee_id/bank-account", zValidator("json", bankSchema), async (c) => {
     const id = c.req.param("employee_id")!;
-    return c.json({ path: `employees/${id}/bank-account`, ...(await setBankDetails(c.get("deps"), c.get("user"), id, c.req.valid("json"))) });
+    const view = await setBankDetails(c.get("deps"), c.get("user"), id, c.req.valid("json"));
+    return c.json({ path: `employees/${id}/bank-account`, ...redactedSub(c, "bank-account", view) });
   })
   .get("/:employee_id/identity", async (c) => {
     const id = c.req.param("employee_id")!;
     const view = await getIdentityDetails(c.get("deps"), c.get("user"), id);
-    const code = c.get("itemCode");
-    const out = code ? redactIdentity(view, c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
-    return c.json({ path: `employees/${id}/identity`, ...out });
+    return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode }) });
   })
   .patch("/:employee_id/identity", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<{ values?: Record<string, string> }>(c);
-    return c.json({ path: `employees/${id}/identity`, ...(await setIdentityDetails(c.get("deps"), c.get("user"), id, body.values ?? {})) });
+    const view = await setIdentityDetails(c.get("deps"), c.get("user"), id, body.values ?? {});
+    return c.json({ path: `employees/${id}/identity`, ...redactIdentity(view, c.get("objectGrant"), fieldScopeCode(c), { employeeCode: c.get("user").employeeCode }) });
   })
   .get("/:employee_id/personal-info", async (c) => {
     const id = c.req.param("employee_id")!;
     const view = await getPersonalDetails(c.get("deps"), c.get("user"), id);
-    const code = c.get("itemCode");
-    const out = code ? redactFlat(view, "personal-info", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
-    return c.json({ path: `employees/${id}/personal-info`, ...out });
+    return c.json({ path: `employees/${id}/personal-info`, ...redactedSub(c, "personal-info", view) });
   })
-  // REDACTED LIKE ITS THREE SIBLINGS. The tax view is field-gated on WRITE (domain/manifests.ts lists `tax`
-  // in SUBRESOURCE_BODY, so the authz middleware checks every key in the body) and was not gated on READ at
-  // all - the one sub-resource served straight out of its service. A per-field deny on a declared figure was
-  // therefore accepted, stored and inert, which is a field ACL failing open.
-  //
-  // The PATCH answer goes through the same redactor, because it is the same view: `:verify` and a plain
-  // re-declaration both return the whole projection, so a caller who may write a figure but not read it back
-  // would otherwise be handed it in the write's own response.
+  // The tax view is field-gated on WRITE (domain/manifests.ts lists `tax` in SUBRESOURCE_BODY, so the authz
+  // middleware checks every key in the body) and was once not gated on READ at all - the one sub-resource
+  // served straight out of its service. A per-field deny on a declared figure was therefore accepted, stored
+  // and inert, which is a field ACL failing open.
   .get("/:employee_id/tax", async (c) => {
     const id = c.req.param("employee_id")!;
     const view = await getTaxDetails(c.get("deps"), c.get("user"), id);
-    const code = c.get("itemCode");
-    const out = code ? redactFlat(view, "tax", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
-    return c.json({ path: `employees/${id}/tax`, ...out });
+    return c.json({ path: `employees/${id}/tax`, ...redactedSub(c, "tax", view) });
   })
   .patch("/:employee_id/tax", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<{ values?: Record<string, unknown> }>(c);
     const view = await setTaxDetails(c.get("deps"), c.get("user"), id, body.values ?? {});
-    const code = c.get("itemCode");
-    const out = code ? redactFlat(view, "tax", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
-    return c.json({ path: `employees/${id}/tax`, ...out });
+    return c.json({ path: `employees/${id}/tax`, ...redactedSub(c, "tax", view) });
   })
   .patch("/:employee_id/personal-info", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<Parameters<typeof setPersonalDetails>[3]>(c);
-    return c.json({ path: `employees/${id}/personal-info`, ...(await setPersonalDetails(c.get("deps"), c.get("user"), id, body ?? {})) });
+    const view = await setPersonalDetails(c.get("deps"), c.get("user"), id, body ?? {});
+    return c.json({ path: `employees/${id}/personal-info`, ...redactedSub(c, "personal-info", view) });
   })
   .get("/:employee_id/notification-prefs", async (c) => {
     const id = c.req.param("employee_id")!;

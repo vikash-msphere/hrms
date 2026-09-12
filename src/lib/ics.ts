@@ -3,6 +3,28 @@
 // day because the spec's end is exclusive, so an off-by-one here shows up as a holiday ending a day early in
 // someone's Outlook.
 
+import { fnv1a64 } from "./fnv";
+
+/**
+ * The UID for the calendar entry that stands for one internal row.
+ *
+ * NOT THE ROW'S INTERNAL ID, which both call sites used to interpolate raw (`holiday-<uuid>@hrms`,
+ * `interview-<uuid>@hrms`). A UID travels further than almost anything else this app emits: the holiday feed
+ * is served with NO SESSION AT ALL (routes/holidayFeed.ts), and an interview invitation is mailed to an
+ * external candidate - so the internal primary key the wire codec exists to keep off the wire
+ * (lib/idCodec.ts) was being published to people outside the org and stored in their calendar clients.
+ * Authz decides by CODE, so this was disclosure rather than a way in - exactly what http/pagination.ts says
+ * about the same id in a cursor, and fixed the same way.
+ *
+ * Hashed rather than wire-encoded, and that is the deliberate half. A UID has to be STABLE forever (a changed
+ * one is a duplicate entry in somebody's calendar, not an update) and has to RESOLVE TO NOTHING - it is an
+ * equality key, never a reference. A wire token is stable only while WIRE_ID_KEY is, and it is a working API
+ * reference, which is not a thing to mail to a candidate. `fnv1a64` is the same choice, for the same reason,
+ * as the audit trail's session id (middleware/auth.ts): its input carries the id's full 64 bits of entropy,
+ * and nothing ever reads one back.
+ */
+export const icsUid = (kind: string, internalId: string): string => `${kind}-${fnv1a64(internalId)}@hrms`;
+
 export type IcsEvent = {
   uid: string;
   start: string; // YYYY-MM-DD, inclusive

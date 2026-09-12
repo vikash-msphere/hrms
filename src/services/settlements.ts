@@ -159,6 +159,10 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
     .from(schema.attendanceSessions)
     .where(and(
       eq(schema.attendanceSessions.employeeId, employeeId),
+      // Superseded punches are not punches - see the same filter (and the reason for it) in the payroll
+      // build's assembleLop. The exit month is docked by exactly the rule every other month is docked by, so
+      // it must read the corrected sessions alone rather than them plus the originals they replaced.
+      isNull(schema.attendanceSessions.supersededBy),
       gte(schema.attendanceSessions.clockIn, windowFrom),
       lte(schema.attendanceSessions.clockIn, windowTo),
     ))) {

@@ -583,6 +583,11 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob;
       continue;
     }
     if (!TRANSIENT.has(res.status) || attempt >= READ_ATTEMPTS || opts.signal?.aborted) break;
+    // Let go of the response this attempt is about to replace - see `discard`. These are the requests that
+    // carry a whole PDF render behind them, so a parked body stream here holds a connection for exactly as
+    // long as the retry path takes, on the retry paths (a gateway rolling between isolates) where the pool is
+    // already under strain. `api()` above has always done this; this loop was the copy that did not.
+    await discard(res);
     await settle(attempt);
   }
   if (res.status === 401) handle401();

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AppEnv } from "../env";
-import { buildIcs } from "../lib/ics";
+import { buildIcs, icsUid } from "../lib/ics";
 import { getSettingValue } from "../services/settings";
 import { holidayApplies } from "../services/holidays";
 import { refHolidays } from "../lib/refData";
@@ -91,7 +91,7 @@ export const holidayFeed = new Hono<AppEnv>().get("/holidays/:token", async (c) 
   const org = await getSettingValue<{ name?: string }>(deps, "organization", {});
   const ics = buildIcs(
     rows.map((h) => ({
-      uid: `holiday-${h.uuid}@hrms`,
+      uid: icsUid("holiday", h.uuid),
       start: ymd(h.date),
       end: ymd(h.date),
       summary: h.halfDay ? `${h.name} (half day)` : h.name,

@@ -44,6 +44,20 @@ async function loadEmployee(deps: Deps, employeeId: string) {
   return row;
 }
 
+/** The stored blob, or an empty record when there is none / it will not decrypt. For the merge in
+ *  `setBankDetails`: a record that cannot be read must still be replaceable field by field, not a write that
+ *  fails. `getBankDetails` keeps its own three-way answer (absent / unreadable / readable), which this cannot
+ *  express and does not need to. */
+async function readStored(deps: Deps, enc: string | null): Promise<StoredBank> {
+  if (!enc) return {};
+  try {
+    const parsed = JSON.parse(await deps.encryptor.decrypt(enc)) as StoredBank;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 // Masked, wire-safe view. Never includes the full account number.
 // Exported for test/fieldAccessDrift.test.ts: the shape this returns is what the redaction has to be able to
 // strip, so the test asserts against the real thing rather than a re-typed copy of it.
@@ -97,14 +111,41 @@ export async function setBankDetails(deps: Deps, actor: AppUser, employeeId: str
       throw invalidArgument(`bank_name must be one of the organization's banks (${banks.join(", ")}); "${bankName}" is not. Add it under Settings -> Organization first.`);
     }
   }
-  const stored: StoredBank = {
-    bank_name: bankName,
-    account_name: input.account_name?.trim() || undefined,
-    account_number: input.account_number?.trim() || undefined,
-    branch: input.branch?.trim() || undefined,
-    ifsc_code: input.ifsc_code?.trim() || undefined,
-    currency_code: input.currency_code?.trim() || undefined,
-  };
+  // A MERGE PATCH, like every other write in the app: a field that is absent is unchanged, and a field sent
+  // empty is cleared (the SPA sends "" for a box somebody emptied, and never null - web/src/api.ts).
+  //
+  // It used to build the whole blob out of `input` alone, which made an omitted field a DELETED field - the
+  // exact bug services/personalDetails.ts#setPersonalDetails already carries a note about having fixed. Every
+  // key in `bankSchema` is optional, so `PATCH {"ifsc_code":"X"}` erased the account number, the account name
+  // and the bank together, silently: the audit row records field NAMES only, so nothing said what went. The
+  // fields it destroys are the ones the bulk-payment file is built from (services/bankFile.ts), so the first
+  // sign of it is a payroll disbursement that cannot be paid.
+  //
+  // The current blob is read the same way `getBankDetails` reads it, and an unreadable one merges as empty
+  // rather than failing the write - a legacy/corrupt blob must still be replaceable by typing the details in.
+  const current = await readStored(deps, emp.bankDetailsEnc);
+  const stored: StoredBank = { ...current };
+  for (const f of BANK_FIELDS) {
+    const raw = input[f];
+    if (raw == null) continue; // absent (or an explicit null) = leave this field as it is
+    const v = raw.trim();
+    if (v) {
+      stored[f] = v;
+      continue;
+    }
+    // EMPTY MEANS "CLEARED" ONLY FOR A FIELD THE CALLER CAN SEE.
+    //
+    // The account number is the one field that never comes back out (`toMaskedBankView` returns the masked
+    // alias and nothing else), so the edit form cannot prefill it and sends "" for "I did not retype it" -
+    // web/src/components/common/EmployeeBankDetails.tsx says so in as many words ("Blank number on an
+    // existing record = keep what's stored"). A client that cannot read a value cannot meaningfully ask for
+    // it to be removed, so "" here is an ABSENT field, not an emptied one. Read the other way round, every
+    // save of the bank dialog that did not retype the digits deleted them - which is how a salary payment
+    // goes out against an account the file no longer has. The readable fields keep the ordinary merge-patch
+    // rule (emptying a prefilled box removes it), the same one services/personalDetails.ts follows.
+    if (f === "account_number") continue;
+    delete stored[f];
+  }
   const enc = await deps.encryptor.encrypt(JSON.stringify(stored));
   await deps.db.update(schema.employees).set({ bankDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, emp.uuid));
   // WHICH fields changed, never their values: an account number in a table read by everyone with the `audit`

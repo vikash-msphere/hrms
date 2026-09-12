@@ -27,7 +27,7 @@ import { reviseCompensation } from "./compensation";
 import { emitEvent } from "./eventBus";
 import { notify } from "./notifications";
 import { renderEmail, loadEmailBrand, escapeHtml } from "../lib/emailLayout";
-import { buildTimedIcs } from "../lib/ics";
+import { buildTimedIcs, icsUid } from "../lib/ics";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
 const cfgOf = (deps: Deps) => getSettingValue<AtsConfig>(deps, "ats", DEFAULT_ATS_CONFIG);
@@ -598,7 +598,7 @@ export async function inviteCandidate(deps: Deps, actor: AppUser, id: string) {
   );
   const ics = buildTimedIcs(
     [{
-      uid: `interview-${row.uuid}@hrms`,
+      uid: icsUid("interview", row.uuid),
       start,
       end,
       summary: `${row.title}${req?.title ? ` · ${req.title}` : ""} · ${brand.orgName}`,
