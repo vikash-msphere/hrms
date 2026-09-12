@@ -159,9 +159,22 @@ describe("budgetFor: which surface a request is charged to", () => {
   });
 
   it("charges the cross-collection fan-outs to the fan-out budget", () => {
-    for (const p of ["/v1/search", "/v1/people-analytics", "/v1/dashboard-summary", "/v1/approvals-summary", "/v1/activity-counts", "/v1/table-views/abc:run"]) {
+    for (const p of ["/v1/search", "/v1/people-analytics", "/v1/table-views/abc:run"]) {
       expect(budgetFor("GET", p).name, p).toBe("fan-out");
     }
+  });
+
+  // The three counts the SPA fires on EVERY page mount (the approvals badge, the tab-bar dots, the KPI tiles)
+  // are not gesture-driven and their width does not grow with the org, so they are budgeted as navigation
+  // rather than as scripted fan-out. Sharing the fan-out bucket meant the chrome of ordinary browsing spent a
+  // ceiling written for abuse - and starved ⌘K search, which was refused on a run that made 18 searches.
+  it("charges the per-navigation chrome counts to their own budget, above the fan-out one", () => {
+    for (const p of ["/v1/dashboard-summary", "/v1/approvals-summary", "/v1/activity-counts"]) {
+      expect(budgetFor("GET", p).name, p).toBe("summary");
+    }
+    expect(budgetFor("GET", "/v1/approvals-summary").limit).toBeGreaterThan(budgetFor("GET", "/v1/search").limit);
+    // Still under the catch-all: each one is several COUNT queries where an ordinary read is one.
+    expect(budgetFor("GET", "/v1/approvals-summary").limit).toBeLessThan(budgetFor("GET", "/v1/employees").limit);
   });
 
   // `:run` is a verb several collections use, so a loose match on it in the fan-out entry claimed

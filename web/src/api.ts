@@ -47,14 +47,28 @@ let sessionExpiredHandler: (() => void) | null = null;
 export function setSessionExpiredHandler(fn: (() => void) | null) {
   sessionExpiredHandler = fn;
 }
-function handle401(): never {
-  // Broadcast so every sibling tab reacts to the lapsed session at once, instead of each discovering it via
-  // its own doomed request. `publishToAll`, because the session is the BROWSER's: a tab running a "view as"
-  // simulation answers as somebody else, and the ordinary identity-scoped publish would leave it sitting on a
-  // dead session (see lib/crossTabBus.ts).
+/**
+ * The session is gone: tell every sibling tab, drop the cached server data, and put the person in front of a
+ * way back in. Returns the error the pending call should fail with.
+ *
+ * Broadcast with `publishToAll`, because the session is the BROWSER's: a tab running a "view as" simulation
+ * answers as somebody else, and the ordinary identity-scoped publish would leave it sitting on a dead session
+ * (see lib/crossTabBus.ts).
+ *
+ * IT RETURNS THE ERROR RATHER THAN THROWING IT so that a caller which SETTLES a promise instead of throwing
+ * takes this path too. lib/getCoalescer.ts is that caller - it is the universal GET transport, and it had its
+ * own 401 branch annotated "mirrors api()" which did none of this: a bare `location.href = "/"`, so no tab was
+ * told, IndexedDB kept every row and photo the person had loaded, and `/` is not a sign-in door in direct-Google
+ * mode. It was unreachable in practice (a batch sub-request cannot 401 - middleware/auth.ts reuses the
+ * envelope's resolved caller), which is exactly how it drifted. One function, one behaviour, both lanes.
+ */
+export function sessionDead(): ApiError {
   publishToAll("auth", { op: "dead" });
   onAuthDead();
-  throw new ApiError("unauthenticated", 401, null);
+  return new ApiError("unauthenticated", 401, null);
+}
+function handle401(): never {
+  throw sessionDead();
 }
 // The cached copies of server data come OFF THE DISK when the session dies, not only when somebody chooses
 // "Sign out" from the menu. That menu item was the sole caller of a purge, so the ordinary exits - a 12-hour

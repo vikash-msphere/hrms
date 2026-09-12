@@ -39,7 +39,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const CLEAR = [schema.projects, schema.goalComments, schema.goals, schema.auditLog, schema.users, schema.employees, schema.roles];
+const CLEAR = [schema.projects, schema.goalComments, schema.goals, schema.auditLog, schema.accessRules, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of CLEAR) await deps.db.delete(t);
 });
@@ -53,11 +53,11 @@ async function seedActor(): Promise<AppUser> {
   return { uuid, email: `${uuid}@test.example`, role: "super_admin", status: "active", employeeId, employeeCode: null } as unknown as AppUser;
 }
 
-async function seedGoalWithComment(employeeId: string): Promise<{ goalId: string }> {
+async function seedGoalWithComment(employeeId: string, code = `04-${genId().slice(0, 6)}`): Promise<{ goalId: string; code: string }> {
   const goalId = genId();
-  await deps.db.insert(schema.goals).values({ uuid: goalId, code: `04-${genId().slice(0, 6)}`, employeeId, title: "Ship the thing" });
+  await deps.db.insert(schema.goals).values({ uuid: goalId, code, employeeId, title: "Ship the thing" });
   await deps.db.insert(schema.goalComments).values({ uuid: genId(), goalId, authorId: employeeId, body: "how is this going?" });
-  return { goalId };
+  return { goalId, code };
 }
 
 // What a HALF-declared cascade looks like: it owns the comments and says nothing about the project pointing
@@ -135,5 +135,74 @@ describe("hard purge: the stored object is deleted only after the row is", () =>
     // leave the caller thinking the record survived. The object is orphaned, which is reclaimable.
     await purge(actor, goalId, COMPLETE, async () => { throw new Error("R2 is having a day"); });
     expect(await deps.db.select().from(schema.goals).where(eq(schema.goals.uuid, goalId))).toHaveLength(0);
+  });
+});
+
+// `access_rules` points at an object by its CODE, not by a foreign key, so SQLite never refuses a purge over
+// one and no `purgeCascade` entry can name it - the shape of that type is `column = <the purged uuid>`. Nothing
+// was removing them, so a rule outlived the object it was written for: dead weight in the ACL surface, and one
+// half of the department code-reuse hole (the other half was the allocator, see test/codeSequence).
+describe("hard purge: the per-object access rules that named the row go with it", () => {
+  const seedRule = async (subject: string, namespace: string, code: string, kind: "exact" | "subtree") => {
+    const uuid = genId();
+    await deps.db.insert(schema.accessRules).values({
+      uuid,
+      subject,
+      subjectKind: "user",
+      namespace,
+      pattern: `${namespace}.${code}${kind === "subtree" ? "-*" : ""}.**`,
+      scopeKind: kind,
+      scopeCode: code,
+      matchCode: kind === "exact" ? code : null,
+      level: "read",
+      effect: "allow",
+    });
+    return uuid;
+  };
+  const survives = async (uuid: string) => (await deps.db.select().from(schema.accessRules).where(eq(schema.accessRules.uuid, uuid))).length === 1;
+
+  it("deletes the exact rule pinned to the purged row's own code", async () => {
+    const actor = await seedActor();
+    const { goalId, code } = await seedGoalWithComment(actor.employeeId!);
+    const pinned = await seedRule(actor.uuid, "goals", code, "exact");
+
+    await purge(actor, goalId, COMPLETE);
+
+    expect(await survives(pinned)).toBe(false);
+  });
+
+  it("leaves a SUBTREE rule alone - that is a scope an admin declared, not a dangling pin", async () => {
+    const actor = await seedActor();
+    const { goalId } = await seedGoalWithComment(actor.employeeId!, "04-000001");
+    const branch = await seedRule(actor.uuid, "goals", "04", "subtree");
+
+    await purge(actor, goalId, COMPLETE);
+
+    expect(await survives(branch)).toBe(true);
+  });
+
+  it("leaves the SAME code alone in another collection's namespace", async () => {
+    // A code is only unique WITHIN a table: a flat catalogue's "01" and a top-level department's "01" are the
+    // same string and different objects. An unscoped sweep would take somebody else's grant with it.
+    const actor = await seedActor();
+    const { goalId, code } = await seedGoalWithComment(actor.employeeId!);
+    const elsewhere = await seedRule(actor.uuid, "employees", code, "exact");
+
+    await purge(actor, goalId, COMPLETE);
+
+    expect(await survives(elsewhere)).toBe(true);
+  });
+
+  it("keeps the rule when the purge itself is refused", async () => {
+    const actor = await seedActor();
+    const { goalId, code } = await seedGoalWithComment(actor.employeeId!);
+    await deps.db.insert(schema.projects).values({ uuid: genId(), code: `p-${genId().slice(0, 5)}`, name: "Migration", goalId });
+    const pinned = await seedRule(actor.uuid, "goals", code, "exact");
+
+    await expect(purge(actor, goalId, INCOMPLETE)).rejects.toMatchObject({ httpStatus: 409 });
+
+    // The sweep rides the same batch as the teardown, so a refusal takes it back with everything else - the
+    // row is still there and so is the rule that governs it.
+    expect(await survives(pinned)).toBe(true);
   });
 });

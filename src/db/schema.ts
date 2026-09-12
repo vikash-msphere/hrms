@@ -158,7 +158,7 @@ export const accessRules = sqliteTable("access_rules", {
   // Row lifecycle, for orgs that want four-eyes on permission changes (settings key `access-approval`).
   // A rule awaiting approval to be ADDED (`pending`) is inert; a rule awaiting approval to be REMOVED
   // (`pending_delete`) keeps enforcing. Fail-safe in both directions - a pending change never applies itself,
-  // in either direction, until a second admin approves it (the predicate lives in lib/policyLoad `live`).
+  // in either direction, until a second admin approves it (the predicate lives in lib/policyLoad `isLive`).
   status: text("status", { enum: ["active", "pending", "pending_delete"] }).notNull().default("active"),
   requestedBy: text("requested_by"), // user uuid that asked for the pending change; may not approve it (four eyes)
   // Optional expiry for temporary access (contractors, incident break-glass). Past this instant the rule is
@@ -2802,7 +2802,9 @@ export const ticketComments = sqliteTable("ticket_comments", {
 // index still refuses the duplicate, and `withFreshCode` walks the counter forward, so the failure mode is a
 // retryable conflict rather than a duplicate code.
 export const codeSequences = sqliteTable("code_sequences", {
-  // "<table>" for a flat namespace, "<table>:<owner uuid>" for an owner-scoped one.
+  // "<table>" for a flat namespace, "<table>:<owner uuid>" for an owner-scoped one, and
+  // "dept-children:<parent uuid | root>" for the child namespace under one department - which spans two tables
+  // (its sub-departments and its employees share one sequence) and so is named after neither.
   scope: text("scope").primaryKey(),
   next: integer("next").notNull(),
 });

@@ -264,8 +264,19 @@ export async function resolveItemState(
 
 export type IdResolver = (collection: string, id: string) => Promise<string | null>;
 
-// Substitute the top resource id with its code; keep `me`, `-` (AEP parent wildcard), and the trailing
-// :verb. If the id does not resolve, leave it as-is (the decision will fail closed - fine for audit).
+// Substitute the top resource id with its code; keep `me`, `-` (AEP parent wildcard), and the trailing :verb.
+//
+// AN ID THAT DOES NOT RESOLVE IS LEFT AS THE RAW UUID, and what that means for the decision depends on the
+// caller's grant - it is not, as this said for a long time, simply "fail closed". A scoped pattern (`me`,
+// `my-dept`, `<prefix>-*`) cannot match a uuid, so those do deny. A WILDCARD one matches it like anything
+// else: `employees.*` and `employees.**` both match `employees.<uuid>`, so a broadly-granted caller is allowed
+// through to a handler that then answers 404 for the row that is not there.
+//
+// Nothing is reachable through the difference - a caller that `*` allows on an unresolvable id is a caller `*`
+// would have allowed on the real code too, so no authority is gained - and it is the right shape for the audit
+// row either way. Stated accurately because "fails closed" is the kind of claim that stops the next reader
+// checking: if a scope is ever added here that is meant to bound a wildcard holder, THIS is the line it has to
+// be checked against.
 export async function buildCodedPath(pathname: string, resolveId: IdResolver): Promise<string> {
   const m = /^\/v1\/(.+)$/.exec(pathname);
   const rest0 = m?.[1];

@@ -2,6 +2,7 @@
 // service layer, not in routes). A resource is "soft-deletable" if its table has a
 // `deleteTime` column. List filtering hides soft-deleted rows unless showDeleted.
 import { and, eq } from "drizzle-orm";
+import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
@@ -185,6 +186,26 @@ export async function purgeRow(
     stmts.push(deps.db.update(t).set(set).where(eq(column, id)));
   }
   for (const { table: t, column } of cascade?.remove ?? []) stmts.push(deps.db.delete(t).where(eq(column, id)));
+  // The per-object access rules that named THIS row, which no `PurgeCascade` entry can express: `access_rules`
+  // points at an object by its `code`, not by a foreign key, so SQLite never refuses the purge over one and
+  // nothing was ever removing them. They outlived their target silently - rendered in the ACL surface as an
+  // entry whose object no longer resolves (services/accessRules.ts `_objectUuid` comes back null), and decided
+  // nothing, which is why it stayed invisible.
+  //
+  // EXACT RULES ONLY - `match_code` is set only for `scopeKind: "exact"` (accessRules.ts), so this is precisely
+  // the rule that named this one object. A SUBTREE rule (`scope_code` set, `match_code` null) is deliberately
+  // left alone: it is a scope an admin declared over a branch of the hierarchy, it may well name a code in
+  // another collection's namespace, and with codes no longer recycled (services/codeAlloc.ts) it can never
+  // re-bind to a different object - so removing it would be destroying a grant, not tidying a dangling one.
+  //
+  // Scoped to this collection's namespace because a code is only unique WITHIN a table: a flat catalogue's
+  // `01` and a top-level department's `01` are the same string and different objects.
+  const purgedCode = typeof row.code === "string" ? row.code : null;
+  if (purgedCode) {
+    stmts.push(
+      deps.db.delete(schema.accessRules).where(and(eq(schema.accessRules.namespace, collection), eq(schema.accessRules.matchCode, purgedCode))),
+    );
+  }
   stmts.push({ stmt: deps.db.delete(table).where(atVersion(table, row)).returning({ uuid: table.uuid }), expect: 1, label: "purge" });
   let short: string[];
   try {

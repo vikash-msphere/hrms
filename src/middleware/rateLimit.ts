@@ -127,15 +127,49 @@ const BUDGETS: Budget[] = [
     rate: keyedCounter(6000),
   },
   {
+    // THE SPA'S CHROME COUNTS. `approvals-summary` is the approvals badge, `activity-counts` the dots on a tab
+    // bar, `dashboard-summary` the KPI tiles - and the first two are fired on EVERY page mount (App.tsx,
+    // lib/approvals.tsx, lib/tabActivity.ts), which is what separates them from the fan-outs below.
+    //
+    // THEY USED TO SIT IN `fan-out`, and that was a category error the app could not feel until the sub-read
+    // charging above closed the batch hole. Before it, the SPA reached all three through `batch:run` and the
+    // fan-out budget applied to nobody who used the transport, so its 120 a minute was never once measured
+    // against the client's own behaviour. The moment a sub-read was charged to the budget its path matches,
+    // the chrome of every navigation started spending a ceiling written for scripted abuse: three units per
+    // page mount against 120 is forty navigations a minute for one credential, which is under human speed.
+    // It also STARVED THE USER-DRIVEN SURFACE it shared the bucket with - ⌘K search 429'd because the badge
+    // counts had already spent the allowance, on a run where only 18 searches were made at all.
+    //
+    // WHY THE SPLIT IS THE FIX AND NOT A BIGGER NUMBER: a fan-out's width grows with the ORG (search queries
+    // ~60 collections, the people report one query per measure, a custom grid one per source table), while
+    // each of these carries a bounded parameter list - the tabs a page has, the queues this caller may
+    // approve, the keys the dashboard asked for. Their cost does not scale with the tenant, so they do not
+    // belong under a ceiling whose whole justification is that it does.
+    //
+    // 1200 is a navigation rate, not a request rate: three units a mount is 400 page mounts a minute from one
+    // credential. No person navigates that fast, and the same concrete reason the `api` and `batch` budgets
+    // are sized generously applies here - the browser suite drives all sixteen workers through one `wrangler
+    // dev` isolate as ONE caller. It stays well under `api` because each of these is several COUNT queries
+    // rather than one read.
+    name: "summary",
+    limit: 1200,
+    matches: (_m, p) =>
+      p === "/v1/dashboard-summary" || p === "/v1/approvals-summary" || p === "/v1/activity-counts",
+    rate: keyedCounter(1200),
+  },
+  {
     // CROSS-COLLECTION FAN-OUTS. One request becomes a decision plus a query per collection (search over ~60
     // of them, the people report per measure, a custom grid per source table), so its cost is a multiple of
     // an ordinary read's and it is trivially scriptable. The manual cron trigger rides here too: it dispatches
     // a whole nightly tick, which is the largest single unit of work the app has.
+    //
+    // Every surface left here is reached by a deliberate GESTURE - ⌘K, opening the analytics page, running a
+    // saved grid, pressing the cron button - never by the act of navigating, so 120 a minute bounds scripting
+    // without ever bounding use. See `summary` above for the three that were moved out.
     name: "fan-out",
     limit: 120,
     matches: (_m, p) =>
-      p === "/v1/search" || p === "/v1/people-analytics" || p === "/v1/dashboard-summary" ||
-      p === "/v1/approvals-summary" || p === "/v1/activity-counts" || p === "/v1/cron-runs:run" ||
+      p === "/v1/search" || p === "/v1/people-analytics" || p === "/v1/cron-runs:run" ||
       (p.startsWith("/v1/table-views/") && verbIs(p, "run")),
     rate: keyedCounter(120),
   },
@@ -178,12 +212,16 @@ type Charge = { budget: Budget; cost: number };
  * AND THE BUDGET OF EACH EXPENSIVE SUB-READ IT CARRIES, which is the hole this closes. `rateLimit` skips the
  * limiter outright for a re-dispatched sub-request (the `__sharedCtx` branch below) - right for the
  * envelope's own count, since the sub-read was already charged on the way in, but it also meant a sub-read
- * never touched the budget its OWN path matches. Every GET fan-out (`/v1/search`, `/v1/people-analytics`,
- * `/v1/dashboard-summary`, `/v1/approvals-summary`, `/v1/activity-counts`) was therefore reachable through
- * the transport at the batch budget's 6000 a minute instead of the fan-out budget's 120 - fifty times the
+ * never touched the budget its OWN path matches. Every GET fan-out (`/v1/search`, `/v1/people-analytics`) and
+ * every chrome count (`/v1/dashboard-summary`, `/v1/approvals-summary`, `/v1/activity-counts`) was therefore
+ * reachable through the transport at the batch budget's 6000 a minute instead of its own - fifty times the
  * ceiling written for the surfaces whose cost is a multiple of an ordinary read's. Nor was it a hole only an
  * attacker would find: web/src/lib/getCoalescer.ts is a UNIVERSAL GET coalescer, so the SPA already sends all
- * five through here, and the fan-out budget bound nobody who used the transport at all.
+ * five through here, and those budgets bound nobody who used the transport at all.
+ *
+ * Closing it is also what first put the SPA's own chrome under a budget, which is how the `summary` split
+ * above came to be needed: until a sub-read was charged, the three per-navigation counts had never spent a
+ * ceiling at all.
  *
  * THE CATCH-ALL IS NOT RE-CHARGED per sub-read, deliberately. The envelope already spends one unit per
  * sub-read against `batch`, whose limit is a read count directly comparable with `api`'s, so charging both

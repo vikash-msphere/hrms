@@ -11,13 +11,13 @@ import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { createAccessRule, deleteAccessRule, decideAccessRule, purgeExpiredAccessRules, cloneAccessRules } from "../src/services/accessRules";
 import { previewAccess } from "../src/services/accessPreview";
-import { loadRoleGrantUncached } from "../src/lib/policyLoad";
+import { loadRoleGrant, loadRoleGrantUncached } from "../src/lib/policyLoad";
 import { DEFAULT_POLICY } from "../src/domain/manifests";
 import { clearCachePrefix } from "../src/lib/cache";
 import { invalidateCodeCache } from "../src/lib/authzResolve";
 
 // Rule LIFECYCLE, against real D1: a rule only decides while it is active and unexpired. Two features ride
-// that one predicate (lib/policyLoad `live`), and both are the kind of thing that silently fails open or
+// that one predicate (lib/policyLoad `isLive`), and both are the kind of thing that silently fails open or
 // closed if it regresses - so each is asserted through the ENGINE (previewAccess / loadRoleGrant), not just
 // by reading the row back.
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -69,6 +69,8 @@ beforeEach(async () => {
 
 const grantEmployeeRead = (extra: Record<string, unknown> = {}) => ({ subject_kind: "role", subject: "employee", collection: "leave-requests", scope: "all", level: "read", ...extra });
 const roleCanRead = async () => Boolean((await loadRoleGrantUncached(deps, "employee")).levels?.["leave-requests.**"]);
+// The CACHED loader - the one middleware/auth.ts actually calls on every request.
+const cachedRoleCanRead = async (d: Deps = deps) => Boolean((await loadRoleGrant(d, "employee")).levels?.["leave-requests.**"]);
 
 describe("expiring grants", () => {
   it("decides while unexpired and stops the moment it lapses - without the row being deleted", async () => {
@@ -82,6 +84,23 @@ describe("expiring grants", () => {
     clearCachePrefix("");
     expect(await roleCanRead()).toBe(false);
     expect((await deps.db.select().from(schema.accessRules)).length).toBe(1); // still there; expiry is not deletion
+  });
+
+  it("lapses on the CACHED path too, rather than at the end of the cache entry's own TTL", async () => {
+    const expiresAt = +deps.clock.now() + 60_000;
+    await createAccessRule(deps, ana(), grantEmployeeRead({ expire_time: new Date(expiresAt).toISOString() }));
+    // Warm the entry while the rule is still live (the create busts it, so this is the fill).
+    expect(await cachedRoleCanRead()).toBe(true);
+
+    // Read it again PAST the expiry with the entry still warm and holding the very same rows. The verdict is
+    // not a property of the rows - it is the rows read against the CALLER'S clock. Tested inside the cached
+    // query (as it used to be), "still live" was frozen into the entry, so the grant went on deciding for up
+    // to the TTL after its own expiry: the one thing an expiring grant exists not to do.
+    const later: Deps = { ...deps, clock: { now: () => new Date(expiresAt + 1000) } };
+    expect(await cachedRoleCanRead(later)).toBe(false);
+
+    // And the entry really was reused rather than quietly refilled - back on this clock it decides again.
+    expect(await cachedRoleCanRead()).toBe(true);
   });
 
   it("rejects an expiry in the past (a rule authored dead reads as granted access that does nothing)", async () => {

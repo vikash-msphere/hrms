@@ -13,7 +13,7 @@ import { eq, inArray, isNull, sql } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/sqlite-core";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { childCodeAt, maxChildSeg, nextChildCode } from "../domain/codes";
+import { childCodeAt, maxChildSeg } from "../domain/codes";
 import { chunk } from "../lib/dbBatch";
 import { isCodeCollision } from "../lib/errors";
 
@@ -72,14 +72,25 @@ export async function allocFlatCodes(deps: Deps, table: any, count: number, minW
   return Array.from({ length: count }, (_, i) => childCodeAt(null, from + i, minWidth));
 }
 
-// Children of a department: BOTH sub-departments (parentId) AND employees (departmentId) share the same
-// child-segment namespace under a dept, so they never collide (docs/archive/plan.txt section 0 design note).
-export async function allocUnderDept(deps: Deps, parentUuid: string | null, minWidth: number): Promise<string> {
-  let parentCode: string | null = null;
-  if (parentUuid) {
-    const d = (await deps.db.select({ code: schema.departments.code }).from(schema.departments).where(eq(schema.departments.uuid, parentUuid)).limit(1))[0];
-    parentCode = d?.code ?? null;
-  }
+/**
+ * The counter for the child namespace under one department (null = the root level).
+ *
+ * NOT spelled `<table>:<uuid>` like `ownedScope`, for two reasons. This namespace spans TWO tables - a
+ * department's children are its sub-departments AND its employees, sharing one child-segment sequence so the
+ * two can never compose the same code (docs/archive/plan.txt section 0 design note) - so no single table name
+ * describes it. And it is keyed by the PARENT rather than by an owner, which includes a root level that has no
+ * uuid at all. A spelling no table is named makes both explicit and cannot collide with an owned scope.
+ */
+const deptChildScope = (parentUuid: string | null) => `dept-children:${parentUuid ?? "root"}`;
+
+/**
+ * FIRST TOUCH ONLY: the highest child segment already stored under this parent, across both tables.
+ *
+ * This is the whole-scope read every allocation here used to do - kept as the seed, exactly as the flat
+ * allocator keeps its own, so a database populated before this counter existed (a seed script, a live tree)
+ * establishes its high-water mark once and is pure arithmetic after that.
+ */
+async function deptChildHighWaterMark(deps: Deps, parentUuid: string | null, parentCode: string | null): Promise<number> {
   const subDepts = await deps.db
     .select({ code: schema.departments.code })
     .from(schema.departments)
@@ -88,7 +99,44 @@ export async function allocUnderDept(deps: Deps, parentUuid: string | null, minW
     .select({ code: schema.employees.code })
     .from(schema.employees)
     .where(parentUuid ? eq(schema.employees.departmentId, parentUuid) : isNull(schema.employees.departmentId));
-  return nextChildCode([...subDepts, ...emps].map((r) => r.code), parentCode, minWidth);
+  return maxChildSeg([...subDepts, ...emps].map((r) => r.code), parentCode);
+}
+
+/**
+ * Children of a department: BOTH sub-departments (parentId) AND employees (departmentId) share the same
+ * child-segment namespace under a dept, so they never collide.
+ *
+ * COUNTER-BACKED like every other allocator in this file, which it was the last one not to be. It composed
+ * `max(surviving siblings) + 1`, and that is not the same rule: it hands a number BACK the moment its holder
+ * stops surviving.
+ *
+ * That mattered because `code` is the authz scope key, and the two collections allocated here are the two the
+ * hierarchy is made of. A department is hard-purgeable (`DELETE ?force=true` - it carries `delete_time`, so the
+ * factory puts it in `forcePurgeable`), nothing sweeps the `access_rules` rows whose `scope_code` names the
+ * purged code, and the next department created under the same parent used to be handed that code again. Every
+ * surviving subtree grant written for the old department - `departments.04-*`, `employees.04-*`, whoever held
+ * `my-dept` under it - then applied to the new one and everyone placed under it, with nobody re-granting
+ * anything. The coupling was already known here: services/codeCascade.ts rewrites those same rule codes when a
+ * re-parent moves a subtree. Purge was the unguarded door, and a monotonic counter closes it at the source
+ * rather than by remembering to sweep.
+ *
+ * Employees have the identical shape and were protected only by accident (`provisionAccount` always leaves a
+ * `users.employee_id` row, `users` carries no `delete_time` so it cannot be purged either, and the foreign key
+ * makes every employee purge a 409). An accident of another feature is not a rail.
+ *
+ * It also drops the read this used to pay on the two hottest hierarchy writes in the app: every employee
+ * create, department create and re-parent read every sibling department PLUS every employee of the target
+ * department - and at the root level, every department-less employee in the org - on a platform that bills
+ * rows read.
+ */
+export async function allocUnderDept(deps: Deps, parentUuid: string | null, minWidth: number): Promise<string> {
+  let parentCode: string | null = null;
+  if (parentUuid) {
+    const d = (await deps.db.select({ code: schema.departments.code }).from(schema.departments).where(eq(schema.departments.uuid, parentUuid)).limit(1))[0];
+    parentCode = d?.code ?? null;
+  }
+  const value = await reserve(deps, deptChildScope(parentUuid), 1, () => deptChildHighWaterMark(deps, parentUuid, parentCode));
+  return childCodeAt(parentCode, value, minWidth);
 }
 
 // Employee-owned resources (leave-requests, documents, payslips, leave-balances, holiday-selections):

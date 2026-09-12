@@ -10,7 +10,7 @@
 //
 // Parity with api(): resolves the sub-response body on 2xx (empty -> undefined like a 204), redirects on 401,
 // rejects with an equivalent ApiError otherwise (so per-widget "404 -> empty" branches keep working).
-import { ApiError, batchGet, type Problem } from "@/api";
+import { ApiError, batchGet, sessionDead, type Problem } from "@/api";
 
 const MAX = 20; // matches the batch:run sub-request cap; >MAX reads in a window split into multiple batches.
 // KEEP AT 20 on the Cloudflare Workers FREE plan: each batch:run sub-request runs its own D1 queries (authz
@@ -201,10 +201,11 @@ function settle(key: string, r: { status: number; body: unknown; etag?: string }
   const s = take(key);
   if (!s) return;
   if (!r) return s.reject(new ApiError("missing batch response", 0, null));
-  if (r.status === 401) {
-    window.location.href = "/"; // let Cloudflare Access re-challenge (mirrors api())
-    return s.reject(new ApiError("unauthenticated", 401, null));
-  }
+  // The session lapsed. Through `sessionDead` (api.ts), which is the ONE session-death path: it tells the
+  // sibling tabs, purges the cached server data off the disk, and shows the re-sign-in overlay or redirects to
+  // the actual login door. This branch used to do a bare `location.href = "/"` under a comment claiming it
+  // mirrored api(), doing none of those three - see the note on `sessionDead` for why it drifted.
+  if (r.status === 401) return s.reject(sessionDead());
   // "You already have this." The caller keeps its rows and only re-stamps their freshness.
   if (r.status === 304) return s.resolve({ body: NOT_MODIFIED, etag: r.etag });
   if (r.status >= 200 && r.status < 300) {

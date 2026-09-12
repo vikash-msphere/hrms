@@ -71,6 +71,23 @@ async function responseResource(c: Context<AppEnv>): Promise<Record<string, unkn
   }
 }
 
+/**
+ * The collection a `/v1` path names, with a COLLECTION-LEVEL custom method's verb stripped off.
+ *
+ * `/v1/announcements:markAllRead` names the collection `announcements`; `announcements:markAllRead` is not a
+ * collection and is a key no registry in the app holds. This file derived that name in three places and one of
+ * them kept the verb - the resolution block, whose value then went to `hasForcePurge()` and to
+ * `policy.state_visibility[…]`, so both silently answered "no" for every collection-level verb in the app.
+ * Nothing is reachable through it as the routes stand (such a request has no item to state-gate, and `force`
+ * only lifts a DELETE), which is precisely why it could sit there: it is one rule, so it gets one
+ * implementation rather than three spellings of which two happen to be right.
+ */
+function collectionOf(pathname: string): string {
+  const first = pathname.replace(/^\/v1\//, "").split("?")[0]!.split("/").filter(Boolean)[0] ?? "";
+  const verbAt = first.indexOf(":");
+  return verbAt >= 0 ? first.slice(0, verbAt) : first;
+}
+
 async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user: AppUser, grant: Grant): Promise<Decision | null> {
   const method = c.req.method.toUpperCase();
   if (method !== "POST" && method !== "PATCH" && method !== "PUT") return null;
@@ -83,7 +100,7 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   //   - an item-level method (`assets/<code>:verify`) otherwise reads as the code "<code>:verify", so a
   //     protected field in a verb body is gated on a resource that no grant can match. Fail-closed rather
   //     than open, but it denies the caller who does hold the field grant.
-  const collection = segs[0]!.split(":")[0]!;
+  const collection = collectionOf(coded);
   const code = segs[1]?.split(":")[0]; // resource code (or "me"); undefined on create
   const fields = user.policy.protected_fields[collection] ?? [];
   const refs = user.policy.references[collection] ?? {};
@@ -317,7 +334,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
       // it true when the handler logs its own activity row; the write backstop after next() reads it to dedupe.
       user.audited = false;
       const self = { employeeCode: user.employeeCode };
-      const collection = pathname.replace(/^\/v1\//, "").split("/").filter(Boolean)[0] ?? "";
+      const collection = collectionOf(pathname);
       // `?force=true` is the hard purge, and it is what lifts a DELETE from `write` to `admin`. It only lifts
       // it where the purge EXISTS: a collection whose delete is already permanent ignores the parameter
       // outright (collectionRoute's DELETE handler), so escalating there would refuse a caller their own
@@ -502,10 +519,10 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     const segs = pathname.replace(/^\/v1\//, "").split("/").filter(Boolean);
     // A COLLECTION-level custom method carries its verb in that first segment (`announcements:markAllRead`),
     // so the raw segment is not a collection name. Scope is about the collection either way - split the verb
-    // off, or a handler that reads the scope (announcements:markAllRead does) would get one computed against
-    // a resource that does not exist.
-    const verbAt = segs[0]?.indexOf(":") ?? -1;
-    const collection = verbAt >= 0 ? segs[0]!.slice(0, verbAt) : segs[0] ?? "";
+    // off (collectionOf, the one place that does), or a handler that reads the scope
+    // (announcements:markAllRead does) would get one computed against a resource that does not exist.
+    const isCollectionVerb = (segs[0]?.indexOf(":") ?? -1) >= 0;
+    const collection = collectionOf(pathname);
     const scope = scopeFor(user, collection);
     // A collection-level list also honors the caller's per-object shares/denies (one indexed read): shares
     // widen the result, denies remove rows (deny-wins). Covers user exceptions AND exact role rules. Item
@@ -514,7 +531,7 @@ export const authz: MiddlewareHandler<AppEnv> = async (c, next) => {
     // The aggregate ROUTES are not collections: no rule can carry their namespace, and their handlers read
     // searchScopes/summaryScopes/approvalScopes (each already scoped per collection below), never this scope -
     // so the read would be a guaranteed-empty one thrown away.
-    if (segs.length === 1 && verbAt < 0 && !AGGREGATE_ROUTES.has(collection)) {
+    if (segs.length === 1 && !isCollectionVerb && !AGGREGATE_ROUTES.has(collection)) {
       const roleSubjects = isSuperGrant(user.grant) ? [user.role] : [user.role, EVERYONE_ROLE];
       const exc = await loadObjectExceptionCodes(c.get("deps"), user.uuid, roleSubjects, collection);
       scope.shares = exc.shares;
