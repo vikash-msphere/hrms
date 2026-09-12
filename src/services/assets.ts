@@ -356,36 +356,58 @@ export async function createAssetsBatch(deps: Deps, actor: AppUser, items: Asset
   const cfg = await tagConfigOf(deps);
   const status = statusForAssignment(policy, null);
   const now = new Date();
-  // One read of the tags in use, one run of numbers off it - the reason this verb exists. Narrowed to the runs
-  // this delivery actually touches (a mixed box is a handful of categories), as index ranges rather than the
-  // whole column: same single read, a fraction of the rows billed.
+  // Narrowed to the runs this delivery actually touches (a mixed box is a handful of categories), as index
+  // ranges rather than the whole column: same single read, a fraction of the rows billed.
   const runs = [...new Set(drafts.map((d) => d.tagCode?.trim().toUpperCase() || FALLBACK_TAG_CODE))].map((code) => tagRange(cfg, code));
-  const inUse = (
-    await deps.db
-      .select({ t: schema.assets.assetTag })
-      .from(schema.assets)
-      .where(or(...runs.map((r) => and(gte(schema.assets.assetTag, r.from), lt(schema.assets.assetTag, r.to)))))
-  ).map((r) => r.t);
-  const tags = allocTagRun(cfg, inUse, drafts.map((d) => d.tagCode));
-  const codes = await allocFlatCodes(deps, schema.assets, drafts.length);
-  const rows = drafts.map((d, i) => ({
-    uuid: genId(), // minted here so the audit + event rows can name each asset without reading the inserts back
-    code: codes[i]!,
-    assetTag: tags[i]!,
-    name: d.name,
-    categoryId: d.categoryId,
-    serialNumber: d.serialNumber,
-    status,
-    assignedTo: null,
-    assignedOn: null,
-    purchaseDate: d.purchaseDate,
-    tagSecret: mintTagSecret(),
-    custodySince: isPending(status) ? now : null,
-    notes: d.notes,
-  }));
-  // One atomic batch: either the whole delivery is in the inventory or none of it is. A half-written run would
-  // leave numbered stickers with nothing to stick them to, and no way to tell which.
-  await runBatch(deps.db, insertBatches(rows, (group) => deps.db.insert(schema.assets).values(group)));
+  // BOTH ALLOCATED NUMBERS ARE INSIDE THE RETRY, exactly as the single create does it (createAsset above).
+  //
+  // The row `code` and the printed asset tag are each read-max-then-write against what is currently stored,
+  // and each is UNIQUE - so a second batch, or an ordinary single create, booking stock in at the same moment
+  // composes one of the same numbers and the index refuses it. `createAsset` has always retried that; this
+  // path did not, and the two failure modes it left were both bad: the whole delivery rolled back (the insert
+  // is one atomic batch, which is what makes retrying it safe) behind an `UNIQUE constraint failed` that
+  // matched no branch in middleware/errorHandler and therefore answered 500 - a server fault reported for a
+  // lost draw, on the create path most likely of any in the app to be run twice at once, because a shipment
+  // is unpacked by whoever is free.
+  //
+  // Re-reading is the whole point of the retry: the winner has committed by the time the loser looks again,
+  // so the second attempt measures the tags and codes that now exist and composes the next free ones. The
+  // uuids are re-minted with them, because `rows` is what the read-back, the audit entries and the events are
+  // all keyed on and it must describe the attempt that actually landed.
+  const rows = await withFreshCode(
+    async () => {
+      // One read of the tags in use, one run of numbers off it - the reason this verb exists.
+      const inUse = (
+        await deps.db
+          .select({ t: schema.assets.assetTag })
+          .from(schema.assets)
+          .where(or(...runs.map((r) => and(gte(schema.assets.assetTag, r.from), lt(schema.assets.assetTag, r.to)))))
+      ).map((r) => r.t);
+      const tags = allocTagRun(cfg, inUse, drafts.map((d) => d.tagCode));
+      const codes = await allocFlatCodes(deps, schema.assets, drafts.length);
+      const attempt = drafts.map((d, i) => ({
+        uuid: genId(), // minted here so the audit + event rows can name each asset without reading the inserts back
+        code: codes[i]!,
+        assetTag: tags[i]!,
+        name: d.name,
+        categoryId: d.categoryId,
+        serialNumber: d.serialNumber,
+        status,
+        assignedTo: null,
+        assignedOn: null,
+        purchaseDate: d.purchaseDate,
+        tagSecret: mintTagSecret(),
+        custodySince: isPending(status) ? now : null,
+        notes: d.notes,
+      }));
+      // One atomic batch: either the whole delivery is in the inventory or none of it is. A half-written run
+      // would leave numbered stickers with nothing to stick them to, and no way to tell which - and it is
+      // also what makes the retry above safe, since a refused batch leaves nothing behind to collide with.
+      await runBatch(deps.db, insertBatches(attempt, (group) => deps.db.insert(schema.assets).values(group)));
+      return attempt;
+    },
+    (e) => isCodeCollision(e) || isAssetTagCollision(e),
+  );
   // Read the rows back for their server-side stamps (create/update time, which the caller's ETag rides on).
   // Chunked at 90 ids: a batched insert returns nothing to take them from, and an IN list is bound params too.
   const created = (await Promise.all(

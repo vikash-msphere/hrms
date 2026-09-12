@@ -2,7 +2,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument } from "../lib/errors";
-import { getSettingValue, upsertSetting } from "./settings";
+import { getSettingValue, mutateSetting } from "./settings";
 
 // Bank bulk-payment Excel formats. Three pieces, all owned here:
 //  - COLUMN MAPPINGS (which sheet column -> which payroll field) as plain data in the settings table key
@@ -66,12 +66,17 @@ export async function getBankFormat(deps: Deps, bank: string): Promise<(BankForm
 }
 
 // Merge a patch into one bank's format (upsert) and persist the whole map.
+//
+// Through `mutateSetting`, because editing ONE bank rewrites the WHOLE map: read-then-write let two admins
+// saving two different banks silently revert each other. See the note on that function - the version is taken
+// and pinned server-side, across the read and the write, so no client contract changes.
 export async function saveBankFormat(deps: Deps, actor: AppUser, bank: string, patch: Partial<BankFormat>): Promise<BankFormat & { bank: string }> {
   if (!bank.trim()) throw invalidArgument("bank is required");
-  const m = await getBankFormats(deps);
-  const next: BankFormat = { columns: [], ...m[bank], ...patch };
-  m[bank] = next;
-  await upsertSetting(deps, actor, "bank-formats", m);
+  let next: BankFormat = { columns: [] };
+  await mutateSetting<BankFormats>(deps, actor, "bank-formats", {}, (m) => {
+    next = { columns: [], ...m[bank], ...patch };
+    return { ...m, [bank]: next };
+  });
   return { bank, ...next };
 }
 
@@ -112,15 +117,22 @@ export async function getPayrollDebitFor(deps: Deps, bank: string): Promise<Debi
 }
 
 // Merge-patch: a blank/absent account number keeps the stored one (so an edit needn't re-enter it).
+//
+// Guarded by `mutateSetting` for the same reason `saveBankFormat` is - one bank's edit rewrites the map every
+// bank lives in. The account is encrypted BEFORE the mutation rather than inside it: the ciphertext depends
+// only on what the caller sent, so it does not have to be recomputed when a retry re-reads the map, and the
+// mutation stays a pure function of the current value (which is what makes retrying it safe).
 export async function savePayrollDebitFor(deps: Deps, actor: AppUser, bank: string, patch: DebitInput): Promise<DebitView> {
   if (!bank.trim()) throw invalidArgument("bank is required");
-  const store = await getSettingValue<PayrollDebitStore>(deps, "payroll-debit", {});
-  const next: StoredDebit = { ...store[bank] };
   const acct = patch.debit_account_number?.trim();
-  if (acct) next.debit_account_enc = await deps.encryptor.encrypt(acct);
-  if (patch.currency_code !== undefined) next.currency_code = patch.currency_code.trim() || undefined;
-  store[bank] = next;
-  await upsertSetting(deps, actor, "payroll-debit", store);
+  const enc = acct ? await deps.encryptor.encrypt(acct) : undefined;
+  let next: StoredDebit = {};
+  await mutateSetting<PayrollDebitStore>(deps, actor, "payroll-debit", {}, (store) => {
+    next = { ...store[bank] };
+    if (enc) next.debit_account_enc = enc;
+    if (patch.currency_code !== undefined) next.currency_code = patch.currency_code.trim() || undefined;
+    return { ...store, [bank]: next };
+  });
   return debitView(deps, bank, next);
 }
 

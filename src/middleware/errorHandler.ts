@@ -2,8 +2,9 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
 import {
-  AppError, aborted, alreadyExists, errorChainText, forbidden, invalidArgument, isCodeCollision,
-  isShiftAssignmentDuplicate, notFound, resourceExhausted, unauthenticated,
+  AppError, aborted, alreadyExists, errorChainText, forbidden, invalidArgument, isAssetTagCollision,
+  isCardSeqCollision, isCodeCollision, isEmployeeNumberCollision, isShiftAssignmentDuplicate, notFound,
+  resourceExhausted, unauthenticated,
 } from "../lib/errors";
 
 // Which fields a validation failure was about, and what was wrong with each.
@@ -101,11 +102,18 @@ export const errorHandler = (err: Error, c: Context) => {
       // The framework's own client errors, which are client errors just as much as Zod's - see fromHttpException.
       : err instanceof HTTPException && err.status < 500
         ? fromHttpException(err, c.req.path)
-        // A create that lost the code-allocation race trips the UNIQUE index on `code`. The create path
-        // already re-allocates and tries again a few times (services/codeAlloc.ts withFreshCode), so a
-        // collision reaching here means the scope stayed contended throughout - rare, and still the client's
-        // to retry rather than a server fault, so it answers 409 and not a 500.
-        : isCodeCollision(err)
+        // A create that lost an ALLOCATION race trips the UNIQUE index on whichever number it composed. The
+        // create paths already re-allocate and try again a few times (services/codeAlloc.ts withFreshCode),
+        // so a collision reaching here means the scope stayed contended throughout - rare, and still the
+        // client's to retry rather than a server fault, so it answers 409 and not a 500.
+        //
+        // ALL FOUR OF THEM, not just `code`. Every one of these is the same shape - a number read as max+1
+        // from what is stored, kept honest by a UNIQUE index, retried by the same helper - but only `code`
+        // was listed, so the other three fell to the catch-all below and were reported as "Internal Server
+        // Error" with a stack and an `unhandled error` log line. Which one a create happens to lose on is not
+        // a property a client should be able to observe, and it is certainly not the difference between "try
+        // again" and "the server is broken".
+        : isCodeCollision(err) || isAssetTagCollision(err) || isCardSeqCollision(err) || isEmployeeNumberCollision(err)
           ? aborted("resource id collision; please retry").toProblem(c.req.path)
           // The roster's one-entry-per-person-per-day index. The service checks for the existing entry first
           // and says so in words; this catches the paths that cannot (a restore of a soft-deleted entry onto a

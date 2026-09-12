@@ -1,7 +1,11 @@
 // FNV-1a, as a 64-bit value in base36.
 //
-// NOT a security primitive, and it does not need to be: both callers hash a string the server re-derives on
-// every request and never trusts one back (domain/authzVersion.ts, http/listEtag.ts).
+// NOT a security primitive, and it does not need to be: every caller hashes a string the server re-derives on
+// every request and never trusts one back (domain/authzVersion.ts, http/listEtag.ts, middleware/auth.ts's
+// session id). The session id is the one whose input is not public - it carries the caller's internal user id -
+// and it holds for the same reason rather than a different one: that input has the full 64 bits of entropy the
+// id was minted with, so there is no small space to walk. What this is not is a keyed MAC, so nothing may
+// depend on a client being unable to COMPUTE one of these from facts it already knows.
 //
 // WHY 64 BITS AND NOT 32. Both callers use their hash as an IDENTITY that decides whether a payload may be
 // reused: `authzVersion` says "these are still the same rights", and `listEtag` folds it together with the

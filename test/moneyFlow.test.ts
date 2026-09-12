@@ -10,6 +10,7 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
+import { clearCache } from "../src/lib/cache";
 
 import { createRun, buildRunItems, transition, deleteRun, listRunItems, getRun, runStaleness, previewRunItemPayslip, publishRun } from "../src/services/payroll";
 import { createLoan, approveLoan, disburseLoan, recordLoanRepayment, repaidCreditStmt, resetLoanRepaymentStmts } from "../src/services/loans";
@@ -836,8 +837,18 @@ describe("prior-employer figures: declared, then HR/payroll verified before they
     const admin = await seedActor(await seedEmployee({ code: short("04") })); // a different person (HR/payroll)
     await seedComp(emp, { basePay: 100000 }); // recurring monthly gross 100000
     // A payroll_admin verifier who should be alerted when a declaration is filed.
+    //
+    // The GRANT is seeded alongside the role, because that is what now decides who gets told: the recipient
+    // list is `employees.*.tax` write, asked of each role's compiled grant (services/capabilityHolders.ts),
+    // rather than a hardcoded ["hr_admin", "payroll_admin", "super_admin"] the notification used to carry.
+    // Scoped `*` and not `me`, since verifying is by definition done to somebody else's record - a self-scoped
+    // tax grant is what every employee already holds and must not put them on this list.
     const verifierEmp = await seedEmployee({ code: short("04") });
     await deps.db.insert(schema.roles).values({ name: "payroll_admin", label: "Payroll" }).onConflictDoNothing();
+    await deps.db
+      .insert(schema.accessRules)
+      .values({ subject: "payroll_admin", subjectKind: "role", namespace: "employees", pattern: "employees.*.tax.**", scopeKind: "all", scopeCode: "", matchCode: null, level: "write", effect: "allow" });
+    clearCache();
     await deps.db.insert(schema.users).values({ uuid: genId(), code: short("u"), email: `${genId()}@test.example`, role: "payroll_admin", employeeId: verifierEmp });
 
     // Employee declares prior-employer income. Unverified -> zero effect on the projection.

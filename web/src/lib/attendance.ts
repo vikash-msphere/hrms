@@ -84,13 +84,28 @@ export function localDay(iso: string, tz: string): string {
 export function zonedInstant(ymd: string, hhmm: string, tz: string): string {
   const [h, m] = hhmm.split(":").map(Number);
   const guess = Date.parse(`${ymd}T${String(h || 0).padStart(2, "0")}:${String(m || 0).padStart(2, "0")}:00Z`);
-  // Offset (minutes) = wall-clock the guess prints in tz, minus the wall-clock we asked for.
-  const shown = localMinutes(new Date(guess).toISOString(), tz);
   const wanted = (h || 0) * 60 + (m || 0);
-  let offset = shown - wanted;
-  if (offset > 720) offset -= 1440; // day-wrap: the guess printed as the previous/next day
-  else if (offset < -720) offset += 1440;
-  return new Date(guess - offset * 60000).toISOString();
+  // How far the instant `ms` prints from the wall-clock we asked for, in minutes.
+  const driftAt = (ms: number): number => {
+    let d = localMinutes(new Date(ms).toISOString(), tz) - wanted;
+    if (d > 720) d -= 1440; // day-wrap: it printed as the previous/next day
+    else if (d < -720) d += 1440;
+    return d;
+  };
+  const first = guess - driftAt(guess) * 60000;
+  // SECOND PASS, because the offset is read at one instant and applied to another.
+  //
+  // The correction moves the instant by up to a day, and a zone's offset is not constant across that move: on
+  // a DST boundary the offset at the guess is not the offset at the answer, so a single pass lands an hour
+  // out - silently, on a value that becomes a stored punch. Re-reading the drift AT the corrected instant and
+  // applying what is left converges wherever the wall-clock time actually exists, which is every case but one.
+  //
+  // Deliberately one extra pass and not a loop: inside a spring-forward GAP the requested wall-clock time does
+  // not occur at all, so no instant has zero drift and iterating would oscillate between the two sides of the
+  // jump forever. One pass terminates and lands on the nearest real instant, which is the right answer to
+  // "09:30 on a day that has no 09:30".
+  const drift = driftAt(first);
+  return new Date(drift === 0 ? first : first - drift * 60000).toISOString();
 }
 
 export type DaySummary = {

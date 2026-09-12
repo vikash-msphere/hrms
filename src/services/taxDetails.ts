@@ -4,6 +4,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldsMeta, stateMeta } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
+import { holdsForAnyone, roleHolderEmployeeIds } from "./capabilityHolders";
 import { notFound, invalidArgument, failedPrecondition } from "../lib/errors";
 import { getEmployeeTaxProjection, readDeclarations, readRawTaxDetails, type TaxDeclarations, type TaxProjection } from "./taxProjection";
 import type { Wire } from "../http/wire";
@@ -13,18 +14,41 @@ import type { Wire } from "../http/wire";
 // deducted-to-date) is computed live by taxProjection. Access is gated by the middleware on
 // employees/<code>/tax (owner + HR/payroll + super).
 
-// Roles that may verify prior-employer figures (hold the employees.tax capability). Notification-only routing;
-// the actual verify is still authorized in the middleware + the not-self check in setTaxDetails.
-const TAX_VERIFIER_ROLES = ["hr_admin", "payroll_admin", "super_admin"];
+/**
+ * The DECLARATION fields a per-field access rule can target on `employees/<id>/tax`.
+ *
+ * This is the read half of field-level control for this sub-resource, and it is the list http/fieldAccess.ts
+ * imports - so a key that is not here CANNOT be denied on read: the rule is accepted by the validator, stored,
+ * rendered in the ACL surface, and does nothing. Owned here rather than re-typed there for the same reason
+ * BANK_FIELDS and PERSONAL_FIELDS are (see the note on FLAT_KEYS).
+ *
+ * Only the four figures the employee (or HR on their behalf) actually DECLARES. `assessment_year` is a write
+ * key too, but the value the view returns under that name is the org's configured year from the tax config,
+ * not anything declared, so denying a read of it would hide a published setting rather than someone's money.
+ * Everything else in the view is derived (the slab walk, the year's tax, the monthly schedule) and is governed
+ * by the whole-sub-resource gate on `employees.<code>.tax`, which the authz middleware applies to the path.
+ */
+export const TAX_FIELDS = ["prior_employer_income", "prior_employer_tds", "verified_income", "verified_tds"] as const;
 
 // Employee ids of the tax verifiers to notify about a new declaration (excluding the actor, so a payroll admin
 // declaring on someone's behalf doesn't ping themselves).
-async function taxVerifierIds(deps: Deps, excludeEmployeeId: string | null | undefined): Promise<string[]> {
-  const users = await deps.db.select({ employeeId: schema.users.employeeId, role: schema.users.role }).from(schema.users);
-  return users
-    .filter((u) => u.employeeId && u.employeeId !== excludeEmployeeId && TAX_VERIFIER_ROLES.includes(u.role))
-    .map((u) => u.employeeId as string);
-}
+//
+// ASKED OF THE GRANT, not of a list of role names. This was
+//
+//     const TAX_VERIFIER_ROLES = ["hr_admin", "payroll_admin", "super_admin"];
+//
+// filtered over a full read of `users` - the exact pattern domain/access.ts was written to replace, and wrong
+// in both directions without ever erroring: a custom role granted the capability was never told a declaration
+// was waiting, and a seeded role that had it revoked in the ACL went on being told. A declaration nobody is
+// told about sits unverified, and only VERIFIED figures reduce withholding - so the cost of the silence lands
+// on the employee's take-home.
+//
+// `holdsForAnyone`, not the scope-stripped capability test: `employees.me.tax.**` is in OWN_PII, so every
+// employee in the org can write their OWN tax sub-resource and a coarse "holds employees.tax.write" would
+// notify the entire company. Verifying is by definition something done to somebody else's record - which the
+// not-self guard in setTaxDetails already says about the act, and this says about the audience.
+const taxVerifierIds = (deps: Deps, excludeEmployeeId: string | null | undefined): Promise<string[]> =>
+  roleHolderEmployeeIds(deps, holdsForAnyone("employees.*.tax", "write"), excludeEmployeeId);
 
 async function loadEmployee(deps: Deps, employeeId: string) {
   const row = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];

@@ -3,7 +3,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, fieldDiff } from "../lib/audit";
-import { aborted, isSettingKeyCollision, notFound } from "../lib/errors";
+import { AppError, aborted, isSettingKeyCollision, notFound } from "../lib/errors";
 import { etagOf } from "../http/serialize";
 import { paginate } from "../http/pagination";
 import { refSettings, bustRef } from "../lib/refData";
@@ -117,6 +117,58 @@ export async function upsertSetting(deps: Deps, actor: AppUser, key: string, val
   // A first save has no previous value to diff against, so the whole of what it set IS the change.
   await audit(deps, actor, "setting.create", "settings", key, { diff: { value: { from: null, to: json.length > 140 ? `${json.slice(0, 140)}…` : json } } }, inserted);
   return inserted!;
+}
+
+/**
+ * Read one settings blob, change part of it, and write it back WITHOUT losing a concurrent change to another
+ * part of the same blob.
+ *
+ * This is the shape every managed-key writer has: `bank-formats` and `payroll-debit` each store a MAP keyed by
+ * bank, and editing one bank means rewriting the whole map. Done as a plain read-then-write - which is what
+ * services/bankFormats.ts did - two admins saving two different banks a moment apart silently revert each
+ * other: both read the map, both add their own key, the second write wins and the first bank is simply gone,
+ * with a 200 on both requests and nothing but the audit diff to say so. The blob these two hold is the
+ * employer's payout configuration, so "gone" means a bank file built against a debit account nobody
+ * re-entered.
+ *
+ * `upsertSetting` has had the compare-and-swap for this since the generic settings route grew an `If-Match` -
+ * these two callers were simply the ones that never passed a version, and they could not: their routes expose
+ * no ETag of their own (the resource is `bank-formats/<bank>`, not the settings row), so there was no version
+ * for a client to hold. So the version is taken and used HERE, on the server, across the read and the write
+ * that belong together - which is the guarantee that was actually missing. A client sending nothing is
+ * unaffected, and no wire contract changes.
+ *
+ * A conflict is RETRIED rather than returned: the losing writer's edit is still valid, it was just computed
+ * against a map that has since grown another key, so re-reading and re-applying is exactly right and is
+ * invisible to the caller. Bounded, because a key contended through every attempt is not a race a longer wait
+ * fixes - and past the bound the 409 is honest and retryable.
+ */
+const SETTING_MAP_ATTEMPTS = 4;
+export async function mutateSetting<T>(deps: Deps, actor: AppUser, key: string, fallback: T, mutate: (current: T) => T): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    // Straight to the row, NOT through refSettings: that snapshot is per-request and is taken before any of
+    // this, so reading the map from it would re-introduce the stale read this function exists to close.
+    const row = (await deps.db.select().from(schema.settings).where(eq(schema.settings.key, key)).limit(1))[0];
+    let current: T = fallback;
+    if (row) {
+      try {
+        current = { ...fallback, ...(JSON.parse(row.value) as object) };
+      } catch {
+        console.error(`setting "${key}" holds malformed JSON; using default`);
+      }
+    }
+    const next = mutate(current);
+    try {
+      // No row yet means there is no version to pin, so the first write goes in unguarded - and the insert
+      // race is already answered by the primary key on `settings.key`, which `upsertSetting` turns into the
+      // same `aborted` this loop retries.
+      await upsertSetting(deps, actor, key, next, row ? etagOf(+new Date(row.updatedAt)) : undefined);
+      return next;
+    } catch (e) {
+      const lost = e instanceof AppError && e.httpStatus === 409;
+      if (!lost || attempt >= SETTING_MAP_ATTEMPTS) throw e;
+    }
+  }
 }
 
 // The org's single currency (settings/organization `default_currency`, "INR" out of the box). The app is

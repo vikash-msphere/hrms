@@ -2,7 +2,7 @@ import { allocFlatCode, allocOwnedCode } from "./services/codeAlloc";
 // The successor row's id is minted before the claim in the recurrence rolls, so a failed create can be asked
 // whether it landed before the claim is released. Same shape as services/cards.ts#rollRecurringCards.
 import { genId } from "./lib/idCodec";
-import { eq, and, or, ne, isNull, isNotNull, lte, lt, gte, sql, inArray } from "drizzle-orm";
+import { asc, eq, and, or, ne, isNull, isNotNull, lte, lt, gte, sql, inArray } from "drizzle-orm";
 import * as schema from "./db/schema";
 import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
@@ -455,11 +455,24 @@ async function reclaimStuckJobs(deps: Deps): Promise<number> {
 async function drainJobs(deps: Deps, limit: number): Promise<number> {
   await reclaimStuckJobs(deps);
   // A queued job runs when it has no runAfter, or its runAfter has passed (delayed automation actions).
+  //
+  // OLDEST FIRST, which it was not. `LIMIT` with no `ORDER BY` takes whatever rows the plan reaches first, and
+  // for an indexed scan on `status` that is effectively insertion order of the index - stable enough that a
+  // job which does not clear is met by the same slice every tick. Two shapes turn that into starvation rather
+  // than untidiness: an LRO requeues itself (a payslip batch, the reminder mail, carry-forward), and a failing
+  // job comes back with a backoff - so a handful of them sitting at the head of the scan can fill `limit`
+  // every five minutes while a job queued behind them is never once looked at. Nothing reports that; the drain
+  // returns a healthy count of jobs it did advance.
+  //
+  // FIFO makes the queue a queue: a requeued LRO goes back with a fresh `updated_at` but keeps its original
+  // `created_at`, so it holds its place rather than either monopolising the front or being pushed to the back,
+  // and anything waiting behind it reaches the front in bounded time.
   const now = deps.clock.now();
   const queued = await deps.db
     .select()
     .from(schema.jobs)
     .where(and(eq(schema.jobs.status, "queued"), or(isNull(schema.jobs.runAfter), lte(schema.jobs.runAfter, now))))
+    .orderBy(asc(schema.jobs.createdAt), asc(schema.jobs.uuid))
     .limit(limit);
   let processed = 0;
   let dropped = 0;

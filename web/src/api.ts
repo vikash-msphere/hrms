@@ -209,6 +209,27 @@ const settle = (attempt: number) => new Promise((r) => setTimeout(r, 150 * attem
 // Past the cap the error is thrown, and the server's own detail names the wait ("retry in 47s"), so the
 // message the person reads is actionable either way.
 const RETRY_AFTER_CAP_MS = 3_000;
+
+/**
+ * Let go of a response this call is about to replace with another attempt.
+ *
+ * A `fetch` response holds a live body stream, and the browser cannot release the connection it is riding
+ * until that stream is read or cancelled. A retried read therefore left one parked per attempt, reclaimed only
+ * whenever the response object happened to be collected - and the retry paths are precisely the moments the
+ * connection pool is already under strain: a gateway rolling between isolates (502/503/504) or a budget
+ * refusal that every coalesced read in the window hits at once. Cancelling is immediate and costs nothing,
+ * since the body of a response we have decided to discard is by definition not wanted.
+ *
+ * Never throws: a body already consumed or a stream that died with the connection would otherwise turn a
+ * recoverable retry into a failed request, which is the opposite of what this is for.
+ */
+async function discard(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    /* already consumed or gone - nothing to release */
+  }
+}
 /** The `Retry-After` delay in ms when it is present, parseable and inside the cap; otherwise null. */
 function retryAfterMs(res: Response): number | null {
   const raw = res.headers.get("Retry-After");
@@ -247,6 +268,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     }
     if (attempt >= attempts) break;
     if (TRANSIENT.has(res.status)) {
+      await discard(res);
       await settle(attempt);
       continue;
     }
@@ -254,6 +276,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     if (res.status === 429 && isRead) {
       const wait = retryAfterMs(res);
       if (wait === null) break;
+      await discard(res);
       await new Promise((r) => setTimeout(r, wait));
       continue;
     }

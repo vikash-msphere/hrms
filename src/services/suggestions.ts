@@ -10,6 +10,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { notify, notifyMany } from "./notifications";
+import { holdsVerbForAnyone, roleHolderEmployeeIds } from "./capabilityHolders";
 import { emitEvent } from "./eventBus";
 import { invalidArgument, notFound, aborted, oneOf } from "../lib/errors";
 import { etagOf } from "../http/serialize";
@@ -21,8 +22,6 @@ import { purgeRow, type PurgeCascade } from "./softDelete";
 const STATUSES = ["new", "under_review", "planned", "implemented", "declined"] as const;
 type Status = (typeof STATUSES)[number];
 
-// Roles that hold `suggestions.*.respond` (see grants.ts) - the reviewers who triage the box.
-const SUGGESTION_REVIEWER_ROLES = ["hr_admin", "super_admin"];
 
 // Where a bell about one suggestion lands: that suggestion alone, on its own page (`#/suggestions/<id>/view`),
 // not the box it sits in - a notification is about a specific idea, so the click has to arrive AT it. The
@@ -30,12 +29,15 @@ const SUGGESTION_REVIEWER_ROLES = ["hr_admin", "super_admin"];
 const suggestionLink = (id: string) => `suggestions/${id}/view`;
 
 // Employee ids of the suggestion reviewers to notify about a new submission (excluding the actor).
-async function suggestionReviewerIds(deps: Deps, excludeEmployeeId?: string): Promise<string[]> {
-  const users = await deps.db.select({ employeeId: schema.users.employeeId, role: schema.users.role }).from(schema.users);
-  return users
-    .filter((u) => u.employeeId && u.employeeId !== excludeEmployeeId && SUGGESTION_REVIEWER_ROLES.includes(u.role))
-    .map((u) => u.employeeId as string);
-}
+//
+// ASKED OF THE GRANT - the reviewers are whoever holds `suggestions.*.respond`, which is a thing the ACL can
+// say and a hardcoded `["hr_admin", "super_admin"]` cannot. The literal was wrong in both directions and
+// quietly: grant the verb to a custom triage role and nobody on it was ever told an idea had come in; revoke
+// it from hr_admin and they were still told. It also read the whole `users` table to answer, on a write path.
+// See services/capabilityHolders.ts - and `holdsVerbForAnyone` rather than the coarse capability test, because
+// "may respond to somebody's suggestion" is the question, not "may respond to my own".
+const suggestionReviewerIds = (deps: Deps, excludeEmployeeId?: string): Promise<string[]> =>
+  roleHolderEmployeeIds(deps, holdsVerbForAnyone("suggestions.*", "respond"), excludeEmployeeId);
 
 export type SuggestionInput = {
   category?: string | null;

@@ -12,6 +12,7 @@ import { loadRoleGrant, loadUserGrant, loadManifest } from "../lib/policyLoad";
 import { resolveViewAs, VIEW_AS_HEADER } from "../lib/viewAs";
 import { unauthenticated, forbidden, isUserEmailCollision, isUserEmployeeCollision } from "../lib/errors";
 import { getCookie } from "hono/cookie";
+import { fnv1a64 } from "../lib/fnv";
 import { openSession } from "../lib/session";
 import { SESSION_COOKIE } from "../routes/authRoutes";
 import type { SQL } from "drizzle-orm";
@@ -350,7 +351,20 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     // and adding a store just to name a session would give that up. Two sessions of the same user in the same
     // millisecond would collide; they would also both be that user signing in twice at once, which is one
     // sitting for every purpose this grouping serves.
-    ...(sessionIat !== null ? { sessionId: `${user.uuid}:${sessionIat}` } : {}),
+    //
+    // HASHED, because this value goes ON THE WIRE: it is `session_id` on every activity row (http/serialize.ts)
+    // and a filter a client passes back (`GET /v1/activity?session=`). Written as `<uuid>:<iat>` it published
+    // the INTERNAL users primary key verbatim - the id the whole wire codec exists to keep off the wire
+    // (lib/idCodec.ts) - under a comment calling it opaque, which it was not: the first half was the row's PK
+    // in the clear. Nothing accepts an internal id inbound any more (lib/viewAs.ts was the last lane that did),
+    // so this was disclosure rather than a way in, and the fix is the same either way.
+    //
+    // fnv1a64 and not an HMAC: everything this value has to be is an EQUALITY KEY - the server re-derives it
+    // from the same two facts on every request of the sitting, and never trusts one handed back as anything
+    // but a filter. Its input carries the uuid's full 64 bits of entropy, so it is not a hash of a guessable
+    // secret; and the same helper already backs `authzVersion` and the list validator, which are identities
+    // decided the same way.
+    ...(sessionIat !== null ? { sessionId: fnv1a64(`${user.uuid}:${sessionIat}`) } : {}),
   };
 
   // "View as": an access admin can ask the app to answer as another user (read-only, audited). This swaps the

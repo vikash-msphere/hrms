@@ -181,14 +181,28 @@ export const employees = new Hono<AppEnv>()
     const out = code ? redactFlat(view, "personal-info", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
     return c.json({ path: `employees/${id}/personal-info`, ...out });
   })
+  // REDACTED LIKE ITS THREE SIBLINGS. The tax view is field-gated on WRITE (domain/manifests.ts lists `tax`
+  // in SUBRESOURCE_BODY, so the authz middleware checks every key in the body) and was not gated on READ at
+  // all - the one sub-resource served straight out of its service. A per-field deny on a declared figure was
+  // therefore accepted, stored and inert, which is a field ACL failing open.
+  //
+  // The PATCH answer goes through the same redactor, because it is the same view: `:verify` and a plain
+  // re-declaration both return the whole projection, so a caller who may write a figure but not read it back
+  // would otherwise be handed it in the write's own response.
   .get("/:employee_id/tax", async (c) => {
     const id = c.req.param("employee_id")!;
-    return c.json({ path: `employees/${id}/tax`, ...(await getTaxDetails(c.get("deps"), c.get("user"), id)) });
+    const view = await getTaxDetails(c.get("deps"), c.get("user"), id);
+    const code = c.get("itemCode");
+    const out = code ? redactFlat(view, "tax", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
+    return c.json({ path: `employees/${id}/tax`, ...out });
   })
   .patch("/:employee_id/tax", async (c) => {
     const id = c.req.param("employee_id")!;
     const body = await jsonBody<{ values?: Record<string, unknown> }>(c);
-    return c.json({ path: `employees/${id}/tax`, ...(await setTaxDetails(c.get("deps"), c.get("user"), id, body.values ?? {})) });
+    const view = await setTaxDetails(c.get("deps"), c.get("user"), id, body.values ?? {});
+    const code = c.get("itemCode");
+    const out = code ? redactFlat(view, "tax", c.get("objectGrant"), code, { employeeCode: c.get("user").employeeCode }) : view;
+    return c.json({ path: `employees/${id}/tax`, ...out });
   })
   .patch("/:employee_id/personal-info", async (c) => {
     const id = c.req.param("employee_id")!;

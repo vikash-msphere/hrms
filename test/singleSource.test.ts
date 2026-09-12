@@ -36,10 +36,19 @@ const ALLOW = new Set<string>([
   "src/services/accessPreview.ts::authz-engine import",
   // include_capabilities: emits the subject's capability payload (same as /users/me), for view-as - never gates.
   "src/services/accessPreview.ts::capabilitiesOf",
-  // Access requests (:requestAccess): computes WHO the access admins are (capabilitiesOf over role grants)
-  // to address a notification - recipient selection, not an access decision on the caller.
-  "src/services/accessRequest.ts::hasCapability",
-  "src/services/accessRequest.ts::capabilitiesOf",
+  // RECIPIENT SELECTION, not an access decision on the caller: "who handles this" - the access admins for a
+  // permission request, the tax verifiers for a prior-employer declaration, the reviewers for a suggestion.
+  // It asks each ROLE's grant, which is the whole point: the alternative, and what two of the three features
+  // were doing, is a hardcoded `["hr_admin", "payroll_admin", "super_admin"]` that silently misses a custom
+  // role and silently keeps a revoked one. The gate on the action itself is the middleware, untouched.
+  //
+  // It lives in ONE module now (services/capabilityHolders.ts) rather than being re-derived per feature, so
+  // the exception is one file rather than one per caller - and the `decide` import is here because a
+  // self-scoped grant is not authority over anyone else: `employees.me.tax.**` is held by every employee, so
+  // the coarse capability test would have addressed the tax queue's mail to the entire company.
+  "src/services/capabilityHolders.ts::hasCapability",
+  "src/services/capabilityHolders.ts::capabilitiesOf",
+  "src/services/capabilityHolders.ts::authz-engine import",
   // profile_completeness enrichment on GET /employees/{id}: owner-private flags also shared with HR as a
   // record-quality signal. Shapes the RESPONSE payload (field visibility), never gates the request - the
   // route is authorized by the middleware like any other.
