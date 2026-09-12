@@ -81,3 +81,61 @@ describe("errorHandler: a client's mistake is not a 500", () => {
     expect(body.detail).toBe("nope");
   });
 });
+
+// ---- `instance` never carries an internal id ---------------------------------------------------------------
+//
+// The path an error handler sees is the DECODED one: `decodeWireIdsRequest` runs outside Hono (src/index.ts),
+// so by the time anything throws, `c.req.path` reads `/v1/employees/<13-char internal id>` - the primary key
+// lib/idCodec.ts exists to keep off the wire. And a problem body is the one response shape the outbound edge
+// never rewrites: `encodeWireIdsMiddleware` only touches `application/json`, problem details are
+// `application/problem+json`, and a throw unwinds past its post-`next()` block regardless. So every 403, 404,
+// 409 and validation 400 on an item path published that id verbatim.
+//
+// Asserted on the handler rather than end to end, because that is where the masking lives and where the next
+// branch will be added - the four problem shapes below are the four the handler builds.
+const ID = "0abc1def2ghj3"; // 13 Crockford-base32 chars: exactly what lib/idCodec.ts#genId emits
+
+const leaky = new Hono<AppEnv>();
+leaky.onError(errorHandler);
+leaky.get(`/v1/employees/:id/bank-account`, () => {
+  throw forbidden("nope");
+});
+// A ZodError THROWN, which is how a custom method's body fails (http/collectionRoute.ts calls
+// `own.schema.parse(...)` directly); `zValidator` answers its own 400 and never reaches the handler.
+leaky.post(`/v1/employees/:id`, async (c) => c.json(z.object({ name: z.string() }).parse(await c.req.json())));
+leaky.get(`/v1/employees/:id:verb`, () => {
+  throw new HTTPException(418, { message: "short and stout" });
+});
+
+const instanceOf = async (res: Response) => ((await res.json()) as { instance?: string }).instance;
+
+describe("errorHandler: the internal id never reaches problem.instance", () => {
+  it("masks the id segment on an app error", async () => {
+    const res = await leaky.request(`/v1/employees/${ID}/bank-account`);
+    expect(res.status).toBe(403);
+    const instance = await instanceOf(res);
+    expect(instance).not.toContain(ID);
+    expect(instance).toBe("/v1/employees/_/bank-account");
+  });
+
+  it("masks it on a validation failure too", async () => {
+    const res = await leaky.request(`/v1/employees/${ID}`, { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
+    expect(res.status).toBe(400);
+    expect(await instanceOf(res)).toBe("/v1/employees/_");
+  });
+
+  it("masks it on a framework 4xx, keeping the verb that was refused", async () => {
+    // The verb names WHAT was refused and carries no id, so it survives - only the id half is masked.
+    const res = await leaky.request(`/v1/employees/${ID}:verb`);
+    expect(res.status).toBe(418);
+    expect(await instanceOf(res)).toBe("/v1/employees/_:verb");
+  });
+
+  it("leaves a path that carries no internal id untouched", async () => {
+    // A wire token is 26 chars and a settings key is a word: neither is an id, and masking either would make
+    // `instance` useless for the paths where it is the whole diagnostic.
+    const res = await leaky.request("/v1/employees/0abc1def2ghj30abc1def2ghj3/bank-account");
+    expect(res.status).toBe(403);
+    expect(await instanceOf(res)).toBe("/v1/employees/0abc1def2ghj30abc1def2ghj3/bank-account");
+  });
+});

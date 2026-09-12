@@ -4,7 +4,7 @@ import { ZodError } from "zod";
 import {
   AppError, aborted, alreadyExists, errorChainText, forbidden, invalidArgument, isAssetTagCollision,
   isCardSeqCollision, isCodeCollision, isEmployeeNumberCollision, isShiftAssignmentDuplicate, notFound,
-  resourceExhausted, unauthenticated,
+  publicPath, resourceExhausted, unauthenticated,
 } from "../lib/errors";
 
 // Which fields a validation failure was about, and what was wrong with each.
@@ -92,16 +92,20 @@ function fromHttpException(err: HTTPException, path: string) {
 // Maps thrown errors to RFC 9457 problem+json. Never leaks stack traces or secrets.
 export const errorHandler = (err: Error, c: Context) => {
   const isAppError = err instanceof AppError;
+  // THE PATH THAT GOES IN THE BODY IS MASKED; the raw one is only logged. See lib/errors.ts#publicPath - by
+  // the time anything throws, `c.req.path` carries the decoded INTERNAL id, and a problem body is the one
+  // response shape the outbound wire edge never rewrites.
+  const instance = publicPath(c.req.path);
   const problem =
     isAppError
-      ? err.toProblem(c.req.path)
+      ? err.toProblem(instance)
       : err instanceof ZodError
         // A validation failure is a client error, not a 500. Field paths and Zod's reasons travel; the values
         // the caller sent do not.
-        ? { type: "/errors/invalid-argument", title: "Invalid argument", status: 400, instance: c.req.path, fields: zodFields(err) }
+        ? { type: "/errors/invalid-argument", title: "Invalid argument", status: 400, instance, fields: zodFields(err) }
       // The framework's own client errors, which are client errors just as much as Zod's - see fromHttpException.
       : err instanceof HTTPException && err.status < 500
-        ? fromHttpException(err, c.req.path)
+        ? fromHttpException(err, instance)
         // A create that lost an ALLOCATION race trips the UNIQUE index on whichever number it composed. The
         // create paths already re-allocate and try again a few times (services/codeAlloc.ts withFreshCode),
         // so a collision reaching here means the scope stayed contended throughout - rare, and still the
@@ -114,13 +118,13 @@ export const errorHandler = (err: Error, c: Context) => {
         // a property a client should be able to observe, and it is certainly not the difference between "try
         // again" and "the server is broken".
         : isCodeCollision(err) || isAssetTagCollision(err) || isCardSeqCollision(err) || isEmployeeNumberCollision(err)
-          ? aborted("resource id collision; please retry").toProblem(c.req.path)
+          ? aborted("resource id collision; please retry").toProblem(instance)
           // The roster's one-entry-per-person-per-day index. The service checks for the existing entry first
           // and says so in words; this catches the paths that cannot (a restore of a soft-deleted entry onto a
           // day since re-rostered) and the races that get past the check, so the invariant answers 409 rather
           // than surfacing SQLite's constraint text as a 500.
           : isShiftAssignmentDuplicate(err)
-            ? alreadyExists("that employee is already rostered on that day").toProblem(c.req.path)
+            ? alreadyExists("that employee is already rostered on that day").toProblem(instance)
             : { type: "/errors/internal", title: "Internal Server Error", status: 500 };
   // Log any unexpected (non-AppError, non-Zod) failure server-side. The client body stays generic, but with
   // [observability] on this is the only trace of a 500 - without it a production 500 is undebuggable.

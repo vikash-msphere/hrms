@@ -7,6 +7,7 @@ import {
   type CardInput,
 } from "../services/cards";
 import { toCardResource } from "../http/serialize";
+import { MAX_RICH_COMMENT } from "../domain/richText";
 import { CARD_PRIORITIES } from "../domain/boards";
 // A card's checklist and a ticket's are the same thing seeded from the same catalogue, so they share the cap.
 import { MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_ITEM_LEN } from "../domain/tickets";
@@ -53,7 +54,7 @@ const moveSchema = z.object({ to_column: z.string().min(1), to_swimlane: z.strin
 const blockSchema = z.object({ reason: z.string().nullable().optional(), blocked_by: z.string().nullable().optional() }).strict();
 const assignSchema = z.object({ assignee: z.string().nullable().optional() }).strict();
 const prioritizeSchema = z.object({ priority: priorityEnum }).strict();
-const commentSchema = z.object({ body: z.string() }).strict();
+const commentSchema = z.object({ body: z.string().max(MAX_RICH_COMMENT) }).strict();
 const todosSchema = z.object({ texts: z.array(z.string().max(MAX_CHECKLIST_ITEM_LEN)).max(MAX_CHECKLIST_ITEMS) }).strict();
 const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).strict();
 const removeTodoSchema = z.object({ todo: z.string() }).strict();

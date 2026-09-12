@@ -1,5 +1,5 @@
 import { eq, and, lte, gte, type SQL } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -82,7 +82,7 @@ export const approvalDelegationSpec: CrudSpec<ApprovalDelegationInput, typeof sc
   collection: "approval-delegations",
   auditName: "approvalDelegation",
   notFound: "approval delegation not found",
-  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.approvalDelegations.delegatorId, values.delegatorId as string),
+  allocCode: (deps, table, values, attempt) => allocOwnedCode(deps, table, schema.approvalDelegations.delegatorId, values.delegatorId as string, CODE_WIDTH.owned, attempt > 1),
   insert: async (input, deps, actor) => {
     const delegatorId = idFromPath(input.delegator) ?? actor.employeeId;
     if (!delegatorId) throw invalidArgument("delegator is required");

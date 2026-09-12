@@ -11,6 +11,7 @@ import {
   type AnnouncementInput,
 } from "../services/announcements";
 import { toAnnouncementResource } from "../http/serialize";
+import { MAX_RICH_BODY, MAX_RICH_COMMENT } from "../domain/richText";
 import { accessHint, withAccess } from "../http/accessHint";
 import { WRAP_MODES } from "../domain/illustration";
 
@@ -92,7 +93,7 @@ const writeSchema = z.object({
   // Empty is allowed through: a poll's description is optional, so clearing it is an edit like any other. Which
   // kinds may actually go without one is decided per kind in the service (create and update both), not here -
   // this schema cannot see the row's kind on a PATCH.
-  body: z.string().optional(),
+  body: z.string().max(MAX_RICH_BODY).optional(),
   kind: z.enum(["announcement", "post", "poll"]).optional(),
   author: z.string().nullable().optional(),
   // A malformed timestamp would make an Invalid-Date publishTime, which the scheduler's `lte` never matches -
@@ -125,7 +126,7 @@ const writeSchema = z.object({
 // Generic board post (or poll): title + body, optionally poll options. The kind is forced to "post"/"poll" and
 // the author to the caller, so the `post` verb (grantable to anyone via the ACL) can't be used to forge an
 // announcement or another author. A poll's body is optional.
-const postSchema = z.object({ title: z.string().min(1), body: z.string().min(1).optional(), illustration: z.string().max(120).nullable().optional(), illustration_layout: illustrationLayout, title_align: titleAlign, body_valign: bodyValign, ...pollFields }).strict();
+const postSchema = z.object({ title: z.string().min(1), body: z.string().min(1).max(MAX_RICH_BODY).optional(), illustration: z.string().max(120).nullable().optional(), illustration_layout: illustrationLayout, title_align: titleAlign, body_valign: bodyValign, ...pollFields }).strict();
 
 // Collection-level custom method `announcements:post` (mounted at the full path in index.ts, like
 // employees:upcomingCelebrations). Authz resolves it to the `announcements.post` verb - the "anyone can post"
@@ -220,7 +221,7 @@ export const announcements = collectionRoutes<AnnouncementInput, typeof schema.a
       schema: z.object({ emoji: z.string().min(1), reply: z.string().optional() }).strict(),
       run: (deps, user, id, b) => toggleReaction(deps, user, id, b.emoji, b.reply ?? null),
     },
-    reply: { schema: z.object({ body: z.string().min(1) }).strict(), run: (deps, user, id, b) => addReply(deps, user, id, b.body) },
+    reply: { schema: z.object({ body: z.string().min(1).max(MAX_RICH_COMMENT) }).strict(), run: (deps, user, id, b) => addReply(deps, user, id, b.body) },
     // Cast / change / clear the caller's vote on a poll option.
     vote: { schema: z.object({ option: z.string().min(1) }).strict(), run: (deps, user, id, b) => castVote(deps, user, id, b.option) },
     // Pin the post to the top of the board / take it down (moderation - gated by the verb grant).

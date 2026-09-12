@@ -1,7 +1,7 @@
 // Dependents: who an employee can enrol in a benefit plan. Employee-owned (the code is allocated under the
 // owner), so a caller sees their own by scope; HR sees the department or all.
 import { eq, and, isNull, type SQL } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -37,7 +37,7 @@ export const dependentSpec: CrudSpec<DependentInput, typeof schema.dependents> =
   auditName: "dependent",
   notFound: "dependent not found",
   // Owned code: allocated under the owning employee, which `insert` has just resolved.
-  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.dependents.employeeId, values.employeeId as string),
+  allocCode: (deps, table, values, attempt) => allocOwnedCode(deps, table, schema.dependents.employeeId, values.employeeId as string, CODE_WIDTH.owned, attempt > 1),
   insert: (input, _deps, actor) => {
     if (!input.name?.trim()) throw invalidArgument("name is required");
     const employeeId = idFromPath(input.employee) ?? actor.employeeId;

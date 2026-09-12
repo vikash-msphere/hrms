@@ -409,6 +409,22 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       .filter((h) => !h.deleteTime && !h.disabled && +new Date(h.date) >= +new Date(period.periodStart) && +new Date(h.date) <= +new Date(period.periodEnd))
       .map((h) => utcDay(+new Date(h.date))),
   );
+  // THE PERIOD'S SCHEDULED WORKING DAYS, WHETHER OR NOT ATTENDANCE-DRIVEN LOP IS ENABLED.
+  //
+  // This is the divisor `lopAmount` uses under the default `working_days` basis, and it used to be read off
+  // `lop?.workingDaysInPeriod ?? 30`. `lop` is null whenever `settings/attendance.lop_enabled` is false -
+  // which is the DEFAULT (domain/attendance.ts DEFAULT_ATTENDANCE) - while a manually keyed loss of pay is
+  // still accepted in that configuration. So the per-day rate fell back to a 30-day month on an org whose
+  // basis says ~22, and the day-units derived from it (`amount / rate`) came out ~35% too high: a ₹5,000
+  // manual LOP against a ₹50,000 gross read as 3.0 days instead of 2.2. Those units are not cosmetic - they
+  // are what services/statutoryReport.ts sums into `ncpDays`, the non-contributing days on the PF ECR - so a
+  // statutory return overstated absence for every manual LOP in a default-configured org.
+  //
+  // Computed from the same holiday set two lines up, so it costs no query of its own (`refHolidays` is a
+  // per-request cached reference read); `assembleLop` derives its own copy from the same helper, so the two
+  // cannot disagree. Only the fallback for a run with no period stays 30 - with no period there are no bounds
+  // to count, and `days_30` is the honest reading of "a month" there.
+  const workingDaysInPeriod = lop?.workingDaysInPeriod ?? (period ? workingDaysInRange(periodStartYmd, periodEndYmd, att.work_days, holidaySet) : 30);
 
   // The payslip is rendered in the org currency, and every line total is summed as a bare number. The app is
   // single-currency: guard the invariant so an employee's comp - or any payable - in a different currency fails
@@ -544,7 +560,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
     // uses. Hoisted because a MANUAL loss of pay arrives as a rupee amount and still has to state its day-units
     // (the PF/ESI registers report non-contributing days, not rupees).
     const lopWage = (att.lop_wage_basis ?? "gross") === "basic" ? comp.basePay : fullMonthlyBase;
-    const lopDailyRate = lopAmount(lopWage, 1, att.lop_basis ?? "working_days", lop?.workingDaysInPeriod ?? 30);
+    const lopDailyRate = lopAmount(lopWage, 1, att.lop_basis ?? "working_days", workingDaysInPeriod);
 
     // One-off inputs the caller passed for this employee (manual adjustments, statutory deduction inputs, a
     // manually keyed loss of pay). A manual LOP arrives as a deduction line coded "LOP"; it is normalised to a
@@ -583,7 +599,7 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
       // it negative - which a prorated part-month at the full daily rate could otherwise do). `lopWage` is the
       // FULL monthly regular gross by default (basic + every recurring allowance + the Special Allowance plug),
       // because an unworked day earned none of them. Rounded ONCE from the unrounded per-day rate.
-      const amt = Math.min(lopAmount(lopWage, dayUnits, att.lop_basis ?? "working_days", lop.workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
+      const amt = Math.min(lopAmount(lopWage, dayUnits, att.lop_basis ?? "working_days", workingDaysInPeriod), Math.max(0, round2(regularGross - manualLop)));
       // Loss of pay is a NEGATIVE EARNING, not a deduction: it is wage the employee never earned, so it has to
       // leave gross, the income-tax base AND the PF/ESI bases together. As a deduction line it left every one of
       // those bases at the undocked wage, so a docked month withheld income tax, ESI and PT on pay that was never
@@ -738,7 +754,9 @@ export async function buildRunItems(deps: Deps, actor: AppUser, runId: string, o
         paidGross: paid.taxableGross, paidTax: paid.tax,
         // Spread the balance over the calendar months left from this run's PAY month (inclusive - this run
         // collects the first installment), skipping months another finalized run already collected in.
-        collectMonths: collectibleMonths(period?.payDate ?? new Date(), e.startDate ?? null, fy, paid.paidMonths),
+        // `endDate` closes the window at the leaving month: a leaver's remaining liability has to be collected
+        // in the payslips they will actually receive, not spread to a 31 March they are not employed for.
+        collectMonths: collectibleMonths(period?.payDate ?? new Date(), e.startDate ?? null, fy, paid.paidMonths, e.endDate ?? null),
         // Every FY month whose salary is neither already priced by a finalized run nor being priced by THIS run,
         // each valued off the employee's compensation timeline - a raise later in the year lifts only the months
         // on or after it, and the months before it stay at the old salary instead of being repainted at the

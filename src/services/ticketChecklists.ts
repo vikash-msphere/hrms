@@ -1,8 +1,10 @@
 // Predefined ticket checklists: reusable, named lists of item texts copied onto a ticket. A first-class
 // collection so each checklist is access-controlled individually (private-by-default; visibility is the
 // read grant, managed in the ACL UI). Mirrors reimbursement-categories (a simple flat config collection).
-import { eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, type SQL } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
+import { applyScope } from "./listScope";
+import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -17,14 +19,22 @@ export type TicketChecklistInput = { display_name?: string; items?: string[] };
 
 const cleanItems = (items?: string[]) => (items ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
 
-export async function listTicketChecklists(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
+export async function listTicketChecklists(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
   // Oldest first: a checklist template is read top-down, in the order its steps were written. Paged in SQL
   // (services/keysetPage.ts), soft-delete filter included, rather than reading the catalog whole.
+  //
+  // SCOPED, like the generic list this hook replaces. It took the actor as `_actor` and read the whole
+  // catalogue - so the route's own claim that "the list scopes by the caller" was not true of it, and a
+  // per-object DENY on one checklist (this collection is private-by-default and managed entirely through the
+  // ACL, which is the only way its visibility is set) simply evaporated on the list while still hiding the
+  // item. `applyScope` decides nothing; it binds the breadth the middleware already resolved, and the
+  // catalogue has no owner column, so a breadth it cannot answer yields no rows rather than all of them.
+  const conds = [applyScope(scope, schema.ticketChecklists.code, undefined), showDeleted ? undefined : isNull(schema.ticketChecklists.deleteTime)];
   const { items: slice, nextPageToken } = await keysetPage<typeof schema.ticketChecklists.$inferSelect>(
     deps,
     schema.ticketChecklists,
     "ticket-checklists",
-    showDeleted ? undefined : isNull(schema.ticketChecklists.deleteTime),
+    and(...(conds.filter(Boolean) as SQL[])),
     { dir: "asc", max: maxPageSize, pageToken },
   );
   return { items: slice, nextPageToken };

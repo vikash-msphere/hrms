@@ -105,11 +105,41 @@ export const monthKey = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMon
 // employment window and skipping months a finalized run already paid. This is deliberately different from
 // "employed - paid" months: if payroll skipped months (or hasn't started yet), those past months are gone -
 // the balance must be spread over the months actually left on the calendar.
-export function collectibleMonths(from: Date, startDate: Date | null, fy: { start: Date; end: Date }, paidMonths: ReadonlySet<string>): number {
+//
+// `endDate` CLOSES THE WINDOW AT THE OTHER END, and it was the half this function did not take. Its two
+// siblings do: `employedMonthsInFy` clamps by it (with a header saying why), and `unpaidEarningMonths` stops
+// pricing at it - so a leaver's annual income was right while the horizon it was collected over ran to 31
+// March regardless. Someone leaving on 30 September had the year's remaining liability spread over seven
+// months instead of one, and their final payslips withheld a seventh of what they owed. The settlement does
+// recover it (services/settlements.ts passes `collectMonths: 1`, so the whole residual lands on the FnF), but
+// only where an FnF is actually run, and the person meets the entire year's shortfall in one line of their
+// exit payout instead of over the notice period they were being paid through.
+export function collectibleMonths(
+  from: Date,
+  startDate: Date | null,
+  fy: { start: Date; end: Date },
+  paidMonths: ReadonlySet<string>,
+  endDate?: Date | null,
+): number {
   let cur = firstOfMonthUTC(from < fy.start ? fy.start : from);
   if (startDate && startDate > cur) cur = firstOfMonthUTC(startDate);
+  // The last month TDS can still be withheld in: the leaving month, else the FY end.
+  //
+  // NEVER BELOW THE MONTH `from` IS IN, which is the case the clamp alone gets wrong. Collection months are
+  // PAY months and the leaving date is an EARNING one, and the two are not the same month whenever pay lags
+  // work: September salary paid on 5 October, for someone whose last day was 30 September, is collected in a
+  // month the clamp has already closed. Left at that, the leaver's final run would find nothing to spread the
+  // balance over and withhold NOTHING - which is worse than the over-long horizon this is fixing, because the
+  // shortfall is the whole year's rather than a fraction of it. `from` is the run's own pay date (the build)
+  // or today (the read-only page), and standing at it, its month is by definition still collectible.
+  // The floor relaxes the EMPLOYMENT clamp only. The financial year's own end is absolute and re-applied after
+  // it, or a `from` past 31 March would be handed its own month and report a collectible one in a year that is
+  // over - which is the opposite of what this function has always answered there.
+  const endCap = endDate && endDate < fy.end ? endDate : fy.end;
+  const floored = +endCap >= +cur ? endCap : new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+  const last = +floored > +fy.end ? fy.end : floored;
   let n = 0;
-  while (cur <= fy.end) {
+  while (cur <= last) {
     if (!paidMonths.has(monthKey(cur))) n++;
     cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
   }
@@ -436,7 +466,7 @@ export async function getEmployeeTaxProjection(deps: Deps, employee: typeof sche
   const t = (await finalizedTotals(deps, fy, undefined, employee.uuid)).get(employee.uuid) ?? EMPTY_FINALIZED_TOTALS();
   // Collection is keyed on PAY months (when TDS can still be withheld), pricing on EARNED months (which months'
   // salary a run already covered) - see finalizedTotals.
-  const collectMonths = collectibleMonths(asOf, employee.startDate ?? null, fy, t.paidMonths);
+  const collectMonths = collectibleMonths(asOf, employee.startDate ?? null, fy, t.paidMonths, employee.endDate ?? null);
   const projected = projectedGrossForMonths(unpaidEarningMonths(fy, employee.startDate ?? null, employee.endDate, t.earnedMonths), timeline, pricer);
   // A leaver's exit payout is salary income too, and it is settled outside any run: fold the FnF's taxable
   // earnings and the tax it withheld into the year, else the page understates both.

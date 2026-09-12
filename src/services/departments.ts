@@ -40,7 +40,7 @@ export const departmentSpec: CrudSpec<DepartmentInput, typeof schema.departments
   collection: "departments",
   auditName: "department",
   notFound: "department not found",
-  allocCode: (deps, _table, values) => allocUnderDept(deps, (values.parentId as string | undefined) ?? null, CODE_WIDTH.dept),
+  allocCode: (deps, _table, values, attempt) => allocUnderDept(deps, (values.parentId as string | undefined) ?? null, CODE_WIDTH.dept, attempt > 1),
   insert: (input) => {
     if (!input.display_name) throw invalidArgument("display_name is required");
     return { name: input.display_name, parentId: idFromPath(input.parent), managerIds: managerIdsJson(input.managers) };

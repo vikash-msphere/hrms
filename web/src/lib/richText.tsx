@@ -178,9 +178,36 @@ const INLINE = new RegExp(
 // renders as the words it is - live, it would be a piece of blue underlined text that goes nowhere.
 const safeHref = (url: string) => (/^(https?:\/\/[^/\s]|mailto:[^\s@]+@)/i.test(url) ? url : undefined);
 
-function renderInline(text: string, keyPrefix = "i"): ReactNode[] {
+/**
+ * How much text one block will be SCANNED for inline markers, and how deep a nested mark may recurse.
+ *
+ * `INLINE` is ten alternatives of lazy `[\s\S]+?` runs, and the loop below re-`exec`s it over the remainder
+ * after every match. That is fine on prose and quadratic on a long run of unmatched openers: for each start
+ * position the engine expands the lazy quantifier to the end of the string and fails, for every alternative.
+ * A body of a few hundred thousand `*` therefore renders as a frozen tab - and bodies are not bounded at the
+ * source either (see the length caps this is paired with in src/routes/announcements.ts and cards.ts), so it
+ * was reachable by writing one post and lands on everyone who opens the board, not on its author.
+ *
+ * Past the ceiling the overflow is emitted as PLAIN TEXT rather than dropped: nothing a person wrote
+ * disappears, it simply stops being scanned for formatting - and no real post is anywhere near it (this is
+ * several times the longest announcement the app has ever stored). The depth cap does the same for nesting,
+ * where the input is the recursion: `renderInline` calls itself on what a mark captured, so a deeply nested
+ * `***…***` chain is bounded by the text it can contain rather than by anything checked.
+ */
+const MAX_INLINE_SCAN = 20_000;
+const MAX_INLINE_DEPTH = 8;
+
+function renderInline(text: string, keyPrefix = "i", depth = 0): ReactNode[] {
+  // Past either bound, the words still show - they are just not read as markup. See the note above.
+  if (depth >= MAX_INLINE_DEPTH) return [text];
   const out: ReactNode[] = [];
   let rest = text;
+  if (rest.length > MAX_INLINE_SCAN) {
+    // The tail is pushed FIRST as a plain string and the head is scanned, so the block still reads in order.
+    const tail = rest.slice(MAX_INLINE_SCAN);
+    rest = rest.slice(0, MAX_INLINE_SCAN);
+    return [...renderInline(rest, keyPrefix, depth), tail];
+  }
   let n = 0;
   while (rest) {
     const m = INLINE.exec(rest);
@@ -196,15 +223,15 @@ function renderInline(text: string, keyPrefix = "i"): ReactNode[] {
     const bold = g.bold ?? g.boldU;
     const italic = g.em ?? g.emU;
     const { strike, code, linkText, linkUrl, bare, mentionName, mentionId } = g;
-    if (both !== undefined) out.push(<strong key={key} className="font-semibold"><em>{renderInline(both, key)}</em></strong>);
-    else if (bold !== undefined) out.push(<strong key={key} className="font-semibold">{renderInline(bold, key)}</strong>);
-    else if (italic !== undefined) out.push(<em key={key}>{renderInline(italic, key)}</em>);
-    else if (strike !== undefined) out.push(<s key={key} className="opacity-70">{renderInline(strike, key)}</s>);
+    if (both !== undefined) out.push(<strong key={key} className="font-semibold"><em>{renderInline(both, key, depth + 1)}</em></strong>);
+    else if (bold !== undefined) out.push(<strong key={key} className="font-semibold">{renderInline(bold, key, depth + 1)}</strong>);
+    else if (italic !== undefined) out.push(<em key={key}>{renderInline(italic, key, depth + 1)}</em>);
+    else if (strike !== undefined) out.push(<s key={key} className="opacity-70">{renderInline(strike, key, depth + 1)}</s>);
     else if (code !== undefined) out.push(<code key={key} className="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em]">{code}</code>);
     else if (mentionName !== undefined) out.push(<Mention key={key} name={mentionName} employeeId={mentionId!} />);
     else if (linkText !== undefined) {
       const href = safeHref(linkUrl!);
-      out.push(href ? <Anchor key={key} href={href}>{renderInline(linkText, key)}</Anchor> : <span key={key}>{linkText}</span>);
+      out.push(href ? <Anchor key={key} href={href}>{renderInline(linkText, key, depth + 1)}</Anchor> : <span key={key}>{linkText}</span>);
     } else if (bare !== undefined) out.push(<Anchor key={key} href={bare} title={bare}>{bareLabel(bare)}</Anchor>);
     rest = rest.slice(m.index + m[0]!.length);
   }

@@ -32,22 +32,42 @@ export const CODE_WIDTH = { dept: 2, employee: 3, owned: 3, flat: 2 } as const;
  * live one). After that the scope is pure arithmetic. See the note on schema `codeSequences`.
  *
  * Returns the FIRST value of the reserved run; the run is `[value, value + count - 1]`.
+ *
+ * `resync` re-establishes the counter against what is actually STORED before taking a number, instead of
+ * trusting it - the same escape hatch `allocOwnedCodeRuns` below has carried since it was written, and the one
+ * this function was missing.
+ *
+ * A counter can only be BEHIND if something once wrote codes without it: a table populated by a seed script
+ * (bootstrap.sql inserts rows with literal codes), a restored dump, or a path that composed its own. A counter
+ * that is behind hands out numbers already on disk, the UNIQUE index on `code` refuses every one of them, and
+ * the retry in `withFreshCode` only walks it forward ONE place per attempt - so with four attempts a scope
+ * more than four codes behind can never catch up, and every create in it fails as a 409 "please retry" that
+ * retrying will not fix. That is a stuck collection, not a lost race. Paid for only on a RETRY (the attempt
+ * number is what sets this), so the first try stays one indexed statement and a collision buys the read that
+ * makes the scope correct from then on.
  */
-async function reserve(deps: Deps, scope: string, count: number, seed: () => Promise<number>): Promise<number> {
-  // The steady state: the counter exists, so one indexed update hands back the end of the reserved run.
-  const [bumped] = await deps.db
-    .update(schema.codeSequences)
-    .set({ next: sql`${schema.codeSequences.next} + ${count}` })
-    .where(eq(schema.codeSequences.scope, scope))
-    .returning();
-  if (bumped) return bumped.next - count + 1;
-  // First touch of this scope. `onConflictDoUpdate` rather than a plain insert because two creates can reach
-  // here at the same moment: the loser takes the run after the winner's instead of colliding with it.
-  const from = (await seed()) + 1;
+async function reserve(deps: Deps, scope: string, count: number, seed: () => Promise<number>, resync = false): Promise<number> {
+  if (!resync) {
+    // The steady state: the counter exists, so one indexed update hands back the end of the reserved run.
+    const [bumped] = await deps.db
+      .update(schema.codeSequences)
+      .set({ next: sql`${schema.codeSequences.next} + ${count}` })
+      .where(eq(schema.codeSequences.scope, scope))
+      .returning();
+    if (bumped) return bumped.next - count + 1;
+  }
+  // First touch of this scope, or a resync. `onConflictDoUpdate` rather than a plain insert because two creates
+  // can reach here at the same moment: the loser takes the run after the winner's instead of colliding with it.
+  //
+  // `max(stored, mark) + count` covers both reasons the row may already exist, exactly as the owned lane does:
+  // a concurrent first touch (the winner's counter is at or past the mark, so `max` picks it and the loser's
+  // run simply follows) and a counter that had fallen behind (it jumps to the mark instead of handing out a
+  // number that is already on disk again).
+  const mark = await seed();
   const [created] = await deps.db
     .insert(schema.codeSequences)
-    .values({ scope, next: from + count - 1 })
-    .onConflictDoUpdate({ target: schema.codeSequences.scope, set: { next: sql`${schema.codeSequences.next} + ${count}` } })
+    .values({ scope, next: mark + count })
+    .onConflictDoUpdate({ target: schema.codeSequences.scope, set: { next: sql`max(${schema.codeSequences.next}, ${mark}) + ${count}` } })
     .returning();
   return created!.next - count + 1;
 }
@@ -57,18 +77,20 @@ const tableName = (table: any) => getTableConfig(table).name;
 const ownedScope = (table: any, ownerUuid: string) => `${tableName(table)}:${ownerUuid}`;
 
 // Flat resources (holidays, leave-types, pay-periods, announcements, payroll-runs, users): one namespace.
-export async function allocFlatCode(deps: Deps, table: any, minWidth: number = CODE_WIDTH.flat): Promise<string> {
-  return (await allocFlatCodes(deps, table, 1, minWidth))[0]!;
+// `resync` re-establishes the counter from what is stored before taking a number - see `reserve`. Pass
+// `attempt > 1` from inside `withFreshCode`, so a collision heals the scope instead of walking it one place.
+export async function allocFlatCode(deps: Deps, table: any, minWidth: number = CODE_WIDTH.flat, resync = false): Promise<string> {
+  return (await allocFlatCodes(deps, table, 1, minWidth, resync))[0]!;
 }
 
 // `count` flat codes from ONE statement, for a create that makes many rows in a single act (a box of twenty
 // adapters, a pasted list of serials). Allocating in a loop would take the counter n times, which the
 // subrequest budget cannot afford (see lib/dbBatch.ts).
-export async function allocFlatCodes(deps: Deps, table: any, count: number, minWidth: number = CODE_WIDTH.flat): Promise<string[]> {
+export async function allocFlatCodes(deps: Deps, table: any, count: number, minWidth: number = CODE_WIDTH.flat, resync = false): Promise<string[]> {
   const from = await reserve(deps, tableName(table), count, async () => {
     const rows = await deps.db.select({ code: table.code }).from(table);
     return maxChildSeg(rows.map((r: { code: string | null }) => r.code), null);
-  });
+  }, resync);
   return Array.from({ length: count }, (_, i) => childCodeAt(null, from + i, minWidth));
 }
 
@@ -129,13 +151,13 @@ async function deptChildHighWaterMark(deps: Deps, parentUuid: string | null, par
  * department - and at the root level, every department-less employee in the org - on a platform that bills
  * rows read.
  */
-export async function allocUnderDept(deps: Deps, parentUuid: string | null, minWidth: number): Promise<string> {
+export async function allocUnderDept(deps: Deps, parentUuid: string | null, minWidth: number, resync = false): Promise<string> {
   let parentCode: string | null = null;
   if (parentUuid) {
     const d = (await deps.db.select({ code: schema.departments.code }).from(schema.departments).where(eq(schema.departments.uuid, parentUuid)).limit(1))[0];
     parentCode = d?.code ?? null;
   }
-  const value = await reserve(deps, deptChildScope(parentUuid), 1, () => deptChildHighWaterMark(deps, parentUuid, parentCode));
+  const value = await reserve(deps, deptChildScope(parentUuid), 1, () => deptChildHighWaterMark(deps, parentUuid, parentCode), resync);
   return childCodeAt(parentCode, value, minWidth);
 }
 

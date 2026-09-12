@@ -1,7 +1,8 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { keysetPage } from "../services/keysetPage";
+import { applyScope } from "../services/listScope";
 import { toEventLogResource } from "../http/serialize";
 import { isSuperGrant } from "../domain/grants";
 
@@ -26,11 +27,20 @@ export const eventLog = collectionRoutes({
   serialize: (row, user) => toEventLogResource(row, !isSuperGrant(user!.grant)),
   list: async (c, page) => {
     const type = c.req.query("type");
+    // THE SCOPE THE MIDDLEWARE DECIDED IS BOUND HERE, like every other list in the app. This hook used to
+    // ignore `c.get("scope")` entirely and answer with the whole table - so a grant NARROWED through the ACL
+    // (the bare `event-log` list gate plus, say, `event-log.my-dept.**`) resolved to `breadth: "dept"` and was
+    // silently widened back to every row. Nothing reaches it today (bootstrap seeds `event-log.**`, i.e. `all`,
+    // to hr_admin), which is exactly why it could sit here: the fail-open only appears the first time somebody
+    // authors a narrower rule. `applyScope` decides nothing - it maps the breadth onto this table's columns,
+    // and answers no rows for a breadth a flat-coded table cannot satisfy (services/listScope.ts), which is
+    // the same fail-closed answer the generic list gives.
+    const conds = [applyScope(c.get("scope"), schema.eventLog.code, undefined), type ? eq(schema.eventLog.type, type) : undefined];
     return keysetPage<typeof schema.eventLog.$inferSelect>(
       c.get("deps"),
       schema.eventLog,
       "event-log",
-      type ? eq(schema.eventLog.type, type) : undefined,
+      and(...(conds.filter(Boolean) as SQL[])),
       {
         max: page.maxPageSize,
         pageToken: page.pageToken,

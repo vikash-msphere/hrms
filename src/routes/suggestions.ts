@@ -5,12 +5,13 @@ import { jsonBody } from "../http/jsonRequest";
 import { listSuggestions, createSuggestion, updateSuggestion, respondSuggestion, voteSuggestion, mergeSuggestion, purgeSuggestion, decorate, type SuggestionInput } from "../services/suggestions";
 import { toSuggestionResource } from "../http/serialize";
 import { invalidArgument } from "../lib/errors";
+import { MAX_RICH_BODY } from "../domain/richText";
 
 const writeSchema = z
   .object({
     category: z.string().nullable().optional(),
     title: z.string().optional(),
-    body: z.string().optional(),
+    body: z.string().max(MAX_RICH_BODY).optional(),
     anonymous: z.boolean().optional(),
   })
   .strict();

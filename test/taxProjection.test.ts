@@ -23,6 +23,37 @@ describe("collectibleMonths - calendar months left to collect TDS in", () => {
     expect(collectibleMonths(new Date(Date.UTC(2027, 2, 31)), null, fy, none)).toBe(1);
     expect(collectibleMonths(new Date(Date.UTC(2027, 3, 1)), null, fy, none)).toBe(0);
   });
+
+  // THE LEAVING DATE CLOSES THE WINDOW AT THE OTHER END, and it was the half this took no argument for. Its
+  // two siblings already clamp by it (`employedMonthsInFy` and `unpaidEarningMonths` below), so a leaver's
+  // annual income was right while the horizon it was collected over ran to 31 March regardless: someone
+  // leaving on 30 September had the balance spread over seven months instead of one, and each of their final
+  // payslips withheld a seventh of what was owed.
+  it("stops at the leaving month for a leaver", () => {
+    const sep30 = new Date(Date.UTC(2026, 8, 30));
+    expect(collectibleMonths(new Date(Date.UTC(2026, 6, 5)), null, fy, none, sep30)).toBe(3); // Jul, Aug, Sep
+  });
+
+  it("still collects in the month the run is PAID in, after the last working day", () => {
+    // Collection months are PAY months and the leaving date is an EARNING one; they differ whenever pay lags
+    // work. September salary paid on 5 October, for a 30 September leaver, is collected in a month the clamp
+    // has already closed - and left at that the final run would find nothing to spread the balance over and
+    // withhold NOTHING, which is worse than the over-long horizon this fixes.
+    const sep30 = new Date(Date.UTC(2026, 8, 30));
+    expect(collectibleMonths(new Date(Date.UTC(2026, 9, 5)), null, fy, none, sep30)).toBe(1);
+  });
+
+  it("does not let that floor reach past the end of the financial year", () => {
+    // The floor relaxes the EMPLOYMENT clamp only. The year's own end stays absolute, or a `from` past 31
+    // March would be handed its own month and report a collectible one in a year that is over.
+    expect(collectibleMonths(new Date(Date.UTC(2027, 3, 1)), null, fy, none, new Date(Date.UTC(2026, 8, 30)))).toBe(0);
+  });
+
+  it("leaves a full-year employee unchanged whether or not an end date is passed", () => {
+    const from = new Date(Date.UTC(2026, 6, 5));
+    expect(collectibleMonths(from, null, fy, none, null)).toBe(collectibleMonths(from, null, fy, none));
+    expect(collectibleMonths(from, null, fy, none, new Date(Date.UTC(2027, 2, 31)))).toBe(9);
+  });
 });
 
 describe("mid-year revision - each month priced at the salary in force then", () => {

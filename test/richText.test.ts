@@ -1,5 +1,6 @@
+/// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { richExcerpt, richToPlain } from "../src/domain/richText";
+import { MAX_RICH_BODY, MAX_RICH_COMMENT, richExcerpt, richToPlain } from "../src/domain/richText";
 // React-free on purpose, so the worker test project can reach them - see web/src/lib/splitSource.ts.
 import { splitSource } from "../web/src/lib/splitSource";
 import {
@@ -288,5 +289,58 @@ describe("block attributes", () => {
     const edit = setAttrs("one\n\ntwo", [0, 8], { align: "right" });
     expect(edit.value).toBe("{right}\none\n\n{right}\ntwo");
     expect(edit.value.slice(edit.selection[0], edit.selection[1])).toBe("one\n\n{right}\ntwo");
+  });
+});
+
+// ---- The stored text is bounded, and bounded UNDER what the renderer will scan --------------------------------
+//
+// web/src/lib/richText.tsx scans a block with a ten-alternative regex of lazy `[\s\S]+?` runs, re-`exec`ing it
+// over the remainder after every match. Linear on prose; quadratic on a long run of unmatched openers, because
+// for each start position the engine expands the quantifier to the end and fails, once per alternative. None of
+// these fields had a length cap above the 10 MiB request ceiling, so one post of a few hundred thousand `*`
+// froze the tab of everyone who opened the board - written once by its author, paid for by every reader.
+//
+// Two halves, and they have to stay in step. The renderer stops scanning past its own ceiling (the overflow
+// renders as plain text, so nothing a person wrote disappears); the routes refuse a body past the stored cap.
+// If the stored cap ever rose ABOVE the render ceiling, a body would exist that the renderer only ever
+// half-formats - visible to readers as a post whose markup stops mid-way, with nothing saying why.
+const renderSrc = Object.values(
+  import.meta.glob("../web/src/lib/richText.tsx", { query: "?raw", import: "default", eager: true }) as Record<string, string>,
+)[0]!;
+const routeSrc = import.meta.glob("../src/routes/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const route = (name: string) => Object.entries(routeSrc).find(([p]) => p.endsWith(`/${name}.ts`))![1];
+
+describe("rich text is bounded at both ends", () => {
+  it("the renderer still declares a scan ceiling", () => {
+    // Read from source rather than imported: the module is a .tsx and this project is React-free (see the
+    // import note at the top of this file). A rename that drops the constant fails here rather than silently
+    // removing the bound.
+    expect(renderSrc).toMatch(/const MAX_INLINE_SCAN = [\d_]+;/);
+    expect(renderSrc).toMatch(/const MAX_INLINE_DEPTH = \d+;/);
+  });
+
+  it("never stores more than the renderer will format", () => {
+    const scan = Number(/const MAX_INLINE_SCAN = ([\d_]+);/.exec(renderSrc)![1]!.replace(/_/g, ""));
+    expect(MAX_RICH_BODY).toBeLessThanOrEqual(scan);
+    expect(MAX_RICH_COMMENT).toBeLessThanOrEqual(scan);
+  });
+
+  it("caps every rich-text body a route accepts", () => {
+    // The four collections whose bodies go through the renderer. A fifth that forgets is the same defect, so
+    // this names them rather than counting them.
+    expect(route("announcements")).toContain("MAX_RICH_BODY");
+    expect(route("announcements")).toContain("MAX_RICH_COMMENT"); // the reply verb
+    expect(route("suggestions")).toContain("MAX_RICH_BODY");
+    expect(route("cards")).toContain("MAX_RICH_COMMENT");
+    expect(route("tickets")).toContain("MAX_RICH_COMMENT");
+  });
+
+  it("leaves no rich-text body schema uncapped", () => {
+    // A bare `body: z.string()` with no `.max(...)` on one of these files is the shape that shipped: the field
+    // existed, the validator accepted anything, and the ceiling was the 10 MiB request cap.
+    for (const name of ["announcements", "suggestions", "cards", "tickets"]) {
+      const uncapped = [...route(name).matchAll(/body: z\.string\(\)((?:\.(?!max)\w+\([^)]*\))*)(?:,|\s*\})/g)];
+      expect(uncapped.map((m) => m[0]), `${name}: a rich-text body schema with no .max()`).toEqual([]);
+    }
   });
 });

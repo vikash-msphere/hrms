@@ -12,7 +12,7 @@ import { codecFor } from "./lib/idCodec";
 import { securityHeaders } from "./middleware/securityHeaders";
 import { bodyLimit } from "./middleware/bodyLimit";
 import { errorHandler } from "./middleware/errorHandler";
-import { AppError } from "./lib/errors";
+import { AppError, publicPath } from "./lib/errors";
 import { requestId } from "./middleware/requestId";
 import * as Sentry from "@sentry/cloudflare";
 import { runScheduled, NIGHTLY_CRON } from "./cron";
@@ -391,7 +391,9 @@ app.notFound(async (c) => {
   // holiday feed is disabled" or "that token is forged" into a 200 page.
   const workerOwned = WORKER_OWNED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
   if (workerOwned || LOOKS_LIKE_A_FILE.test(path)) {
-    return c.body(JSON.stringify({ type: "/errors/not-found", title: "Not Found", status: 404, instance: path }), 404, {
+    // `publicPath`, like every other problem body: a 404 under /v1 is reached with the path already decoded to
+    // internal ids, and this response never passes back through the outbound wire edge. See lib/errors.ts.
+    return c.body(JSON.stringify({ type: "/errors/not-found", title: "Not Found", status: 404, instance: publicPath(path) }), 404, {
       "Content-Type": "application/problem+json",
     });
   }

@@ -1,5 +1,5 @@
 import { eq, and, inArray, isNull, type SQL } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -57,7 +57,7 @@ export const checkInSpec: CrudSpec<CheckInInput, typeof schema.checkIns> = {
   collection: "check-ins",
   auditName: "check-in",
   notFound: "check-in not found",
-  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.checkIns.employeeId, values.employeeId as string),
+  allocCode: (deps, table, values, attempt) => allocOwnedCode(deps, table, schema.checkIns.employeeId, values.employeeId as string, CODE_WIDTH.owned, attempt > 1),
   insert: async (input, deps, actor) => {
     const employeeId = idFromPath(input.employee) ?? actor.employeeId;
     if (!employeeId) throw invalidArgument("employee is required");

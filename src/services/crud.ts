@@ -9,7 +9,7 @@
 // each service was written by hand. `assertNotLocked` is a workflow precondition, not access control.
 import { and, eq, isNotNull, isNull, type SQL } from "drizzle-orm";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
-import { allocFlatCode, withFreshCode } from "./codeAlloc";
+import { CODE_WIDTH, allocFlatCode, withFreshCode } from "./codeAlloc";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
@@ -114,8 +114,14 @@ export type CrudSpec<I, T extends Table = Table> = {
   /**
    * Code allocation, when the resource is not a flat one (owned/dept-scoped tables). Receives the resolved
    * insert values, since an owned code is allocated under the row's owner.
+   *
+   * `attempt` is `withFreshCode`'s retry number (1 on the first try). Past 1 the scope's counter is
+   * re-established from what is actually stored before a number is taken - a counter left behind by a seed
+   * script hands out codes already on disk, and retrying without that resync only walks it one place per
+   * attempt and never catches up. See services/codeAlloc.ts#reserve. An allocator that does not care may
+   * simply omit the parameter.
    */
-  allocCode?: (deps: Deps, table: Table, values: SetOf<T>) => Promise<string>;
+  allocCode?: (deps: Deps, table: Table, values: SetOf<T>, attempt: number) => Promise<string>;
   /**
    * What a HARD purge (`DELETE ?force=true`) takes with it: the sub-resource rows that only exist as part of
    * this one, and the columns elsewhere that merely point at it. See services/softDelete.ts#PurgeCascade.
@@ -146,8 +152,10 @@ export const has = <T extends object>(patch: T, key: keyof T) => Object.prototyp
 
 export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): CrudService<I> {
   const { table, collection, auditName } = spec;
-  // allocFlatCode's third parameter is a width, not the values bag - bind it explicitly.
-  const alloc = spec.allocCode ?? ((deps: Deps, t: Table) => allocFlatCode(deps, t));
+  // allocFlatCode's third parameter is a width, not the values bag - bind it explicitly. The fourth is the
+  // resync flag, which is the retry's: past the first attempt the scope is re-read rather than trusted (see
+  // CrudSpec.allocCode).
+  const alloc = spec.allocCode ?? ((deps: Deps, t: Table, _values: SetOf<T>, attempt: number) => allocFlatCode(deps, t, CODE_WIDTH.flat, attempt > 1));
 
   const required = async (deps: Deps, id: string): Promise<Row> => {
     const row = (await deps.db.select().from(table).where(eq(table.uuid, id)).limit(1))[0] as unknown as Row | undefined;
@@ -197,8 +205,8 @@ export function crudService<I, T extends Table = Table>(spec: CrudSpec<I, T>): C
       // Allocated INSIDE the retry: a create that loses the code race re-reads the scope and composes the
       // next code rather than handing the caller a 409 to press again (services/codeAlloc.ts withFreshCode).
       // Two people adding a record at the same moment is an ordinary Tuesday.
-      const row = await withFreshCode(async () => {
-        const code = await alloc(deps, table, values);
+      const row = await withFreshCode(async (attempt) => {
+        const code = await alloc(deps, table, values, attempt);
         try {
           // Identity spreads LAST, after the spec's columns: the allocated `code` is the code and an explicit
           // `?id` is the id, so neither can be shadowed by a mapper. `InsertOf` already makes both a compile

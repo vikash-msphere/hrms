@@ -1,5 +1,5 @@
 import { eq, and, gte, isNull, lte, type SQL } from "drizzle-orm";
-import { allocOwnedCode } from "./codeAlloc";
+import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -64,7 +64,7 @@ export const shiftAssignmentSpec: CrudSpec<ShiftAssignmentInput, typeof schema.s
   collection: "shift-assignments",
   auditName: "shift-assignment",
   notFound: "shift assignment not found",
-  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.shiftAssignments.employeeId, values.employeeId as string),
+  allocCode: (deps, table, values, attempt) => allocOwnedCode(deps, table, schema.shiftAssignments.employeeId, values.employeeId as string, CODE_WIDTH.owned, attempt > 1),
   insert: async (input, deps, actor) => {
     const employeeId = idFromPath(input.employee) ?? actor.employeeId;
     if (!employeeId) throw invalidArgument("employee is required");

@@ -5,8 +5,47 @@ export type Problem = {
   title: string;      // short, human-readable summary
   status: number;     // HTTP status code
   detail?: string;    // explanation specific to this occurrence
-  instance?: string;  // URI reference identifying this occurrence (we use the request path)
+  instance?: string;  // URI reference identifying this occurrence (the request path, id segments masked)
 };
+
+/** The internal-id shape: 8 random bytes in Crockford base32 (lib/idCodec.ts genId). */
+const INTERNAL_ID = /^[0-9a-hj-km-np-tv-z]{13}$/;
+/** What an id segment reads as once masked. Unreserved in a URI path, and no collection or verb is named `_`. */
+const MASK = "_";
+
+/**
+ * A request path fit to publish in `problem.instance`.
+ *
+ * THE PATH AN ERROR HANDLER SEES IS THE DECODED ONE. `decodeWireIdsRequest` runs outside Hono (src/index.ts),
+ * so by the time anything throws, `c.req.path` reads `/v1/employees/<13-char internal id>` - the primary key
+ * the wire codec exists to keep off the wire (lib/idCodec.ts). And an error body never passes back through the
+ * outbound edge: `encodeWireIdsMiddleware` only rewrites `application/json`, problem details are
+ * `application/problem+json`, and a throw unwinds past its post-`next()` block regardless. So every 403, 404,
+ * 409 and validation 400 on an item path published that id verbatim, under a field whose own comment called it
+ * the request path.
+ *
+ * MASKED RATHER THAN RE-ENCODED, deliberately. Re-encoding is the prettier answer and cannot be relied on
+ * here: `encode` is async and needs a codec, and the two places that build a problem outside a resolved
+ * request (the body-cap refusal above Hono, and the SPA fallback's 404) have neither - so it would be a second
+ * code path for a field no client reads (`instance` is unused by web/src/lib/problemText.ts). Masking is one
+ * pure function that cannot throw and cannot leak. The real path still reaches the server-side log, which is
+ * where it is actually wanted.
+ *
+ * Only a segment that IS an internal id is masked, and a trailing `:verb` is kept (it names what was refused,
+ * and carries no id). The Crockford alphabet omits i/l/o/u, so an ordinary 13-character key segment - a
+ * settings key, a role name - does not match; a false positive would only over-mask, never under-mask.
+ */
+export function publicPath(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((seg) => {
+      const colon = seg.indexOf(":");
+      const head = colon >= 0 ? seg.slice(0, colon) : seg;
+      if (!INTERNAL_ID.test(head)) return seg;
+      return colon >= 0 ? MASK + seg.slice(colon) : MASK;
+    })
+    .join("/");
+}
 
 export class AppError extends Error {
   constructor(

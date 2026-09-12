@@ -27,5 +27,5 @@ export const ticketChecklists = collectionRoutes<TicketChecklistInput, typeof sc
     create: (deps, actor, input, id) => createTicketChecklist(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateTicketChecklist(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listTicketChecklists(c.get("deps"), c.get("user"), page.maxPageSize, page.pageToken, page.showDeleted),
+  list: (c, page) => listTicketChecklists(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
 });

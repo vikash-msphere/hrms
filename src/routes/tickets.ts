@@ -10,6 +10,7 @@ import {
   type TicketInput,
 } from "../services/tickets";
 import { requireCappedBody } from "../services/documentsCommon";
+import { MAX_RICH_COMMENT } from "../domain/richText";
 import { toTicketResource } from "../http/serialize";
 import { MAX_CHECKLIST_ITEMS, MAX_CHECKLIST_ITEM_LEN } from "../domain/tickets";
 
@@ -30,7 +31,7 @@ const createSchema = z
 const assignSchema = z.object({ assignee: z.string().nullable().optional() }).strict();
 const routeSchema = z.object({ department: z.string().nullable().optional() }).strict();
 const prioritySchema = z.object({ priority: z.enum(["low", "medium", "high"]) }).strict();
-const commentSchema = z.object({ body: z.string() }).strict();
+const commentSchema = z.object({ body: z.string().max(MAX_RICH_COMMENT) }).strict();
 const addTodosSchema = z.object({ texts: z.array(z.string().max(MAX_CHECKLIST_ITEM_LEN)).max(MAX_CHECKLIST_ITEMS) }).strict();
 const toggleTodoSchema = z.object({ todo: z.string(), done: z.boolean() }).strict();
 const removeTodoSchema = z.object({ todo: z.string() }).strict();

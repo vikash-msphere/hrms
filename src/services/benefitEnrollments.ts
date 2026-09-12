@@ -1,5 +1,5 @@
 import { eq, and, isNull, type SQL } from "drizzle-orm";
-import { allocOwnedCode, allocOwnedCodeRuns } from "./codeAlloc";
+import { CODE_WIDTH, allocOwnedCode, allocOwnedCodeRuns } from "./codeAlloc";
 import { insertBatches, runBatch } from "../lib/dbBatch";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -87,7 +87,7 @@ export const benefitEnrollmentSpec: CrudSpec<BenefitEnrollmentInput, typeof sche
   collection: "benefit-enrollments",
   auditName: "benefit-enrollment",
   notFound: "enrollment not found",
-  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.benefitEnrollments.employeeId, values.employeeId as string),
+  allocCode: (deps, table, values, attempt) => allocOwnedCode(deps, table, schema.benefitEnrollments.employeeId, values.employeeId as string, CODE_WIDTH.owned, attempt > 1),
   insert: async (input, deps, actor) => {
     const employeeId = idFromPath(input.employee) ?? actor.employeeId;
     if (!employeeId) throw invalidArgument("employee is required");

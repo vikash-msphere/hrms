@@ -424,16 +424,35 @@ export async function listConditional<T>(
   return { response: answer.body, etag: answer.etag };
 }
 
-/** Follow the cursor to the end: EVERY row of a collection (the server caps a page at 100). For pickers
- * that must be complete (the view-as / add-user dropdowns) - not for list pages, which stay paged. */
+/**
+ * Follow the cursor to the end: EVERY row of a collection (the server caps a page at 100). For pickers
+ * that must be complete (the view-as / add-user dropdowns) - not for list pages, which stay paged.
+ *
+ * BOUNDED, like `getAllPages` below it, and for a reason the unfiltered form makes worse rather than better.
+ * The loop used to be `do { ... } while (pageToken)` with no ceiling and no check that the cursor was moving:
+ * a server cursor that ever failed to advance - a keyset key that ties across more rows than a page holds, a
+ * filter change mid-walk, a bug in a route's own `list` hook - turns a picker into an infinite request loop
+ * that spends the caller's whole rate budget and never resolves, with a spinner on screen and nothing saying
+ * why. Two guards, because they catch different failures: a repeated token catches a cursor that is stuck, and
+ * the page ceiling catches one that advances but never ends.
+ *
+ * Stopping early yields a SHORT list rather than an error, which is the right failure for the surface this
+ * serves (a picker missing entries beats a picker that never opens) - and MAX_PAGES x 100 rows is far past any
+ * collection these callers read.
+ */
+const LIST_ALL_MAX_PAGES = 50;
+
 export async function listAll<T>(collection: string): Promise<T[]> {
   const all: T[] = [];
   let pageToken: string | undefined;
-  do {
-    const page = await list<T>(collection, { max: 100, pageToken });
-    all.push(...page.results);
-    pageToken = page.next_page_token;
-  } while (pageToken);
+  const seen = new Set<string>();
+  for (let page = 0; page < LIST_ALL_MAX_PAGES; page++) {
+    const res = await list<T>(collection, { max: 100, pageToken });
+    all.push(...(res.results ?? []));
+    pageToken = res.next_page_token;
+    if (!pageToken || seen.has(pageToken)) break;
+    seen.add(pageToken);
+  }
   return all;
 }
 
@@ -454,12 +473,19 @@ export async function listAll<T>(collection: string): Promise<T[]> {
 export async function getAllPages<T>(path: string, cap: number): Promise<{ results: T[]; truncated: boolean }> {
   const results: T[] = [];
   let pageToken: string | undefined;
+  // The row ceiling bounds a cursor that ADVANCES; it does not bound one that does not. A page that comes back
+  // empty (or short) while still handing over a token adds nothing to `results`, so `cap` is never reached and
+  // the loop runs forever - see the note on `listAll` for how a cursor gets stuck. Remembering the tokens costs
+  // one Set and ends that walk as truncated, which is what the caller already knows how to show.
+  const seen = new Set<string>();
   do {
     const sep = path.includes("?") ? "&" : "?";
     const page = await coalescedGet<ListResponse<T>>(pageToken ? `${path}${sep}page_token=${encodeURIComponent(pageToken)}` : path);
     results.push(...(page.results ?? []));
     pageToken = page.next_page_token;
     if (results.length >= cap) return { results: results.slice(0, cap), truncated: !!pageToken || results.length > cap };
+    if (pageToken && seen.has(pageToken)) return { results, truncated: true };
+    if (pageToken) seen.add(pageToken);
   } while (pageToken);
   return { results, truncated: false };
 }
@@ -581,6 +607,21 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob;
       if (attempt >= READ_ATTEMPTS) throw networkError(); // a download is the request most likely to be attempted on a bad connection
       await settle(attempt);
       continue;
+    }
+    // A BUDGET REFUSAL IS HONOURED HERE TOO, on the same rule `api()` applies to a read: the server always
+    // says how long to wait, and waiting that long is free when the wait is short. This loop retried only
+    // TRANSIENT gateway statuses, so the ONE surface with a dedicated per-caller budget (`render` in
+    // middleware/rateLimit.ts, 40/min - these ARE the requests it bounds) was also the one that never backed
+    // off: a 429 arriving a second before the window rolled dead-ended a payslip or a letterhead preview that
+    // one pause would have completed. Safe for the same reason the retries above it are - a binary method
+    // renders bytes and files nothing, so asking again changes nothing but the wait.
+    if (res.status === 429 && attempt < READ_ATTEMPTS && !opts.signal?.aborted) {
+      const wait = retryAfterMs(res);
+      if (wait !== null) {
+        await discard(res);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
     }
     if (!TRANSIENT.has(res.status) || attempt >= READ_ATTEMPTS || opts.signal?.aborted) break;
     // Let go of the response this attempt is about to replace - see `discard`. These are the requests that

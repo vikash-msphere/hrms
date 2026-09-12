@@ -1508,6 +1508,33 @@ describe("payroll: statutory + tax bases are the wage actually paid", () => {
     // ESI on the 9000 paid: ceil(9000 x 0.75%) = 68. PT still keys off the monthly wage BRACKET (12000 -> 200).
     expect(line("ESI")!.amount).toBe(68);
     expect(line("PT")!.amount).toBe(200);
+    // THE DAY-UNITS ARE DERIVED AT THE PERIOD'S OWN WORKING-DAY RATE, not a 30-day month. January 2026 has 22
+    // scheduled working days, so 12,000 of gross is 545.45 a day and 3,000 is 5.5 of them. That divisor used
+    // to be read off the assembled LOP facts, which are only assembled when `settings/attendance.lop_enabled`
+    // is true - and it is false by DEFAULT (this test never sets it), so the rate fell back to 12,000/30 and
+    // the same 3,000 came out as 7.5 days. See the note at `workingDaysInPeriod` in services/payroll.ts.
+    expect(line("LOP")!.units).toBe(5.5);
+  });
+
+  it("states manual loss-of-pay days at the period's working-day rate even with attendance LOP disabled", async () => {
+    // The units are not cosmetic: services/statutoryReport.ts sums them into `ncpDays`, the non-contributing
+    // days on the PF ECR, so an inflated figure is an overstated statutory return - filed for every manual LOP
+    // in an org running the default (disabled) attendance configuration, which is to say most of them.
+    const emp = await seedEmployee({ epfEnrolled: true });
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const period = await seedPeriod(); // Jan 2026: 22 working days Mon-Fri
+    const run = await createRun(deps, actor, `pay-periods/${period}`);
+    // Two working days docked at 30,000/22 = 1,363.64 a day.
+    const twoDays = Math.round((30000 / 22) * 2 * 100) / 100;
+    await buildRunItems(deps, actor, run.uuid, { [emp]: [{ code: "LOP", name: "Loss of pay", kind: "deduction", amount: twoDays }] });
+
+    const item = (await listRunItems(deps, run.uuid))[0]!;
+    const lop = item.lines.find((l) => l.code === "LOP")!;
+    expect(lop.units).toBe(2);
+    // The amount is unchanged - only the day count it is stated in was ever wrong. Under the old 30-day
+    // divisor the same rupees read as 2.73 days.
+    expect(lop.amount).toBe(-twoDays);
   });
 
   it("charges ESI on arrears + overtime, and PF only on the basic slice of the arrears", async () => {

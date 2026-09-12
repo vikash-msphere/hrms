@@ -11,7 +11,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import type { ListScope } from "../domain/access";
 import { invalidArgument } from "../lib/errors";
-import { allocOwnedCode } from "./codeAlloc";
+import { CODE_WIDTH, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
 import { has, type CrudSpec, type SetOf } from "./crud";
@@ -148,7 +148,7 @@ export const tableViewSpec: CrudSpec<TableViewInput, typeof schema.tableViews> =
   notFound: "table view not found",
   // Owner-coded, so a `me`-scoped grant reaches the author's own views and an object share on the code is how
   // one is handed to somebody else (see [[me-scope-needs-owned-codes]]).
-  allocCode: (deps, table, values) => allocOwnedCode(deps, table, schema.tableViews.ownerId, values.ownerId as string),
+  allocCode: (deps, table, values, attempt) => allocOwnedCode(deps, table, schema.tableViews.ownerId, values.ownerId as string, CODE_WIDTH.owned, attempt > 1),
   insert: (input, _deps, actor) => {
     const name = input.display_name?.trim();
     if (!name) throw invalidArgument("display_name is required");
