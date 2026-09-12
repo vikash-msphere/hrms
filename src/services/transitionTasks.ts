@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, type SQL } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, stateMeta } from "../lib/audit";
 import { notFound, failedPrecondition } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { makeDocumentService } from "./documentService";
 import { VALID_DOC_TYPES, type DocType } from "./documentsCommon";
 
@@ -19,11 +19,14 @@ export async function listTransitionTasks(deps: Deps, scope: ListScope, maxPageS
   if (statusFilter) conds.push(eq(schema.transitionTasks.status, statusFilter as typeof schema.transitionTasks.$inferSelect.status));
   const transitionId = transition ? transition.split("/").pop()! : undefined;
   if (transitionId) conds.push(eq(schema.transitionTasks.transitionId, transitionId));
-  const all = await deps.db.select().from(schema.transitionTasks).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
-  // Paged on `createdAt` (the cursor's key) and, unlike the streams, OLDEST first: a joiner's checklist is read
-  // forwards, and its first tasks are the ones due first. Due date orders the page, not the paging - sorting the
-  // whole set by `dueDate` while seeking on `createdAt` is what let a task slip between two pages.
-  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc", { codec: deps.idCodec, collection: "transition-tasks" });
+  // Paged in SQL (services/keysetPage.ts) on `createdAt` (the cursor's key) and, unlike the streams, OLDEST
+  // first: a joiner's checklist is read forwards, and its first tasks are the ones due first. It used to read
+  // every task the scope matched into the isolate to slice one page - one row per checklist step per joiner
+  // and leaver, kept for the record, and billed by rows read on every list.
+  //
+  // Due date orders the PAGE, not the paging: sorting the whole set by `dueDate` while seeking on `createdAt`
+  // is what let a task slip between two pages.
+  const page = await keysetPage<typeof schema.transitionTasks.$inferSelect>(deps, schema.transitionTasks, "transition-tasks", and(...(conds.filter(Boolean) as SQL[])), { dir: "asc", max: maxPageSize, pageToken });
   return {
     ...page,
     items: page.items.sort((a, b) => +new Date(a.dueDate ?? a.createdAt) - +new Date(b.dueDate ?? b.createdAt) || a.uuid.localeCompare(b.uuid)),

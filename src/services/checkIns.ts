@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, isNull, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { invalidArgument } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
@@ -33,12 +33,16 @@ export async function listCheckIns(deps: Deps, scope: ListScope, maxPageSize: nu
   const conds = [applyScope(scope, schema.checkIns.code, schema.checkIns.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.checkIns.employeeId, empId));
-  const all = (await deps.db.select().from(schema.checkIns).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((c) => showDeleted || !c.deleteTime);
-  // Paged on `createdAt` (what the cursor carries), newest first. Sorting the whole set by MEETING date and then
-  // seeking on `createdAt` was two different orders, and a 1:1 logged out of order fell through the gap between
-  // pages. The meeting date is a presentation order, so it orders the page that came back.
-  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "check-ins" });
+  if (!showDeleted) conds.push(isNull(schema.checkIns.deleteTime));
+  // Paged in SQL (services/keysetPage.ts) on `createdAt` (what the cursor carries), newest first. It used to
+  // read every matching check-in into the isolate and slice one page out - this table grows as headcount x
+  // cadence forever, and D1 bills rows read, so the whole history was paid for on every page. The soft-delete
+  // filter is part of the WHERE for the same reason.
+  //
+  // Sorting the set by MEETING date while seeking on `createdAt` would be two different orders, and a 1:1
+  // logged out of order falls through the gap between pages; the meeting date is a presentation order, so it
+  // orders the page that came back.
+  const page = await keysetPage<typeof schema.checkIns.$inferSelect>(deps, schema.checkIns, "check-ins", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
   return {
     ...page,
     items: page.items.sort((a, b) => +new Date(b.meetingDate ?? b.createdAt) - +new Date(a.meetingDate ?? a.createdAt) || a.uuid.localeCompare(b.uuid)),

@@ -1,4 +1,4 @@
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, type SQL } from "drizzle-orm";
 import { allocOwnedCode, allocOwnedCodeRuns } from "./codeAlloc";
 import { insertBatches, runBatch } from "../lib/dbBatch";
 import { applyScope } from "./listScope";
@@ -8,7 +8,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit } from "../lib/audit";
 import { invalidArgument } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
@@ -72,9 +72,11 @@ export async function listBenefitEnrollments(deps: Deps, scope: ListScope, maxPa
   const conds = [applyScope(scope, schema.benefitEnrollments.code, schema.benefitEnrollments.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.benefitEnrollments.employeeId, empId));
-  const all = (await deps.db.select().from(schema.benefitEnrollments).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((e) => showDeleted || !e.deleteTime);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "benefit-enrollments" });
+  if (!showDeleted) conds.push(isNull(schema.benefitEnrollments.deleteTime));
+  // Paged in SQL (services/keysetPage.ts) rather than by reading every enrolment the scope matches into the
+  // isolate and slicing one page out - this grows as headcount x plans x every year enrolment is re-run, and
+  // D1 bills rows read. The soft-delete filter is in the WHERE for the same reason.
+  return keysetPage<typeof schema.benefitEnrollments.$inferSelect>(deps, schema.benefitEnrollments, "benefit-enrollments", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 
 // An enrollment is owned by its employee (the code embeds the owner, so own/dept/all scoping works), and the

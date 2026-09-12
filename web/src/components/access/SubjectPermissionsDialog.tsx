@@ -10,6 +10,7 @@ import { roleLabel } from "@/lib/roles";
 import { CellOption } from "./CellOption";
 import { AccessAction } from "./AccessAction";
 import { ruleSentence } from "./ruleLogic";
+import { restoreAccessRules } from "./cloneRules";
 import { FineRulesEditor } from "./FineRulesEditor";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -165,16 +166,33 @@ export function SubjectPermissionsDialog({
       if (!ok) return;
     }
     setSaving((s) => ({ ...s, [collection]: value }));
+    // Delete-then-create, and the same two consequences the matrix guards (see PermissionsPanel#setCell): the
+    // deletes are committed even when the create fails, so the rules are put back rather than silently lost,
+    // and the reload happens on EVERY path so this dialog can never keep showing a level the server no longer
+    // holds.
+    const removed: AccessRule[] = [];
     try {
-      for (const r of cellRules(collection)) await remove(r.path, r.etag); // edit = delete + create
+      for (const r of cellRules(collection)) {
+        await remove(r.path, r.etag);
+        removed.push(r);
+      }
       if (value !== "none") {
         const body = value === "deny" ? { effect: "deny" } : { level: value };
         await create("access-rules", { subject_kind: subjectKind, subject, collection, ...ruleScopeFor({ collection }), ...body });
       }
       toast({ title: `Updated ${labelOf(collection)}` });
-      await reload();
     } catch (e) {
-      toast({ variant: "destructive", title: "Could not update", description: String((e as Error).message) });
+      const outstanding = removed.length - (await restoreAccessRules(removed));
+      toast({
+        variant: "destructive",
+        title: "Could not update",
+        description: outstanding
+          ? `${String((e as Error).message)} - and ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${labelOf(collection)} before relying on it.`
+          : String((e as Error).message),
+      });
+    }
+    try {
+      await reload();
     } finally {
       // Cleared in the same tick the reload's rules land in, so the cell moves straight from the level it was
       // being set to to the level the server confirms - and falls back to the old one if the write failed.

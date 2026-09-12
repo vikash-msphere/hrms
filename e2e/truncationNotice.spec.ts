@@ -17,6 +17,15 @@ import { allowConsoleErrors, gotoRoute, test, expect } from "./fixtures";
 // hundred and one rows every other spec then has to page past. The page's reads are coalesced into one
 // `POST /v1/batch:run`, and this adds the `next_page_token` the store reads as "there is more" to the one
 // collection under test, leaving every other read untouched.
+// The one phrase of the notice that does NOT move: `TruncationNotice` interpolates what is missing ("Only
+// some leave requests are loaded here"), so the opening clause differs per view and is the wrong thing to
+// match on. Matched in one place because the negative assertions below are the trap: a regex that no copy can
+// satisfy makes `toHaveCount(0)` pass for the wrong reason, so the half of this test that proves the notice
+// STAYS AWAY silently stops testing anything - which is exactly what happened when the component was reworded
+// (575f15e) and the spec kept looking for "Showing only the first page". Two of the three assertions here went
+// on passing; only the positive one failed, and it failed as a copy mismatch rather than as a broken feature.
+const NOTICE = /more exist than this view is showing/;
+
 test("a view whose collection is truncated says so, and one that is not says nothing", async ({ as }) => {
   test.setTimeout(180_000);
   const page = await as("hr");
@@ -25,7 +34,7 @@ test("a view whose collection is truncated says so, and one that is not says not
   // half that stops the notice becoming furniture.
   await gotoRoute(page, "leave-calendar", "Leave calendar");
   await expect(page.getByRole("main")).toBeVisible();
-  await expect(page.getByText(/Showing only the first page/)).toHaveCount(0);
+  await expect(page.getByText(NOTICE)).toHaveCount(0);
 
   // Now the same page, with the leave-requests read coming back marked as a window.
   let truncating = true;
@@ -60,10 +69,10 @@ test("a view whose collection is truncated says so, and one that is not says not
   await page.reload();
   await expect(page.getByRole("main")).toBeVisible();
 
-  // Said in the reader's terms: which view is incomplete, and what to do about it.
-  const notice = page.getByText(/Showing only the first page/);
+  // Said in the reader's terms: that rows are missing, and what to do about it.
+  const notice = page.getByText(NOTICE);
   await expect(notice.first()).toBeVisible({ timeout: 30_000 });
-  await expect(notice.first()).toContainText("this view is incomplete");
+  await expect(notice.first()).toContainText("so it is incomplete");
   await expect(notice.first()).toContainText("⌘K");
 
   // And it goes again once the collection fits: the notice is a fact about the data, not a flag somebody
@@ -71,5 +80,5 @@ test("a view whose collection is truncated says so, and one that is not says not
   truncating = false;
   await page.reload();
   await expect(page.getByRole("main")).toBeVisible();
-  await expect(page.getByText(/Showing only the first page/)).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByText(NOTICE)).toHaveCount(0, { timeout: 30_000 });
 });

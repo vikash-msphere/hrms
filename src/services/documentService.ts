@@ -4,15 +4,15 @@
 import { allocOwnedCode, allocFlatCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
-import { eq, and, inArray, isNull } from "drizzle-orm";
+import { eq, and, inArray, isNull, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete, softDeleteRow, restoreRow, purgeRow } from "./softDelete";
+import { softDeleteRow, restoreRow, purgeRow } from "./softDelete";
 import { hasPrintVersion } from "./letterheads";
 import { assertNotLocked } from "./lifecycle";
 import { genId } from "../lib/idCodec";
@@ -100,9 +100,12 @@ export function makeDocumentService(cfg: Cfg) {
   async function list(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, showDeleted = false, actor?: AppUser, employee?: string) {
     const scoped = applyScope(scope, table.code, ownerCol);
     const employeeId = owned ? idFromPath(employee) : undefined;
-    const where = employeeId ? and(scoped, eq(table.employeeId, employeeId)) : scoped;
-    const all = visibleByDelete(await deps.db.select().from(table).where(where), showDeleted);
-    const page = await paginate(all, maxPageSize, pageToken, (r: any) => +new Date(r.createdAt), (r: any) => r.uuid, "desc", { codec: deps.idCodec, collection });
+    // Paged in SQL (services/keysetPage.ts), soft-delete filter included. This one list backs every document
+    // collection in the app (personal, org, offer, letter...), and it used to read every row the scope
+    // matched into the isolate to slice fifty out of it - the exact cost the `employee` narrowing above was
+    // added to avoid, still being paid by every caller who does not pass one.
+    const conds = [scoped, employeeId ? eq(table.employeeId, employeeId) : undefined, showDeleted ? undefined : isNull(table.deleteTime)];
+    const page = await keysetPage<any>(deps, table, collection, and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
     return { items: await decorate(deps, actor, page.items), nextPageToken: page.nextPageToken };
   }
 

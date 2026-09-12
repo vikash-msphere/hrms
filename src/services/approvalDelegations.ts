@@ -1,4 +1,4 @@
-import { eq, and, lte, gte } from "drizzle-orm";
+import { eq, and, lte, gte, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -7,7 +7,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { orgToday, dayStartMs } from "./orgDay";
@@ -46,8 +46,10 @@ export async function listApprovalDelegations(deps: Deps, scope: ListScope, maxP
   const conds = [applyScope(scope, schema.approvalDelegations.code, schema.approvalDelegations.delegatorId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.approvalDelegations.delegatorId, empId));
-  const all = await deps.db.select().from(schema.approvalDelegations).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "approval-delegations" });
+  // Paged in SQL (services/keysetPage.ts) rather than by reading every delegation the scope matches and
+  // slicing one page out of it in the isolate: delegations accumulate one row per cover period per person and
+  // are never pruned, and D1 bills the rows a query reads, not the rows it returns.
+  return keysetPage<typeof schema.approvalDelegations.$inferSelect>(deps, schema.approvalDelegations, "approval-delegations", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 
 // Reject overlapping delegations to the same delegate, so the window stays unambiguous.

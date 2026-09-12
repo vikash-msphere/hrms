@@ -12,7 +12,7 @@ import { invalidArgument, notFound, aborted, forbidden } from "../lib/errors";
 import { isSuperGrant } from "../domain/grants";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { assertNotLocked } from "./lifecycle";
 import { validateAutomation, evalCondition, isScheduled, privilegedActionKinds, type Automation, type Condition, type Action, type Schedule } from "../domain/automations";
@@ -84,8 +84,9 @@ function assertMayActOnStored(actor: AppUser, row: { actionsJson: string }): voi
 // see their own rules), that grant silently means "every rule in the org". `applyScope` decides nothing - it
 // binds what the middleware already settled - so for the admin case it is the same query it always was.
 export async function listAutomations(deps: Deps, _actor: AppUser, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
-  const all = await deps.db.select().from(schema.automations).where(applyScope(scope, schema.automations.code, undefined));
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "automations" });
+  // Paged in SQL (services/keysetPage.ts) rather than by reading every rule the scope matches into the
+  // isolate and slicing one page out of it.
+  return keysetPage<typeof schema.automations.$inferSelect>(deps, schema.automations, "automations", applyScope(scope, schema.automations.code, undefined), { dir: "desc", max: maxPageSize, pageToken });
 }
 
 // Not exported: the factory's generic get answers the item read (services/crud.ts); this is the internal

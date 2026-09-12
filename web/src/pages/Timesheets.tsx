@@ -193,12 +193,41 @@ export default function Timesheets({ me }: { me: Me }) {
     // half-finished week submitted by accident has to be rejected before it can be fixed.
     if (!(await confirmDecision(confirm, "submit", `${toSubmit.length} ${toSubmit.length === 1 ? "entry" : "entries"} (${weekTotal}h)`))) return;
     setSubmitting(true);
+    // One entry at a time, and the ones that LANDED are kept even when a later one fails.
+    //
+    // This used to be a bare loop with the toast and the reload inside the `try`, which made a partial failure
+    // a dead end rather than a setback: entries before the failure are SUBMITTED on the server, the view still
+    // listed all of them as drafts (nothing reloaded on the error path), and pressing Submit again re-invoked
+    // `:submit` on an entry that had already moved - which services/timeEntries.ts refuses with a
+    // failedPrecondition. So the retry broke on the FIRST entry and the genuinely-unsubmitted rest could never
+    // be sent without reloading the page by hand.
+    //
+    // Same shape the attendance correction dialog already uses: stop at the first refusal, say which entries
+    // went through, and ALWAYS re-read the week so the next attempt is computed from what the server holds.
+    let submitted = 0;
+    let failure: string | undefined;
     try {
-      for (const e of toSubmit) await invoke(`time-entries/${idOf(e.path)}`, "submit");
-      toast({ title: `Submitted ${toSubmit.length} ${toSubmit.length === 1 ? "entry" : "entries"}`, variant: "success" });
-      void loadWeek();
-    } catch (e) { toast({ title: "Couldn't submit", description: (e as Error).message, variant: "destructive" }); }
-    finally { setSubmitting(false); }
+      for (const e of toSubmit) {
+        try {
+          await invoke(`time-entries/${idOf(e.path)}`, "submit");
+          submitted++;
+        } catch (err) {
+          failure = (err as Error).message;
+          break;
+        }
+      }
+      if (submitted) toast({ title: `Submitted ${submitted} ${submitted === 1 ? "entry" : "entries"}`, variant: "success" });
+      if (failure) {
+        toast({
+          title: submitted ? `Couldn't submit the remaining ${toSubmit.length - submitted}` : "Couldn't submit",
+          description: failure,
+          variant: "destructive",
+        });
+      }
+      // Unconditional: after a partial run the view and the server disagree about exactly the rows the next
+      // attempt would act on, so the reload is what makes the retry correct rather than a cosmetic refresh.
+      await loadWeek();
+    } finally { setSubmitting(false); }
   }
   // Seed this week from the previous one: same project, same weekday, same hours and description, as fresh
   // drafts. Cells that already hold an entry this week are left alone, so it is safe to run twice.

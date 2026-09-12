@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -8,7 +8,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { notify } from "./notifications";
 
@@ -29,12 +29,15 @@ export async function listTaxDeclarations(deps: Deps, scope: ListScope, maxPageS
   if (empId) conds.push(eq(schema.taxDeclarations.employeeId, empId));
   if (financialYear) conds.push(eq(schema.taxDeclarations.financialYear, financialYear));
   if (status) conds.push(eq(schema.taxDeclarations.status, status as Status));
-  const all = (await deps.db.select().from(schema.taxDeclarations).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((d) => showDeleted || !d.deleteTime);
-  // Paged on `createdAt` (the cursor's key). Grouping by tax SECTION is how the page is read, not how it is
-  // paged: sorting the whole set by section and then seeking on `createdAt` were two different orders, and a
-  // declaration could disappear between pages because of it.
-  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "tax-declarations" });
+  if (!showDeleted) conds.push(isNull(schema.taxDeclarations.deleteTime));
+  // Paged in SQL (services/keysetPage.ts) on `createdAt` (the cursor's key). It used to read every matching
+  // declaration into the isolate to slice one page - these accumulate a set per employee per financial year
+  // and are never pruned, and D1 bills rows read, so an HR-scope list with no filters paid for every year the
+  // org has ever run. The soft-delete filter rides in the WHERE for the same reason.
+  //
+  // Grouping by tax SECTION is how the page is READ, not how it is paged: sorting the set by section while
+  // seeking on `createdAt` would be two different orders, and a declaration could disappear between pages.
+  const page = await keysetPage<typeof schema.taxDeclarations.$inferSelect>(deps, schema.taxDeclarations, "tax-declarations", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
   return {
     ...page,
     items: page.items.sort((a, b) => (a.section ?? "").localeCompare(b.section ?? "") || +new Date(a.createdAt) - +new Date(b.createdAt) || a.uuid.localeCompare(b.uuid)),

@@ -1,4 +1,4 @@
-import { eq, and, gte, lte } from "drizzle-orm";
+import { eq, and, gte, lte, isNull, type SQL } from "drizzle-orm";
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -9,7 +9,7 @@ import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta, stateMeta } from "../lib/audit";
 import { notify, notifyManager } from "./notifications";
 import { invalidArgument, notFound, aborted, failedPrecondition } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 
 type Status = typeof schema.timeEntries.$inferSelect.status;
@@ -51,13 +51,18 @@ export async function listTimeEntries(deps: Deps, scope: ListScope, maxPageSize:
   if (status) conds.push(eq(schema.timeEntries.status, status as Status));
   if (from && !Number.isNaN(dayMs(from))) conds.push(gte(schema.timeEntries.date, new Date(dayMs(from))));
   if (to && !Number.isNaN(dayMs(to))) conds.push(lte(schema.timeEntries.date, new Date(dayMs(to) + 86_399_999)));
-  const all = (await deps.db.select().from(schema.timeEntries).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((e) => showDeleted || !e.deleteTime);
-  // Paged on `createdAt`, which is what the cursor carries. It used to page a set pre-sorted by `date` while
-  // seeking on `createdAt`: two different orders, so the seek could land past rows that had never been returned
-  // and they vanished from the listing (the same defect test/paginateOrder.test.ts pins for the tiebreaker).
-  // The worked day is a PRESENTATION order, so it is applied to the page that came back, below.
-  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "time-entries" });
+  if (!showDeleted) conds.push(isNull(schema.timeEntries.deleteTime));
+  // Paged in SQL (services/keysetPage.ts), on `createdAt` - which is what the cursor carries. It used to read
+  // EVERY entry the filters matched and slice one page out of it in the isolate, which for a caller with no
+  // `?employee` filter is the whole table: `time_entries` grows as headcount x working days, and D1 bills the
+  // rows a query reads, so the cost of one 50-row page climbed forever while the answer stayed the same size.
+  // The soft-delete filter moved into the WHERE with it, for the same reason - filtering it afterwards still
+  // read the deleted rows.
+  //
+  // The worked day is a PRESENTATION order, applied to the page that came back, below. It must not become the
+  // paging order: sorting the set by `date` while seeking on `createdAt` is two different orders, so the seek
+  // lands past rows that were never returned and they vanish from the listing (test/paginateOrder.test.ts).
+  const page = await keysetPage<typeof schema.timeEntries.$inferSelect>(deps, schema.timeEntries, "time-entries", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
   return { ...page, items: page.items.sort((a, b) => +new Date(b.date) - +new Date(a.date) || a.uuid.localeCompare(b.uuid)) };
 }
 

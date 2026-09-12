@@ -45,6 +45,27 @@ export const clampPageSize = (n?: number) => Math.min(Math.max(n ?? 50, 1), 100)
 // on - "desc" (newest first, the default, matching keysetPage) or "asc". Returns the page slice plus the next
 // cursor (undefined when exhausted).
 //
+// SQL-SIDE PAGING (services/keysetPage.ts) IS THE DEFAULT, AND THIS IS THE EXCEPTION.
+//
+// Reading a whole table to hand back fifty rows is not a style choice on this platform: D1 bills the rows a
+// query READS, the isolate holds all of them while it sorts, and both costs grow with the table while the
+// answer stays one page. Every collection whose rows accumulate - time entries, check-ins, documents,
+// enrolments, declarations, payroll runs - pages in SQL for that reason, and a new list should too.
+//
+// What is left here is the set where SQL paging buys nothing or cannot apply, and each one is here on purpose:
+//
+//   - `roles`, `policy`, `settings`, `preferences` are keyed by a NATURAL identifier (a role name, a settings
+//     key), not by `uuid`. keysetPage seeks on (createdAt, uuid) and tokenizes the uuid half through the wire
+//     codec; these collections have no internal id on the wire to seek or encode, and their row counts are
+//     bounded by configuration rather than by use. `settings` additionally reads off the per-request snapshot
+//     in lib/refData.ts, so its rows are already in memory and a second query would be the more expensive
+//     shape.
+//   - `expenseBudgets` computes phase counts and a spend summary ACROSS every matching budget before it pages.
+//     Those totals are the answer, not a decoration of the page, so the whole set genuinely has to be read;
+//     paging it in SQL would mean querying twice and would save nothing.
+//
+// Anything else that reaches for this is almost certainly a list that should be using keysetPage.
+//
 // The ONE thing a caller must not do is sort the row set on a different key than it pages on: the seek below
 // compares `when`, so a caller that pre-sorted by some other field and then paged would seek into an order that
 // does not exist and drop whole rows between pages. Page here, and sort a RETURNED PAGE for presentation.

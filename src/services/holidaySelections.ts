@@ -6,7 +6,7 @@ import type { AppUser } from "../env";
 import { audit, removedMeta } from "../lib/audit";
 import { invalidArgument, notFound, forbidden, failedPrecondition } from "../lib/errors";
 import { getSettingValue } from "./settings";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { refHolidays } from "../lib/refData";
 
 const DEFAULT_POLICY = { max_optional: 2 };
@@ -15,8 +15,10 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 // The caller's own holiday picks.
 export async function listHolidaySelections(deps: Deps, actor: AppUser, maxPageSize = 50, pageToken?: string) {
   if (!actor.employeeId) return { items: [], nextPageToken: undefined };
-  const rows = await deps.db.select().from(schema.holidaySelections).where(eq(schema.holidaySelections.employeeId, actor.employeeId));
-  return paginate(rows, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "holiday-selections" });
+  // Paged in SQL (services/keysetPage.ts). Narrow already - one caller's own picks - but it accumulates a row
+  // per optional holiday per year for the life of the account, and there is no reason for the page to cost
+  // the history.
+  return keysetPage<typeof schema.holidaySelections.$inferSelect>(deps, schema.holidaySelections, "holiday-selections", eq(schema.holidaySelections.employeeId, actor.employeeId), { dir: "desc", max: maxPageSize, pageToken });
 }
 
 export async function getHolidaySelection(deps: Deps, actor: AppUser, id: string) {

@@ -6,7 +6,7 @@ import type { AppEnv } from "../env";
 import { users } from "../db/schema";
 import { makeDeps } from "../deps";
 import { openSession, sealSession } from "../lib/session";
-import { counter } from "../lib/isolateRate";
+import { counter, keyedCounter } from "../lib/isolateRate";
 
 // Direct Google sign-in (OIDC authorization-code flow), the no-per-seat-cost alternative to fronting the
 // app with Cloudflare Access. Selected by configuration: GOOGLE_CLIENT_ID set = Google mode; absent =
@@ -47,15 +47,41 @@ const OAUTH_COOKIE = { httpOnly: true, secure: true, sameSite: "Lax" as const, p
 // A FLOOR on the one unauthenticated lane a person actually walks (see lib/isolateRate.ts - the control is
 // the WAF rule, and `npm run preflight` names this route as having had nothing at all). `/callback` is the
 // expensive half: it exchanges a code with Google over a real outbound request and verifies an id token
-// against a fetched JWKS, neither of which requires a credential of ours to provoke. Sized so a whole
-// company arriving at nine in the morning never notices - sign-ins land on many isolates, and one isolate
-// serving 300 of them a minute is already an unusual morning.
-const signIns = counter(300);
+// against a fetched JWKS, neither of which requires a credential of ours to provoke.
+//
+// TWO BUDGETS, because they bound different things and neither implies the other.
+//
+// `perIp` is the one that was missing. A single shared counter is what `/found` and `/diag` were both moved
+// off, for a reason that applies here with more force than it does to either of them: one noisy client spends
+// the isolate's entire allowance, and the cost of that is not a refused attacker, it is that NOBODY ELSE ON
+// THAT ISOLATE CAN SIGN IN. Sign-in is the door - a floor whose failure mode is locking the workforce out of
+// the app is worse than the flood it was put there to bound. The key is the address Cloudflare observed
+// (`cf-connecting-ip`), which a client cannot set because the edge overwrites it - the same reason the audit
+// trail keys on it and nothing else.
+//
+// `total` keeps the absolute ceiling the shared counter used to be, because per-IP alone bounds nothing
+// against a spread-out flood: a thousand addresses each politely inside their own budget is still a thousand
+// OAuth round trips this isolate pays for. Sized so a whole company arriving at nine in the morning never
+// notices - sign-ins land on many isolates, and one isolate serving 300 a minute is already an unusual
+// morning - while one address walking through 30 of them in a minute is already a client in a loop.
+const perIp = keyedCounter(30);
+const total = counter(300);
+// One bucket for requests arriving with no observed address (not behind the edge - local dev, a direct origin
+// hit). They share a budget rather than each getting the full one, which is the conservative way round:
+// unattributable traffic must not be the way to get an unbounded allowance. Same shape as routes/found.ts.
+const NO_IP = "-";
 
 export const authRoutes = new Hono<AppEnv>()
   .use("*", async (c, next) => {
-    if (signIns.throttled(Date.now())) {
-      return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(signIns.retryAfterSeconds) });
+    const now = Date.now();
+    // Per-IP FIRST, so its `retryAfterSeconds` is the one reported when it is the budget that refused - the
+    // two counters keep separate windows, and reading the wrong one parks a client for a window that had
+    // nothing to do with them.
+    if (perIp.throttled(c.req.header("cf-connecting-ip") ?? NO_IP, now)) {
+      return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(perIp.retryAfterSeconds) });
+    }
+    if (total.throttled(now)) {
+      return c.text("too many sign-in attempts; try again in a minute", 429, { "Retry-After": String(total.retryAfterSeconds) });
     }
     await next();
   })

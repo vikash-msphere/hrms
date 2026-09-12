@@ -159,3 +159,70 @@ describe("every custom method a route mounts is in the contract", () => {
     expect([...new Set(missing)], "mounted but unspecified - Prism answers 405 and the feature is dead through the proxy").toEqual([]);
   });
 });
+
+// THE ANSWERS THE MIDDLEWARE GIVES, WHICH NO ROUTE DECLARES FOR ITSELF.
+//
+// Everything above this point checks that a route EXISTS in the contract. That is not the same as the
+// contract being right about it, and it was not: 401, 413 and 429 appeared nowhere in openapi.yaml at all,
+// 403 on 88 of 737 operations and 409 on 15 - while src/middleware/{auth,csrf,bodyLimit,rateLimit,authz}.ts
+// produce all five on EVERY path under /v1. Measured through the dev proxy, one e2e run logged 138 Prism
+// response violations, 116 of them DELETEs documented `204,404` answering 403.
+//
+// Nothing caught it. `npm run api:lint` lints the document, not the running app. Prism reports a violation
+// per request into a log nobody reads. And the drift tests above ask only whether a path and a method are
+// present. So the contract could say a private-by-default API never refuses a caller, and the generated
+// client (src/http/openapi.d.ts, from `npm run api:types`) carried no shape for its single commonest answer.
+//
+// UNIFORM ON PURPOSE, including the pairings that look imprecise. A GET cannot really answer 409, and 413 is
+// only reachable with a body - but every one of these is produced by a middleware that runs before any
+// handler and that no operation can opt out of, so the set belongs to the LANE, not to the route. Declaring
+// it per-method would make it a judgement call at each of 737 sites, which is the condition that produced
+// the drift in the first place. Over-declaring an error a caller must already handle costs nothing;
+// under-declaring the one they will actually meet is what this closes.
+describe("every /v1 operation declares the middleware-level responses", () => {
+  const METHODS = ["get", "post", "patch", "put", "delete"];
+  // Each code with the shared component it must point at, so a future operation cannot satisfy the gate with
+  // a bare inline description that says nothing about what the status means.
+  const REQUIRED: Record<string, string> = {
+    "401": "#/components/responses/Unauthenticated",
+    "403": "#/components/responses/PermissionDenied",
+    "409": "#/components/responses/Conflict",
+    "413": "#/components/responses/PayloadTooLarge",
+    "429": "#/components/responses/TooManyRequests",
+  };
+  type Operation = { responses?: Record<string, { $ref?: string }> };
+  const operations = (): { key: string; op: Operation }[] => {
+    const out: { key: string; op: Operation }[] = [];
+    for (const [path, item] of Object.entries(spec.paths as Record<string, Record<string, unknown>>)) {
+      if (!path.startsWith("/v1/")) continue;
+      for (const [method, op] of Object.entries(item ?? {})) {
+        if (METHODS.includes(method)) out.push({ key: `${method.toUpperCase()} ${path}`, op: op as Operation });
+      }
+    }
+    return out;
+  };
+
+  it("found the operations (sanity: the spec shape still parses)", () => {
+    expect(operations().length).toBeGreaterThan(700);
+  });
+
+  it("declares 401/403/409/413/429 on every one of them", () => {
+    const missing: string[] = [];
+    for (const { key, op } of operations()) {
+      const responses = op.responses ?? {};
+      for (const code of Object.keys(REQUIRED)) if (!responses[code]) missing.push(`${key} is missing '${code}'`);
+    }
+    expect(missing, "every /v1 request passes auth, csrf, bodyLimit, rateLimit and authz, so every operation can answer these").toEqual([]);
+  });
+
+  it("points each of them at the shared component", () => {
+    const wrong: string[] = [];
+    for (const { key, op } of operations()) {
+      for (const [code, ref] of Object.entries(REQUIRED)) {
+        const declared = (op.responses ?? {})[code];
+        if (declared && declared.$ref !== ref) wrong.push(`${key} '${code}' -> ${declared.$ref ?? "inline"} (expected ${ref})`);
+      }
+    }
+    expect(wrong, "these statuses mean the same thing on every route, so they share one documented response").toEqual([]);
+  });
+});

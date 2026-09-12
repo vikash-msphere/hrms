@@ -10,7 +10,7 @@ import { CopyEmail } from "@/components/common/CopyEmail";
 import { ruleScopeFor, ruleMatchesTarget } from "@/components/access/accessRuleScope";
 import { type AccessRule, CELL, labelOf, fetchAllAccessRules, collectionsForRules, COLLECTION_GROUPS, groupOf, accessTone } from "@/components/access/permMatrix";
 import { CellOption } from "@/components/access/CellOption";
-import { cloneAccessRules, ruleBody } from "@/components/access/cloneRules";
+import { cloneAccessRules, restoreAccessRules, ruleBody } from "@/components/access/cloneRules";
 import { useAccessMode } from "@/components/access/AccessModeProvider";
 import { AccessAction } from "@/components/access/AccessAction";
 import { useConfirm } from "@/components/common/confirm";
@@ -150,20 +150,41 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   }, [collections, matrixFilter, onlySet, roles, rules]);
 
 
+  // Set one cell of the matrix. An edit is delete-then-create (the API keys one rule per subject/collection/
+  // scope), so the two failure modes this guards are both consequences of that, and both used to be live:
+  //
+  //   - the deletes are committed even when the create that replaces them fails, so a failed edit REMOVED the
+  //     subject's access while reporting only "Could not update". The rules are put back (see
+  //     restoreAccessRules, which is also correct under four-eyes), and if any of them cannot be, the toast
+  //     says so instead of leaving the row quietly wrong.
+  //   - the grid was re-read only on the success path, so after a failure it went on rendering the level the
+  //     subject used to hold. On a permissions page that is the worst available outcome: a grant that is gone
+  //     and a grid that says it is there are indistinguishable from a grid that is right. The reload is now
+  //     unconditional, and it owns clearing `busy` (see reload's own finally).
   async function setCell(kind: Kind, subject: string, collection: string, value: string, label: string) {
     setBusy(true);
+    const removed: AccessRule[] = [];
     try {
-      for (const r of cellRules(kind, subject, collection)) await remove(r.path, r.etag); // edit = delete + create
+      for (const r of cellRules(kind, subject, collection)) {
+        await remove(r.path, r.etag);
+        removed.push(r);
+      }
       if (value !== "none") {
         const body = value === "deny" ? { effect: "deny" } : { level: value };
         await create("access-rules", { subject_kind: kind, subject, collection, ...ruleScopeFor({ collection }), ...body });
       }
       toast({ title: `Updated ${label} · ${labelOf(collection)}` });
-      await reload();
     } catch (e) {
-      toast({ variant: "destructive", title: "Could not update", description: String((e as Error).message) });
-      setBusy(false);
+      const outstanding = removed.length - (await restoreAccessRules(removed));
+      toast({
+        variant: "destructive",
+        title: "Could not update",
+        description: outstanding
+          ? `${String((e as Error).message)} - and ${outstanding} rule${outstanding === 1 ? "" : "s"} that had to be removed first could not be put back. Check ${label} · ${labelOf(collection)} before relying on it.`
+          : String((e as Error).message),
+      });
     }
+    await reload();
   }
 
   // What the subject ALSO holds on this collection beyond the org-wide cell: the `everyone` rule the engine

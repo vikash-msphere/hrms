@@ -1,4 +1,4 @@
-import { invoke } from "@/api";
+import { create, invoke } from "@/api";
 import type { AccessRule } from "./permMatrix";
 
 // One access rule as the API's own create body - the shape export, import and clone all speak, so a rule that
@@ -15,6 +15,38 @@ export function ruleBody(r: AccessRule) {
     ...(r.effect === "deny" ? { effect: "deny" } : {}),
     ...(r.expire_time ? { expire_time: r.expire_time } : {}),
   };
+}
+
+/**
+ * Put back rules a failed edit has already deleted. Returns how many of them are in force again.
+ *
+ * WHY THIS EXISTS. Setting a cell is delete-then-create, and it has to be: the API keys one rule per
+ * (subject, collection, scope), so the old rule must be gone before the replacement can exist. That makes a
+ * failure BETWEEN the two halves a REMOVAL - the deletes are committed whether or not the create that
+ * justifies them lands - and the surfaces that do this used to answer such a failure with "Could not update",
+ * which reads as "nothing happened" while the subject has in fact just lost the access they had.
+ *
+ * An "already exists" refusal COUNTS AS RESTORED, and that is what makes this correct under four-eyes
+ * approval as well as without it. With approval on, a delete only parks the rule as `pending_delete` and it
+ * keeps working until a second admin approves, so nothing was removed and the re-create collides with the
+ * rule that is still there. Reading that collision as success means this needs to know nothing about which
+ * mode the org is in - the answer from the server is the same question, asked the only way that cannot go
+ * stale.
+ *
+ * Best-effort by construction: it is called from a catch block that already has a failure to report, so a
+ * rule that cannot be put back is counted rather than thrown, and the caller says how many are outstanding.
+ */
+export async function restoreAccessRules(rules: AccessRule[]): Promise<number> {
+  let restored = 0;
+  for (const r of rules) {
+    try {
+      await create("access-rules", ruleBody(r));
+      restored++;
+    } catch (e) {
+      if (/already exists/i.test(String((e as Error).message))) restored++;
+    }
+  }
+  return restored;
 }
 
 export type CloneResult = {

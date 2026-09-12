@@ -1,4 +1,4 @@
-import { eq, and, gte, isNull, lte } from "drizzle-orm";
+import { eq, and, gte, isNull, lte, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -6,7 +6,7 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { alreadyExists, invalidArgument } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { notify } from "./notifications";
 
@@ -25,12 +25,16 @@ export async function listShiftAssignments(deps: Deps, scope: ListScope, maxPage
   if (empId) conds.push(eq(schema.shiftAssignments.employeeId, empId));
   if (from && !Number.isNaN(dayMs(from))) conds.push(gte(schema.shiftAssignments.date, new Date(dayMs(from))));
   if (to && !Number.isNaN(dayMs(to))) conds.push(lte(schema.shiftAssignments.date, new Date(dayMs(to) + 86_399_999)));
-  const all = (await deps.db.select().from(schema.shiftAssignments).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((a) => showDeleted || !a.deleteTime);
-  // Paged on `createdAt`, which is what the cursor carries - sorting the whole roster by DATE and seeking on
-  // `createdAt` were two different orders, so a shift added out of date order could fall between two pages.
-  // The roster reads forwards through the week, so the page comes back in date order.
-  const page = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "shift-assignments" });
+  if (!showDeleted) conds.push(isNull(schema.shiftAssignments.deleteTime));
+  // Paged in SQL (services/keysetPage.ts) on `createdAt`, which is what the cursor carries. It used to read
+  // every assignment the filters matched and slice a page out of it in the isolate - a roster grows as
+  // headcount x days, and D1 bills rows read, so an unfiltered list cost the whole table to answer with 50
+  // rows. The soft-delete filter went into the WHERE with it rather than being applied to rows already read.
+  //
+  // Sorting the roster by DATE and seeking on `createdAt` would be two different orders, so a shift added out
+  // of date order could fall between two pages; the roster reads forwards through the week, so date orders
+  // the page that came back, below.
+  const page = await keysetPage<typeof schema.shiftAssignments.$inferSelect>(deps, schema.shiftAssignments, "shift-assignments", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
   return { ...page, items: page.items.sort((a, b) => +new Date(a.date) - +new Date(b.date) || a.uuid.localeCompare(b.uuid)) };
 }
 

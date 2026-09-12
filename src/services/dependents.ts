@@ -1,13 +1,13 @@
 // Dependents: who an employee can enrol in a benefit plan. Employee-owned (the code is allocated under the
 // owner), so a caller sees their own by scope; HR sees the department or all.
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull, type SQL } from "drizzle-orm";
 import { allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { crudService, has, type CrudSpec, type SetOf } from "./crud";
 
 type Relationship = typeof schema.dependents.$inferSelect.relationship;
@@ -24,9 +24,11 @@ export async function listDependents(deps: Deps, scope: ListScope, maxPageSize: 
   const conds = [applyScope(scope, schema.dependents.code, schema.dependents.employeeId)];
   const empId = idFromPath(employee);
   if (empId) conds.push(eq(schema.dependents.employeeId, empId));
-  const all = (await deps.db.select().from(schema.dependents).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined))
-    .filter((d) => showDeleted || !d.deleteTime);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "dependents" });
+  if (!showDeleted) conds.push(isNull(schema.dependents.deleteTime));
+  // Paged in SQL (services/keysetPage.ts) rather than by reading every dependent the scope matches and
+  // slicing one page out of it in the isolate - a whole-org read on the HR lane, billed by rows read, to
+  // answer with fifty. The soft-delete filter is in the WHERE for the same reason.
+  return keysetPage<typeof schema.dependents.$inferSelect>(deps, schema.dependents, "dependents", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 
 export const dependentSpec: CrudSpec<DependentInput, typeof schema.dependents> = {

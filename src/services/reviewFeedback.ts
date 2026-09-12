@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, type SQL } from "drizzle-orm";
 import { allocOwnedCodesFor } from "./codeAlloc";
 import { insertBatches, runBatch, type BatchStmt } from "../lib/dbBatch";
 import { genId } from "../lib/idCodec";
@@ -9,7 +9,7 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, stateMeta } from "../lib/audit";
 import { invalidArgument, notFound, failedPrecondition, forbidden } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { notify, notifyMany } from "./notifications";
 
 const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
@@ -18,9 +18,10 @@ type State = typeof schema.reviewFeedback.$inferSelect.state;
 export async function listReviewFeedback(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string) {
   const conds = [applyScope(scope, schema.reviewFeedback.code, schema.reviewFeedback.authorId)];
   if (stateFilter) conds.push(eq(schema.reviewFeedback.state, stateFilter as State));
-  const all = await deps.db.select().from(schema.reviewFeedback).where(conds.filter(Boolean).length ? and(...conds.filter(Boolean)) : undefined);
-  // Oldest first: 360 feedback on one review reads as a thread, in the order it was given.
-  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc", { codec: deps.idCodec, collection: "review-feedback" });
+  // Oldest first: 360 feedback on one review reads as a thread, in the order it was given. Paged in SQL
+  // (services/keysetPage.ts) rather than by reading every request the scope matched into the isolate - one
+  // row per reviewer per cycle per person, kept for the record, and D1 bills rows read.
+  const { items: slice, nextPageToken } = await keysetPage<typeof schema.reviewFeedback.$inferSelect>(deps, schema.reviewFeedback, "review-feedback", and(...(conds.filter(Boolean) as SQL[])), { dir: "asc", max: maxPageSize, pageToken });
   return { items: slice, nextPageToken };
 }
 

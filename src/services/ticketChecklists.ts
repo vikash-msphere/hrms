@@ -1,7 +1,7 @@
 // Predefined ticket checklists: reusable, named lists of item texts copied onto a ticket. A first-class
 // collection so each checklist is access-controlled individually (private-by-default; visibility is the
 // read grant, managed in the ACL UI). Mirrors reimbursement-categories (a simple flat config collection).
-import { eq } from "drizzle-orm";
+import { eq, isNull } from "drizzle-orm";
 import { allocFlatCode } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
@@ -9,18 +9,23 @@ import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, createdMeta, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete } from "./softDelete";
 
 export type TicketChecklistInput = { display_name?: string; items?: string[] };
 
 const cleanItems = (items?: string[]) => (items ?? []).map((s) => (s ?? "").trim()).filter(Boolean);
 
 export async function listTicketChecklists(deps: Deps, _actor: AppUser, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const all = visibleByDelete(await deps.db.select().from(schema.ticketChecklists), showDeleted);
-  // Oldest first: a checklist template is read top-down, in the order its steps were written.
-  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "asc", { codec: deps.idCodec, collection: "ticket-checklists" });
+  // Oldest first: a checklist template is read top-down, in the order its steps were written. Paged in SQL
+  // (services/keysetPage.ts), soft-delete filter included, rather than reading the catalog whole.
+  const { items: slice, nextPageToken } = await keysetPage<typeof schema.ticketChecklists.$inferSelect>(
+    deps,
+    schema.ticketChecklists,
+    "ticket-checklists",
+    showDeleted ? undefined : isNull(schema.ticketChecklists.deleteTime),
+    { dir: "asc", max: maxPageSize, pageToken },
+  );
   return { items: slice, nextPageToken };
 }
 

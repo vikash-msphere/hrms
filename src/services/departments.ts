@@ -1,16 +1,15 @@
 import { allocUnderDept, CODE_WIDTH } from "./codeAlloc";
 // SIMPLE resource template. Copy this file for holidays, announcements, leave-types,
 // pay-components, pay-periods (rename table, fields, capability). See docs/03-add-a-resource.md.
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, type SQL } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { audit, diffMeta } from "../lib/audit";
 import { invalidArgument, notFound, aborted } from "../lib/errors";
 import { moveDepartment } from "./codeCascade";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
-import { visibleByDelete } from "./softDelete";
 import { assertNotLocked } from "./lifecycle";
 import { crudService, type CrudSpec, type SetOf } from "./crud";
 import { applyScope } from "./listScope";
@@ -27,9 +26,10 @@ const managerIdsJson = (managers?: string[] | null) =>
 // must not see the whole tree. Departments have no employee owner, so the hierarchy `code` is both the scope
 // key and the owner column. `all`-breadth callers get no filter (unchanged); a narrower grant is enforced.
 export async function listDepartments(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const where = applyScope(scope, schema.departments.code, schema.departments.code);
-  const all = visibleByDelete(await deps.db.select().from(schema.departments).where(where), showDeleted);
-  return paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "departments" });
+  // Paged in SQL (services/keysetPage.ts), soft-delete filter included, rather than reading the whole tree
+  // into the isolate to slice one page out of it.
+  const conds = [applyScope(scope, schema.departments.code, schema.departments.code), showDeleted ? undefined : isNull(schema.departments.deleteTime)];
+  return keysetPage<typeof schema.departments.$inferSelect>(deps, schema.departments, "departments", and(...(conds.filter(Boolean) as SQL[])), { dir: "desc", max: maxPageSize, pageToken });
 }
 
 // A department is a node in the hierarchy, so its code IS its position in the tree: the create allocates one

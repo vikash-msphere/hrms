@@ -32,7 +32,7 @@ import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } fr
 import { renderPayslipPdf } from "../lib/pdf";
 import { payslipTemplateOrDefault, type PayslipTemplate } from "../domain/payslipTemplate";
 import { etagOf } from "../http/serialize";
-import { paginate } from "../http/pagination";
+import { keysetPage } from "./keysetPage";
 import { refDepartments, refHolidays, refPayComponents, refPayPeriods } from "../lib/refData";
 
 // Resolve user ids to a display name: the linked employee's full name, else the user's email.
@@ -137,8 +137,10 @@ export async function listRunItems(deps: Deps, runId: string) {
 }
 
 export async function listRuns(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string) {
-  const all = await deps.db.select().from(schema.payrollRuns).where(applyScope(scope, schema.payrollRuns.code, schema.payrollRuns.code));
-  const { items: slice, nextPageToken } = await paginate(all, maxPageSize, pageToken, (r) => +new Date(r.createdAt), (r) => r.uuid, "desc", { codec: deps.idCodec, collection: "payroll-runs" });
+  // Paged in SQL (services/keysetPage.ts) rather than by reading every run the scope matches into the isolate
+  // and slicing one page out. Runs accrue a row per period forever and are never deleted once published, so
+  // the read grew with the org's payroll history on a page that shows twelve of them.
+  const { items: slice, nextPageToken } = await keysetPage<typeof schema.payrollRuns.$inferSelect>(deps, schema.payrollRuns, "payroll-runs", applyScope(scope, schema.payrollRuns.code, schema.payrollRuns.code), { dir: "desc", max: maxPageSize, pageToken });
   return { items: await withNames(deps, slice), nextPageToken };
 }
 function assertEtag(row: { updatedAt: Date }, ifMatch?: string) {

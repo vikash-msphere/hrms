@@ -235,6 +235,52 @@ describe("Google mode: the domain allow-list is the perimeter, so an empty one i
   });
 });
 
+// THE SIGN-IN FLOOR IS PER CALLER, and that is the property worth pinning rather than the number.
+//
+// `/auth/*` carried a single shared `counter()` for the whole route while `/found` and `/diag` had both been
+// moved to `keyedCounter`. The failure mode of a shared budget here is not a refused attacker: it is that one
+// client in a loop spends the isolate's whole allowance and NOBODY ELSE ON THAT ISOLATE CAN SIGN IN. Sign-in
+// is the door, so a floor whose failure mode is locking the workforce out is worse than the flood it bounds.
+//
+// The route-wide ceiling is kept alongside it (a thousand addresses each inside their own budget is still a
+// thousand OAuth round trips), which is why this asserts both halves: one address is cut off, and a second
+// address is unaffected by the first one's spending.
+describe("/auth is floored per caller, not per isolate", () => {
+  // Comfortably past the per-IP budget (30/min) and far under the route-wide one (300/min), so the second
+  // address below is answering on its own budget rather than on what is left of a shared one.
+  const BURST = 34;
+  const login = (ip: string) => app.request("/auth/login", { headers: { "cf-connecting-ip": ip } }, googleEnv());
+
+  it("throttles the address that is hammering it, and only that address", async () => {
+    let refused = 0;
+    for (let i = 0; i < BURST; i++) {
+      const res = await login("203.0.113.9");
+      if (res.status === 429) refused++;
+    }
+    expect(refused, "one address must run out of its own budget").toBeGreaterThan(0);
+
+    // The whole point: a different caller arrives after that burst and still gets in.
+    const other = await login("198.51.100.4");
+    expect(other.status, "a second address must not pay for the first one's burst").toBe(302);
+    expect(other.headers.get("location")).toContain("accounts.google.com");
+  });
+
+  it("advertises what is left of the window, never zero", async () => {
+    let retryAfter: string | null = null;
+    for (let i = 0; i < BURST && retryAfter === null; i++) {
+      const res = await login("203.0.113.77");
+      if (res.status === 429) retryAfter = res.headers.get("Retry-After");
+    }
+    expect(retryAfter, "a refusal must say when to come back").not.toBeNull();
+    const seconds = Number(retryAfter);
+    expect(Number.isInteger(seconds)).toBe(true);
+    // At least 1 (a `Retry-After: 0` invites the retry the same window refuses) and never more than the
+    // window it is the remainder of.
+    expect(seconds).toBeGreaterThanOrEqual(1);
+    expect(seconds).toBeLessThanOrEqual(60);
+  });
+});
+
 describe("/auth routes (Access mode)", () => {
   it("login bounces home (the edge is the login) and logout points at the Access logout", async () => {
     const e: Record<string, unknown> = { ...(env as unknown as Bindings), DEV_FAKE_EMAIL: undefined, ALLOW_DEV_AUTH: undefined };
