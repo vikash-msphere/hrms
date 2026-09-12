@@ -193,6 +193,34 @@ export function isShiftAssignmentDuplicate(err: unknown): boolean {
   return /UNIQUE constraint failed:[^:]*\bshift_assignments\.(employee_id|date)\b/i.test(errorChainText(err));
 }
 
+/** Two punches raced and both tried to leave the same person with an open attendance session
+ *  (`att_open_emp_idx`, partial on `employee_id where clock_out is null and superseded_by is null`).
+ *
+ *  Same shape as the timeline indexes below and the same reason for existing: `clockIn` reads "is anything
+ *  open" and then inserts, which is two statements, so a double-tapped clock button (or a phone and a laptop)
+ *  could put TWO open rows on one employee. That is not a cosmetic duplicate - `openSessionFor` takes one of
+ *  them arbitrarily, `clockOut` closes that one, and the other stays open forever: every later `clockIn`
+ *  answers "already clocked in", the person can never punch again, and because loss of pay is derived from
+ *  punches, every subsequent working day is docked as a full absence with nothing saying why.
+ *
+ *  The answer is the same one the pre-read gives in words, so it is a precondition and not a 500. */
+export function isOpenAttendanceCollision(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\battendance_sessions\.(employee_id|clock_out|superseded_by)\b/i.test(errorChainText(err));
+}
+
+/** That person already has a review in that cycle (`review_cycle_emp_idx`).
+ *
+ *  `addReviewees` reads the cycle's existing reviews and inserts the ones that are missing, which is a
+ *  check-then-write: two concurrent launches of one cycle both read an empty set and both insert. The index is
+ *  what makes the duplicate unwritable - a second review row for one person in one cycle double-counts them in
+ *  calibration, in the analytics and in their own list, and sends them two "your review is open" notices.
+ *
+ *  Launching is claimed exactly-once now (services/reviewCycles.ts), so the reachable racer is two mid-cycle
+ *  `:addReviewees` calls; D1 rolls the whole insert batch back, so nothing half-lands and the caller re-reads. */
+export function isReviewDuplicate(err: unknown): boolean {
+  return /UNIQUE constraint failed:[^:]*\breviews\.(cycle_id|employee_id)\b/i.test(errorChainText(err));
+}
+
 /** Two concurrent writes to one employee's effective-dated timeline both tried to leave it with an open row.
  *
  *  `comp_open_idx` / `pos_open_idx` are partial unique indexes on `employee_id where effective_to is null`, so

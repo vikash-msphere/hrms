@@ -14,6 +14,7 @@ import { listReviews, submitSelf, submitManager, acknowledgeReview, assignReview
 import { competenciesForCycle } from "../src/domain/performance";
 import { nominateFeedback, suggestFeedback, submitFeedback, declineFeedback } from "../src/services/reviewFeedback";
 import type { ListScope } from "../src/domain/access";
+import { isReviewDuplicate } from "../src/lib/errors";
 
 // Real-D1 (miniflare) flow test for the performance review cycle: the stage machine, and the two ownership
 // rules the UI leans on - a 360 nomination is answerable ONLY by the person it was addressed to, and a
@@ -339,5 +340,60 @@ describe("a cycle's own competencies", () => {
 
     const cleared = await updateReviewCycle(deps, actor, cycle.uuid, { competency_keys: [] });
     expect(cleared.competencyKeysJson).toBeNull();
+  });
+});
+
+// ---- Launching a cycle is exactly-once ------------------------------------------------------------------------
+//
+// `addReviewees` decides who is missing by READING the cycle's existing reviews and inserting the rest, and the
+// DRAFT -> ACTIVE flip used to be unguarded and to happen AFTER that work. So two concurrent launches both
+// passed the in-memory state check, both read an empty set, and both inserted the whole roster: every reviewee
+// ended up with two review rows and two "your review is open" notices, double-counted in calibration and in the
+// people analytics.
+//
+// It is the one action in the module shaped to provoke exactly that - `addReviewees` is explicitly
+// O(headcount), so the button sits unresponsive for seconds, which is when people press it again, and
+// web/src/api.ts deliberately neither retries nor dedupes a POST.
+//
+// Claiming the launch first means the loser stops on the guard having done no work; `review_cycle_emp_idx` is
+// the backstop under the sibling path that stays racy by nature (`:addReviewees` on an ACTIVE cycle).
+describe("review cycle: launching is claimed exactly once", () => {
+  it("opens one review per person when the same cycle is launched twice at once", async () => {
+    const actor = await seedActor();
+    const reviewee = await seedActor();
+    const cycle = await createReviewCycle(deps, actor, { name: "H2 2026", period_start: "2026-07-01", period_end: "2026-12-31" });
+
+    const settled = await Promise.allSettled([
+      launchReviewCycle(deps, actor, cycle.uuid, [`employees/${reviewee.employeeId}`]),
+      launchReviewCycle(deps, actor, cycle.uuid, [`employees/${reviewee.employeeId}`]),
+    ]);
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = settled.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason?.message ?? refused.reason)).toMatch(/no longer a draft|only a draft/);
+
+    const rows = await deps.db.select().from(schema.reviews).where(eq(schema.reviews.cycleId, cycle.uuid));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.employeeId).toBe(reviewee.employeeId);
+
+    const after = (await deps.db.select().from(schema.reviewCycles).where(eq(schema.reviewCycles.uuid, cycle.uuid)))[0]!;
+    expect(after.state).toBe("ACTIVE");
+  });
+
+  it("refuses a second review for one person in one cycle at the database", async () => {
+    // The index is the invariant itself, independent of which caller path reaches it: `addReviewees` is the
+    // only writer of this table and opens at most one review per person per cycle.
+    const actor = await seedActor();
+    const reviewee = await seedActor();
+    const { cycle } = await launchFor(actor, reviewee.employeeId!, "H1 2027");
+    let threw: unknown = null;
+    try {
+      await deps.db.insert(schema.reviews).values({ uuid: genId(), code: `dup-${genId().slice(0, 4)}`, cycleId: cycle.uuid, employeeId: reviewee.employeeId! });
+    } catch (e) { threw = e; }
+    expect(threw, "a second review for one person in one cycle must be refused by the index").not.toBeNull();
+    // Asserted through the MATCHER, not the message: drizzle wraps every failed statement in a
+    // DrizzleQueryError whose own message is just "Failed query: <sql>", and the constraint text lives only in
+    // the `cause` chain - which is the whole reason lib/errors.ts reads errors through `errorChainText`. This
+    // is also what middleware/errorHandler.ts turns into a 409, so the test pins the path the app takes.
+    expect(isReviewDuplicate(threw)).toBe(true);
   });
 });

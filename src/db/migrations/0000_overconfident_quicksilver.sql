@@ -319,6 +319,7 @@ CREATE UNIQUE INDEX `attendance_sessions_code_unique` ON `attendance_sessions` (
 CREATE INDEX `attendance_sessions_page_idx` ON `attendance_sessions` (`clock_in`,`uuid`);--> statement-breakpoint
 CREATE INDEX `att_emp_idx` ON `attendance_sessions` (`employee_id`,`clock_in`,`uuid`);--> statement-breakpoint
 CREATE INDEX `att_open_idx` ON `attendance_sessions` (`clock_out`);--> statement-breakpoint
+CREATE UNIQUE INDEX `att_open_emp_idx` ON `attendance_sessions` (`employee_id`) WHERE "attendance_sessions"."clock_out" is null and "attendance_sessions"."superseded_by" is null;--> statement-breakpoint
 CREATE TABLE `audit_log` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1898,6 +1899,7 @@ CREATE UNIQUE INDEX `reviews_code_unique` ON `reviews` (`code`);--> statement-br
 CREATE INDEX `reviews_page_idx` ON `reviews` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `rev_cycle_idx` ON `reviews` (`cycle_id`);--> statement-breakpoint
 CREATE INDEX `rev_emp_idx` ON `reviews` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
+CREATE UNIQUE INDEX `review_cycle_emp_idx` ON `reviews` (`cycle_id`,`employee_id`);--> statement-breakpoint
 CREATE TABLE `roles` (
 	`name` text PRIMARY KEY NOT NULL,
 	`label` text NOT NULL,

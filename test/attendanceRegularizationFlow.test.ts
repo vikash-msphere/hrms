@@ -10,9 +10,9 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { createRegularization, approveRegularization } from "../src/services/attendanceRegularizations";
-import { listSessions } from "../src/services/attendance";
+import { listSessions, clockIn, clockOut } from "../src/services/attendance";
 import type { ListScope } from "../src/domain/access";
-import { DEFAULT_ATTENDANCE } from "../src/domain/attendance";
+import { DEFAULT_ATTENDANCE, localDay } from "../src/domain/attendance";
 
 // Real-D1 (miniflare) flow test for the reimagined attendance correction: a regularization carries the whole
 // day's intended sessions; approving it supersedes that day's existing punches and writes the requested ones as
@@ -199,5 +199,70 @@ describe("attendance list: the window and the page are bound in SQL", () => {
     await deps.db.update(schema.attendanceSessions).set({ supersededBy: reg.uuid }).where(eq(schema.attendanceSessions.uuid, supersede.uuid));
     const { items: live } = await listSessions(deps, ALL, 100);
     expect(live.map((s) => s.uuid)).not.toContain(supersede.uuid);
+  });
+});
+
+// ---- Correcting a day you are still clocked in on must not lock the clock ------------------------------------
+//
+// A regularization supersedes the day's punches selected by `clock_in`, an OPEN session among them included,
+// and writes only CLOSED corrected pairs in their place - so the superseded row keeps `clock_out` null for
+// good. `openSessionFor` gates both punches and was the one reader of this table that did not filter
+// `superseded_by` (every other one does: `listSessions` here, compOff, peopleAnalytics, and the loss-of-pay
+// assemblers in payroll and settlements). Counted as open, that dead row meant:
+//
+//   - `clockIn` answered "already clocked in" FOREVER - the person could never punch again,
+//   - and loss of pay is derived from punches, so every subsequent working day was docked as a full absence,
+//   - while `clockOut` appeared to release it only by writing `clock_out` onto a row every derived reader
+//     ignores, discarding the punch.
+//
+// No race is needed to reach it: correcting today's morning punch while still at work is enough.
+describe("attendance: a superseded open session does not count as being clocked in", () => {
+  const noFence = { ip: null, allowList: undefined };
+
+  it("lets the employee clock in again after a correction supersedes their open session", async () => {
+    const actor = await seedActor();
+    const open = await clockIn(deps, actor, noFence);
+    expect(open.clockOut).toBeNull();
+
+    // The day the punch BELONGS to is its org-local one, which is what the supersede query matches on
+    // (`localDay`) - a punch late in the UTC evening is already tomorrow in Asia/Kolkata, so reading its UTC
+    // day here would target a day with nothing on it. Same distinction domain/attendance.ts#utcDay sets out.
+    const day = localDay(+new Date(open.clockIn), DEFAULT_ATTENDANCE.timezone);
+    const reg = await createRegularization(deps, actor, {
+      date: day,
+      sessions: [{ clock_in: `${day}T03:30:00.000Z`, clock_out: `${day}T07:30:00.000Z` }],
+      reason: "clocked in at the wrong time",
+    });
+    await approveRegularization(deps, actor, reg.uuid);
+
+    // The open punch was superseded and still carries a null clock_out - that is the shape of the trap.
+    const dead = (await deps.db.select().from(schema.attendanceSessions).where(eq(schema.attendanceSessions.uuid, open.uuid)))[0]!;
+    expect(dead.supersededBy).toBe(reg.uuid);
+    expect(dead.clockOut).toBeNull();
+
+    // ...and it must not read as "clocked in". Before the filter this threw "already clocked in", permanently.
+    const again = await clockIn(deps, actor, noFence);
+    expect(again.uuid).not.toBe(open.uuid);
+    expect(again.supersededBy).toBeNull();
+  });
+
+  it("refuses a second concurrent punch instead of leaving two open sessions", async () => {
+    // `clockIn` reads "is anything open" and then inserts, which is two statements - a double-tapped button
+    // (or a phone and a laptop) passes the same check twice. `att_open_emp_idx` is what stops both rows
+    // existing; without it the second row is orphaned the moment the first is clocked out, and the employee
+    // is in the same permanent lockout as above. The answer is the one the pre-read gives in words, not a 500.
+    const actor = await seedActor();
+    const [first, second] = await Promise.allSettled([clockIn(deps, actor, noFence), clockIn(deps, actor, noFence)]);
+    const settled = [first, second];
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = settled.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason?.message ?? refused.reason)).toContain("already clocked in");
+
+    const rows = await deps.db.select().from(schema.attendanceSessions).where(eq(schema.attendanceSessions.employeeId, actor.employeeId!));
+    expect(rows.filter((s) => s.clockOut === null && s.supersededBy === null)).toHaveLength(1);
+
+    // And the survivor is a real, closable session rather than an orphan.
+    const closed = await clockOut(deps, actor, noFence);
+    expect(closed.clockOut).not.toBeNull();
   });
 });

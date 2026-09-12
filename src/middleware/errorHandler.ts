@@ -3,8 +3,8 @@ import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
 import {
   AppError, aborted, alreadyExists, errorChainText, forbidden, invalidArgument, isAssetTagCollision,
-  isCardSeqCollision, isCodeCollision, isEmployeeNumberCollision, isShiftAssignmentDuplicate, notFound,
-  publicPath, resourceExhausted, unauthenticated,
+  isCardSeqCollision, isCodeCollision, isEmployeeNumberCollision, isReviewDuplicate, isShiftAssignmentDuplicate,
+  notFound, publicPath, resourceExhausted, unauthenticated,
 } from "../lib/errors";
 
 // Which fields a validation failure was about, and what was wrong with each.
@@ -125,6 +125,11 @@ export const errorHandler = (err: Error, c: Context) => {
           // than surfacing SQLite's constraint text as a 500.
           : isShiftAssignmentDuplicate(err)
             ? alreadyExists("that employee is already rostered on that day").toProblem(instance)
+          // One review per person per cycle (`review_cycle_emp_idx`). `addReviewees` checks first and says so
+          // in words; this catches the race that gets past the check - two `:addReviewees` calls on one
+          // active cycle - so the invariant answers 409 rather than SQLite's constraint text as a 500.
+          : isReviewDuplicate(err)
+            ? alreadyExists("someone in that list already has a review in this cycle; re-read the cycle and try again").toProblem(instance)
             : { type: "/errors/internal", title: "Internal Server Error", status: 500 };
   // Log any unexpected (non-AppError, non-Zod) failure server-side. The client body stays generic, but with
   // [observability] on this is the only trace of a 500 - without it a production 500 is undebuggable.

@@ -208,8 +208,29 @@ export async function goalCoverageFor(deps: Deps, cycleIds: string[]): Promise<M
 export async function launchReviewCycle(deps: Deps, actor: AppUser, id: string, employees: string[]) {
   const row = await getReviewCycle(deps, actor, id);
   if (row.state !== "DRAFT") throw failedPrecondition("only a draft cycle can be launched");
+  // CLAIM THE LAUNCH FIRST (guarded DRAFT -> ACTIVE), then open the reviews.
+  //
+  // The work used to come first and the flip was unguarded, so two concurrent launches both passed the read
+  // above and both ran `addReviewees` - which decides who is missing by READING the cycle's existing reviews,
+  // so both read an empty set and both inserted the whole roster. Everyone ends up with two review rows and
+  // two "your review is open" notices, and is counted twice in calibration and in the analytics.
+  //
+  // And this is the one action in the module shaped to provoke it: `addReviewees` is explicitly O(headcount)
+  // (see its own note), so the button sits unresponsive for seconds, which is when people press it again -
+  // and web/src/api.ts deliberately neither retries nor dedupes a POST.
+  //
+  // Claiming first means the loser stops on the guard having done NO work, rather than both racing through it
+  // and one of them merely winning the stamp afterwards. `review_cycle_emp_idx` is the backstop underneath,
+  // for the sibling path that stays racy by nature (`:addReviewees` on an already-ACTIVE cycle).
+  //
+  // If the fan-out then fails part-way the cycle is ACTIVE with some reviews open, which is recoverable in the
+  // UI (`addRevieweesToCycle` requires exactly that state) and is the better of the two failure modes: the old
+  // order could leave reviews opened and notices sent under a cycle still reading DRAFT.
+  const updated = (await deps.db.update(schema.reviewCycles)
+    .set({ state: "ACTIVE", updatedAt: new Date() })
+    .where(and(eq(schema.reviewCycles.uuid, id), eq(schema.reviewCycles.state, "DRAFT"))).returning())[0];
+  if (!updated) throw failedPrecondition("the cycle is no longer a draft");
   const { goals } = await addReviewees(deps, row, employees, actor);
-  const updated = (await deps.db.update(schema.reviewCycles).set({ state: "ACTIVE", updatedAt: new Date() }).where(eq(schema.reviewCycles.uuid, id)).returning())[0]!;
   await audit(deps, actor, "review-cycle.launch", "review-cycles", id, stateMeta(row.state, "ACTIVE", {
     fields: employees.slice(0, 12),
     // Launching moves goals onto the cycle, which is a write nobody asked for by name - the trail says so.

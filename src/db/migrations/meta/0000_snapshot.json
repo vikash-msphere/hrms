@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "817403cc-f6a8-4724-ac28-ae2245a2f2b5",
+  "id": "00e3025c-88f2-44d7-8a09-7f17dbe890db",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -2339,6 +2339,14 @@
             "clock_out"
           ],
           "isUnique": false
+        },
+        "att_open_emp_idx": {
+          "name": "att_open_emp_idx",
+          "columns": [
+            "employee_id"
+          ],
+          "isUnique": true,
+          "where": "\"attendance_sessions\".\"clock_out\" is null and \"attendance_sessions\".\"superseded_by\" is null"
         }
       },
       "foreignKeys": {
@@ -13808,6 +13816,14 @@
             "uuid"
           ],
           "isUnique": false
+        },
+        "review_cycle_emp_idx": {
+          "name": "review_cycle_emp_idx",
+          "columns": [
+            "cycle_id",
+            "employee_id"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {

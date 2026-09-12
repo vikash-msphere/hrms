@@ -6,7 +6,7 @@ import type { ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
-import { invalidArgument, failedPrecondition, clockNetworkFence } from "../lib/errors";
+import { invalidArgument, failedPrecondition, clockNetworkFence, isOpenAttendanceCollision } from "../lib/errors";
 import { parseIpAllowList, ipMatchesAny } from "../lib/ipAllow";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, localDay, localMinutes } from "../domain/attendance";
 import { getSettingValue } from "./settings";
@@ -42,11 +42,35 @@ export async function listSessions(deps: Deps, scope: ListScope, maxPageSize: nu
   });
 }
 
+// The caller's LIVE open session, or undefined. Both punches gate on it, so it decides whether a person can
+// clock in at all.
+//
+// SUPERSEDED PUNCHES ARE NOT PUNCHES, and this was the one reader in the app that did not say so. Every other
+// one filters it - `listSessions` directly above, services/compOff.ts, services/peopleAnalytics.ts, and the
+// loss-of-pay assemblers in services/payroll.ts and services/settlements.ts, whose comment asserts that
+// "every other reader of this table already filters it (services/attendance.ts, ...)". True of the list in
+// this file; not true of this function.
+//
+// It is reachable with no race at all. An approved regularization supersedes the day's punches selected by
+// `clock_in` with `superseded_by is null` (services/attendanceRegularizations.ts) - an OPEN session among them
+// included - and writes only closed corrected pairs in their place. So correcting a day you are still clocked
+// in on leaves a superseded row with `clock_out` still null, and unfiltered that row reads as "you are
+// clocked in" FOREVER: `clockIn` answers "already clocked in" on every later attempt, the person can never
+// punch again, and because loss of pay is derived from punches, every subsequent working day is docked as a
+// full absence with nothing on screen explaining it. `clockOut` appears to release it only by writing
+// `clock_out` onto a row that every derived reader ignores, so the punch is discarded.
+//
+// The partial unique index `att_open_emp_idx` matches these two columns exactly - one is the reader, the
+// other the backstop, and neither is sufficient alone.
 async function openSessionFor(deps: Deps, employeeId: string) {
   return (await deps.db
     .select()
     .from(schema.attendanceSessions)
-    .where(and(eq(schema.attendanceSessions.employeeId, employeeId), isNull(schema.attendanceSessions.clockOut)))
+    .where(and(
+      eq(schema.attendanceSessions.employeeId, employeeId),
+      isNull(schema.attendanceSessions.clockOut),
+      isNull(schema.attendanceSessions.supersededBy),
+    ))
     .limit(1))[0];
 }
 
@@ -103,10 +127,21 @@ export async function clockIn(deps: Deps, actor: AppUser, origin: PunchOrigin) {
   await assertPunchOrigin(deps, employeeId, at, origin);
   if (await openSessionFor(deps, employeeId)) throw failedPrecondition("already clocked in");
   // Allocated inside the retry: a shift change is everybody clocking in at once (codeAlloc.ts).
-  const row = (await withFreshCode(async () => deps.db
-    .insert(schema.attendanceSessions)
-    .values({ code: await allocOwnedCode(deps, schema.attendanceSessions, schema.attendanceSessions.employeeId, employeeId), employeeId, clockIn: new Date(at), source: "clock" })
-    .returning()))[0]!;
+  //
+  // The read above and this insert are two statements, so a second punch arriving between them passes the
+  // same check - `att_open_emp_idx` is what stops both rows existing. Translated to the answer the check
+  // above gives in words rather than surfacing as a 500: the caller is not wrong, they are already clocked
+  // in. See lib/errors.ts#isOpenAttendanceCollision for what two open rows actually cost.
+  let row: typeof schema.attendanceSessions.$inferSelect;
+  try {
+    row = (await withFreshCode(async () => deps.db
+      .insert(schema.attendanceSessions)
+      .values({ code: await allocOwnedCode(deps, schema.attendanceSessions, schema.attendanceSessions.employeeId, employeeId), employeeId, clockIn: new Date(at), source: "clock" })
+      .returning()))[0]!;
+  } catch (e) {
+    if (isOpenAttendanceCollision(e)) throw failedPrecondition("already clocked in");
+    throw e;
+  }
   return row;
 }
 

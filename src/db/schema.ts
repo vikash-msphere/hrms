@@ -1000,7 +1000,14 @@ export const reviews = sqliteTable("reviews", {
   goalsJson: text("goals_json"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ pageIdx: index("reviews_page_idx").on(t.createdAt, t.uuid), cycleIdx: index("rev_cycle_idx").on(t.cycleId), empIdx: index("rev_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
+}, (t) => ({ pageIdx: index("reviews_page_idx").on(t.createdAt, t.uuid), cycleIdx: index("rev_cycle_idx").on(t.cycleId), empIdx: index("rev_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
+  // ONE review per person per cycle, enforced by the DB. `addReviewees` reads which employees the cycle
+  // already covers and inserts the rest, which is a check-then-write: two concurrent launches of one cycle
+  // both read an empty set and both insert the whole roster. A duplicate review is not untidiness - the
+  // person is counted twice in calibration and in the analytics, sees two rows in their own list, and gets
+  // two "your review is open" notices. `review_feedback` has carried the same guard one level down
+  // (`rf_once_idx`) since it was written; this is the pair it was missing.
+  cycleEmpUniq: uniqueIndex("review_cycle_emp_idx").on(t.cycleId, t.employeeId) }));
 
 // A 360/peer feedback request on a review. Owned (code-scoped) by the AUTHOR - the nominee giving feedback -
 // so they see "feedback asked of me" via own-scope and submit it. The manager/HR nominate peers via the
@@ -2456,7 +2463,21 @@ export const attendanceSessions = sqliteTable("attendance_sessions", {
   note: text("note"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ pageIdx: index("attendance_sessions_page_idx").on(t.clockIn, t.uuid), empIdx: index("att_emp_idx").on(t.employeeId, t.clockIn, t.uuid), openIdx: index("att_open_idx").on(t.clockOut) }));
+}, (t) => ({ pageIdx: index("attendance_sessions_page_idx").on(t.clockIn, t.uuid), empIdx: index("att_emp_idx").on(t.employeeId, t.clockIn, t.uuid), openIdx: index("att_open_idx").on(t.clockOut),
+  // At most ONE LIVE open session per employee, enforced by the DB - the same shape as `comp_open_idx` and
+  // `pos_open_idx`, for the same reason. `clockIn` reads "is anything open" and then inserts, which is two
+  // statements, so two punches at once (a double-tapped button, a phone and a laptop) both saw nothing open
+  // and both wrote a row. `openSessionFor` then takes one of them arbitrarily and `clockOut` closes that one,
+  // leaving the other open for good: every later `clockIn` answers "already clocked in", so the person can
+  // never punch again - and loss of pay is derived from punches, so every subsequent working day is docked as
+  // a full absence.
+  //
+  // SUPERSEDED ROWS ARE OUTSIDE THE PREDICATE, and that half is load-bearing rather than tidy. An approved
+  // regularization supersedes the day's punches by `clock_in`, an OPEN session among them included, and it
+  // writes only closed corrected pairs - so the superseded row keeps `clock_out` null forever. Counted as
+  // open, it is the same permanent lockout reached with no race at all, just by correcting a day you are
+  // still clocked in on. `openSessionFor` filters the same two columns; this is the backstop under it.
+  openEmpUniq: uniqueIndex("att_open_emp_idx").on(t.employeeId).where(sql`${t.clockOut} is null and ${t.supersededBy} is null`) }));
 
 // Attendance regularization: an employee's request to correct a whole day's clock times (missed punch, wrong
 // time, extra break). `sessions` is the COMPLETE intended set of in/out pairs for the day. A manager (own

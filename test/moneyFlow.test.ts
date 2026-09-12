@@ -15,7 +15,7 @@ import { clearCache } from "../src/lib/cache";
 import { createRun, buildRunItems, transition, deleteRun, listRunItems, getRun, runStaleness, previewRunItemPayslip, publishRun } from "../src/services/payroll";
 import { createLoan, approveLoan, disburseLoan, recordLoanRepayment, repaidCreditStmt, resetLoanRepaymentStmts } from "../src/services/loans";
 import { recordBonus, unpaidBonuses } from "../src/services/bonuses";
-import { computeAndStoreEncashment, approveEncashment, cancelEncashment, approvedUnpaidEncashments } from "../src/services/leaveEncashments";
+import { computeAndStoreEncashment, approveEncashment, rejectEncashment, cancelEncashment, approvedUnpaidEncashments } from "../src/services/leaveEncashments";
 import { createReimbursement, approveReimbursement, approvedUnpaidReimbursements, payReimbursement, markReimbursementsPaidByRun, markReimbursementsSettledStmt } from "../src/services/reimbursements";
 import { computeAndStoreSettlement } from "../src/services/settlements";
 import { createSalaryStructure } from "../src/services/salaryStructures";
@@ -758,6 +758,36 @@ describe("leave encashment: approve debits the balance (atomic guarded decrement
     // A second cancel must NOT credit again (would be 14 -> phantom balance). It no-ops loudly.
     await expect(cancelEncashment(deps, actor, enc.uuid)).rejects.toThrow();
     expect(await balOf()).toBe(10); // credited exactly once
+  });
+
+  // REJECT IS GUARDED ON PENDING TOO, and it is the balance that pays for its absence.
+  //
+  // `rejectEncashment` read the row, checked PENDING in memory, then wrote REJECTED with no state in the
+  // WHERE - unlike the approve and cancel above it, which both guard and both say why. So a concurrent
+  // `:approve` could win its own guarded flip and DEBIT the leave days in between, and the unguarded write
+  // then stamped REJECTED over the approval with the days still gone. Nothing gives them back: cancel only
+  // credits when it moves an APPROVED row and refuses a REJECTED one outright. The request reads as cleanly
+  // declined while encashable leave - money - has silently vanished.
+  it("cannot reject an encashment that was approved underneath it, leaving the balance debited", async () => {
+    const emp = await seedEmployee();
+    const actor = await seedActor(emp);
+    await seedComp(emp, { basePay: 30000 });
+    const lt = genId();
+    await deps.db.insert(schema.leaveTypes).values({ uuid: lt, code: short("lt"), name: "Earned", encashable: true, minBalanceRetainedDays: 0 });
+    await deps.db.insert(schema.leaveBalances).values({ uuid: genId(), code: short("lb"), employeeId: emp, leaveTypeId: lt, balanceDays: 10 });
+    const balOf = async () => (await deps.db.select().from(schema.leaveBalances).where(and(eq(schema.leaveBalances.employeeId, emp), eq(schema.leaveBalances.leaveTypeId, lt))))[0]!.balanceDays;
+
+    const enc = await computeAndStoreEncashment(deps, actor, { employee: `employees/${emp}`, leave_type: `leave-types/${lt}`, days: 4 });
+    await approveEncashment(deps, actor, enc.uuid); // wins: APPROVED, balance 10 -> 6
+    // The reject arrives holding the PENDING it read a moment ago. It must lose on the guard, not overwrite.
+    await expect(rejectEncashment(deps, actor, enc.uuid)).rejects.toThrow(/no longer pending|not pending/);
+
+    const row = (await deps.db.select().from(schema.leaveEncashments).where(eq(schema.leaveEncashments.uuid, enc.uuid)))[0]!;
+    expect(row.state).toBe("APPROVED"); // not stamped over
+    expect(await balOf()).toBe(6);
+    // And the days are still recoverable, which is the property the stranded REJECTED row destroyed.
+    await cancelEncashment(deps, actor, enc.uuid);
+    expect(await balOf()).toBe(10);
   });
 });
 

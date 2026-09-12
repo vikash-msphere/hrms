@@ -322,8 +322,19 @@ export async function approveEncashment(deps: Deps, actor: AppUser, id: string) 
 export async function rejectEncashment(deps: Deps, actor: AppUser, id: string) {
   const row = await getEncashment(deps, actor, id);
   if (row.state !== "PENDING") throw failedPrecondition("encashment is not pending");
+  // Guard the flip on PENDING, like the approve and cancel beside it - and here it is the balance that pays
+  // for its absence. The check above is a read, so a concurrent `:approve` can win its own guarded flip and
+  // DEBIT the employee's leave days in between; an unguarded write then stamped REJECTED over the approval
+  // and the days stayed debited. Nothing gives them back: `cancelEncashment` only credits when it moves an
+  // APPROVED row, and it refuses a REJECTED one outright. So the request reads as cleanly declined while the
+  // leave - which is encashable, i.e. money - is simply gone, with an audit trail that says nothing happened.
+  //
+  // The other ordering was always safe (a reject that lands first leaves approve's guard matching no rows, and
+  // it 409s), which is exactly why this only ever went wrong in one direction and never in a test.
   const [updated] = await deps.db.update(schema.leaveEncashments)
-    .set({ state: "REJECTED", decidedBy: actor.uuid, updatedAt: new Date() }).where(eq(schema.leaveEncashments.uuid, id)).returning();
+    .set({ state: "REJECTED", decidedBy: actor.uuid, updatedAt: new Date() })
+    .where(and(eq(schema.leaveEncashments.uuid, id), eq(schema.leaveEncashments.state, "PENDING"))).returning();
+  if (!updated) throw failedPrecondition("encashment is no longer pending");
   await audit(deps, actor, "leave_encashment.reject", "leave-encashments", id, stateMeta(row.state, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
   await notify(deps, { recipient: row.employeeId, type: "encashment.rejected", title: "Leave encashment rejected", body: `Your encashment of ${row.days} day(s) was rejected.`, link: "leave-requests/encashments", subject: `leave-encashments/${id}`, actorId: actor.employeeId });
   return updated;

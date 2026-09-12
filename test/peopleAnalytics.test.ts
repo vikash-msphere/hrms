@@ -114,12 +114,20 @@ async function seed() {
     { uuid: genId(), code: `${A.code}-g3`, employeeId: A.uuid, title: "done", status: "completed", progress: 100, updatedAt: at("2026-06-20T00:00:00Z") },
   ]);
 
+  // TWO CYCLES, because that is the only way a person actually holds two reviews. `addReviewees` is the sole
+  // writer of this table and it opens at most one review per person per cycle, which `review_cycle_emp_idx`
+  // now enforces - so a fixture putting both in one cycle was modelling a state the app cannot produce.
+  // Neither measure below reads the cycle (both group by employee alone), so the assertions are unchanged.
   const cycle = genId();
-  await deps.db.insert(schema.reviewCycles).values({ uuid: cycle, code: "01", name: "H1 2026", state: "ACTIVE" });
+  const cycle2 = genId();
+  await deps.db.insert(schema.reviewCycles).values([
+    { uuid: cycle, code: "01", name: "H1 2026", state: "ACTIVE" },
+    { uuid: cycle2, code: "02", name: "H2 2026", state: "ACTIVE" },
+  ]);
   await deps.db.insert(schema.reviews).values([
     { uuid: genId(), code: `${A.code}-v1`, cycleId: cycle, employeeId: A.uuid, state: "SHARED", overallRating: 4, updatedAt: at("2026-06-25T00:00:00Z") },
     // Not shared yet: it must not become the person's rating, but it is still an open review.
-    { uuid: genId(), code: `${A.code}-v2`, cycleId: cycle, employeeId: A.uuid, state: "MANAGER", overallRating: 2, updatedAt: at("2026-06-26T00:00:00Z") },
+    { uuid: genId(), code: `${A.code}-v2`, cycleId: cycle2, employeeId: A.uuid, state: "MANAGER", overallRating: 2, updatedAt: at("2026-06-26T00:00:00Z") },
   ]);
 
   await deps.db.insert(schema.checkIns).values([
