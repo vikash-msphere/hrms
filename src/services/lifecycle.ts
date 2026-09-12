@@ -35,8 +35,15 @@ async function fetchRow(deps: Deps, table: Table, id: string): Promise<Row | und
 export { assertNotLocked };
 
 async function set(deps: Deps, table: Table, id: string, fields: Record<string, unknown>) {
-  await deps.db.update(table).set({ ...fields, updatedAt: new Date() }).where(eq(table.uuid, id));
-  return fetchRow(deps, table, id);
+  // `.returning()` rather than an UPDATE followed by a SELECT. The write already knows the row it produced, so
+  // reading it back was a second subrequest for bytes the database had just handed over - and this is the
+  // shared lane for :enable/:disable/:lock/:unlock across ~60 collections, so it is three subrequests per verb
+  // (fetch, update, refetch) against a per-invocation budget of 50 that this codebase counts carefully
+  // everywhere else. `setPublished` below already writes this way.
+  //
+  // Same answer on the empty case: zero rows means the row was hard-purged between the fetch above and this
+  // write, and `undefined` is exactly what the re-read returned for it.
+  return ((await deps.db.update(table).set({ ...fields, updatedAt: new Date() }).where(eq(table.uuid, id)).returning()) as Row[])[0];
 }
 
 // The three lifecycle verbs below record no meta, and that is the decision rather than an oversight: each

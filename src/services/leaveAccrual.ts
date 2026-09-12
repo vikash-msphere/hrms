@@ -5,7 +5,7 @@ import { computeAccrual, roundToIncrement } from "../domain/leave";
 import { allocOwnedCodeRuns } from "./codeAlloc";
 import { getSettingValue } from "./settings";
 import { orgToday, dayStartMs } from "./orgDay";
-import { runBatch, insertBatches, type BatchStmt } from "../lib/dbBatch";
+import { runBatchChecked, insertBatches, type CheckedStmt } from "../lib/dbBatch";
 import { refLeaveTypes } from "../lib/refData";
 import { audit } from "../lib/audit";
 
@@ -102,7 +102,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // month-boundary night would cost one per balance row. Because the write is an ABSOLUTE balance derived from
   // the snapshot above, and the snapshot is taken once for the whole org rather than per row, each update is
   // guarded on the balance it read (compare-and-set) - see the claim below.
-  const updates: BatchStmt[] = [];
+  const updates: CheckedStmt[] = [];
   // First-touch balance rows. PLANNED first, coded second, inserted with the batch - three passes rather than a
   // round-trip per row.
   //
@@ -146,12 +146,20 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         // money once those days are encashed. If the row moved, the claim matches nothing and the row is simply
         // left for the next nightly tick: lastAccrualYm is unchanged, so the same month is still owed and
         // accrues then off the fresh balance.
-        updates.push(
-          deps.db
+        // CHECKED, so the count below is what actually landed. The claim above is allowed to match nothing -
+        // that is the whole design, and the row is correctly left for the next tick - but `credited` was
+        // incremented here regardless, so the audit summary reported every balance this walk INTENDED to move
+        // rather than the ones it did. On the one nightly job that hands out encashable days, a number that
+        // over-reports in the healthy-looking direction is the wrong one to leave in the trail.
+        updates.push({
+          stmt: deps.db
             .update(schema.leaveBalances)
             .set({ balanceDays: newBalance, lastAccrualYm: newLastYm, updatedAt: new Date() })
-            .where(and(eq(schema.leaveBalances.uuid, existing.uuid), eq(schema.leaveBalances.balanceDays, existing.balanceDays))),
-        );
+            .where(and(eq(schema.leaveBalances.uuid, existing.uuid), eq(schema.leaveBalances.balanceDays, existing.balanceDays)))
+            .returning({ uuid: schema.leaveBalances.uuid }),
+          expect: 1,
+          label: existing.uuid,
+        });
         credited++;
       } else {
         if (add === 0 && newLastYm === null) continue; // employee hasn't started yet
@@ -197,7 +205,15 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // One atomic batch for the whole tick: the guarded updates plus any first-touch inserts, the latter split to
   // stay inside the D1 bound-parameter cap (insertBatches measures the real per-row parameter count rather
   // than guessing from the columns set).
-  await runBatch(deps.db, [...updates, ...insertBatches(newRows, (group) => deps.db.insert(schema.leaveBalances).values(group))]);
+  const lost = await runBatchChecked(deps.db, [...updates, ...insertBatches(newRows, (group) => deps.db.insert(schema.leaveBalances).values(group))]);
+  // A claim that matched nothing is a balance that moved under the snapshot - an approved leave request, an
+  // encashment - between the read at the top of this function and the write here. Nothing is wrong and nothing
+  // is retried: `last_accrual_ym` was not written, so the same month is still owed and accrues on the next tick
+  // off the fresh balance. It just did not happen TONIGHT, so it does not count as credited.
+  if (lost.length) {
+    console.warn(`[accrual] ${lost.length} balance(s) moved during the tick and were deferred to the next one`);
+    credited -= lost.length;
+  }
   // The nightly walk recorded NOTHING before this, and accrued leave is encashable - it is money that appears
   // on people's balances while they sleep, and "why do I have 14.5 days" had no answer anywhere in the app.
   //
