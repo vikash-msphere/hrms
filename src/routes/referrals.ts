@@ -2,7 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listReferrals, getReferral, createReferral, updateReferral, awardReferralBonusNow, type ReferralInput } from "../services/referrals";
-import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toReferralResource } from "../http/serialize";
 
@@ -58,7 +58,7 @@ export const referrals = collectionRoutes<ReferralInput, typeof schema.referrals
     download: {
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, RESUME);
-        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "resume") });
       },
     },
   },

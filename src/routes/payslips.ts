@@ -29,8 +29,8 @@ export const payslips = collectionRoutes({
     },
     download: {
       raw: async (c, id) => {
-        const { bytes } = await downloadPayslip(c.get("deps"), c.get("user"), id);
-        return c.body(bytes, 200, { "Content-Type": "application/octet-stream" });
+        const { bytes, fileName } = await downloadPayslip(c.get("deps"), c.get("user"), id);
+        return c.body(bytes, 200, { "Content-Type": "application/pdf", "Content-Disposition": contentDisposition("attachment", fileName) });
       },
     },
   },

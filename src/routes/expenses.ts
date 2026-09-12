@@ -7,7 +7,7 @@ import {
   submitExpense, approveExpense, rejectExpense, cancelExpense, payExpense,
   type ExpenseInput,
 } from "../services/expenses";
-import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toExpenseResource } from "../http/serialize";
 
@@ -95,7 +95,7 @@ export const expenses = collectionRoutes<ExpenseInput, typeof schema.expenses>({
     download: {
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, INVOICE);
-        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "invoice") });
       },
     },
   },

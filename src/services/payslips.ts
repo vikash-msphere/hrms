@@ -24,9 +24,18 @@ async function payslipBytes(deps: Deps, id: string) {
   return { row, bytes };
 }
 
+/** What the slip is called, off the period it was issued for. One derivation, because the two verbs below are
+ *  the SAME bytes and a copy saved from one should not be named differently from a copy saved from the other. */
+const payslipFileName = (row: { createdAt?: Date | number | null }, id: string) =>
+  `payslip-${row.createdAt ? new Date(row.createdAt).toISOString().slice(0, 10) : id}.pdf`;
+
+// `download` is the verb whose whole purpose is KEEPING a copy, and it was the one that named nothing: it
+// returned bytes alone, so routes/payslips.ts answered `application/octet-stream` with no
+// `Content-Disposition` at all, and a caller outside the SPA saved an extensionless file named after the
+// request URL. `preview` - which is not saving anything - carried the name the whole time.
 export async function downloadPayslip(deps: Deps, _actor: AppUser, id: string) {
-  const { bytes } = await payslipBytes(deps, id);
-  return { bytes };
+  const { row, bytes } = await payslipBytes(deps, id);
+  return { bytes, fileName: payslipFileName(row, id) };
 }
 
 // `payslips/<id>:preview` - the same bytes, served for INLINE viewing. A separate custom method (not a flag on
@@ -34,6 +43,5 @@ export async function downloadPayslip(deps: Deps, _actor: AppUser, id: string) {
 // self / my-dept / org-wide scope.
 export async function previewPayslip(deps: Deps, _actor: AppUser, id: string) {
   const { row, bytes } = await payslipBytes(deps, id);
-  const day = row.createdAt ? new Date(row.createdAt).toISOString().slice(0, 10) : id;
-  return { bytes, fileName: `payslip-${day}.pdf` };
+  return { bytes, fileName: payslipFileName(row, id) };
 }

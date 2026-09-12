@@ -43,3 +43,36 @@ export function saveBlob(blob: Blob, filename: string): void {
 export function saveBytes(bytes: BlobPart, filename: string, contentType: string): void {
   saveBlob(new Blob([bytes], { type: contentType }), filename);
 }
+
+/**
+ * The filename the SERVER asked a download to be saved under, from its `Content-Disposition`.
+ *
+ * WHY THE SERVER'S NAME WINS. For a stored attachment the server is the only side that knows what the file
+ * actually is: the row carries the name the uploader gave it and the content type it was stored under, and the
+ * caller here has neither. Every attachment download in the app passed its own invented name instead -
+ * `receipt-<token>`, `proof-<section>`, `resume-<name>`, `<field>-document` - none of which carries an
+ * EXTENSION, so a JPEG receipt was saved as a file the operating system had no idea how to open. The caller's
+ * name stays as the fallback, for the generated downloads (a payslip, a bank file) that have no stored row and
+ * name themselves correctly already.
+ *
+ * `filename*` (RFC 8187) is read first and is the one that survives a non-ASCII name; the quoted `filename`
+ * is the ASCII fallback every server also sends. Anything path-like is reduced to its last segment: the value
+ * is ultimately text somebody typed when they uploaded a file, and it is about to become `a.download`.
+ */
+export function filenameFromDisposition(header: string | null | undefined): string | undefined {
+  if (!header) return undefined;
+  const starred = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+  const quoted = /filename\s*=\s*"([^"]*)"/i.exec(header) ?? /filename\s*=\s*([^;]+)/i.exec(header);
+  let raw: string | undefined;
+  if (starred) {
+    // A malformed percent-escape throws rather than returning something; fall through to the ASCII form.
+    try {
+      raw = decodeURIComponent(starred[1]!.trim());
+    } catch {
+      raw = undefined;
+    }
+  }
+  raw ??= quoted?.[1]?.trim();
+  const name = raw?.split(/[/\\]/).pop()?.trim();
+  return name && name !== "." && name !== ".." ? name : undefined;
+}

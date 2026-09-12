@@ -15,7 +15,7 @@ import { getTaxDetails, setTaxDetails } from "../services/taxDetails";
 import { getNotificationPrefs, setNotificationPrefs } from "../services/notificationPrefs";
 import { computeProfileCompleteness } from "../services/profileCompleteness";
 import { uploadPhoto, clearPhoto, getPhoto, uploadSignature, clearSignature, getSignature } from "../services/employeePhoto";
-import { putAttachment, downloadAttachment, deleteAttachment } from "../services/attachments";
+import { putAttachment, downloadAttachment, deleteAttachment, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { identityDocSlot } from "../services/identityDetails";
 import { toEmployeeResource } from "../http/serialize";
@@ -134,7 +134,7 @@ async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "d
   const slot = identityDocSlot(field);
   if (action === "download") {
     const { bytes, row } = await downloadAttachment(deps, COL, id, slot);
-    return c.body(bytes, 200, { "Content-Type": row.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+    return c.body(bytes, 200, { "Content-Type": row.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(row, `${field}-document`) });
   }
   if (action === "upload") {
     const bytes = new Uint8Array(await requireCappedBody(c.req.raw));

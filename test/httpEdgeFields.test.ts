@@ -86,3 +86,37 @@ describe("Content-Disposition", () => {
     expect(plain(contentDisposition("attachment", '"""'))).toBe("download");
   });
 });
+
+// AND NOBODY HAND-WRITES THE HEADER.
+//
+// The module above exists because a file name is a value somebody typed, and quoting it is fiddly enough to
+// get wrong once. That argument only holds while every route goes through it - and seven did not: they answered
+// `"Content-Disposition": "attachment"` with no name at all, while the attachment row they had just read
+// carried one. A browser handed a nameless disposition falls back to the request URL's last segment, which for
+// a custom method is `<wire token>:downloadReceipt`: an extensionless file named after a token.
+//
+// Source-level, because the property is "nobody writes a second one" - the same shape as
+// test/downloadLane.test.ts on the client side. A literal is permitted only where the name is a fixed ASCII
+// constant the module itself wrote (the two design previews), which is a header with nothing variable in it.
+describe("every download names its file through the one helper", () => {
+  const routes = import.meta.glob("../src/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+
+  it("no route hand-writes a Content-Disposition around a value", () => {
+    const offenders: string[] = [];
+    for (const [path, src] of Object.entries(routes)) {
+      if (path.endsWith("http/contentDisposition.ts")) continue;
+      for (const line of src.split("\n")) {
+        if (!/"Content-Disposition"\s*:/.test(line)) continue;
+        if (/contentDisposition\(|attachmentDisposition\(/.test(line)) continue;
+        // A constant the module wrote itself, with no interpolation: `filename="letterhead-preview.pdf"`.
+        if (/"Content-Disposition"\s*:\s*'[^'`${}]*filename="[^"]+"'/.test(line)) continue;
+        offenders.push(`${path.replace(/^\.\.\//, "")}: ${line.trim().slice(0, 90)}`);
+      }
+    }
+    expect(
+      offenders,
+      "build it with contentDisposition()/attachmentDisposition() - a bare `attachment` makes the browser " +
+        "name the file after the request URL, and an interpolated name needs the quoting this module does",
+    ).toEqual([]);
+  });
+});

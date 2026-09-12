@@ -6,7 +6,7 @@ import {
   verifyTaxDeclaration, rejectTaxDeclaration,
   type TaxDeclarationInput,
 } from "../services/taxDeclarations";
-import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toTaxDeclarationResource } from "../http/serialize";
 
@@ -59,7 +59,7 @@ export const taxDeclarations = collectionRoutes<TaxDeclarationInput, typeof sche
     download: {
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, PROOF);
-        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "proof") });
       },
     },
   },

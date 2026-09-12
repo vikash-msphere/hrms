@@ -342,7 +342,7 @@ export function patch<T>(path: string, body: Record<string, unknown>, etag?: str
 }
 
 import { coalescedGet, coalescedGetDetailed, NOT_MODIFIED } from "@/lib/getCoalescer";
-import { saveBlob } from "@/lib/download";
+import { saveBlob, filenameFromDisposition } from "@/lib/download";
 
 // ---- AEP-shaped helpers -----------------------------------------------------
 
@@ -552,9 +552,10 @@ export function invoke<T>(path: string, verb: string, etag?: string, body?: Reco
 
 type BinaryOpts = { verb?: string; params?: Record<string, string>; body?: Record<string, unknown>; signal?: AbortSignal };
 
-/** POST a binary-returning custom method and hand back the raw bytes. Shared by `download` (save to disk) and
- *  `blobUrl` (view inline), so both speak the same auth/CSRF/Problem-error contract. */
-async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
+/** POST a binary-returning custom method and hand back the raw bytes, plus the name the server asked it to be
+ *  saved under when it sent one (see lib/download.ts#filenameFromDisposition). Shared by `download` (save to
+ *  disk) and `blobUrl` (view inline), so both speak the same auth/CSRF/Problem-error contract. */
+async function postBinary(path: string, opts: BinaryOpts): Promise<{ blob: Blob; filename?: string }> {
   // Binary methods are POSTs, so a simulation cannot carry them (the server is read-only there). Refuse with
   // the same message the other writes get rather than letting a download 403 opaquely.
   guardReadOnly(`/${path}`, { method: "POST" });
@@ -590,13 +591,13 @@ async function postBinary(path: string, opts: BinaryOpts): Promise<Blob> {
     bailOnBrokenSimulation(res.status, problem);
     throw new ApiError(problem?.detail ?? problem?.title ?? res.statusText, res.status, problem);
   }
-  return res.blob();
+  return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("Content-Disposition")) };
 }
 
 /** Fetch a binary custom method and hand back the bytes themselves - for a renderer that reads the file
  *  (pdf.js) rather than handing it to the browser's own viewer, so no object URL is minted or leaked. */
-export function blobOf(path: string, opts: BinaryOpts = {}): Promise<Blob> {
-  return postBinary(path, opts);
+export async function blobOf(path: string, opts: BinaryOpts = {}): Promise<Blob> {
+  return (await postBinary(path, opts)).blob;
 }
 
 /**
@@ -608,7 +609,7 @@ export function blobOf(path: string, opts: BinaryOpts = {}): Promise<Blob> {
  * revoke here, so nothing to get wrong. Use `blobUrl` for big things a viewer streams, like a PDF.
  */
 export async function dataUrl(path: string, opts: BinaryOpts = {}): Promise<string> {
-  const blob = await postBinary(path, opts);
+  const { blob } = await postBinary(path, opts);
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("could not read the image"));
@@ -620,10 +621,18 @@ export async function dataUrl(path: string, opts: BinaryOpts = {}): Promise<stri
 /** Fetch a binary custom method for INLINE viewing and return an object URL (feed it to an iframe).
  *  The caller owns the URL and must `URL.revokeObjectURL` it when the viewer closes. */
 export async function blobUrl(path: string, opts: BinaryOpts = {}): Promise<string> {
-  return URL.createObjectURL(await postBinary(path, opts));
+  return URL.createObjectURL((await postBinary(path, opts)).blob);
 }
 
-/** Download a binary via a `:download` (or custom `verb`) method and trigger a browser save. */
+/**
+ * Download a binary via a `:download` (or custom `verb`) method and trigger a browser save.
+ *
+ * `filename` is the FALLBACK. When the response says what the file should be called, that wins - it is the
+ * only side that knows what a stored attachment actually is (the uploader's own name, and the extension its
+ * content type implies), and the names passed here for those are extensionless by construction. See
+ * lib/download.ts#filenameFromDisposition.
+ */
 export async function download(path: string, filename: string, opts: BinaryOpts = {}): Promise<void> {
-  saveBlob(await postBinary(path, opts), filename);
+  const { blob, filename: served } = await postBinary(path, opts);
+  saveBlob(blob, served ?? filename);
 }

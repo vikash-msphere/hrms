@@ -6,7 +6,7 @@ import {
   approveLeaveRequest, rejectLeaveRequest, cancelLeaveRequest,
   type LeaveRequestInput,
 } from "../services/leaveRequests";
-import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toLeaveRequestResource } from "../http/serialize";
 
@@ -68,7 +68,7 @@ export const leaveRequests = collectionRoutes<LeaveRequestInput, typeof schema.l
     download: {
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, DOCUMENT);
-        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "leave-document") });
       },
     },
   },

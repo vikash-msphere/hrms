@@ -2,7 +2,7 @@ import { z } from "zod";
 import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listCandidates, getCandidate, createCandidate, updateCandidate, type CandidateInput } from "../services/ats";
-import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toCandidateResource } from "../http/serialize";
 
@@ -54,7 +54,7 @@ export const candidates = collectionRoutes<CandidateInput, typeof schema.candida
     download: {
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, RESUME);
-        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "resume") });
       },
     },
   },

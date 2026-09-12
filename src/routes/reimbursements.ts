@@ -6,7 +6,7 @@ import {
   approveReimbursement, rejectReimbursement, cancelReimbursement, payReimbursement,
   type ReimbursementInput,
 } from "../services/reimbursements";
-import { putAttachment, downloadAttachment, attachedObjectIds } from "../services/attachments";
+import { putAttachment, downloadAttachment, attachedObjectIds, attachmentDisposition } from "../services/attachments";
 import { requireCappedBody } from "../services/documentsCommon";
 import { toReimbursementResource } from "../http/serialize";
 
@@ -60,7 +60,7 @@ export const reimbursements = collectionRoutes<ReimbursementInput, typeof schema
     download: {
       raw: async (c, id) => {
         const { bytes, row: att } = await downloadAttachment(c.get("deps"), COL, id, RECEIPT);
-        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": "attachment" });
+        return c.body(bytes, 200, { "Content-Type": att.contentType ?? "application/octet-stream", "Content-Disposition": attachmentDisposition(att, "receipt") });
       },
     },
   },

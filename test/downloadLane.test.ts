@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
+import { filenameFromDisposition } from "@/lib/download";
 
 // ONE WAY A FILE REACHES THE DISK.
 //
@@ -42,6 +43,42 @@ describe("blob downloads go through one helper", () => {
   it("blobUrl stays a URL, not a download", () => {
     const api = Object.entries(files).find(([p]) => p.endsWith("web/src/api.ts"))?.[1] ?? "";
     expect(api).toMatch(/export async function blobUrl/);
-    expect(api).toMatch(/saveBlob\(await postBinary/);
+    expect(api).toMatch(/saveBlob\(blob, served \?\? filename\)/);
+  });
+});
+
+// WHO DECIDES WHAT THE SAVED FILE IS CALLED.
+//
+// For a stored attachment, only the server knows: the row carries the name the uploader gave it and the
+// content type it was stored under. Every attachment download in the SPA passed its own invented name instead
+// - `receipt-<token>`, `proof-<section>`, `resume-<name>`, `<field>-document` - and not one of those carries
+// an EXTENSION, so a JPEG receipt was saved as a file the operating system could not open. The caller's name
+// is now the fallback and the response's `Content-Disposition` wins.
+describe("the server's filename wins over the caller's fallback", () => {
+  it("reads the RFC 8187 starred parameter, which is the one that survives a non-ASCII name", () => {
+    expect(filenameFromDisposition(`attachment; filename="____ ___.pdf"; filename*=UTF-8''%E0%A4%B5%E0%A5%87%E0%A4%A4%E0%A4%A8.pdf`)).toBe("वेतन.pdf");
+  });
+
+  it("reads the quoted ASCII parameter when there is no starred one", () => {
+    expect(filenameFromDisposition('attachment; filename="Q3 receipt.pdf"')).toBe("Q3 receipt.pdf");
+    expect(filenameFromDisposition("attachment; filename=plain.pdf")).toBe("plain.pdf");
+  });
+
+  it("answers undefined when the header says nothing, so the caller's fallback stands", () => {
+    // The shape seven routes used to send, and the shape a route with nothing to name still sends.
+    expect(filenameFromDisposition("attachment")).toBeUndefined();
+    expect(filenameFromDisposition(null)).toBeUndefined();
+    expect(filenameFromDisposition("inline")).toBeUndefined();
+  });
+
+  // The value is text somebody typed when they uploaded a file, and it is about to become `a.download`.
+  it("keeps only the last path segment, and refuses a name that is only dots", () => {
+    expect(filenameFromDisposition('attachment; filename="../../etc/passwd"')).toBe("passwd");
+    expect(filenameFromDisposition(`attachment; filename*=UTF-8''a%2Fb%5Cc.pdf`)).toBe("c.pdf");
+    expect(filenameFromDisposition('attachment; filename=".."')).toBeUndefined();
+  });
+
+  it("falls back to the ASCII parameter rather than throwing on a malformed escape", () => {
+    expect(filenameFromDisposition(`attachment; filename="ok.pdf"; filename*=UTF-8''%E0%A4`)).toBe("ok.pdf");
   });
 });
