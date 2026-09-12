@@ -48,31 +48,83 @@ type Budget = { name: string; limit: number; matches: (method: string, path: str
 /** `/v1/<collection>[:verb]` or `/v1/<collection>/<id>:verb` - the custom-method spellings, verb only. */
 const verbIs = (path: string, verb: string) => path.endsWith(`:${verb}`);
 
+/**
+ * The same, pinned to ONE collection. Needed wherever a verb's SPELLING does not say what the request costs:
+ * `:preview` renders a letterhead sample on `letterheads` and hands back an object stored in R2 on
+ * `payslips`, and those two do not belong in the same budget.
+ */
+const itemVerbIs = (path: string, collection: string, verb: string) =>
+  path.startsWith(`/v1/${collection}/`) && path.endsWith(`:${verb}`);
+
+/**
+ * Sub-requests one batch envelope may carry. The route's schema caps its array at this, and the limiter below
+ * clamps the cost it charges to it - ONE constant, because the two disagreeing is a client that can either
+ * spend a budget it was never allowed to use or slip work past the one that is meant to bound it.
+ *
+ * Lives here rather than in routes/batch.ts to keep the import one-way: that route imports the app from
+ * index.ts, which mounts this middleware, so the constant travelling the other way would close the cycle.
+ */
+export const BATCH_MAX_SUB_READS = 20;
+
 const BUDGETS: Budget[] = [
   {
     // DOCUMENT RENDERING. Each of these builds a PDF in the isolate (lib/pdf.ts, lib/letterPdf.ts) - the most
     // CPU any single request in the app spends, and the reason wrangler.toml raises cpu_ms at all. A loop
     // here is what exhausts an invocation budget rather than a database.
+    //
+    // THE LIST HAS TO BE THE WHOLE LIST, and it was not. Written from the personal-documents surfaces, it
+    // named six spellings and missed every PDF built anywhere else in the app - so five renderers, each one a
+    // `renderLetterPdf` / `renderPayslipPdf` call in the isolate and therefore exactly what this budget
+    // exists to bound, fell through to the catch-all at 3000: seventy-five times the ceiling written for
+    // them, on the one class of request that can exhaust an invocation rather than a database.
+    //
+    //   reviews/<id>:pdf                  services/reviews.ts       renderLetterPdf
+    //   offers/<id>:letter                services/offerLetter.ts   renderLetterPdf
+    //   personal-documents/<id>:print     services/letterPrint.ts   renderLetterPdf
+    //   letterheads/<id>:preview          services/letterheads.ts   renderLetterPdf
+    //   payroll-runs/<id>:previewPayslip  services/payroll.ts       renderPayslipPdf
+    //
+    // `payslips/<id>:preview` and `payslips/<id>:download` deliberately stay OUT, which is why the letterhead
+    // entry is collection-qualified and they are not caught by a bare `:preview`: those two read the slip the
+    // publish job already rendered out of R2 and decrypt it. That is an object read, and charging it here
+    // would put an employee opening their own payslips under a budget sized for PDF construction.
     name: "render",
     limit: 40,
     matches: (_m, p) =>
       verbIs(p, "generateLetter") || verbIs(p, "generateForm16") || verbIs(p, "previewLetter") ||
-      verbIs(p, "previewTemplate") || verbIs(p, "bankFile") || verbIs(p, "statutoryReport"),
+      verbIs(p, "previewTemplate") || verbIs(p, "bankFile") || verbIs(p, "statutoryReport") ||
+      verbIs(p, "pdf") || verbIs(p, "letter") || verbIs(p, "print") || verbIs(p, "previewPayslip") ||
+      itemVerbIs(p, "letterheads", "preview"),
     rate: keyedCounter(40),
   },
   {
     // THE BATCH TRANSPORT. One envelope carries up to MAX_REQUESTS sub-reads (routes/batch.ts), each of which
-    // re-enters the whole chain. The SPA coalesces essentially every GET through here, so the budget is the
-    // loosest of the three - but it is still the single most leveraged call in the API.
+    // re-enters the whole chain. The SPA coalesces essentially every GET through here, so this is the single
+    // most leveraged call in the API.
+    //
+    // COUNTED IN SUB-READS, NOT IN ENVELOPES, which is the whole point of the number below. Charged one unit
+    // per envelope, the budget was a count of envelopes whatever work they carried - so it bounded nothing on
+    // the fan-out side (600 full envelopes is 12,000 reads) while being the TIGHTEST ceiling anywhere on the
+    // SPA's read path: the same reads issued one per request are charged to `api` at 3000, so routing them
+    // through the transport that exists to cost LESS made them run out of budget five times sooner. A client
+    // must never be penalised for coalescing. `rateLimit` below therefore charges each envelope
+    // `requests.length`, and this limit is a read count directly comparable with `api`'s.
+    //
+    // WHY 6000 AND NOT 3000. Parity with `api` is the principle; two things then say the transport's reads are
+    // worth more than a raw request's. A sub-read is strictly cheaper - the envelope pays one JWT verify and
+    // one HKDF derivation for all of them (routes/batch.ts), where twenty separate requests pay twenty of
+    // each. And the same concrete reason the `api` budget is sized generously applies double here: the browser
+    // suite drives the whole app as ONE caller against a single `wrangler dev` isolate with every Playwright
+    // worker sharing it, and the SPA sends nearly every read of that suite through this one path.
     //
     // LISTED BEFORE the fan-outs, and matched on the exact path rather than on its verb. `:run` is a verb
     // several collections use, and a `verbIs(p, "run")` test in the fan-out entry below matched
     // `/v1/batch:run` first - so the transport the whole SPA reads through was silently charged to the
     // tighter fan-out budget. First match wins, so the order here IS the behaviour.
     name: "batch",
-    limit: 600,
+    limit: 6000,
     matches: (m, p) => m === "POST" && p === "/v1/batch:run",
-    rate: keyedCounter(600),
+    rate: keyedCounter(6000),
   },
   {
     // CROSS-COLLECTION FAN-OUTS. One request becomes a decision plus a query per collection (search over ~60
@@ -104,11 +156,88 @@ const BUDGETS: Budget[] = [
   },
 ];
 
+/** The budget a request falls under. The last entry matches everything, so this never comes back undefined. */
+const budgetOf = (method: string, path: string): Budget => BUDGETS.find((b) => b.matches(method, path))!;
+
 /** Which budget a request falls under. Exported so a test can name the surfaces without re-deriving them. */
 export const budgetFor = (method: string, path: string): { name: string; limit: number } => {
-  const b = BUDGETS.find((x) => x.matches(method.toUpperCase(), path))!;
+  const b = budgetOf(method.toUpperCase(), path);
   return { name: b.name, limit: b.limit };
 };
+
+/** A budget this request spends from, and how many units of it. */
+type Charge = { budget: Budget; cost: number };
+
+/**
+ * Everything this request spends. ONE charge for every surface except the batch transport, whose envelope
+ * spends from two different kinds of budget.
+ *
+ * ITS OWN, denominated in SUB-READS rather than in envelopes - see the `batch` entry above for why an
+ * envelope cannot be one unit.
+ *
+ * AND THE BUDGET OF EACH EXPENSIVE SUB-READ IT CARRIES, which is the hole this closes. `rateLimit` skips the
+ * limiter outright for a re-dispatched sub-request (the `__sharedCtx` branch below) - right for the
+ * envelope's own count, since the sub-read was already charged on the way in, but it also meant a sub-read
+ * never touched the budget its OWN path matches. Every GET fan-out (`/v1/search`, `/v1/people-analytics`,
+ * `/v1/dashboard-summary`, `/v1/approvals-summary`, `/v1/activity-counts`) was therefore reachable through
+ * the transport at the batch budget's 6000 a minute instead of the fan-out budget's 120 - fifty times the
+ * ceiling written for the surfaces whose cost is a multiple of an ordinary read's. Nor was it a hole only an
+ * attacker would find: web/src/lib/getCoalescer.ts is a UNIVERSAL GET coalescer, so the SPA already sends all
+ * five through here, and the fan-out budget bound nobody who used the transport at all.
+ *
+ * THE CATCH-ALL IS NOT RE-CHARGED per sub-read, deliberately. The envelope already spends one unit per
+ * sub-read against `batch`, whose limit is a read count directly comparable with `api`'s, so charging both
+ * would bill one read twice and re-impose on coalescing exactly the penalty that sub-read costing removed.
+ * Only the narrow budgets - the ones batching could otherwise evade - are charged a second time.
+ *
+ * A sub-request the route will refuse without dispatching (a non-GET method, an unparseable path, one that
+ * normalises outside /v1) buys no work, so it is charged no surface budget. It still counts toward the
+ * envelope's own sub-read cost, which is the conservative direction.
+ *
+ * Reading the body here is safe and free: Hono caches the parsed JSON on the request, so the `zValidator` in
+ * routes/batch.ts gets the same object rather than a second parse, and nothing before this middleware
+ * (securityHeaders, dbContext, encodeWireIds, csrf, auth) touches the stream.
+ *
+ * A body that is missing, unparseable or the wrong shape charges ONE and falls through: the route's own
+ * validator is what refuses a malformed envelope, and a limiter that threw its own error here would answer
+ * 429 (or worse, 500) to what is really a 400 - a client told the wrong thing about why it failed.
+ */
+async function chargesFor(c: Parameters<MiddlewareHandler<AppEnv>>[0], budget: Budget): Promise<Charge[]> {
+  if (budget.name !== "batch") return [{ budget, cost: 1 }];
+  let subs: { method?: unknown; path?: unknown }[];
+  try {
+    const body = (await c.req.json()) as { requests?: unknown } | null;
+    if (!Array.isArray(body?.requests)) return [{ budget, cost: 1 }];
+    // Clamped at the route's own cap: past it the envelope is refused by the validator anyway, so charging an
+    // arbitrarily large declared length would let a client spend somebody's whole window on one 400.
+    subs = body.requests.slice(0, BATCH_MAX_SUB_READS) as { method?: unknown; path?: unknown }[];
+  } catch {
+    return [{ budget, cost: 1 }];
+  }
+  // Insertion order is the order charged, and the envelope's own budget goes first: it is the budget of the
+  // request the client actually made, so it is the one named in the refusal when both are spent at once.
+  const charges = new Map<Budget, number>([[budget, subs.length]]);
+  const origin = new URL(c.req.url).origin;
+  for (const r of subs) {
+    // The same two tests routes/batch.ts applies before it dispatches anything, for the same reasons: GET
+    // only, and a path that still resolves inside /v1 once the URL parser has normalised it (a raw
+    // `startsWith` would take `/v1/../healthz` for a /v1 request).
+    if (String(r.method ?? "GET").toUpperCase() !== "GET") continue;
+    if (typeof r.path !== "string") continue;
+    let pathname: string;
+    try {
+      const u = new URL(r.path, origin);
+      if (u.origin !== origin || !u.pathname.startsWith("/v1/")) continue;
+      pathname = u.pathname;
+    } catch {
+      continue;
+    }
+    const sub = budgetOf("GET", pathname);
+    if (sub === budget || sub.name === "api") continue; // already covered by the envelope's own sub-read cost
+    charges.set(sub, (charges.get(sub) ?? 0) + 1);
+  }
+  return [...charges].map(([b, cost]) => ({ budget: b, cost }));
+}
 
 export const rateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
   // A batch SUB-REQUEST is not a request the caller made - it is a slice of the envelope that was already
@@ -128,12 +257,24 @@ export const rateLimit: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
   const path = new URL(c.req.url).pathname;
   const method = c.req.method.toUpperCase();
-  const budget = BUDGETS.find((b) => b.matches(method, path))!;
-  if (budget.rate.throttled(principalOf(user), Date.now())) {
+  const budget = budgetOf(method, path);
+  const principal = principalOf(user);
+  const now = Date.now();
+  // EVERY budget is charged before any of them decides the answer, so a refusal never leaves one of the
+  // others under-counted - a request that is over budget on one surface still did the work it declared on the
+  // rest. The loop holds no await, which is what lets `retryAfterSeconds` be read off the counter that
+  // refused: that slot is one per counter (lib/isolateRate.ts), so it is this request's window only while
+  // nothing else has run in between.
+  const charges = await chargesFor(c, budget);
+  let refused: Budget | undefined;
+  for (const ch of charges) {
+    if (ch.budget.rate.throttled(principal, now, ch.cost) && !refused) refused = ch.budget;
+  }
+  if (refused) {
     // Named in the message, because a 429 with no number is a thing a client author cannot act on. The
     // header is what an SDK actually reads.
-    const err = resourceExhausted(`too many ${budget.name} requests; retry in ${budget.rate.retryAfterSeconds}s`);
-    c.header("Retry-After", String(budget.rate.retryAfterSeconds));
+    const err = resourceExhausted(`too many ${refused.name} requests; retry in ${refused.rate.retryAfterSeconds}s`);
+    c.header("Retry-After", String(refused.rate.retryAfterSeconds));
     throw err;
   }
   await next();

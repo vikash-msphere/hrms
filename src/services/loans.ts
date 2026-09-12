@@ -359,6 +359,15 @@ export function loanRepaymentWrites(
 ): { stmts: (BatchStmt | CheckedStmt)[]; events: { type: "loan.repaymentRecorded" | "loan.closed"; loanId: string; employeeId: string; payload: Record<string, number> }[] } {
   const stmts: (BatchStmt | CheckedStmt)[] = [];
   const events: ReturnType<typeof loanRepaymentWrites>["events"] = [];
+  // TWO DIFFERENT TIMESTAMPS, and conflating them was a bug. `at` is the pay date - the date the installment
+  // is COLLECTED ON, which is a fact about the money and belongs on the ledger row. The loan row's
+  // `updated_at` is when the row was last written, which is now: it drives conditional GET, list ordering and
+  // payroll's own staleness probe, and none of those mean anything if a writer can set it to a date of its
+  // choosing. Stamped with the pay date it did real damage in both directions - a past period back-dated the
+  // row behind caches that had already seen it, and the ordinary case of a pay date at month end (i.e. AFTER
+  // the build that collects for that month) post-dated the run's build stamp, so every run with a loan
+  // recovery on it reported ITSELF stale the moment it was built and `transition` then refused to approve it.
+  const wroteAt = new Date();
   for (const e of entries) {
     const loan = loans.get(e.loanId);
     if (!loan) continue;
@@ -368,7 +377,7 @@ export function loanRepaymentWrites(
     // Checked: the deduction is already on the payslip, so if the loan stopped being collectible between the
     // caller's read and this batch (closed by a manual repayment, soft-deleted), the caller must undo the
     // whole build rather than deduct from an employee for a loan that is no longer owed.
-    stmts.push({ stmt: repaidCreditStmt(deps, e.loanId, e.amount, at).returning({ uuid: schema.loans.uuid }), expect: 1, label: `loan ${loan.code}` });
+    stmts.push({ stmt: repaidCreditStmt(deps, e.loanId, e.amount, wroteAt).returning({ uuid: schema.loans.uuid }), expect: 1, label: `loan ${loan.code}` });
     events.push({ type: "loan.repaymentRecorded", loanId: e.loanId, employeeId: loan.employeeId, payload: { amount: e.amount, outstanding: round2(loan.principal - repaid) } });
     if (closed) events.push({ type: "loan.closed", loanId: e.loanId, employeeId: loan.employeeId, payload: { principal: loan.principal } });
   }

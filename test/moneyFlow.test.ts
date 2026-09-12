@@ -406,6 +406,61 @@ describe("payroll: employer contributions ride on the item and follow each compo
       await deps.db.insert(schema.holidays).values({ uuid: genId(), code: short("hol"), date: new Date("2026-01-26"), name: "Republic Day" });
       expect((await stale(run.uuid)).changes).toContain("Holidays");
     });
+
+    // A loan is collectible only once recovery has STARTED by the period end - the same test the build applies
+    // (`startedBy` in services/loans.ts). Unnarrowed in time, this probe flagged a run for a loan agreed to
+    // start months later, which that run could not have collected on any rebuild.
+    it("ignores a loan whose recovery starts after the period, and still catches one that has started", async () => {
+      const { emp, run } = await rebuiltRun(); // the period is Jan 2026
+      const loan = (over: Partial<typeof schema.loans.$inferInsert>) =>
+        deps.db.insert(schema.loans).values({
+          uuid: genId(), code: short("ln"), employeeId: emp, principal: 12000, installments: 12, monthlyAmount: 1000,
+          status: "DISBURSED", ...over,
+        });
+      await loan({ startDate: new Date("2026-06-01") });
+      expect(await stale(run.uuid)).toMatchObject({ stale: false, changes: [] });
+
+      await loan({ startDate: new Date("2026-01-05") });
+      expect((await stale(run.uuid)).changes).toContain("Loans");
+    });
+
+    // Declarations are filed per FINANCIAL YEAR and the build reads exactly one year's (`fyWindow` on the pay
+    // date). Jan 2026 withholds for FY 2025-26, so a filing for 2026-27 is not an input to it.
+    it("ignores a tax declaration for another financial year, and still catches one for this year's", async () => {
+      const { emp, run } = await rebuiltRun(); // pay date 2026-01-31 -> FY 2025-26
+      const decl = (financialYear: string) =>
+        deps.db.insert(schema.taxDeclarations).values({
+          uuid: genId(), code: short("td"), employeeId: emp, financialYear, section: "80C",
+          declaredAmount: 50000, verifiedAmount: 50000, status: "VERIFIED",
+        });
+      await decl("2026-27");
+      expect(await stale(run.uuid)).toMatchObject({ stale: false, changes: [] });
+
+      await decl("2025-26");
+      expect((await stale(run.uuid)).changes).toContain("Investment / tax declarations");
+    });
+
+    // The run's OWN build must not make it stale. `loans.updated_at` was being stamped with the PAY DATE
+    // rather than the time of the write (services/loans.ts), so the ordinary case of a pay date at month end -
+    // after the build that collects for that month - post-dated the build stamp and left every run with a loan
+    // recovery on it permanently stale, which `transition` then refuses to approve with no override.
+    it("does not call a run stale for the loan installment its own build collected", async () => {
+      const actor = await seedActor(await seedEmployee());
+      const emp = await seedEmployee({ code: short("04") });
+      await seedComp(emp, { basePay: 30000 });
+      // A period whose pay date is WELL AFTER the build, which is how a real period is shaped.
+      const period = await seedPeriodRange("Jan 2030", "2030-01-01", "2030-01-31");
+      await deps.db.insert(schema.loans).values({
+        uuid: genId(), code: short("ln"), employeeId: emp, principal: 12000, installments: 12, monthlyAmount: 1000,
+        status: "DISBURSED", startDate: new Date("2029-12-01"),
+      });
+      const run = await createRun(deps, actor, `pay-periods/${period}`);
+      await buildRunItems(deps, actor, run.uuid);
+      // The installment really was collected - otherwise this asserts nothing about the loan probe.
+      const [item] = await listRunItems(deps, run.uuid);
+      expect(item?.lines.some((l) => l.code === "LOAN")).toBe(true);
+      expect(await stale(run.uuid)).toMatchObject({ stale: false, changes: [] });
+    });
   });
 
   it("keeps the employer ESI share in step with the employee's sticky eligibility", async () => {

@@ -123,10 +123,36 @@ test("a payroll run is created, built, submitted and approved - and payroll cann
   await expect(payroll.getByRole("menuitem", { name: "Approve" })).toHaveCount(0);
   await payroll.keyboard.press("Escape");
 
-  await row.getByRole("button", { name: "Actions" }).click();
-  await admin.getByRole("menuitem", { name: "Approve" }).click();
-  await expect(toast(admin, /Run approved/)).toBeVisible();
-  await expect(row).toContainText(/Approved/i);
+  // Approved from the menu - retried, and REBUILDING between attempts, for the reason the server states:
+  // `:approve` refuses a run whose income inputs moved since it was built ("rebuild it before approving"),
+  // with no override, because approving a stale run pays the wrong money. A run in review is still editable,
+  // so building again is exactly what the refusal asks for - and on this lane another spec editing the org's
+  // pay catalogs, or anyone the run pays, is enough to move an input between the build above and this press.
+  // Pressing Approve again on its own can only ask the same closed question.
+  //
+  // Gated on the row's own state, not on the toast: a toast lives about five seconds, and the row says
+  // "Approved" for as long as the run is.
+  const approved = async () => /approved/i.test(await row.innerText());
+  await expect(async () => {
+    if (await approved()) return;
+    // Rebuild first: harmless on a fresh run (the same request repeated) and the whole point on a stale one.
+    // "Rebuild" is the label the verb carries in this state - the review menu offers it precisely so the
+    // refusal has a remedy on the menu that raised it.
+    await row.getByRole("button", { name: "Actions" }).click();
+    const rebuild = admin.getByRole("menuitem", { name: "Rebuild" });
+    if (await rebuild.count()) await rebuild.click();
+    else await admin.keyboard.press("Escape");
+    // The page allows ONE transition in flight, so an Approve pressed while the rebuild is still going is
+    // dropped on the floor. Waited for, not asserted: if the toast is missed the poll below simply fails this
+    // attempt and the next one presses again.
+    await toast(admin, /Run built/).waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
+
+    await row.getByRole("button", { name: "Actions" }).click();
+    const approve = admin.getByRole("menuitem", { name: "Approve" });
+    if (await approve.count()) await approve.click();
+    else await admin.keyboard.press("Escape");
+    await expect.poll(approved, { timeout: 15_000 }).toBe(true);
+  }).toPass({ timeout: 150_000 });
 
   // Approved: publishing is now on the menu, and so is the statutory report the run's numbers feed.
   await row.getByRole("button", { name: "Actions" }).click();

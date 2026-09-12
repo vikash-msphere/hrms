@@ -10,6 +10,7 @@ import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
 import { EmptyState } from "@/components/common/EmptyState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { Field } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
 import { useDeepOpen } from "@/hooks/useDeepOpen";
@@ -34,7 +35,15 @@ const EMPTY = { name: "", category: "health" as BenefitCategory, description: ""
 
 // HR catalog editor for benefit plans (Settings → Benefits).
 export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
-  const { rows, state, error, reload } = useCollection<BenefitPlan>("benefit-plans");
+  // `all`, for the same reason ProjectsAdmin needs it: a card grid is the other shape a catalog comes in, and
+  // it has nowhere to admit that the server capped the page and no Load more for a reader to press - so the
+  // first hundred plans silently read as the whole catalog, and a deep link to any plan past them opened
+  // nothing. The walk only runs while a cursor keeps coming back, so an ordinary catalog pays nothing.
+  //
+  // And the TruncationNotice below for the same reason ProjectsAdmin carries one: the walk stops at the
+  // hook's `ALL_CAP`, so `all` moves the window rather than removing it, and the grid still needs somewhere
+  // to admit that it is showing part of the catalog.
+  const { rows, state, error, reload } = useCollection<BenefitPlan>("benefit-plans", { all: true });
   useDeepOpen(openId, rows, openEdit);
   const { toast } = useToast();
   const confirm = useConfirm();
@@ -91,6 +100,7 @@ export default function BenefitPlansAdmin({ openId }: { openId?: string }) {
           <EmptyState icon={HeartPulse} title="No plans" description="Add a benefit plan for employees to enrol in." action={<AccessAction create label="Benefit plan"><Button onClick={openCreate}><Plus className="h-4 w-4" /> New plan</Button></AccessAction>} />
         ) : (
           <div className="space-y-2">
+            <TruncationNotice collection="benefit-plans" what="plans" />
             {sorted.map((p) => (
               <AccessItem key={p.path} objectPath={p.path} can={p.access?.can} label={p.name}>
               <Card className="flex flex-wrap items-center justify-between gap-3 p-3">

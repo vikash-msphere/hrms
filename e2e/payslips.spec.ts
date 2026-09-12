@@ -1,4 +1,5 @@
 import { SPA_HEADERS, gotoRoute, test, expect } from "./fixtures";
+import { approvePayrollRun } from "./payrollRun";
 import { extractPdfText } from "./pdfText";
 
 // The other end of payroll: what the person being paid sees.
@@ -95,10 +96,11 @@ async function ensureRun(page: import("@playwright/test").Page, period: string):
   expect(made.status(), await made.text()).toBe(200);
   const run = (await made.json()) as { path: string };
   // No bodies: these verbs take none, and the contract proxy rejects a request that carries one anyway.
-  for (const verb of ["build", "submit", "approve"]) {
+  for (const verb of ["build", "submit"]) {
     const res = await page.request.post(`/v1/${run.path}:${verb}`, { headers: SPA_HEADERS });
     expect(res.status(), `${verb}: ${await res.text()}`).toBeLessThan(300);
   }
+  await approvePayrollRun(page, run.path);
   return { path: run.path, state: "APPROVED" };
 }
 

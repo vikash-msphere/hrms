@@ -3,6 +3,7 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import type { AppEnv } from "../env";
 import { decodeWireIdsRequest } from "../middleware/decodeWireIds";
+import { BATCH_MAX_SUB_READS } from "../middleware/rateLimit";
 import { app, getCodec } from "../index";
 
 // Multi-read batch (Google-style). One HTTP request carries several GET sub-requests; each is re-dispatched
@@ -23,7 +24,11 @@ import { app, getCodec } from "../index";
 // Cap sub-requests per batch. With shared auth/deps (one verify + one HKDF) the per-sub cost is a route +
 // in-memory decide + the data query; a modest cap bounds total CPU/DB work per request. The client coalescer
 // splits larger ticks across multiple batches.
-const MAX_REQUESTS = 20;
+//
+// Shared with the limiter, which charges an envelope its sub-read count against a budget denominated in
+// sub-reads and clamps that cost to this same cap (middleware/rateLimit.ts). Two copies of the number would
+// let one side bound work the other had already let through.
+const MAX_REQUESTS = BATCH_MAX_SUB_READS;
 // `etag` is the sub-request's `If-None-Match`. Every list read the SPA makes is coalesced through here, so
 // without it conditional GET would be unreachable from the client that needs it most: a cached list whose
 // freshness window has lapsed would go on re-reading a page of rows to learn nothing had changed. The

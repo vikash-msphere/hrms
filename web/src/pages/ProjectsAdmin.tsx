@@ -9,6 +9,7 @@ import { AccessScope } from "@/components/access/AccessScope";
 import { AccessAction } from "@/components/access/AccessAction";
 import { AccessItem } from "@/components/access/AccessItem";
 import { EmptyState } from "@/components/common/EmptyState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { Field, FieldRow } from "@/components/common/Field";
 import { Combobox } from "@/components/ui/combobox";
 import { WriteDialog } from "@/components/common/WriteDialog";
@@ -26,7 +27,17 @@ const EMPTY = { name: "", client: "", code: "", billable: true, goal: "none", st
 
 // HR/PM editor for the project catalog (Settings → Payroll → Projects).
 export default function ProjectsAdmin({ openId }: { openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Project>("projects");
+  // `all`: this is the whole catalog rendered as a CARD GRID, not a list page. A DataTable admits a window -
+  // it draws "Showing 1-100 of ..." and a Load more - but a grid of cards has nowhere to say so and nothing
+  // for a reader to press, so the first page silently presented itself as the entire catalog: past a hundred
+  // projects an admin could not see, edit or archive the rest of them, and `useDeepOpen` below could not open
+  // a link to one either. Costs nothing until a catalog actually exceeds one page (the walk only runs while
+  // the server is still handing back a cursor), and is bounded by the hook's own cap.
+  //
+  // The cap is why the grid still carries a TruncationNotice below. `all` narrows the window from a hundred
+  // rows to `ALL_CAP`; it does not remove it, and a grid presenting a thousand projects as the whole catalog
+  // is telling the same lie as one presenting a hundred - just to an org large enough that nobody checks.
+  const { rows, state, error, reload } = useCollection<Project>("projects", { all: true });
   // Small, and only used to fill one picker; empty for anybody who cannot read goals, which hides the field.
   const { rows: goals } = useCollection<Goal>("goals");
   useDeepOpen(openId, rows, openEdit);
@@ -90,6 +101,7 @@ export default function ProjectsAdmin({ openId }: { openId?: string }) {
           <EmptyState icon={FolderKanban} title="No projects" description="Add a project for employees to log time against." action={<AccessAction create label="Project"><Button onClick={openCreate}><Plus className="h-4 w-4" /> New project</Button></AccessAction>} />
         ) : (
           <div className="space-y-2">
+            <TruncationNotice collection="projects" what="projects" />
             {sorted.map((p) => (
               <AccessItem key={p.path} objectPath={p.path} can={p.access?.can} label={p.name}>
               <Card className="flex items-center justify-between gap-3 p-3">

@@ -989,7 +989,7 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
     window?: SQL;
   };
   const period = (await deps.db
-    .select({ periodStart: schema.payPeriods.periodStart, periodEnd: schema.payPeriods.periodEnd })
+    .select({ periodStart: schema.payPeriods.periodStart, periodEnd: schema.payPeriods.periodEnd, payDate: schema.payPeriods.payDate })
     .from(schema.payPeriods)
     .where(eq(schema.payPeriods.uuid, run.payPeriodId))
     .limit(1))[0];
@@ -1003,6 +1003,17 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
   // boundary docks days on both sides of it.
   const overlapsPeriod = (start: unknown, end: unknown): SQL | undefined =>
     from === null || to === null ? undefined : sql`${start as never} <= ${to} and ${end as never} >= ${from}`;
+  // A loan is only collectible by this run once recovery has STARTED by the period end - the same test the
+  // build itself applies (`startedBy` in services/loans.ts). A loan agreed to start next quarter cannot move
+  // this month's money, exactly as a holiday next year cannot, and without this the probe was org-wide in
+  // time: any new loan for anybody the run pays flagged it, including loans for periods years apart.
+  // A null start date collects as before, so it stays in.
+  const startedByPeriodEnd = (col: unknown): SQL | undefined =>
+    to === null ? undefined : sql`(${col as never} is null or ${col as never} <= ${to})`;
+  // Declarations are filed PER FINANCIAL YEAR and the build reads exactly one year's - `fyWindow` on the pay
+  // date, mirrored here from services/payroll.ts's own `fy`. A declaration for a different year is not an
+  // input to this run, and treating it as one made every run stale as soon as anyone filed for any year.
+  const runFy = fyWindow(period?.payDate ?? new Date()).financialYear;
 
   const sources: Source[] = [
     { label: "Employee records (joiners, tax verifications, EPF, status)", table: schema.employees, employee: schema.employees.uuid },
@@ -1013,9 +1024,15 @@ export async function runStaleness(deps: Deps, run: { uuid: string; state: strin
     { label: "Leave encashments", table: schema.leaveEncashments, ownRun: schema.leaveEncashments.paidRunId, employee: schema.leaveEncashments.employeeId },
     { label: "Reimbursements", table: schema.reimbursements, ownRun: schema.reimbursements.paidRunId, employee: schema.reimbursements.employeeId },
     { label: "Overtime requests", table: schema.overtimeRequests, ownRun: schema.overtimeRequests.paidRunId, employee: schema.overtimeRequests.employeeId },
-    { label: "Loans", table: schema.loans, employee: schema.loans.employeeId },
-    // A verified investment declaration reduces withholding, so it moves the TDS on an already-built run.
-    { label: "Investment / tax declarations", table: schema.taxDeclarations, employee: schema.taxDeclarations.employeeId },
+    { label: "Loans", table: schema.loans, employee: schema.loans.employeeId, window: startedByPeriodEnd(schema.loans.startDate) },
+    // A verified investment declaration reduces withholding, so it moves the TDS on an already-built run -
+    // but only one filed for the year this run withholds for (see `runFy`).
+    {
+      label: "Investment / tax declarations",
+      table: schema.taxDeclarations,
+      employee: schema.taxDeclarations.employeeId,
+      window: sql`${schema.taxDeclarations.financialYear} = ${runFy}`,
+    },
     // The `settings` table is one row per KEY, so an unnarrowed probe made every unrelated org preference - the
     // holiday feed, an asset-tag option, a board default - an input to payroll. These are the keys the build
     // actually reads (directly, and through loadTaxConfig / orgToday).

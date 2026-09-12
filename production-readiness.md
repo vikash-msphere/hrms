@@ -5,13 +5,13 @@ instance. This is the file `docs/security-review.md`, `docs/deploy-security.md` 
 `docs/architecture-decisions.md` point at for the live posture; the security review itself is an archived
 2026-07-04 snapshot, kept for the record of what was found and fixed.
 
-Last verified against the working tree on **2026-09-11**.
+Last verified against the working tree on **2026-09-12**.
 
 ## Build gates
 
 | Gate | Result |
 |------|--------|
-| `npm run test:gate` (vitest + count assertion) | 2744 tests across 232 files, 0 failures |
+| `npm run test:gate` (vitest + count assertion) | 2760 tests across 233 files, 0 failures |
 | `npm run typecheck` | 0 errors (api + web + e2e) |
 | `npm run lint` (eslint, `--max-warnings 0`) | 0 issues |
 | `npm run api:lint` (spectral) | 0 errors (23 infos) |
@@ -107,8 +107,13 @@ Each of these leaves production working but weaker.
   stamping — and D1 is capped at 100k reads/day. Preflight reporting `plan=paid` is **not** evidence: it is
   the default `CF_PLAN` value, and the check only asserts that the flag and the `[limits]` block agree.
   Confirm the plan in the dashboard.
-- **WAF rate limits.** There is no code-side limiter. `docs/deploy-security.md` §1 carries a table per plan
-  tier; on Free you get one rule, so spend it on `/auth/*`.
+- **WAF rate limits.** The code-side limiter is a FLOOR, not the control: `src/lib/isolateRate.ts` counts in
+  one isolate's memory, so a caller spread over enough colos gets one allowance per isolate. It covers the
+  unauthenticated lanes per route and `/v1` per caller (`src/middleware/rateLimit.ts` — four budgets: PDF
+  rendering at 40/min, the cross-collection fan-outs at 120, the batch transport at 6000 sub-reads, and a
+  3000 runaway detector over everything else). The limit across the fleet is still the WAF rule.
+  `docs/deploy-security.md` §1 carries a table per plan tier; on Free you get one rule, so spend it on
+  `/auth/*`.
 - **Sentry release wiring.** Set `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` in the deploy
   environment, plus `VITE_APP_VERSION` and a matching `SENTRY_RELEASE`, or the uploaded source maps match
   no event. Then set alert routing, or nobody reads the issues.

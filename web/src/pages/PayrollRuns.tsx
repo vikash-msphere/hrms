@@ -45,7 +45,20 @@ const NEXT: Record<string, { verb: Verb; label: string; icon: typeof Hammer; var
     { verb: "build", label: "Build", icon: Hammer },
     { verb: "submit", label: "Submit", icon: Send },
   ],
-  REVIEW: [{ verb: "approve", label: "Approve", icon: CheckCircle2, variant: "success" }],
+  // REVIEW offers Rebuild as well as Approve, and it has to. `:approve` refuses a run whose income inputs
+  // moved since it was built - "this run was built before its inputs changed (...); rebuild it before
+  // approving" - with no override, deliberately: approving a stale run pays the wrong money. A run in review
+  // is still an editable state on the server (`isEditable` covers DRAFT and REVIEW), so rebuilding it is
+  // exactly what that refusal asks for. Offering Approve alone made the refusal a dead end: the only remedy
+  // the server names was not on the menu that raised it, and the run could only be sent back to draft - if
+  // the reviewer thought to try that - to get at the same button.
+  //
+  // Labelled "Rebuild", not "Build", because the run is already priced here: pressing it re-prices it at
+  // today's inputs, which is a different thing to say than "build" on an empty draft. Same verb underneath.
+  REVIEW: [
+    { verb: "approve", label: "Approve", icon: CheckCircle2, variant: "success" },
+    { verb: "build", label: "Rebuild", icon: Hammer },
+  ],
   APPROVED: [{ verb: "publish", label: "Publish", icon: Rocket, variant: "success" }],
 };
 

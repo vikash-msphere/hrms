@@ -75,6 +75,32 @@ describe("keyedCounter: the budget belongs to the caller, not the isolate", () =
     expect(rate.throttled("live", now)).toBe(true);
   });
 
+  it("spends as many units as the call costs", () => {
+    const rate = keyedCounter(10);
+    // A batch envelope of four sub-reads is four reads of work, so it spends four (middleware/rateLimit.ts).
+    expect(rate.throttled("a", 0, 4)).toBe(false);
+    expect(rate.throttled("a", 0, 4)).toBe(false);
+    expect(rate.throttled("a", 0, 4)).toBe(true); // 12 > 10
+    // Still per key: an expensive caller does not spend anybody else's allowance.
+    expect(rate.throttled("b", 0, 10)).toBe(false);
+  });
+
+  it("never lets a call cost less than one", () => {
+    const rate = keyedCounter(3);
+    // A cost derived from a request body is a number a client can influence, so zero, a fraction and a
+    // negative must all still spend a whole unit - otherwise declaring one buys unlimited free calls.
+    for (const cost of [0, 0.4, -5]) expect(rate.throttled("a", 0, cost)).toBe(false);
+    expect(rate.throttled("a", 0, 0)).toBe(true); // three units spent, not zero
+  });
+
+  it("refuses a call that cannot fit the budget, and still spends it", () => {
+    const rate = keyedCounter(5);
+    // The work is what is bounded, so a single oversized request must not slip through under a budget too
+    // small to hold it - and must not leave the window looking untouched afterwards either.
+    expect(rate.throttled("a", 0, 9)).toBe(true);
+    expect(rate.throttled("a", 0)).toBe(true);
+  });
+
   it("retryAfterSeconds is what is LEFT of the window, not its length", () => {
     // Before anything is counted there is no window to be part-way through, so the full length is the only
     // honest answer.
@@ -106,6 +132,30 @@ describe("budgetFor: which surface a request is charged to", () => {
     ]) {
       expect(budgetFor("POST", p).name, p).toBe("render");
     }
+  });
+
+  // The list above was written from the personal-documents surfaces and stopped there, so every PDF the app
+  // builds somewhere else fell through to the catch-all at 3000 - seventy-five times the ceiling meant for a
+  // render, on the one class of request that exhausts an invocation rather than a database.
+  it("charges the renderers that live outside personal-documents to the render budget too", () => {
+    for (const p of [
+      "/v1/reviews/abc:pdf",                 // services/reviews.ts       renderLetterPdf
+      "/v1/offers/abc:letter",               // services/offerLetter.ts   renderLetterPdf
+      "/v1/personal-documents/abc:print",    // services/letterPrint.ts   renderLetterPdf
+      "/v1/letterheads/abc:preview",         // services/letterheads.ts   renderLetterPdf
+      "/v1/payroll-runs/abc:previewPayslip", // services/payroll.ts       renderPayslipPdf
+    ]) {
+      expect(budgetFor("POST", p).name, p).toBe("render");
+    }
+  });
+
+  // The mirror of the bug above, and the reason the letterhead entry is matched on its collection rather than
+  // on the `:preview` spelling: these two hand back the slip the publish job ALREADY rendered, read out of R2
+  // and decrypted. Charging an object read to a budget sized for PDF construction would put an employee
+  // opening their own payslips under a ceiling of forty a minute.
+  it("leaves the stored-object reads on the catch-all", () => {
+    expect(budgetFor("POST", "/v1/payslips/abc:preview").name).toBe("api");
+    expect(budgetFor("POST", "/v1/payslips/abc:download").name).toBe("api");
   });
 
   it("charges the cross-collection fan-outs to the fan-out budget", () => {
@@ -155,15 +205,78 @@ describe("the limiter in the request chain", () => {
 
   it("does not charge a batch's sub-requests a second time", async () => {
     // routes/batch.ts re-dispatches each sub-request through the WHOLE chain, so without the __sharedCtx skip
-    // one envelope would be charged up to twenty times - making the transport that exists to cost less the
-    // fastest way to hit a limit. The `api` budget is 900 and one envelope carries 20 reads; if they were
-    // counted, 50 envelopes would exhaust it.
+    // one envelope would be charged up to twenty times OVER AND ABOVE the sub-read cost the envelope already
+    // paid on the way in - making the transport that exists to cost less the fastest way to hit a limit.
+    // 20 envelopes of 20 is 400 sub-reads, comfortably inside the batch budget; charged again per sub-request
+    // it would be 8,000 and refuse.
     const requests = Array.from({ length: 20 }, () => ({ path: "/v1/holidays" }));
     let last: Response | undefined;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 20; i++) {
       last = await call("/v1/batch:run", { method: "POST", body: JSON.stringify({ requests }), headers: { "content-type": "application/json" } });
       if (last.status === 429) break;
     }
     expect(last!.status).not.toBe(429);
+  });
+
+  it("charges a malformed envelope one unit rather than refusing it as over budget", async () => {
+    // The route's validator is what rejects a bad envelope, with a 400 that says so. A limiter that threw its
+    // own error over an unreadable body would answer 429 to what is really a client mistake.
+    const res = await call("/v1/batch:run", { method: "POST", body: "not json", headers: { "content-type": "application/json" } });
+    expect(res.status).not.toBe(429);
+    // And a 400, not the 500 an unmapped HTTPException used to produce - see test/errorHandler.test.ts. Pinned
+    // here too because this is the request that found it: the limiter reads the same unparseable body first.
+    expect(res.status).toBe(400);
+  });
+
+  // A sub-request is skipped by the limiter outright (the `__sharedCtx` branch), which is right for the
+  // envelope's own count - it was charged on the way in - and wrong for everything else: a sub-read never
+  // touched the budget its own path matches. So a GET fan-out was reachable through the transport at the
+  // batch budget's 6000 a minute rather than the 120 it gets when called directly, fifty times the ceiling
+  // written for the surfaces whose cost is a query per collection. Not a hole only an attacker would find
+  // either: web/src/lib/getCoalescer.ts is a universal GET coalescer, so the SPA already sends every one of
+  // them through here, and the fan-out budget bound nobody who used the transport at all.
+  it("charges a fan-out carried inside an envelope to the fan-out budget", async () => {
+    const fanOut = budgetFor("GET", "/v1/search").limit;
+    const perEnvelope = 20;
+    const requests = Array.from({ length: perEnvelope }, () => ({ path: "/v1/search?q=ab" }));
+    let sent = 0;
+    let last: Response | undefined;
+    // Bounded at three times what the fan-out budget allows, so a failure here reads as "never refused"
+    // rather than "refused late" - and it is still far short of what the batch budget alone would permit,
+    // which is the whole point.
+    for (; sent < (fanOut / perEnvelope) * 3; sent++) {
+      last = await call("/v1/batch:run", { method: "POST", body: JSON.stringify({ requests }), headers: { "content-type": "application/json" } });
+      if (last.status === 429) break;
+    }
+    expect(last!.status).toBe(429);
+    // NAMED fan-out, not batch: the envelope's own budget is nowhere near spent, and a client told "too many
+    // batch requests" would coalesce less, which is the opposite of the fix.
+    const body = (await last!.json()) as { detail?: string };
+    expect(body.detail).toContain("fan-out");
+    // Charged per sub-read, so the budget is gone in about limit/20 envelopes rather than limit of them.
+    expect(sent).toBeLessThanOrEqual(fanOut / perEnvelope);
+  });
+
+  // LAST in this file on purpose: it drives the batch budget to its ceiling, and the budgets live for the
+  // isolate, so anything after it would start out of allowance.
+  //
+  // The budget is denominated in SUB-READS, not in envelopes. Charged one unit each, it bounded nothing on the
+  // fan-out side while being the tightest ceiling anywhere on the SPA's read path - so coalescing reads, which
+  // is what the transport exists for, ran a client out of budget sooner than not coalescing did.
+  it("charges a batch envelope its sub-read count, not one per envelope", async () => {
+    const { limit } = budgetFor("POST", "/v1/batch:run");
+    const requests = Array.from({ length: 20 }, () => ({ path: "/v1/holidays" }));
+    let sent = 0;
+    for (;;) {
+      const res = await call("/v1/batch:run", { method: "POST", body: JSON.stringify({ requests }), headers: { "content-type": "application/json" } });
+      if (res.status === 429) break;
+      // Counted per envelope, `limit` of them would all be allowed. The loop would then be the assertion's
+      // failure mode rather than its result, so it is bounded well below that.
+      if (++sent > limit / 10) break;
+    }
+    // Full envelopes run out after roughly limit/20 of them - the earlier cases in this describe spent some of
+    // the same principal's allowance, so the bound is one-sided: what matters is that it is nowhere near
+    // `limit` envelopes, which is what counting them one apiece would have allowed.
+    expect(sent).toBeLessThanOrEqual(limit / 20);
   });
 });

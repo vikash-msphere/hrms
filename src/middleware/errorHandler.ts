@@ -1,6 +1,10 @@
 import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
-import { AppError, aborted, alreadyExists, errorChainText, isCodeCollision, isShiftAssignmentDuplicate } from "../lib/errors";
+import {
+  AppError, aborted, alreadyExists, errorChainText, forbidden, invalidArgument, isCodeCollision,
+  isShiftAssignmentDuplicate, notFound, resourceExhausted, unauthenticated,
+} from "../lib/errors";
 
 // Which fields a validation failure was about, and what was wrong with each.
 //
@@ -46,6 +50,44 @@ function zodFields(err: ZodError): { field: string; message: string }[] {
   return out;
 }
 
+// The app's own error of a given status, for carrying a framework failure across into this vocabulary.
+// Nothing in src/ throws an HTTPException, so this only ever translates Hono's own - see below.
+const AS_APP_ERROR: Record<number, (detail?: string) => AppError> = {
+  400: invalidArgument,
+  401: unauthenticated,
+  403: forbidden,
+  404: notFound,
+  409: alreadyExists,
+  429: resourceExhausted,
+};
+
+/**
+ * Hono's own `HTTPException`, rendered as one of ours.
+ *
+ * WHY THIS IS NEEDED AT ALL. The framework throws this for the failures it handles before a route sees them,
+ * and one of those is on EVERY validated write in the app: `zValidator` refuses a body that will not parse
+ * with `new HTTPException(400, { message: "Malformed JSON in request body" })`. Unmapped, it matched none of
+ * the branches below and fell to the catch-all `{ status: 500 }` - so a caller who sent a trailing comma was
+ * told the server had crashed, with no indication that the body was theirs to fix. Worse at our end than at
+ * theirs: `problem.status >= 500` then logged it as `unhandled error` with a stack, and with [observability]
+ * on, every malformed request anyone sent raised an alert about a fault that did not exist.
+ *
+ * Translated rather than passed through, so the body is indistinguishable from the same status raised
+ * anywhere else in the app and no client has to learn a second problem vocabulary. `err.message` is one of
+ * Hono's own fixed strings - it carries none of the request, which is the rule `safeMessage` above follows
+ * for the same reason.
+ *
+ * A 5xx HTTPException is deliberately NOT translated: that is a server fault, and it belongs in the log at
+ * the foot of this file with everything else that crashed.
+ */
+function fromHttpException(err: HTTPException, path: string) {
+  const asAppError = AS_APP_ERROR[err.status];
+  if (asAppError) return asAppError(err.message).toProblem(path);
+  // A 4xx the app has no word of its own for (413 from a framework body cap, say). The STATUS is the part a
+  // client acts on, so it is carried verbatim rather than flattened into a 400 that misreports the reason.
+  return { type: "/errors/invalid-argument", title: "Invalid argument", status: err.status, instance: path, detail: err.message };
+}
+
 // Maps thrown errors to RFC 9457 problem+json. Never leaks stack traces or secrets.
 export const errorHandler = (err: Error, c: Context) => {
   const isAppError = err instanceof AppError;
@@ -56,6 +98,9 @@ export const errorHandler = (err: Error, c: Context) => {
         // A validation failure is a client error, not a 500. Field paths and Zod's reasons travel; the values
         // the caller sent do not.
         ? { type: "/errors/invalid-argument", title: "Invalid argument", status: 400, instance: c.req.path, fields: zodFields(err) }
+      // The framework's own client errors, which are client errors just as much as Zod's - see fromHttpException.
+      : err instanceof HTTPException && err.status < 500
+        ? fromHttpException(err, c.req.path)
         // A create that lost the code-allocation race trips the UNIQUE index on `code`. The create path
         // already re-allocates and tries again a few times (services/codeAlloc.ts withFreshCode), so a
         // collision reaching here means the scope stayed contended throughout - rare, and still the client's

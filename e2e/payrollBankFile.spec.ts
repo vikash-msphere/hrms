@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import { SPA_HEADERS, allowConsoleErrors, gotoRoute, withAllowedBank, test, expect, toast } from "./fixtures";
+import { approvePayrollRun } from "./payrollRun";
 
 // An approved run's "Bank file · <bank>" download - `payroll.spec.ts` already proves the two other download
 // menu items (statutory report, PF ECR), but never this one, and this one carries the sharpest guard in the
@@ -97,7 +98,7 @@ async function approvedRun(page: import("@playwright/test").Page, period: string
   const made = await page.request.post("/v1/payroll-runs", { headers: SPA_HEADERS, data: { pay_period: period } });
   expect(made.status(), await made.text()).toBe(200);
   const run = (await made.json()) as { path: string };
-  for (const verb of ["build", "submit", "approve"]) {
+  for (const verb of ["build", "submit"]) {
     // Retried, because `:build` prices whatever is payable at the instant it runs and REFUSES if the payables
     // moved under it - "payables changed while the run was building (reimbursements) - nothing was paid;
     // build the run again". On a lane where sixteen specs are writing reimbursements that is the guard doing
@@ -108,5 +109,6 @@ async function approvedRun(page: import("@playwright/test").Page, period: string
       expect(res.status(), `${verb}: ${await res.text()}`).toBeLessThan(300);
     }).toPass({ timeout: 60_000 });
   }
+  await approvePayrollRun(page, run.path);
   return { path: run.path };
 }

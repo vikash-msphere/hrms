@@ -47,8 +47,18 @@ export type IsolateRate = {
  * grants anyone more than their budget.
  */
 export type KeyedIsolateRate = {
-  /** True when THIS key has spent its allowance for the current window. Counts the call. */
-  throttled(key: string, nowMs: number): boolean;
+  /**
+   * True when THIS key has spent its allowance for the current window. Counts the call.
+   *
+   * `cost` is how many units of the budget the call spends, for the surfaces whose unit is not "one request".
+   * The batch transport is the one that needs it: an envelope carrying twenty sub-reads is twenty reads of
+   * work, and charging it as one made the budget a count of envelopes rather than of the work they do (see
+   * middleware/rateLimit.ts). Defaults to 1, which is every other caller.
+   *
+   * A cost ABOVE the remaining allowance refuses the call and still spends it: the work is what is being
+   * bounded, so an oversized request must not slip through under a budget it cannot fit in.
+   */
+  throttled(key: string, nowMs: number, cost?: number): boolean;
   /** Seconds left in the window that refused the most recent `throttled` call - see IsolateRate. */
   retryAfterSeconds: number;
 };
@@ -67,7 +77,7 @@ export function keyedCounter(maxPerWindow: number, windowMs = 60_000, maxKeys = 
   let lastAt: number | null = null;
   let lastStartedAt: number | null = null;
   return {
-    throttled(key: string, nowMs: number): boolean {
+    throttled(key: string, nowMs: number, cost = 1): boolean {
       let w = windows.get(key);
       if (!w || nowMs - w.startedAt >= windowMs) {
         if (!w && windows.size >= maxKeys) {
@@ -76,7 +86,9 @@ export function keyedCounter(maxPerWindow: number, windowMs = 60_000, maxKeys = 
         }
         windows.set(key, (w = { startedAt: nowMs, count: 0 }));
       }
-      w.count++;
+      // At least one, and integral: a caller must never buy a free call by declaring a cost of zero (or a
+      // fractional one that never accumulates), whatever shape the request that produced the number had.
+      w.count += Math.max(1, Math.floor(cost));
       lastAt = nowMs;
       lastStartedAt = w.startedAt;
       return w.count > maxPerWindow;
