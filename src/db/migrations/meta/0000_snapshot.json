@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c554b5cf-303f-43f2-858d-fd2d1df6f256",
+  "id": "ada4b556-f15d-43d5-9aee-ad8baea8c6cd",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -239,6 +239,14 @@
         }
       },
       "indexes": {
+        "apv_opt_emp_uniq": {
+          "name": "apv_opt_emp_uniq",
+          "columns": [
+            "option_id",
+            "employee_id"
+          ],
+          "isUnique": true
+        },
         "apv_ann_idx": {
           "name": "apv_ann_idx",
           "columns": [
@@ -250,13 +258,6 @@
           "name": "apv_emp_idx",
           "columns": [
             "employee_id"
-          ],
-          "isUnique": false
-        },
-        "apv_opt_idx": {
-          "name": "apv_opt_idx",
-          "columns": [
-            "option_id"
           ],
           "isUnique": false
         }
@@ -353,6 +354,24 @@
         }
       },
       "indexes": {
+        "arx_post_emp_uniq": {
+          "name": "arx_post_emp_uniq",
+          "columns": [
+            "announcement_id",
+            "employee_id"
+          ],
+          "isUnique": true,
+          "where": "\"announcement_reactions\".\"reply_id\" is null"
+        },
+        "arx_reply_emp_uniq": {
+          "name": "arx_reply_emp_uniq",
+          "columns": [
+            "reply_id",
+            "employee_id"
+          ],
+          "isUnique": true,
+          "where": "\"announcement_reactions\".\"reply_id\" is not null"
+        },
         "arx_ann_idx": {
           "name": "arx_ann_idx",
           "columns": [
@@ -364,13 +383,6 @@
           "name": "arx_emp_idx",
           "columns": [
             "employee_id"
-          ],
-          "isUnique": false
-        },
-        "arx_reply_idx": {
-          "name": "arx_reply_idx",
-          "columns": [
-            "reply_id"
           ],
           "isUnique": false
         }
@@ -453,12 +465,13 @@
         }
       },
       "indexes": {
-        "ar_ann_idx": {
-          "name": "ar_ann_idx",
+        "ar_ann_emp_uniq": {
+          "name": "ar_ann_emp_uniq",
           "columns": [
-            "announcement_id"
+            "announcement_id",
+            "employee_id"
           ],
-          "isUnique": false
+          "isUnique": true
         },
         "ar_emp_idx": {
           "name": "ar_emp_idx",
@@ -1022,10 +1035,20 @@
           ],
           "isUnique": true
         },
+        "api_keys_page_idx": {
+          "name": "api_keys_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "api_keys_owner_idx": {
           "name": "api_keys_owner_idx",
           "columns": [
-            "owner_user_id"
+            "owner_user_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -1180,6 +1203,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "applications_page_idx": {
+          "name": "applications_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "application_candidate_idx": {
           "name": "application_candidate_idx",
@@ -1336,10 +1367,20 @@
           ],
           "isUnique": true
         },
+        "approval_delegations_page_idx": {
+          "name": "approval_delegations_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "appdel_delegator_idx": {
           "name": "appdel_delegator_idx",
           "columns": [
-            "delegator_id"
+            "delegator_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -1474,6 +1515,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "asset_categories_page_idx": {
+          "name": "asset_categories_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -1585,10 +1634,20 @@
           ],
           "isUnique": true
         },
+        "asset_requests_page_idx": {
+          "name": "asset_requests_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "areq_emp_idx": {
           "name": "areq_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -1832,10 +1891,20 @@
           ],
           "isUnique": true
         },
+        "assets_page_idx": {
+          "name": "assets_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "asset_assigned_idx": {
           "name": "asset_assigned_idx",
           "columns": [
-            "assigned_to"
+            "assigned_to",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -2107,10 +2176,20 @@
           ],
           "isUnique": true
         },
+        "attendance_regularizations_page_idx": {
+          "name": "attendance_regularizations_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "attreg_emp_idx": {
           "name": "attreg_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -2237,10 +2316,20 @@
           ],
           "isUnique": true
         },
+        "attendance_sessions_page_idx": {
+          "name": "attendance_sessions_page_idx",
+          "columns": [
+            "clock_in",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "att_emp_idx": {
           "name": "att_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "clock_in",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -2589,6 +2678,14 @@
           ],
           "isUnique": true
         },
+        "automation_runs_page_idx": {
+          "name": "automation_runs_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "automation_runs_auto_idx": {
           "name": "automation_runs_auto_idx",
           "columns": [
@@ -2783,6 +2880,14 @@
           ],
           "isUnique": true
         },
+        "automations_page_idx": {
+          "name": "automations_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "automations_trigger_idx": {
           "name": "automations_trigger_idx",
           "columns": [
@@ -2929,10 +3034,20 @@
           ],
           "isUnique": true
         },
+        "background_checks_page_idx": {
+          "name": "background_checks_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "bgcheck_emp_idx": {
           "name": "bgcheck_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -3065,10 +3180,20 @@
           ],
           "isUnique": true
         },
+        "benefit_enrollments_page_idx": {
+          "name": "benefit_enrollments_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "ben_emp_idx": {
           "name": "ben_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -3365,6 +3490,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "boards_page_idx": {
+          "name": "boards_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -3497,10 +3630,20 @@
           ],
           "isUnique": true
         },
+        "bonuses_page_idx": {
+          "name": "bonuses_page_idx",
+          "columns": [
+            "award_date",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "bonus_emp_idx": {
           "name": "bonus_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "award_date",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -3675,6 +3818,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "candidates_page_idx": {
+          "name": "candidates_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "candidate_email_idx": {
           "name": "candidate_email_idx",
@@ -4302,6 +4453,14 @@
           ],
           "isUnique": true
         },
+        "cards_page_idx": {
+          "name": "cards_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "card_board_idx": {
           "name": "card_board_idx",
           "columns": [
@@ -4312,7 +4471,9 @@
         "card_emp_idx": {
           "name": "card_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -4580,10 +4741,20 @@
           ],
           "isUnique": true
         },
+        "check_ins_page_idx": {
+          "name": "check_ins_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "ci_emp_idx": {
           "name": "ci_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -5135,6 +5306,14 @@
           ],
           "isUnique": true
         },
+        "compliance_events_page_idx": {
+          "name": "compliance_events_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "compliance_due_idx": {
           "name": "compliance_due_idx",
           "columns": [
@@ -5300,6 +5479,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "compliance_rules_page_idx": {
+          "name": "compliance_rules_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -5411,6 +5598,14 @@
           ],
           "isUnique": true
         },
+        "cron_runs_page_idx": {
+          "name": "cron_runs_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "cron_runs_cron_idx": {
           "name": "cron_runs_cron_idx",
           "columns": [
@@ -5521,6 +5716,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "departments_page_idx": {
+          "name": "departments_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -5618,10 +5821,20 @@
           ],
           "isUnique": true
         },
+        "dependents_page_idx": {
+          "name": "dependents_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "dep_emp_idx": {
           "name": "dep_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -5735,10 +5948,20 @@
           ],
           "isUnique": true
         },
+        "document_acknowledgements_page_idx": {
+          "name": "document_acknowledgements_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "dack_emp_idx": {
           "name": "dack_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -6057,6 +6280,14 @@
           ],
           "isUnique": true
         },
+        "employees_page_idx": {
+          "name": "employees_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "emp_dept_idx": {
           "name": "emp_dept_idx",
           "columns": [
@@ -6192,6 +6423,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "event_log_page_idx": {
+          "name": "event_log_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "event_log_type_idx": {
           "name": "event_log_type_idx",
@@ -6476,6 +6715,14 @@
           ],
           "isUnique": true
         },
+        "events_page_idx": {
+          "name": "events_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "event_start_idx": {
           "name": "event_start_idx",
           "columns": [
@@ -6586,6 +6833,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "expense_budgets_page_idx": {
+          "name": "expense_budgets_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "expbudget_period_idx": {
           "name": "expbudget_period_idx",
@@ -6719,6 +6974,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "expense_categories_page_idx": {
+          "name": "expense_categories_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -6946,10 +7209,20 @@
           ],
           "isUnique": true
         },
+        "expenses_page_idx": {
+          "name": "expenses_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "exp_emp_idx": {
           "name": "exp_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -7401,6 +7674,14 @@
           ],
           "isUnique": true
         },
+        "goal_templates_page_idx": {
+          "name": "goal_templates_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "goaltpl_group_idx": {
           "name": "goaltpl_group_idx",
           "columns": [
@@ -7722,10 +8003,20 @@
           ],
           "isUnique": true
         },
+        "goals_page_idx": {
+          "name": "goals_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "goal_emp_idx": {
           "name": "goal_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -7882,6 +8173,14 @@
           ],
           "isUnique": true
         },
+        "holiday_selections_page_idx": {
+          "name": "holiday_selections_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "hsel_emp_holiday_idx": {
           "name": "hsel_emp_holiday_idx",
           "columns": [
@@ -8029,6 +8328,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "holidays_page_idx": {
+          "name": "holidays_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -8124,6 +8431,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "interview_feedback_page_idx": {
+          "name": "interview_feedback_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "if_interview_idx": {
           "name": "if_interview_idx",
@@ -8277,6 +8592,14 @@
           ],
           "isUnique": true
         },
+        "interviews_page_idx": {
+          "name": "interviews_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "interview_application_idx": {
           "name": "interview_application_idx",
           "columns": [
@@ -8429,6 +8752,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "job_requisitions_page_idx": {
+          "name": "job_requisitions_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "requisition_dept_idx": {
           "name": "requisition_dept_idx",
@@ -8588,6 +8919,14 @@
           ],
           "isUnique": true
         },
+        "jobs_page_idx": {
+          "name": "jobs_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "jobs_status_idx": {
           "name": "jobs_status_idx",
           "columns": [
@@ -8704,10 +9043,20 @@
           ],
           "isUnique": true
         },
+        "leave_balances_page_idx": {
+          "name": "leave_balances_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "bal_emp_idx": {
           "name": "bal_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -8864,10 +9213,20 @@
           ],
           "isUnique": true
         },
+        "leave_encashments_page_idx": {
+          "name": "leave_encashments_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "encash_emp_idx": {
           "name": "encash_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -9050,10 +9409,20 @@
           ],
           "isUnique": true
         },
+        "leave_requests_page_idx": {
+          "name": "leave_requests_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "lr_emp_idx": {
           "name": "lr_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -9278,6 +9647,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "leave_types_page_idx": {
+          "name": "leave_types_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -9373,6 +9750,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "letter_templates_page_idx": {
+          "name": "letter_templates_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -9454,6 +9839,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "letterheads_page_idx": {
+          "name": "letterheads_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -9671,10 +10064,20 @@
           ],
           "isUnique": true
         },
+        "loans_page_idx": {
+          "name": "loans_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "loan_emp_idx": {
           "name": "loan_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -9816,10 +10219,20 @@
           ],
           "isUnique": true
         },
+        "notice_periods_page_idx": {
+          "name": "notice_periods_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "notice_emp_idx": {
           "name": "notice_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -10076,10 +10489,20 @@
           ],
           "isUnique": true
         },
+        "notifications_page_idx": {
+          "name": "notifications_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "notif_recipient_idx": {
           "name": "notif_recipient_idx",
           "columns": [
-            "recipient_id"
+            "recipient_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -10248,6 +10671,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "offers_page_idx": {
+          "name": "offers_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "offer_application_idx": {
           "name": "offer_application_idx",
@@ -10478,6 +10909,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "org_documents_page_idx": {
+          "name": "org_documents_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -10596,10 +11035,20 @@
           ],
           "isUnique": true
         },
+        "overtime_requests_page_idx": {
+          "name": "overtime_requests_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "ot_emp_idx": {
           "name": "ot_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -10792,6 +11241,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "pay_components_page_idx": {
+          "name": "pay_components_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -10896,6 +11353,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "pay_grades_page_idx": {
+          "name": "pay_grades_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -11000,6 +11465,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "pay_periods_page_idx": {
+          "name": "pay_periods_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -11257,6 +11730,14 @@
           ],
           "isUnique": true
         },
+        "payroll_runs_page_idx": {
+          "name": "payroll_runs_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "run_period_idx": {
           "name": "run_period_idx",
           "columns": [
@@ -11439,10 +11920,20 @@
           ],
           "isUnique": true
         },
+        "payslips_page_idx": {
+          "name": "payslips_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "payslip_emp_idx": {
           "name": "payslip_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -11741,10 +12232,20 @@
           ],
           "isUnique": true
         },
+        "personal_documents_page_idx": {
+          "name": "personal_documents_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "pdoc_emp_idx": {
           "name": "pdoc_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -11921,10 +12422,20 @@
           ],
           "isUnique": true
         },
+        "positions_page_idx": {
+          "name": "positions_page_idx",
+          "columns": [
+            "effective_from",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "pos_emp_idx": {
           "name": "pos_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "effective_from",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -12316,10 +12827,20 @@
           ],
           "isUnique": true
         },
+        "referrals_page_idx": {
+          "name": "referrals_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "referral_referrer_idx": {
           "name": "referral_referrer_idx",
           "columns": [
-            "referrer_id"
+            "referrer_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -12473,6 +12994,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "reimbursement_categories_page_idx": {
+          "name": "reimbursement_categories_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -12584,10 +13113,20 @@
           ],
           "isUnique": true
         },
+        "reimbursements_page_idx": {
+          "name": "reimbursements_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "reimb_emp_idx": {
           "name": "reimb_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -12770,10 +13309,20 @@
           ],
           "isUnique": true
         },
+        "remote_work_requests_page_idx": {
+          "name": "remote_work_requests_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "rwr_emp_idx": {
           "name": "rwr_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -12920,6 +13469,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "review_cycles_page_idx": {
+          "name": "review_cycles_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -13016,6 +13573,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "review_feedback_page_idx": {
+          "name": "review_feedback_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "rf_review_idx": {
           "name": "rf_review_idx",
@@ -13210,6 +13775,14 @@
           ],
           "isUnique": true
         },
+        "reviews_page_idx": {
+          "name": "reviews_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "rev_cycle_idx": {
           "name": "rev_cycle_idx",
           "columns": [
@@ -13220,7 +13793,9 @@
         "rev_emp_idx": {
           "name": "rev_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -13384,6 +13959,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "salary_structures_page_idx": {
+          "name": "salary_structures_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -13642,10 +14225,20 @@
           ],
           "isUnique": true
         },
+        "settlements_page_idx": {
+          "name": "settlements_page_idx",
+          "columns": [
+            "settlement_date",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "settle_emp_idx": {
           "name": "settle_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "settlement_date",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -13744,10 +14337,20 @@
           ],
           "isUnique": true
         },
+        "shift_assignments_page_idx": {
+          "name": "shift_assignments_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "sa_emp_idx": {
           "name": "sa_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -13988,6 +14591,14 @@
           ],
           "isUnique": true
         },
+        "sprints_page_idx": {
+          "name": "sprints_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "sprint_board_idx": {
           "name": "sprint_board_idx",
           "columns": [
@@ -14134,6 +14745,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "stocktakes_page_idx": {
+          "name": "stocktakes_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "stocktake_status_idx": {
           "name": "stocktake_status_idx",
@@ -14376,10 +14995,20 @@
           ],
           "isUnique": true
         },
+        "suggestions_page_idx": {
+          "name": "suggestions_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "sugg_submitter_idx": {
           "name": "sugg_submitter_idx",
           "columns": [
-            "submitter_id"
+            "submitter_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -14541,6 +15170,14 @@
           ],
           "isUnique": true
         },
+        "table_views_page_idx": {
+          "name": "table_views_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "table_view_owner_idx": {
           "name": "table_view_owner_idx",
           "columns": [
@@ -14680,10 +15317,20 @@
           ],
           "isUnique": true
         },
+        "tax_declarations_page_idx": {
+          "name": "tax_declarations_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "td_emp_idx": {
           "name": "td_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -14788,6 +15435,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "ticket_checklists_page_idx": {
+          "name": "ticket_checklists_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -15085,10 +15740,20 @@
           ],
           "isUnique": true
         },
+        "tickets_page_idx": {
+          "name": "tickets_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "ticket_emp_idx": {
           "name": "ticket_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -15272,10 +15937,20 @@
           ],
           "isUnique": true
         },
+        "time_entries_page_idx": {
+          "name": "time_entries_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "te_emp_idx": {
           "name": "te_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         },
@@ -15492,6 +16167,14 @@
           ],
           "isUnique": true
         },
+        "transition_tasks_page_idx": {
+          "name": "transition_tasks_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "trt_trn_idx": {
           "name": "trt_trn_idx",
           "columns": [
@@ -15661,10 +16344,20 @@
           ],
           "isUnique": true
         },
+        "transitions_page_idx": {
+          "name": "transitions_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
+        },
         "trn_emp_idx": {
           "name": "trn_emp_idx",
           "columns": [
-            "employee_id"
+            "employee_id",
+            "created_at",
+            "uuid"
           ],
           "isUnique": false
         }
@@ -15771,6 +16464,14 @@
             "email"
           ],
           "isUnique": true
+        },
+        "users_page_idx": {
+          "name": "users_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "users_employee_idx": {
           "name": "users_employee_idx",
@@ -15937,6 +16638,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "vendors_page_idx": {
+          "name": "vendors_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -16076,6 +16785,14 @@
             "code"
           ],
           "isUnique": true
+        },
+        "workflow_instances_page_idx": {
+          "name": "workflow_instances_page_idx",
+          "columns": [
+            "created_at",
+            "uuid"
+          ],
+          "isUnique": false
         },
         "workflow_instances_status_idx": {
           "name": "workflow_instances_status_idx",

@@ -147,7 +147,11 @@ export async function voteSuggestion(deps: Deps, actor: AppUser, id: string, dir
     if (existing.value === dir) await deps.db.delete(schema.suggestionVotes).where(eq(schema.suggestionVotes.uuid, existing.uuid));
     else await deps.db.update(schema.suggestionVotes).set({ value: dir }).where(eq(schema.suggestionVotes.uuid, existing.uuid));
   } else {
-    await deps.db.insert(schema.suggestionVotes).values({ suggestionId: id, employeeId: actor.employeeId, value: dir });
+    // `onConflictDoNothing` against `sugg_vote_uniq`. The index was already there; nothing caught the collision
+    // it raises, so a second tap that outran the read above fell to the catch-all and answered 500 - a server
+    // fault reported for a double-clicked upvote. Losing the race means the vote already exists, which is what
+    // this call wanted, so the right answer is to do nothing.
+    await deps.db.insert(schema.suggestionVotes).values({ suggestionId: id, employeeId: actor.employeeId, value: dir }).onConflictDoNothing();
   }
   return row;
 }

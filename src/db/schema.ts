@@ -69,7 +69,7 @@ export const users = sqliteTable("users", {
   sessionsValidFrom: integer("sessions_valid_from", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
+}, (t) => ({ pageIdx: index("users_page_idx").on(t.createdAt, t.uuid),
   // ONE account per person. The link is patchable (`PATCH /v1/users` employee), and nothing stopped two
   // accounts pointing at the same employee - at which point "who is this person's account" has two answers
   // and every consumer picks a different one: the view-as subject lookup takes whichever row comes back
@@ -118,7 +118,7 @@ export const apiKeys = sqliteTable(
     createdAt: created(),
     updatedAt: updated(),
   },
-  (t) => ({ ownerIdx: index("api_keys_owner_idx").on(t.ownerUserId) }),
+  (t) => ({ pageIdx: index("api_keys_page_idx").on(t.createdAt, t.uuid), ownerIdx: index("api_keys_owner_idx").on(t.ownerUserId, t.createdAt, t.uuid) }),
 );
 
 // Org-wide key/value config (e.g. holiday policy). One row per key, readable by all,
@@ -194,7 +194,7 @@ export const holidaySelections = sqliteTable("holiday_selections", {
   employeeId: text("employee_id").notNull().references((): AnySQLiteColumn => employees.uuid),
   holidayId: text("holiday_id").notNull().references((): AnySQLiteColumn => holidays.uuid),
   createdAt: created(),
-}, (t) => ({ uk: uniqueIndex("hsel_emp_holiday_idx").on(t.employeeId, t.holidayId) }));
+}, (t) => ({ pageIdx: index("holiday_selections_page_idx").on(t.createdAt, t.uuid), uk: uniqueIndex("hsel_emp_holiday_idx").on(t.employeeId, t.holidayId) }));
 
 // Per-user key/value store (e.g. saved DataTable layouts). One row per (user, key).
 export const preferences = sqliteTable("preferences", {
@@ -219,7 +219,7 @@ export const departments = sqliteTable("departments", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("departments_page_idx").on(t.createdAt, t.uuid) }));
 
 export const employees = sqliteTable("employees", {
   uuid: pk(),
@@ -279,7 +279,7 @@ export const employees = sqliteTable("employees", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
+}, (t) => ({ pageIdx: index("employees_page_idx").on(t.createdAt, t.uuid),
   deptIdx: index("emp_dept_idx").on(t.departmentId),
   mgrIdx: index("emp_mgr_idx").on(t.managerId),
 }));
@@ -316,7 +316,7 @@ export const leaveTypes = sqliteTable("leave_types", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("leave_types_page_idx").on(t.createdAt, t.uuid) }));
 
 export const leaveBalances = sqliteTable("leave_balances", {
   uuid: pk(),
@@ -333,7 +333,7 @@ export const leaveBalances = sqliteTable("leave_balances", {
   // One balance row per (employee, leave type). Prevents the adjust insert-branch (or a concurrent accrual)
   // from creating duplicate rows that would split an employee's balance across rows and defeat the guarded
   // reserve/release. A duplicate insert now fails loudly instead of silently corrupting the balance.
-}, (t) => ({ empIdx: index("bal_emp_idx").on(t.employeeId), empTypeUniq: uniqueIndex("bal_emp_type_idx").on(t.employeeId, t.leaveTypeId) }));
+}, (t) => ({ pageIdx: index("leave_balances_page_idx").on(t.createdAt, t.uuid), empIdx: index("bal_emp_idx").on(t.employeeId, t.createdAt, t.uuid), empTypeUniq: uniqueIndex("bal_emp_type_idx").on(t.employeeId, t.leaveTypeId) }));
 
 export const leaveRequests = sqliteTable("leave_requests", {
   uuid: pk(),
@@ -354,7 +354,7 @@ export const leaveRequests = sqliteTable("leave_requests", {
   decidedBy: text("decided_by").references(() => users.uuid),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("lr_emp_idx").on(t.employeeId), stateIdx: index("lr_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("leave_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("lr_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("lr_state_idx").on(t.state) }));
 
 export const holidays = sqliteTable("holidays", {
   uuid: pk(),
@@ -374,7 +374,7 @@ export const holidays = sqliteTable("holidays", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("holidays_page_idx").on(t.createdAt, t.uuid) }));
 
 // Documents are split into two resource types, each gated by the middleware via its own path + grants.
 // NEITHER has a `visibility`/audience column - access control is NOT in the data or the code; it is purely
@@ -433,7 +433,7 @@ export const events = sqliteTable("events", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ startIdx: index("event_start_idx").on(t.startTime) }));
+}, (t) => ({ pageIdx: index("events_page_idx").on(t.createdAt, t.uuid), startIdx: index("event_start_idx").on(t.startTime) }));
 
 // One attendee's answer to an event (sub-resource, like card_comments): not a wire collection, folded into the
 // event's serialize and written via the event `:respond` verb. Being on `attendee_ids` says an event was aimed
@@ -480,7 +480,7 @@ export const complianceEvents = sqliteTable("compliance_events", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ dueIdx: index("compliance_due_idx").on(t.dueDate), ruleIdx: index("compliance_rule_idx").on(t.ruleId) }));
+}, (t) => ({ pageIdx: index("compliance_events_page_idx").on(t.createdAt, t.uuid), dueIdx: index("compliance_due_idx").on(t.dueDate), ruleIdx: index("compliance_rule_idx").on(t.ruleId) }));
 
 // Recurring statutory obligation: a rule that auto-generates compliance_events occurrences on a schedule
 // (e.g. "PF, monthly, due 15th"). Generation rolls a ~12-month horizon on the daily cron + on rule edit;
@@ -499,7 +499,7 @@ export const complianceRules = sqliteTable("compliance_rules", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("compliance_rules_page_idx").on(t.createdAt, t.uuid) }));
 
 // Background-verification tracking: one row per verification CHECK for an employee (identity/address/education/
 // employment/criminal/reference/credit). An employee's "case" is just their set of checks. Flat company-wide;
@@ -524,7 +524,7 @@ export const backgroundChecks = sqliteTable("background_checks", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("bgcheck_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("background_checks_page_idx").on(t.createdAt, t.uuid), empIdx: index("bgcheck_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
 
 export const orgDocuments = sqliteTable("org_documents", {
   uuid: pk(),
@@ -545,7 +545,7 @@ export const orgDocuments = sqliteTable("org_documents", {
   // origin, 1-based page) - same shape as EsignSignAnchor. Where the signature is stamped / sign_positions
   // sent to the vendor. Required when requiresAck.
   signAnchorJson: text("sign_anchor_json"),
-});
+}, (t) => ({ pageIdx: index("org_documents_page_idx").on(t.createdAt, t.uuid) }));
 
 // Personal documents: employee-owned, owner-embedded code. Access: owner (personal-documents.me) + admins.
 export const personalDocuments = sqliteTable("personal_documents", {
@@ -584,7 +584,7 @@ export const personalDocuments = sqliteTable("personal_documents", {
   esignSentAt: integer("esign_sent_at", { mode: "timestamp_ms" }),
   esignSignedAt: integer("esign_signed_at", { mode: "timestamp_ms" }),
   ...docCommon(),
-}, (t) => ({ empIdx: index("pdoc_emp_idx").on(t.employeeId), esignRefIdx: index("pdoc_esign_ref_idx").on(t.esignRequestId) }));
+}, (t) => ({ pageIdx: index("personal_documents_page_idx").on(t.createdAt, t.uuid), empIdx: index("pdoc_emp_idx").on(t.employeeId, t.createdAt, t.uuid), esignRefIdx: index("pdoc_esign_ref_idx").on(t.esignRequestId) }));
 
 // An employee's acknowledgement (e-signature) of an org document version - the compliance sign-off. Employee-
 // owned + code-scoped (own/dept/all). Created only via org-documents :acknowledge and immutable (no update);
@@ -605,7 +605,7 @@ export const documentAcknowledgements = sqliteTable("document_acknowledgements",
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete (admin cleanup)
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("dack_emp_idx").on(t.employeeId), docIdx: index("dack_doc_idx").on(t.documentId) }));
+}, (t) => ({ pageIdx: index("document_acknowledgements_page_idx").on(t.createdAt, t.uuid), empIdx: index("dack_emp_idx").on(t.employeeId, t.createdAt, t.uuid), docIdx: index("dack_doc_idx").on(t.documentId) }));
 
 export const announcements = sqliteTable("announcements", {
   uuid: pk(),
@@ -703,7 +703,14 @@ export const announcementReads = sqliteTable("announcement_reads", {
   announcementId: text("announcement_id").notNull().references(() => announcements.uuid),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   createdAt: created(),
-}, (t) => ({ annIdx: index("ar_ann_idx").on(t.announcementId), empIdx: index("ar_emp_idx").on(t.employeeId) }));
+}, (t) => ({
+  // ONE RECEIPT PER VIEWER PER POST, enforced here rather than only by the check-then-insert in
+  // services/announcements.ts. Two writes that both read "no receipt" both inserted, and the feed counts rows
+  // (`readersVisibleTo` pushes one entry per row), so "seen by N" over-counted the same person. It is not an
+  // exotic race: the board marks a post read on open while "Mark all read" walks the same table.
+  uniq: uniqueIndex("ar_ann_emp_uniq").on(t.announcementId, t.employeeId),
+  empIdx: index("ar_emp_idx").on(t.employeeId),
+}));
 
 // A reaction on a board post OR one of its replies. One row per (target, employee) - a viewer holds at most
 // one reaction per target. `reply_id` null = a reaction on the post itself; set = a reaction on that reply
@@ -716,7 +723,20 @@ export const announcementReactions = sqliteTable("announcement_reactions", {
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   emoji: text("emoji").notNull(),
   createdAt: created(),
-}, (t) => ({ annIdx: index("arx_ann_idx").on(t.announcementId), empIdx: index("arx_emp_idx").on(t.employeeId), replyIdx: index("arx_reply_idx").on(t.replyId) }));
+}, (t) => ({
+  // ONE REACTION PER VIEWER PER TARGET - which `toggleReaction` has always claimed and only a read-then-write
+  // enforced, so a double tap left two rows and `groupReactions` counted the person twice (and listed them
+  // twice in the hover list).
+  //
+  // TWO PARTIAL INDEXES, not one on (announcement_id, reply_id, employee_id): `reply_id` is nullable and
+  // SQLite treats NULLs as DISTINCT in a unique index, so a single composite would constrain reply-level
+  // reactions and silently do nothing for post-level ones - which are the common case. Splitting on the
+  // predicate makes each half's key wholly non-null.
+  postUniq: uniqueIndex("arx_post_emp_uniq").on(t.announcementId, t.employeeId).where(sql`${t.replyId} is null`),
+  replyUniq: uniqueIndex("arx_reply_emp_uniq").on(t.replyId, t.employeeId).where(sql`${t.replyId} is not null`),
+  annIdx: index("arx_ann_idx").on(t.announcementId),
+  empIdx: index("arx_emp_idx").on(t.employeeId),
+}));
 
 // A reply on a board post. Append-only; reached only through the announcement's routes, so access inherits
 // the parent post (like ticket_comments - not a directly-addressable wire collection). `authorId` is the
@@ -749,7 +769,15 @@ export const announcementPollVotes = sqliteTable("announcement_poll_votes", {
   optionId: text("option_id").notNull().references(() => announcementPollOptions.uuid),
   employeeId: text("employee_id").notNull().references(() => employees.uuid),
   createdAt: created(),
-}, (t) => ({ annIdx: index("apv_ann_idx").on(t.announcementId), empIdx: index("apv_emp_idx").on(t.employeeId), optIdx: index("apv_opt_idx").on(t.optionId) }));
+}, (t) => ({
+  // ONE VOTE PER VIEWER PER OPTION. Keyed on the option and not just the post because a `poll_multiple` poll
+  // legitimately takes several options from one person; what it must never take is the same option twice.
+  // Without it a double submit inflated `countByOption` (which counts rows) while the poll's total-voter
+  // figure de-duplicates through a Set - so the per-option counts could out-total the voters.
+  uniq: uniqueIndex("apv_opt_emp_uniq").on(t.optionId, t.employeeId),
+  annIdx: index("apv_ann_idx").on(t.announcementId),
+  empIdx: index("apv_emp_idx").on(t.employeeId),
+}));
 
 // ---- Performance: goals ----
 // An employee's goal (performance objective). Employee-owned and code-scoped like leave-requests, so the same
@@ -821,7 +849,7 @@ export const goals = sqliteTable("goals", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("goal_emp_idx").on(t.employeeId), parentIdx: index("goal_parent_idx").on(t.parentId), cycleIdx: index("goal_cycle_idx").on(t.cycleId), blockedIdx: index("goal_blocked_idx").on(t.blockedById) }));
+}, (t) => ({ pageIdx: index("goals_page_idx").on(t.createdAt, t.uuid), empIdx: index("goal_emp_idx").on(t.employeeId, t.createdAt, t.uuid), parentIdx: index("goal_parent_idx").on(t.parentId), cycleIdx: index("goal_cycle_idx").on(t.cycleId), blockedIdx: index("goal_blocked_idx").on(t.blockedById) }));
 
 // A comment on a goal (sub-resource, like card_comments): not a wire collection, emitted inline on the goal Get
 // and written via the goal `:comment` verb. A goal is a conversation between an owner and a manager for a
@@ -907,7 +935,7 @@ export const goalTemplates = sqliteTable("goal_templates", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ groupIdx: index("goaltpl_group_idx").on(t.groupName) }));
+}, (t) => ({ pageIdx: index("goal_templates_page_idx").on(t.createdAt, t.uuid), groupIdx: index("goaltpl_group_idx").on(t.groupName) }));
 
 // ---- Performance: review cycles + reviews ----
 // A review cycle (e.g. "H1 2026"): an HR-managed container, flat-coded like pay-periods. DRAFT while being set
@@ -937,7 +965,7 @@ export const reviewCycles = sqliteTable("review_cycles", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("review_cycles_page_idx").on(t.createdAt, t.uuid) }));
 
 // One employee's review within a cycle. Employee-owned + code-scoped like goals (own/dept/all). The workflow
 // runs self -> manager -> shared -> acknowledged; each stage is skippable. `ratingsJson` holds the per-competency
@@ -972,7 +1000,7 @@ export const reviews = sqliteTable("reviews", {
   goalsJson: text("goals_json"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ cycleIdx: index("rev_cycle_idx").on(t.cycleId), empIdx: index("rev_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("reviews_page_idx").on(t.createdAt, t.uuid), cycleIdx: index("rev_cycle_idx").on(t.cycleId), empIdx: index("rev_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
 
 // A 360/peer feedback request on a review. Owned (code-scoped) by the AUTHOR - the nominee giving feedback -
 // so they see "feedback asked of me" via own-scope and submit it. The manager/HR nominate peers via the
@@ -998,7 +1026,7 @@ export const reviewFeedback = sqliteTable("review_feedback", {
   declineReason: text("decline_reason"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
+}, (t) => ({ pageIdx: index("review_feedback_page_idx").on(t.createdAt, t.uuid),
   reviewIdx: index("rf_review_idx").on(t.reviewId),
   authorIdx: index("rf_author_idx").on(t.authorId),
   // One row per person per review: a manager nominating somebody the reviewee already suggested upgrades that
@@ -1034,7 +1062,7 @@ export const boards = sqliteTable("boards", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("boards_page_idx").on(t.createdAt, t.uuid) }));
 
 // A sprint: a time-boxed iteration on a scrum-mode board (flat-coded, board-scoped, HR/team-managed like the
 // board itself). `state` runs planning -> active -> completed; at most one active sprint per board. Cards join
@@ -1052,7 +1080,7 @@ export const sprints = sqliteTable("sprints", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ boardIdx: index("sprint_board_idx").on(t.boardId) }));
+}, (t) => ({ pageIdx: index("sprints_page_idx").on(t.createdAt, t.uuid), boardIdx: index("sprint_board_idx").on(t.boardId) }));
 
 // A card (work item) on a board. Employee-owned + code-scoped like goals (own/dept/all), so a member sees own
 // cards / a manager the dept's / HR all. `columnKey` is the current column (= state); `rank` is a fractional
@@ -1118,7 +1146,7 @@ export const cards = sqliteTable("cards", {
 // said out loud in a stand-up). It is allocated max+1 like a code, so two cards filed at the same moment
 // compose the same number - and without the index both would keep it, leaving two different tasks answering
 // to one name. The index fails the loser instead, and services/cards.ts re-numbers it.
-}, (t) => ({ boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), reporterIdx: index("card_reporter_idx").on(t.reporterId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq) }));
+}, (t) => ({ pageIdx: index("cards_page_idx").on(t.createdAt, t.uuid), boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId, t.createdAt, t.uuid), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), reporterIdx: index("card_reporter_idx").on(t.reporterId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq) }));
 
 // Append-only movement log: one row per column transition of a card. INTERNAL (not a wire collection / route):
 // written only by the card `move` verb and read only server-side by the board analytics roll-up, so it needs no
@@ -1195,7 +1223,7 @@ export const transitions = sqliteTable("transitions", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("trn_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("transitions_page_idx").on(t.createdAt, t.uuid), empIdx: index("trn_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
 
 // A task within a transition. Owned (code-scoped) by the ASSIGNEE - the person who does it - so an assignee
 // sees "tasks assigned to me" via own-scope and completes them, even though the transition belongs to someone
@@ -1224,7 +1252,7 @@ export const transitionTasks = sqliteTable("transition_tasks", {
   completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ trnIdx: index("trt_trn_idx").on(t.transitionId), assigneeIdx: index("trt_assignee_idx").on(t.assigneeId) }));
+}, (t) => ({ pageIdx: index("transition_tasks_page_idx").on(t.createdAt, t.uuid), trnIdx: index("trt_trn_idx").on(t.transitionId), assigneeIdx: index("trt_assignee_idx").on(t.assigneeId) }));
 
 // A 1:1 check-in between an employee (the report, who owns it) and a counterpart (usually their manager).
 // Report-owned + code-scoped like leave-requests (own/dept/all), so the report sees their own, the manager
@@ -1260,7 +1288,7 @@ export const checkIns = sqliteTable("check_ins", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("ci_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("check_ins_page_idx").on(t.createdAt, t.uuid), empIdx: index("ci_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
 
 // ---- Benefits administration ----
 // HR-managed catalog of benefit plans (flat-coded like leave-types). Flat monthly costs in v1 (no tier matrix).
@@ -1293,7 +1321,7 @@ export const dependents = sqliteTable("dependents", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("dep_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("dependents_page_idx").on(t.createdAt, t.uuid), empIdx: index("dep_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
 
 // An employee's election for a plan. Employee-owned + code-scoped like leave-requests (own/dept/all); references
 // a plan (read-gated) and an optional list of covered dependents (the employee's own).
@@ -1308,7 +1336,7 @@ export const benefitEnrollments = sqliteTable("benefit_enrollments", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("ben_emp_idx").on(t.employeeId), planIdx: index("ben_plan_idx").on(t.planId) }));
+}, (t) => ({ pageIdx: index("benefit_enrollments_page_idx").on(t.createdAt, t.uuid), empIdx: index("ben_emp_idx").on(t.employeeId, t.createdAt, t.uuid), planIdx: index("ben_plan_idx").on(t.planId) }));
 
 // ---- Shift scheduling ----
 // An HR-defined shift pattern (flat-coded catalog like leave-types). Times are wall-clock "HH:MM" in the org
@@ -1338,8 +1366,8 @@ export const shiftAssignments = sqliteTable("shift_assignments", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
-  empIdx: index("sa_emp_idx").on(t.employeeId),
+}, (t) => ({ pageIdx: index("shift_assignments_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("sa_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
   shiftIdx: index("sa_shift_idx").on(t.shiftId),
   dateIdx: index("sa_date_idx").on(t.date),
   // ONE roster entry per person per day, which is what every reader already assumes: the roster grid keys its
@@ -1394,7 +1422,7 @@ export const timeEntries = sqliteTable("time_entries", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("te_emp_idx").on(t.employeeId), projIdx: index("te_proj_idx").on(t.projectId), cardIdx: index("te_card_idx").on(t.cardId), dateIdx: index("te_date_idx").on(t.date) }));
+}, (t) => ({ pageIdx: index("time_entries_page_idx").on(t.createdAt, t.uuid), empIdx: index("te_emp_idx").on(t.employeeId, t.createdAt, t.uuid), projIdx: index("te_proj_idx").on(t.projectId), cardIdx: index("te_card_idx").on(t.cardId), dateIdx: index("te_date_idx").on(t.date) }));
 
 // ---- Loans / salary advances ----
 // An employee's loan or salary advance, recovered over monthly installments. Employee-owned + code-scoped
@@ -1418,7 +1446,7 @@ export const loans = sqliteTable("loans", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("loan_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("loans_page_idx").on(t.createdAt, t.uuid), empIdx: index("loan_emp_idx").on(t.employeeId, t.createdAt, t.uuid) }));
 
 // Loan repayment ledger: one row per installment a payroll run deducted from a disbursed loan. A loan repays
 // over MANY runs (unlike a one-shot bonus/reimbursement), so the repayment history is a ledger, not a single
@@ -1457,7 +1485,7 @@ export const taxDeclarations = sqliteTable("tax_declarations", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("td_emp_idx").on(t.employeeId), fyIdx: index("td_fy_idx").on(t.financialYear) }));
+}, (t) => ({ pageIdx: index("tax_declarations_page_idx").on(t.createdAt, t.uuid), empIdx: index("td_emp_idx").on(t.employeeId, t.createdAt, t.uuid), fyIdx: index("td_fy_idx").on(t.financialYear) }));
 
 // Append-only audit trail (INSERT-only; never updated/deleted/purged, and deliberately NOT registered in
 // authzResolve TABLES so no CRUD/delete route can target it). Read back only via the on-demand activity API.
@@ -1536,7 +1564,7 @@ export const jobs = sqliteTable("jobs", {
   runAfter: integer("run_after", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ statusIdx: index("jobs_status_idx").on(t.status) }));
+}, (t) => ({ pageIdx: index("jobs_page_idx").on(t.createdAt, t.uuid), statusIdx: index("jobs_status_idx").on(t.status) }));
 
 // One row per scheduled (cron) tick, written by runScheduled: makes "did it run / when / how long / did it
 // fail" observable (the crons themselves are stateless Cloudflare triggers that record nothing). Admin-only.
@@ -1552,7 +1580,7 @@ export const cronRuns = sqliteTable("cron_runs", {
   summaryJson: text("summary_json"), // per-tick result, e.g. {"drained":3} or {"accrued":12,"reminders":4}
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ cronIdx: index("cron_runs_cron_idx").on(t.cron), startedIdx: index("cron_runs_started_idx").on(t.startedAt) }));
+}, (t) => ({ pageIdx: index("cron_runs_page_idx").on(t.createdAt, t.uuid), cronIdx: index("cron_runs_cron_idx").on(t.cron), startedIdx: index("cron_runs_started_idx").on(t.startedAt) }));
 
 // ---- Workflow & automation engine ----
 // Append-only record of every emitted domain event (see services/eventBus.ts). The spine that makes the
@@ -1570,7 +1598,7 @@ export const eventLog = sqliteTable("event_log", {
   occurredAt: integer("occurred_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ typeIdx: index("event_log_type_idx").on(t.type), occurredIdx: index("event_log_occurred_idx").on(t.occurredAt), corrIdx: index("event_log_corr_idx").on(t.correlationId) }));
+}, (t) => ({ pageIdx: index("event_log_page_idx").on(t.createdAt, t.uuid), typeIdx: index("event_log_type_idx").on(t.type), occurredIdx: index("event_log_occurred_idx").on(t.occurredAt), corrIdx: index("event_log_corr_idx").on(t.correlationId) }));
 
 // The rules: one row = one `when <triggerType> [if <condition>] then <actions[]>`. Config-as-data - HR
 // authors these (via the ACL-gated route/UI) instead of shipping code. conditionJson/actionsJson are the
@@ -1609,7 +1637,7 @@ export const automations = sqliteTable("automations", {
   createdBy: text("created_by").references((): AnySQLiteColumn => users.uuid),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ triggerIdx: index("automations_trigger_idx").on(t.triggerType) }));
+}, (t) => ({ pageIdx: index("automations_page_idx").on(t.createdAt, t.uuid), triggerIdx: index("automations_trigger_idx").on(t.triggerType) }));
 
 // A SUSPENDED durable workflow (Temporal-lite). Written when a rule's `waitFor` action pauses the chain: it
 // persists the wait arms (event/timer selectors + their continuation `then`), the accumulated results bag, the
@@ -1633,7 +1661,7 @@ export const workflowInstances = sqliteTable("workflow_instances", {
   resumedAt: integer("resumed_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ statusIdx: index("workflow_instances_status_idx").on(t.status) }));
+}, (t) => ({ pageIdx: index("workflow_instances_page_idx").on(t.createdAt, t.uuid), statusIdx: index("workflow_instances_status_idx").on(t.status) }));
 
 // Observability of each firing (like cron_runs): which rule fired for which event, and the per-action outcome.
 export const automationRuns = sqliteTable("automation_runs", {
@@ -1656,7 +1684,7 @@ export const automationRuns = sqliteTable("automation_runs", {
   finishedAt: integer("finished_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ autoIdx: index("automation_runs_auto_idx").on(t.automationId), startedIdx: index("automation_runs_started_idx").on(t.startedAt), corrIdx: index("automation_runs_corr_idx").on(t.correlationId) }));
+}, (t) => ({ pageIdx: index("automation_runs_page_idx").on(t.createdAt, t.uuid), autoIdx: index("automation_runs_auto_idx").on(t.automationId), startedIdx: index("automation_runs_started_idx").on(t.startedAt), corrIdx: index("automation_runs_corr_idx").on(t.correlationId) }));
 
 // ---- Payroll (compensation & payslips; single jurisdiction; NO tax engine) ----
 export const compensation = sqliteTable("compensation", {
@@ -1737,8 +1765,8 @@ export const positions = sqliteTable("positions", {
   // key, so a wrong one is an access-control fact and not only a display one.
   // No `delete_time` term: a position row is history and is never soft-deleted (the collection is list+get,
   // see services/positions.ts), so the open row is the only thing the predicate has to be narrowed to.
-}, (t) => ({
-  empIdx: index("pos_emp_idx").on(t.employeeId),
+}, (t) => ({ pageIdx: index("positions_page_idx").on(t.effectiveFrom, t.uuid),
+  empIdx: index("pos_emp_idx").on(t.employeeId, t.effectiveFrom, t.uuid),
   openUniq: uniqueIndex("pos_open_idx").on(t.employeeId).where(sql`${t.effectiveTo} is null`),
 }));
 
@@ -1772,8 +1800,8 @@ export const bonuses = sqliteTable("bonuses", {
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
-  empIdx: index("bonus_emp_idx").on(t.employeeId),
+}, (t) => ({ pageIdx: index("bonuses_page_idx").on(t.awardDate, t.uuid),
+  empIdx: index("bonus_emp_idx").on(t.employeeId, t.awardDate, t.uuid),
   batchIdx: index("bonus_batch_idx").on(t.batchId),
   paidIdx: index("bonus_paid_idx").on(t.paidRunId),
   // ONE variable-pay payout per person per cycle, enforced by the DATABASE.
@@ -1815,7 +1843,7 @@ export const referrals = sqliteTable("referrals", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ referrerIdx: index("referral_referrer_idx").on(t.referrerId), hiredIdx: index("referral_hired_idx").on(t.hiredEmployeeId) }));
+}, (t) => ({ pageIdx: index("referrals_page_idx").on(t.createdAt, t.uuid), referrerIdx: index("referral_referrer_idx").on(t.referrerId, t.createdAt, t.uuid), hiredIdx: index("referral_hired_idx").on(t.hiredEmployeeId) }));
 
 // ATS - a role to fill. Flat/company-level (recruiter/HR), private-by-default + ACL. `status` walks
 // draft -> open -> on_hold -> closed/filled (validated in the service). Applications reference it.
@@ -1838,7 +1866,7 @@ export const jobRequisitions = sqliteTable("job_requisitions", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ deptIdx: index("requisition_dept_idx").on(t.departmentId) }));
+}, (t) => ({ pageIdx: index("job_requisitions_page_idx").on(t.createdAt, t.uuid), deptIdx: index("requisition_dept_idx").on(t.departmentId) }));
 
 // ATS - a person in the talent pool (one person, many applications). Flat/company-level, private-by-default +
 // ACL. Resume via attachments slot "resume" (mirror referrals). `source` is a key from settings/ats.sources.
@@ -1856,7 +1884,7 @@ export const candidates = sqliteTable("candidates", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ emailIdx: index("candidate_email_idx").on(t.email) }));
+}, (t) => ({ pageIdx: index("candidates_page_idx").on(t.createdAt, t.uuid), emailIdx: index("candidate_email_idx").on(t.email) }));
 
 // ATS - candidate x requisition; the pipeline entity rendered on the kanban board. `stage` is a key into
 // settings/ats.stages; `status` is the coarse outcome. `:advance` moves the stage, `:reject` ends it.
@@ -1878,7 +1906,7 @@ export const applications = sqliteTable("applications", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ candidateIdx: index("application_candidate_idx").on(t.candidateId), requisitionIdx: index("application_requisition_idx").on(t.requisitionId), hiredIdx: index("application_hired_idx").on(t.hiredEmployeeId) }));
+}, (t) => ({ pageIdx: index("applications_page_idx").on(t.createdAt, t.uuid), candidateIdx: index("application_candidate_idx").on(t.candidateId), requisitionIdx: index("application_requisition_idx").on(t.requisitionId), hiredIdx: index("application_hired_idx").on(t.hiredEmployeeId) }));
 
 // ATS - a scheduled interview on an application. Flat/company-level, private-by-default + ACL. `interviewerIds`
 // is a JSON array of employee uuids (the panel); `:complete`/`:cancel` move the status.
@@ -1896,7 +1924,7 @@ export const interviews = sqliteTable("interviews", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ applicationIdx: index("interview_application_idx").on(t.applicationId) }));
+}, (t) => ({ pageIdx: index("interviews_page_idx").on(t.createdAt, t.uuid), applicationIdx: index("interview_application_idx").on(t.applicationId) }));
 
 // ATS - one interviewer's scorecard for an interview. Author(interviewer)-owned code (mirror review_feedback):
 // the author owns their own, HR sees all. `ratingsJson` is a per-criterion {key:number} map (criteria from
@@ -1913,7 +1941,7 @@ export const interviewFeedback = sqliteTable("interview_feedback", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ interviewIdx: index("if_interview_idx").on(t.interviewId), authorIdx: index("if_author_idx").on(t.authorId) }));
+}, (t) => ({ pageIdx: index("interview_feedback_page_idx").on(t.createdAt, t.uuid), interviewIdx: index("if_interview_idx").on(t.interviewId), authorIdx: index("if_author_idx").on(t.authorId) }));
 
 // ATS - an offer on an application. Flat/company-level, private-by-default + ACL. Workflow draft -> approved
 // -> extended -> accepted | declined | rescinded (validated by domain/ats.ts). On :accept the candidate is
@@ -1935,7 +1963,7 @@ export const offers = sqliteTable("offers", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ applicationIdx: index("offer_application_idx").on(t.applicationId) }));
+}, (t) => ({ pageIdx: index("offers_page_idx").on(t.createdAt, t.uuid), applicationIdx: index("offer_application_idx").on(t.applicationId) }));
 
 // Company asset inventory (laptops, phones, etc.). Org-level (flat code); ownership is dynamic via
 // `assignedTo` (an employee, nullable when in stock), so the same row can be reassigned over time. The
@@ -1960,7 +1988,7 @@ export const assetCategories = sqliteTable("asset_categories", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("asset_categories_page_idx").on(t.createdAt, t.uuid) }));
 
 export const assets = sqliteTable("assets", {
   uuid: pk(),
@@ -1993,8 +2021,8 @@ export const assets = sqliteTable("assets", {
   notes: text("notes"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
-  assignedIdx: index("asset_assigned_idx").on(t.assignedTo),
+}, (t) => ({ pageIdx: index("assets_page_idx").on(t.createdAt, t.uuid),
+  assignedIdx: index("asset_assigned_idx").on(t.assignedTo, t.createdAt, t.uuid),
   statusIdx: index("asset_status_idx").on(t.status),
   categoryIdx: index("asset_category_idx").on(t.categoryId),
 }));
@@ -2027,7 +2055,7 @@ export const stocktakes = sqliteTable("stocktakes", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete: an accidental count can be dropped
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
+}, (t) => ({ pageIdx: index("stocktakes_page_idx").on(t.createdAt, t.uuid),
   statusIdx: index("stocktake_status_idx").on(t.status),
 }));
 
@@ -2060,7 +2088,7 @@ export const settlements = sqliteTable("settlements", {
   settledJson: text("settled_json"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("settle_emp_idx").on(t.employeeId) }));
+}, (t) => ({ pageIdx: index("settlements_page_idx").on(t.settlementDate, t.uuid), empIdx: index("settle_emp_idx").on(t.employeeId, t.settlementDate, t.uuid) }));
 
 // Mid-employment leave encashment (cashout) - HR converts accrued, still-employed leave balance into a cash
 // payout. WORKFLOW resource (custom methods :approve/:reject/:cancel); APPROVED debits the leave balance and
@@ -2081,7 +2109,7 @@ export const leaveEncashments = sqliteTable("leave_encashments", {
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("encash_emp_idx").on(t.employeeId), stateIdx: index("encash_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("leave_encashments_page_idx").on(t.createdAt, t.uuid), empIdx: index("encash_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("encash_state_idx").on(t.state) }));
 
 // Org-level grade ladder + salary bands (flat-coded catalog like pay-components, HR-managed, soft-delete).
 // Each grade is a rung on the ladder (`level`, lower = more junior) carrying an optional salary band
@@ -2101,7 +2129,7 @@ export const payGrades = sqliteTable("pay_grades", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("pay_grades_page_idx").on(t.createdAt, t.uuid) }));
 
 // A named salary structure: a per-employee selection of recurring EARNING components, each with an optional
 // rate override (e.g. "Senior" sets HRA to 50% while "Standard" uses the component's own 40%). Deductions and
@@ -2116,7 +2144,7 @@ export const salaryStructures = sqliteTable("salary_structures", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("salary_structures_page_idx").on(t.createdAt, t.uuid) }));
 
 export const payComponents = sqliteTable("pay_components", {
   uuid: pk(),
@@ -2150,7 +2178,7 @@ export const payComponents = sqliteTable("pay_components", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("pay_components_page_idx").on(t.createdAt, t.uuid) }));
 
 export const payPeriods = sqliteTable("pay_periods", {
   uuid: pk(),
@@ -2165,7 +2193,7 @@ export const payPeriods = sqliteTable("pay_periods", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("pay_periods_page_idx").on(t.createdAt, t.uuid) }));
 
 export const payrollRuns = sqliteTable("payroll_runs", {
   uuid: pk(),
@@ -2201,7 +2229,7 @@ export const payrollRuns = sqliteTable("payroll_runs", {
   // At most ONE committed (APPROVED/PUBLISHED) run per pay period, enforced by the DB. Drafts are unrestricted
   // (many can coexist), but the money commits at APPROVE, so a partial unique index makes a second concurrent
   // approve for the same period fail loudly instead of the check-then-write race paying the monthly salary twice.
-}, (t) => ({
+}, (t) => ({ pageIdx: index("payroll_runs_page_idx").on(t.createdAt, t.uuid),
   periodIdx: index("run_period_idx").on(t.payPeriodId),
   committedPeriodUniq: uniqueIndex("run_period_committed_idx").on(t.payPeriodId).where(sql`${t.state} in ('APPROVED', 'PUBLISHED')`),
 }));
@@ -2235,8 +2263,8 @@ export const payslips = sqliteTable("payslips", {
   net: real("net").notNull().default(0),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
-  empIdx: index("payslip_emp_idx").on(t.employeeId),
+}, (t) => ({ pageIdx: index("payslips_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("payslip_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
   runIdx: index("payslip_run_idx").on(t.runId),
   // One slip per run item, enforced by the storage layer. processPayslipRunJob already skips items that
   // have a slip, which holds for a sequential retry but not for two drains running the same job at once -
@@ -2258,7 +2286,7 @@ export const reimbursementCategories = sqliteTable("reimbursement_categories", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("reimbursement_categories_page_idx").on(t.createdAt, t.uuid) }));
 
 export const reimbursements = sqliteTable("reimbursements", {
   uuid: pk(),
@@ -2274,7 +2302,7 @@ export const reimbursements = sqliteTable("reimbursements", {
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("reimb_emp_idx").on(t.employeeId), stateIdx: index("reimb_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("reimbursements_page_idx").on(t.createdAt, t.uuid), empIdx: index("reimb_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("reimb_state_idx").on(t.state) }));
 
 // Generic encrypted file attachments, reached THROUGH their parent's routes so access inherits the parent
 // object's gating (NOT a directly-addressable collection). One file per (collection, object_id, slot);
@@ -2312,7 +2340,7 @@ export const expenseCategories = sqliteTable("expense_categories", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("expense_categories_page_idx").on(t.createdAt, t.uuid) }));
 
 // Vendor master: who the company pays. Flat reference (soft-delete/disable/lock like a category).
 export const vendors = sqliteTable("vendors", {
@@ -2332,7 +2360,7 @@ export const vendors = sqliteTable("vendors", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("vendors_page_idx").on(t.createdAt, t.uuid) }));
 
 // WORKFLOW resource. state: DRAFT -> SUBMITTED -> APPROVED -> PAID (+ REJECTED / CANCELLED). PAID is set by
 // :pay (vendor, out-of-band) OR mirrored from the linked reimbursement (employee-fronted bridge), never by hand.
@@ -2373,8 +2401,8 @@ export const expenses = sqliteTable("expenses", {
   templateId: text("template_id").references((): AnySQLiteColumn => expenses.uuid), // the recurring template this was cloned from
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
-  empIdx: index("exp_emp_idx").on(t.employeeId),
+}, (t) => ({ pageIdx: index("expenses_page_idx").on(t.createdAt, t.uuid),
+  empIdx: index("exp_emp_idx").on(t.employeeId, t.createdAt, t.uuid),
   stateIdx: index("exp_state_idx").on(t.state),
   deptIdx: index("exp_dept_idx").on(t.departmentId),
   catIdx: index("exp_cat_idx").on(t.categoryId),
@@ -2402,7 +2430,7 @@ export const expenseBudgets = sqliteTable("expense_budgets", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ periodIdx: index("expbudget_period_idx").on(t.periodType, t.periodKey) }));
+}, (t) => ({ pageIdx: index("expense_budgets_page_idx").on(t.createdAt, t.uuid), periodIdx: index("expbudget_period_idx").on(t.periodType, t.periodKey) }));
 
 // Attendance clock sessions: one clock-in -> clock-out pair. `clockOut` NULL = an OPEN session (the employee
 // is currently clocked in); multiple sessions per day model breaks. Employee-owned (owner-embedded code), so
@@ -2421,7 +2449,7 @@ export const attendanceSessions = sqliteTable("attendance_sessions", {
   note: text("note"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("att_emp_idx").on(t.employeeId), openIdx: index("att_open_idx").on(t.clockOut) }));
+}, (t) => ({ pageIdx: index("attendance_sessions_page_idx").on(t.clockIn, t.uuid), empIdx: index("att_emp_idx").on(t.employeeId, t.clockIn, t.uuid), openIdx: index("att_open_idx").on(t.clockOut) }));
 
 // Attendance regularization: an employee's request to correct a whole day's clock times (missed punch, wrong
 // time, extra break). `sessions` is the COMPLETE intended set of in/out pairs for the day. A manager (own
@@ -2438,7 +2466,7 @@ export const attendanceRegularizations = sqliteTable("attendance_regularizations
   decidedBy: text("decided_by").references(() => users.uuid),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("attreg_emp_idx").on(t.employeeId), stateIdx: index("attreg_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("attendance_regularizations_page_idx").on(t.createdAt, t.uuid), empIdx: index("attreg_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("attreg_state_idx").on(t.state) }));
 
 // Overtime request: an employee logs extra hours worked on a day for approval. Employee-owned + code-scoped
 // (own/dept/all, like leave-requests): the employee files, a manager (own dept) or HR approves/rejects, the
@@ -2460,7 +2488,7 @@ export const overtimeRequests = sqliteTable("overtime_requests", {
   paidAt: integer("paid_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("ot_emp_idx").on(t.employeeId), stateIdx: index("ot_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("overtime_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("ot_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("ot_state_idx").on(t.state) }));
 
 // Work-from-home / remote-day request: an employee requests to work remotely over a date range. Employee-owned
 // + code-scoped (own/dept/all, like leave-requests): the employee files, a manager (own dept) or HR approves/
@@ -2482,7 +2510,7 @@ export const remoteWorkRequests = sqliteTable("remote_work_requests", {
   decisionNote: text("decision_note"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("rwr_emp_idx").on(t.employeeId), stateIdx: index("rwr_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("remote_work_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("rwr_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("rwr_state_idx").on(t.state) }));
 
 // A request for kit: "I need a laptop". Employee-owned + code-scoped (own/dept/all, like leave-requests): the
 // employee files it naming a CATEGORY (not a specific machine - which one they get is inventory's call), a
@@ -2506,7 +2534,7 @@ export const assetRequests = sqliteTable("asset_requests", {
   issuedAt: integer("issued_at", { mode: "timestamp_ms" }),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("areq_emp_idx").on(t.employeeId), stateIdx: index("areq_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("asset_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("areq_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("areq_state_idx").on(t.state) }));
 
 // Approval delegation (out-of-office cover). A manager who'll be away names a delegate to receive - and act on
 // - approvals during a date window. Owner = the delegator (their own record, self-service). While a delegation
@@ -2523,7 +2551,7 @@ export const approvalDelegations = sqliteTable("approval_delegations", {
   reason: text("reason"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ delegatorIdx: index("appdel_delegator_idx").on(t.delegatorId), delegateIdx: index("appdel_delegate_idx").on(t.delegateId) }));
+}, (t) => ({ pageIdx: index("approval_delegations_page_idx").on(t.createdAt, t.uuid), delegatorIdx: index("appdel_delegator_idx").on(t.delegatorId, t.createdAt, t.uuid), delegateIdx: index("appdel_delegate_idx").on(t.delegateId) }));
 
 // Notice-period tracking: a departing employee's notice (resignation/termination/retirement) - notice date +
 // last working day, with a derived countdown. Employee-owned + code-scoped (own/dept/all): the employee sees
@@ -2544,7 +2572,7 @@ export const noticePeriods = sqliteTable("notice_periods", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("notice_emp_idx").on(t.employeeId), statusIdx: index("notice_status_idx").on(t.status) }));
+}, (t) => ({ pageIdx: index("notice_periods_page_idx").on(t.createdAt, t.uuid), empIdx: index("notice_emp_idx").on(t.employeeId, t.createdAt, t.uuid), statusIdx: index("notice_status_idx").on(t.status) }));
 
 // Letter templates: the HR letter/document types (offer, increment, ...). First-class objects so
 // per-template access uses the real engine - READ = who may generate this letter type, WRITE =
@@ -2573,7 +2601,7 @@ export const letterheads = sqliteTable("letterheads", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("letterheads_page_idx").on(t.createdAt, t.uuid) }));
 
 export const letterTemplates = sqliteTable("letter_templates", {
   uuid: pk(),
@@ -2589,7 +2617,7 @@ export const letterTemplates = sqliteTable("letter_templates", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("letter_templates_page_idx").on(t.createdAt, t.uuid) }));
 
 // Suggestion box (employee engagement): an employee submits an idea/suggestion, optionally anonymously; peers
 // upvote it; HR responds + moves it through a status. Owned by the SUBMITTER (code-scoped own/dept/all,
@@ -2613,7 +2641,7 @@ export const suggestions = sqliteTable("suggestions", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete (moderation)
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ submitterIdx: index("sugg_submitter_idx").on(t.submitterId), statusIdx: index("sugg_status_idx").on(t.status) }));
+}, (t) => ({ pageIdx: index("suggestions_page_idx").on(t.createdAt, t.uuid), submitterIdx: index("sugg_submitter_idx").on(t.submitterId, t.createdAt, t.uuid), statusIdx: index("sugg_status_idx").on(t.status) }));
 
 // One upvote per (suggestion, employee). Internal table (NOT a collection) - counts fold into the suggestion
 // serialize, exactly like announcement_reactions. One row per (suggestion, employee); `value` is the direction
@@ -2661,7 +2689,7 @@ export const notifications = sqliteTable("notifications", {
   readTime: integer("read_time", { mode: "timestamp_ms" }), // null = unread
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ recipientIdx: index("notif_recipient_idx").on(t.recipientId), readIdx: index("notif_read_idx").on(t.readTime) }));
+}, (t) => ({ pageIdx: index("notifications_page_idx").on(t.createdAt, t.uuid), recipientIdx: index("notif_recipient_idx").on(t.recipientId, t.createdAt, t.uuid), readIdx: index("notif_read_idx").on(t.readTime) }));
 
 // Parked notifications awaiting the daily digest flush. When a recipient opts into digest mode, informational
 // (no-CTA) low/normal notifications land here instead of the live feed; the day-tick coalesces each
@@ -2714,7 +2742,7 @@ export const tickets = sqliteTable("tickets", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({ empIdx: index("ticket_emp_idx").on(t.employeeId), deptIdx: index("ticket_dept_idx").on(t.departmentId), assigneeIdx: index("ticket_assignee_idx").on(t.assigneeId), stateIdx: index("ticket_state_idx").on(t.state) }));
+}, (t) => ({ pageIdx: index("tickets_page_idx").on(t.createdAt, t.uuid), empIdx: index("ticket_emp_idx").on(t.employeeId, t.createdAt, t.uuid), deptIdx: index("ticket_dept_idx").on(t.departmentId), assigneeIdx: index("ticket_assignee_idx").on(t.assigneeId), stateIdx: index("ticket_state_idx").on(t.state) }));
 
 // A predefined, reusable checklist (a named, ordered list of item texts) that can be copied onto a ticket.
 // Unlike the per-ticket items below, this IS a first-class wire collection so each checklist is access-
@@ -2728,7 +2756,7 @@ export const ticketChecklists = sqliteTable("ticket_checklists", {
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   createdAt: created(),
   updatedAt: updated(),
-});
+}, (t) => ({ pageIdx: index("ticket_checklists_page_idx").on(t.createdAt, t.uuid) }));
 
 // A checklist item on a ticket - the assignee's working todo list. Like ticket_comments, it's a sub-resource
 // reached only through the ticket's routes (not a directly-addressable wire collection), so access inherits
@@ -2859,6 +2887,6 @@ export const tableViews = sqliteTable("table_views", {
   lockedBy: text("locked_by"),
   createdAt: created(),
   updatedAt: updated(),
-}, (t) => ({
+}, (t) => ({ pageIdx: index("table_views_page_idx").on(t.createdAt, t.uuid),
   ownerIdx: index("table_view_owner_idx").on(t.ownerId),
 }));

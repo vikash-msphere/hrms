@@ -70,13 +70,37 @@ function evalComparison(c: Comparison, ctx: EvalContext): boolean {
   }
 }
 
-// Evaluate a condition tree against the event context. A null/undefined condition = always true (unconditional).
+/**
+ * Evaluate a condition tree against the event context. A null/undefined condition = always true (unconditional).
+ *
+ * BOUNDED BY THE SAME CEILING THE VALIDATOR APPLIES, and not only because the validator applies it: this runs
+ * on every event of a matching trigger, over a tree read back out of a stored row, and a row can predate the
+ * validator (a seed, a direct write, an older build).
+ *
+ * THE CEILING THROWS RATHER THAN RETURNING FALSE, which is the difference between fail-closed and
+ * coin-flip-closed. Returning `false` at the depth limit hands that value back to whatever encloses it, and
+ * what encloses it is usually a `not` - so an odd number of them inverts the refusal into `true` and the rule
+ * fires on everything, which is the one outcome a bound like this exists to prevent. Unwinding the whole
+ * evaluation instead means an over-deep tree is UNMET as a tree, whatever its shape.
+ */
+class ConditionTooDeep extends Error {}
+
 export function evalCondition(cond: Condition | null | undefined, ctx: EvalContext): boolean {
+  try {
+    return evalNode(cond, ctx, 0);
+  } catch (e) {
+    if (e instanceof ConditionTooDeep) return false; // the rule declines to fire
+    throw e;
+  }
+}
+
+function evalNode(cond: Condition | null | undefined, ctx: EvalContext, depth: number): boolean {
   if (!cond) return true;
+  if (depth > MAX_CONDITION_DEPTH) throw new ConditionTooDeep();
   if (isComparison(cond)) return evalComparison(cond, ctx);
-  if ("all" in cond) return cond.all.every((c) => evalCondition(c, ctx));
-  if ("any" in cond) return cond.any.some((c) => evalCondition(c, ctx));
-  if ("not" in cond) return !evalCondition(cond.not, ctx);
+  if ("all" in cond) return cond.all.every((c) => evalNode(c, ctx, depth + 1));
+  if ("any" in cond) return cond.any.some((c) => evalNode(c, ctx, depth + 1));
+  if ("not" in cond) return !evalNode(cond.not, ctx, depth + 1);
   return false;
 }
 
@@ -223,7 +247,24 @@ export function scheduleDueOn(s: Schedule, date: Date): boolean {
 }
 
 // ---- Validation ---- (used by the write route AND the drift/round-trip test)
-function validateCondition(cond: Condition, trigger: string, path: string, errors: string[]): void {
+
+/**
+ * Bound nesting of a condition TREE, for the same reason `MAX_ACTION_DEPTH` bounds an action chain - and it was
+ * the half that had no bound at all.
+ *
+ * `validateCondition` recursed freely and so did `evalCondition`, which runs on EVERY event of a matching
+ * trigger. A `{not:{not:…}}` chain 20,000 deep is about 160 KB of JSON - far inside the request body cap - and
+ * overflows the stack: authoring one 500s inside the validator instead of being refused as the bad request it
+ * is, and a stored one crashes the engine for that trigger from then on, because `loadEnabled` caches the
+ * parsed rule. Authoring is super-only, so this is a rail rather than a hole; it is here because a recursive
+ * walk over caller-supplied structure should not be the one thing in this file without a ceiling.
+ *
+ * Well clear of anything a person composes in the rule builder: the deepest shipped condition is two.
+ */
+const MAX_CONDITION_DEPTH = 20;
+
+function validateCondition(cond: Condition, trigger: string, path: string, errors: string[], depth = 0): void {
+  if (depth > MAX_CONDITION_DEPTH) { errors.push(`${path}: condition nesting too deep`); return; }
   if (isComparison(cond)) {
     const known = new Set(fieldsForEventType(trigger).map((f) => f.name));
     // A dotted path digs into the payload object - only validate the top bare-name form against the catalog.
@@ -232,9 +273,9 @@ function validateCondition(cond: Condition, trigger: string, path: string, error
     }
     return;
   }
-  if ("all" in cond) cond.all.forEach((c, i) => validateCondition(c, trigger, `${path}.all[${i}]`, errors));
-  else if ("any" in cond) cond.any.forEach((c, i) => validateCondition(c, trigger, `${path}.any[${i}]`, errors));
-  else if ("not" in cond) validateCondition(cond.not, trigger, `${path}.not`, errors);
+  if ("all" in cond) cond.all.forEach((c, i) => validateCondition(c, trigger, `${path}.all[${i}]`, errors, depth + 1));
+  else if ("any" in cond) cond.any.forEach((c, i) => validateCondition(c, trigger, `${path}.any[${i}]`, errors, depth + 1));
+  else if ("not" in cond) validateCondition(cond.not, trigger, `${path}.not`, errors, depth + 1);
   else errors.push(`${path}: malformed condition`);
 }
 

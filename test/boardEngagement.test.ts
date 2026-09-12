@@ -246,3 +246,73 @@ describe("searching the board", () => {
     expect(all.items).toHaveLength(1);
   });
 });
+
+// EVERY COUNTER ON THE BOARD IS A ROW COUNT, so a duplicate row is a wrong number on screen. All three of
+// these were written as check-then-insert with nothing behind them: two writes that both read "nothing yet"
+// both inserted. Not an exotic race - the board marks a post read as it opens while "Mark all read" walks the
+// same table, and a double tap on a reaction or a poll is ordinary.
+//
+// The uniqueness now lives in the schema (partial indexes for reactions, since `reply_id` is nullable and
+// SQLite counts NULLs as distinct), and every write says `onConflictDoNothing` - so losing the race is the
+// no-op it always meant to be rather than a 500.
+describe("engagement counters cannot double-count", () => {
+  it("records one read receipt however many times a viewer opens the post", async () => {
+    const author = await seedActor("Author");
+    const reader = await seedActor("Reader");
+    const live = await post(author, "Notice");
+
+    await markAnnouncementRead(deps, reader, live.uuid);
+    await markAnnouncementRead(deps, reader, live.uuid);
+    // ...and the batched "mark all read" over the same post, which is the pair that actually collides.
+    await markAllAnnouncementsRead(deps, reader, editors);
+
+    const receipts = await deps.db.select().from(schema.announcementReads).where(eq(schema.announcementReads.announcementId, live.uuid));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]!.employeeId).toBe(reader.employeeId);
+  });
+
+  it("writes the receipt at most once even when two marks race", async () => {
+    const author = await seedActor("Author");
+    const reader = await seedActor("Reader");
+    const live = await post(author, "Notice");
+    // Both see "no receipt" before either writes - the read-then-write window, driven directly.
+    await Promise.all([markAnnouncementRead(deps, reader, live.uuid), markAnnouncementRead(deps, reader, live.uuid)]);
+    expect(await deps.db.select().from(schema.announcementReads).where(eq(schema.announcementReads.announcementId, live.uuid))).toHaveLength(1);
+  });
+
+  it("counts one reactor per emoji however many times they tap it", async () => {
+    const author = await seedActor("Author");
+    const fan = await seedActor("Fan");
+    const live = await post(author, "Ship it");
+
+    await toggleReaction(deps, fan, live.uuid, "🎉");
+    await Promise.all([toggleReaction(deps, fan, live.uuid, "🎉"), toggleReaction(deps, fan, live.uuid, "🎉")]);
+    await toggleReaction(deps, fan, live.uuid, "🎉"); // land on "reacted" whatever the race did
+
+    const rows = await deps.db.select().from(schema.announcementReactions).where(eq(schema.announcementReactions.announcementId, live.uuid));
+    expect(rows).toHaveLength(1);
+    // And the rendered chip agrees: one, listing that person once.
+    const groups = (await reactionsFor(deps, [live.uuid], fan.employeeId!)).get(live.uuid) ?? [];
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.count).toBe(1);
+    expect(groups[0]!.reactors).toEqual([fan.employeeId]);
+  });
+
+  // A post-level reaction has `reply_id IS NULL`, which a single composite unique index would NOT constrain -
+  // SQLite treats NULLs as distinct. That is why the schema carries two partial indexes; this is the half that
+  // would have kept silently double-counting.
+  it("keeps a reply's reaction separate from the post's, and each of them single", async () => {
+    const author = await seedActor("Author");
+    const fan = await seedActor("Fan");
+    const live = await post(author, "Thread");
+    // `addReply` answers with the POST (the route re-serializes it), so the reply's own id comes off the table.
+    await addReply(deps, author, live.uuid, "first");
+    const reply = (await deps.db.select().from(schema.announcementReplies).where(eq(schema.announcementReplies.announcementId, live.uuid)))[0]!;
+
+    await toggleReaction(deps, fan, live.uuid, "👍");
+    await toggleReaction(deps, fan, live.uuid, "👍", reply.uuid);
+    const rows = await deps.db.select().from(schema.announcementReactions).where(eq(schema.announcementReactions.announcementId, live.uuid));
+    expect(rows).toHaveLength(2); // one on the post, one on the reply - different targets, not a duplicate
+    expect(rows.filter((r) => r.replyId === null)).toHaveLength(1);
+  });
+});

@@ -38,9 +38,9 @@ CREATE TABLE `announcement_poll_votes` (
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX `apv_opt_emp_uniq` ON `announcement_poll_votes` (`option_id`,`employee_id`);--> statement-breakpoint
 CREATE INDEX `apv_ann_idx` ON `announcement_poll_votes` (`announcement_id`);--> statement-breakpoint
 CREATE INDEX `apv_emp_idx` ON `announcement_poll_votes` (`employee_id`);--> statement-breakpoint
-CREATE INDEX `apv_opt_idx` ON `announcement_poll_votes` (`option_id`);--> statement-breakpoint
 CREATE TABLE `announcement_reactions` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`announcement_id` text NOT NULL,
@@ -53,9 +53,10 @@ CREATE TABLE `announcement_reactions` (
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX `arx_post_emp_uniq` ON `announcement_reactions` (`announcement_id`,`employee_id`) WHERE "announcement_reactions"."reply_id" is null;--> statement-breakpoint
+CREATE UNIQUE INDEX `arx_reply_emp_uniq` ON `announcement_reactions` (`reply_id`,`employee_id`) WHERE "announcement_reactions"."reply_id" is not null;--> statement-breakpoint
 CREATE INDEX `arx_ann_idx` ON `announcement_reactions` (`announcement_id`);--> statement-breakpoint
 CREATE INDEX `arx_emp_idx` ON `announcement_reactions` (`employee_id`);--> statement-breakpoint
-CREATE INDEX `arx_reply_idx` ON `announcement_reactions` (`reply_id`);--> statement-breakpoint
 CREATE TABLE `announcement_reads` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`announcement_id` text NOT NULL,
@@ -65,7 +66,7 @@ CREATE TABLE `announcement_reads` (
 	FOREIGN KEY (`employee_id`) REFERENCES `employees`(`uuid`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
-CREATE INDEX `ar_ann_idx` ON `announcement_reads` (`announcement_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `ar_ann_emp_uniq` ON `announcement_reads` (`announcement_id`,`employee_id`);--> statement-breakpoint
 CREATE INDEX `ar_emp_idx` ON `announcement_reads` (`employee_id`);--> statement-breakpoint
 CREATE TABLE `announcement_replies` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -142,7 +143,8 @@ CREATE TABLE `api_keys` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `api_keys_code_unique` ON `api_keys` (`code`);--> statement-breakpoint
 CREATE UNIQUE INDEX `api_keys_prefix_unique` ON `api_keys` (`prefix`);--> statement-breakpoint
-CREATE INDEX `api_keys_owner_idx` ON `api_keys` (`owner_user_id`);--> statement-breakpoint
+CREATE INDEX `api_keys_page_idx` ON `api_keys` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `api_keys_owner_idx` ON `api_keys` (`owner_user_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `applications` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -166,6 +168,7 @@ CREATE TABLE `applications` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `applications_code_unique` ON `applications` (`code`);--> statement-breakpoint
+CREATE INDEX `applications_page_idx` ON `applications` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `application_candidate_idx` ON `applications` (`candidate_id`);--> statement-breakpoint
 CREATE INDEX `application_requisition_idx` ON `applications` (`requisition_id`);--> statement-breakpoint
 CREATE INDEX `application_hired_idx` ON `applications` (`hired_employee_id`);--> statement-breakpoint
@@ -184,7 +187,8 @@ CREATE TABLE `approval_delegations` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `approval_delegations_code_unique` ON `approval_delegations` (`code`);--> statement-breakpoint
-CREATE INDEX `appdel_delegator_idx` ON `approval_delegations` (`delegator_id`);--> statement-breakpoint
+CREATE INDEX `approval_delegations_page_idx` ON `approval_delegations` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `appdel_delegator_idx` ON `approval_delegations` (`delegator_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `appdel_delegate_idx` ON `approval_delegations` (`delegate_id`);--> statement-breakpoint
 CREATE TABLE `asset_categories` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -201,6 +205,7 @@ CREATE TABLE `asset_categories` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `asset_categories_code_unique` ON `asset_categories` (`code`);--> statement-breakpoint
+CREATE INDEX `asset_categories_page_idx` ON `asset_categories` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `asset_requests` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -222,7 +227,8 @@ CREATE TABLE `asset_requests` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `asset_requests_code_unique` ON `asset_requests` (`code`);--> statement-breakpoint
-CREATE INDEX `areq_emp_idx` ON `asset_requests` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `asset_requests_page_idx` ON `asset_requests` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `areq_emp_idx` ON `asset_requests` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `areq_state_idx` ON `asset_requests` (`state`);--> statement-breakpoint
 CREATE TABLE `assets` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -255,7 +261,8 @@ CREATE TABLE `assets` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `assets_code_unique` ON `assets` (`code`);--> statement-breakpoint
 CREATE UNIQUE INDEX `assets_asset_tag_unique` ON `assets` (`asset_tag`);--> statement-breakpoint
-CREATE INDEX `asset_assigned_idx` ON `assets` (`assigned_to`);--> statement-breakpoint
+CREATE INDEX `assets_page_idx` ON `assets` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `asset_assigned_idx` ON `assets` (`assigned_to`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `asset_status_idx` ON `assets` (`status`);--> statement-breakpoint
 CREATE INDEX `asset_category_idx` ON `assets` (`category_id`);--> statement-breakpoint
 CREATE TABLE `attachments` (
@@ -290,7 +297,8 @@ CREATE TABLE `attendance_regularizations` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `attendance_regularizations_code_unique` ON `attendance_regularizations` (`code`);--> statement-breakpoint
-CREATE INDEX `attreg_emp_idx` ON `attendance_regularizations` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `attendance_regularizations_page_idx` ON `attendance_regularizations` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `attreg_emp_idx` ON `attendance_regularizations` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `attreg_state_idx` ON `attendance_regularizations` (`state`);--> statement-breakpoint
 CREATE TABLE `attendance_sessions` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -308,7 +316,8 @@ CREATE TABLE `attendance_sessions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `attendance_sessions_code_unique` ON `attendance_sessions` (`code`);--> statement-breakpoint
-CREATE INDEX `att_emp_idx` ON `attendance_sessions` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `attendance_sessions_page_idx` ON `attendance_sessions` (`clock_in`,`uuid`);--> statement-breakpoint
+CREATE INDEX `att_emp_idx` ON `attendance_sessions` (`employee_id`,`clock_in`,`uuid`);--> statement-breakpoint
 CREATE INDEX `att_open_idx` ON `attendance_sessions` (`clock_out`);--> statement-breakpoint
 CREATE TABLE `audit_log` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -359,6 +368,7 @@ CREATE TABLE `automation_runs` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `automation_runs_code_unique` ON `automation_runs` (`code`);--> statement-breakpoint
+CREATE INDEX `automation_runs_page_idx` ON `automation_runs` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `automation_runs_auto_idx` ON `automation_runs` (`automation_id`);--> statement-breakpoint
 CREATE INDEX `automation_runs_started_idx` ON `automation_runs` (`started_at`);--> statement-breakpoint
 CREATE INDEX `automation_runs_corr_idx` ON `automation_runs` (`correlation_id`);--> statement-breakpoint
@@ -383,6 +393,7 @@ CREATE TABLE `automations` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `automations_code_unique` ON `automations` (`code`);--> statement-breakpoint
+CREATE INDEX `automations_page_idx` ON `automations` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `automations_trigger_idx` ON `automations` (`trigger_type`);--> statement-breakpoint
 CREATE TABLE `background_checks` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -406,7 +417,8 @@ CREATE TABLE `background_checks` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `background_checks_code_unique` ON `background_checks` (`code`);--> statement-breakpoint
-CREATE INDEX `bgcheck_emp_idx` ON `background_checks` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `background_checks_page_idx` ON `background_checks` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `bgcheck_emp_idx` ON `background_checks` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `benefit_enrollments` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -423,7 +435,8 @@ CREATE TABLE `benefit_enrollments` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `benefit_enrollments_code_unique` ON `benefit_enrollments` (`code`);--> statement-breakpoint
-CREATE INDEX `ben_emp_idx` ON `benefit_enrollments` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `benefit_enrollments_page_idx` ON `benefit_enrollments` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `ben_emp_idx` ON `benefit_enrollments` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `ben_plan_idx` ON `benefit_enrollments` (`plan_id`);--> statement-breakpoint
 CREATE TABLE `benefit_plans` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -463,6 +476,7 @@ CREATE TABLE `boards` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `boards_code_unique` ON `boards` (`code`);--> statement-breakpoint
+CREATE INDEX `boards_page_idx` ON `boards` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `bonuses` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -486,7 +500,8 @@ CREATE TABLE `bonuses` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `bonuses_code_unique` ON `bonuses` (`code`);--> statement-breakpoint
-CREATE INDEX `bonus_emp_idx` ON `bonuses` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `bonuses_page_idx` ON `bonuses` (`award_date`,`uuid`);--> statement-breakpoint
+CREATE INDEX `bonus_emp_idx` ON `bonuses` (`employee_id`,`award_date`,`uuid`);--> statement-breakpoint
 CREATE INDEX `bonus_batch_idx` ON `bonuses` (`batch_id`);--> statement-breakpoint
 CREATE INDEX `bonus_paid_idx` ON `bonuses` (`paid_run_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `bonus_cycle_emp_idx` ON `bonuses` (`cycle_id`,`employee_id`) WHERE "bonuses"."cycle_id" is not null;--> statement-breakpoint
@@ -508,6 +523,7 @@ CREATE TABLE `candidates` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `candidates_code_unique` ON `candidates` (`code`);--> statement-breakpoint
+CREATE INDEX `candidates_page_idx` ON `candidates` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `candidate_email_idx` ON `candidates` (`email`);--> statement-breakpoint
 CREATE TABLE `card_comments` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -603,8 +619,9 @@ CREATE TABLE `cards` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `cards_code_unique` ON `cards` (`code`);--> statement-breakpoint
+CREATE INDEX `cards_page_idx` ON `cards` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `card_board_idx` ON `cards` (`board_id`);--> statement-breakpoint
-CREATE INDEX `card_emp_idx` ON `cards` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `card_emp_idx` ON `cards` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `card_dept_idx` ON `cards` (`department_id`);--> statement-breakpoint
 CREATE INDEX `card_assignee_idx` ON `cards` (`assignee_id`);--> statement-breakpoint
 CREATE INDEX `card_reporter_idx` ON `cards` (`reporter_id`);--> statement-breakpoint
@@ -631,7 +648,8 @@ CREATE TABLE `check_ins` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `check_ins_code_unique` ON `check_ins` (`code`);--> statement-breakpoint
-CREATE INDEX `ci_emp_idx` ON `check_ins` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `check_ins_page_idx` ON `check_ins` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `ci_emp_idx` ON `check_ins` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `code_sequences` (
 	`scope` text PRIMARY KEY NOT NULL,
 	`next` integer NOT NULL
@@ -710,6 +728,7 @@ CREATE TABLE `compliance_events` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `compliance_events_code_unique` ON `compliance_events` (`code`);--> statement-breakpoint
+CREATE INDEX `compliance_events_page_idx` ON `compliance_events` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `compliance_due_idx` ON `compliance_events` (`due_date`);--> statement-breakpoint
 CREATE INDEX `compliance_rule_idx` ON `compliance_events` (`rule_id`);--> statement-breakpoint
 CREATE TABLE `compliance_rules` (
@@ -730,6 +749,7 @@ CREATE TABLE `compliance_rules` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `compliance_rules_code_unique` ON `compliance_rules` (`code`);--> statement-breakpoint
+CREATE INDEX `compliance_rules_page_idx` ON `compliance_rules` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `cron_runs` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -745,6 +765,7 @@ CREATE TABLE `cron_runs` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `cron_runs_code_unique` ON `cron_runs` (`code`);--> statement-breakpoint
+CREATE INDEX `cron_runs_page_idx` ON `cron_runs` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `cron_runs_cron_idx` ON `cron_runs` (`cron`);--> statement-breakpoint
 CREATE INDEX `cron_runs_started_idx` ON `cron_runs` (`started_at`);--> statement-breakpoint
 CREATE TABLE `departments` (
@@ -763,6 +784,7 @@ CREATE TABLE `departments` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `departments_code_unique` ON `departments` (`code`);--> statement-breakpoint
+CREATE INDEX `departments_page_idx` ON `departments` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `dependents` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -777,7 +799,8 @@ CREATE TABLE `dependents` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `dependents_code_unique` ON `dependents` (`code`);--> statement-breakpoint
-CREATE INDEX `dep_emp_idx` ON `dependents` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `dependents_page_idx` ON `dependents` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `dep_emp_idx` ON `dependents` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `document_acknowledgements` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -796,7 +819,8 @@ CREATE TABLE `document_acknowledgements` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `document_acknowledgements_code_unique` ON `document_acknowledgements` (`code`);--> statement-breakpoint
-CREATE INDEX `dack_emp_idx` ON `document_acknowledgements` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `document_acknowledgements_page_idx` ON `document_acknowledgements` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `dack_emp_idx` ON `document_acknowledgements` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `dack_doc_idx` ON `document_acknowledgements` (`document_id`);--> statement-breakpoint
 CREATE TABLE `employees` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -839,6 +863,7 @@ CREATE TABLE `employees` (
 CREATE UNIQUE INDEX `employees_code_unique` ON `employees` (`code`);--> statement-breakpoint
 CREATE UNIQUE INDEX `employees_employee_number_unique` ON `employees` (`employee_number`);--> statement-breakpoint
 CREATE UNIQUE INDEX `employees_work_email_unique` ON `employees` (`work_email`);--> statement-breakpoint
+CREATE INDEX `employees_page_idx` ON `employees` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `emp_dept_idx` ON `employees` (`department_id`);--> statement-breakpoint
 CREATE INDEX `emp_mgr_idx` ON `employees` (`manager_id`);--> statement-breakpoint
 CREATE TABLE `event_log` (
@@ -858,6 +883,7 @@ CREATE TABLE `event_log` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `event_log_code_unique` ON `event_log` (`code`);--> statement-breakpoint
+CREATE INDEX `event_log_page_idx` ON `event_log` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `event_log_type_idx` ON `event_log` (`type`);--> statement-breakpoint
 CREATE INDEX `event_log_occurred_idx` ON `event_log` (`occurred_at`);--> statement-breakpoint
 CREATE INDEX `event_log_corr_idx` ON `event_log` (`correlation_id`);--> statement-breakpoint
@@ -895,6 +921,7 @@ CREATE TABLE `events` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `events_code_unique` ON `events` (`code`);--> statement-breakpoint
+CREATE INDEX `events_page_idx` ON `events` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `event_start_idx` ON `events` (`start_date`);--> statement-breakpoint
 CREATE TABLE `expense_budgets` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -914,6 +941,7 @@ CREATE TABLE `expense_budgets` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `expense_budgets_code_unique` ON `expense_budgets` (`code`);--> statement-breakpoint
+CREATE INDEX `expense_budgets_page_idx` ON `expense_budgets` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `expbudget_period_idx` ON `expense_budgets` (`period_type`,`period_key`);--> statement-breakpoint
 CREATE TABLE `expense_categories` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -930,6 +958,7 @@ CREATE TABLE `expense_categories` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `expense_categories_code_unique` ON `expense_categories` (`code`);--> statement-breakpoint
+CREATE INDEX `expense_categories_page_idx` ON `expense_categories` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `expenses` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -971,7 +1000,8 @@ CREATE TABLE `expenses` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `expenses_code_unique` ON `expenses` (`code`);--> statement-breakpoint
-CREATE INDEX `exp_emp_idx` ON `expenses` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `expenses_page_idx` ON `expenses` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `exp_emp_idx` ON `expenses` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `exp_state_idx` ON `expenses` (`state`);--> statement-breakpoint
 CREATE INDEX `exp_dept_idx` ON `expenses` (`department_id`);--> statement-breakpoint
 CREATE INDEX `exp_cat_idx` ON `expenses` (`category_id`);--> statement-breakpoint
@@ -1022,6 +1052,7 @@ CREATE TABLE `goal_templates` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `goal_templates_code_unique` ON `goal_templates` (`code`);--> statement-breakpoint
+CREATE INDEX `goal_templates_page_idx` ON `goal_templates` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `goaltpl_group_idx` ON `goal_templates` (`group_name`);--> statement-breakpoint
 CREATE TABLE `goal_watchers` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1072,7 +1103,8 @@ CREATE TABLE `goals` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `goals_code_unique` ON `goals` (`code`);--> statement-breakpoint
-CREATE INDEX `goal_emp_idx` ON `goals` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `goals_page_idx` ON `goals` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `goal_emp_idx` ON `goals` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `goal_parent_idx` ON `goals` (`parent_id`);--> statement-breakpoint
 CREATE INDEX `goal_cycle_idx` ON `goals` (`cycle_id`);--> statement-breakpoint
 CREATE INDEX `goal_blocked_idx` ON `goals` (`blocked_by_id`);--> statement-breakpoint
@@ -1087,6 +1119,7 @@ CREATE TABLE `holiday_selections` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `holiday_selections_code_unique` ON `holiday_selections` (`code`);--> statement-breakpoint
+CREATE INDEX `holiday_selections_page_idx` ON `holiday_selections` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE UNIQUE INDEX `hsel_emp_holiday_idx` ON `holiday_selections` (`employee_id`,`holiday_id`);--> statement-breakpoint
 CREATE TABLE `holidays` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1105,6 +1138,7 @@ CREATE TABLE `holidays` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `holidays_code_unique` ON `holidays` (`code`);--> statement-breakpoint
+CREATE INDEX `holidays_page_idx` ON `holidays` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `interview_feedback` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1122,6 +1156,7 @@ CREATE TABLE `interview_feedback` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `interview_feedback_code_unique` ON `interview_feedback` (`code`);--> statement-breakpoint
+CREATE INDEX `interview_feedback_page_idx` ON `interview_feedback` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `if_interview_idx` ON `interview_feedback` (`interview_id`);--> statement-breakpoint
 CREATE INDEX `if_author_idx` ON `interview_feedback` (`author_id`);--> statement-breakpoint
 CREATE TABLE `interviews` (
@@ -1142,6 +1177,7 @@ CREATE TABLE `interviews` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `interviews_code_unique` ON `interviews` (`code`);--> statement-breakpoint
+CREATE INDEX `interviews_page_idx` ON `interviews` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `interview_application_idx` ON `interviews` (`application_id`);--> statement-breakpoint
 CREATE TABLE `job_requisitions` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1166,6 +1202,7 @@ CREATE TABLE `job_requisitions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `job_requisitions_code_unique` ON `job_requisitions` (`code`);--> statement-breakpoint
+CREATE INDEX `job_requisitions_page_idx` ON `job_requisitions` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `requisition_dept_idx` ON `job_requisitions` (`department_id`);--> statement-breakpoint
 CREATE TABLE `jobs` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1186,6 +1223,7 @@ CREATE TABLE `jobs` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `jobs_code_unique` ON `jobs` (`code`);--> statement-breakpoint
+CREATE INDEX `jobs_page_idx` ON `jobs` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `jobs_status_idx` ON `jobs` (`status`);--> statement-breakpoint
 CREATE TABLE `leave_balances` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1202,7 +1240,8 @@ CREATE TABLE `leave_balances` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `leave_balances_code_unique` ON `leave_balances` (`code`);--> statement-breakpoint
-CREATE INDEX `bal_emp_idx` ON `leave_balances` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `leave_balances_page_idx` ON `leave_balances` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `bal_emp_idx` ON `leave_balances` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE UNIQUE INDEX `bal_emp_type_idx` ON `leave_balances` (`employee_id`,`leave_type_id`);--> statement-breakpoint
 CREATE TABLE `leave_encashments` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1226,7 +1265,8 @@ CREATE TABLE `leave_encashments` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `leave_encashments_code_unique` ON `leave_encashments` (`code`);--> statement-breakpoint
-CREATE INDEX `encash_emp_idx` ON `leave_encashments` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `leave_encashments_page_idx` ON `leave_encashments` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `encash_emp_idx` ON `leave_encashments` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `encash_state_idx` ON `leave_encashments` (`state`);--> statement-breakpoint
 CREATE TABLE `leave_requests` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1249,7 +1289,8 @@ CREATE TABLE `leave_requests` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `leave_requests_code_unique` ON `leave_requests` (`code`);--> statement-breakpoint
-CREATE INDEX `lr_emp_idx` ON `leave_requests` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `leave_requests_page_idx` ON `leave_requests` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `lr_emp_idx` ON `leave_requests` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `lr_state_idx` ON `leave_requests` (`state`);--> statement-breakpoint
 CREATE TABLE `leave_types` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1276,6 +1317,7 @@ CREATE TABLE `leave_types` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `leave_types_code_unique` ON `leave_types` (`code`);--> statement-breakpoint
+CREATE INDEX `leave_types_page_idx` ON `leave_types` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `letter_templates` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1291,6 +1333,7 @@ CREATE TABLE `letter_templates` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `letter_templates_code_unique` ON `letter_templates` (`code`);--> statement-breakpoint
+CREATE INDEX `letter_templates_page_idx` ON `letter_templates` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `letterheads` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1304,6 +1347,7 @@ CREATE TABLE `letterheads` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `letterheads_code_unique` ON `letterheads` (`code`);--> statement-breakpoint
+CREATE INDEX `letterheads_page_idx` ON `letterheads` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `loan_repayments` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`loan_id` text NOT NULL,
@@ -1337,7 +1381,8 @@ CREATE TABLE `loans` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `loans_code_unique` ON `loans` (`code`);--> statement-breakpoint
-CREATE INDEX `loan_emp_idx` ON `loans` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `loans_page_idx` ON `loans` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `loan_emp_idx` ON `loans` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `notice_periods` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1357,7 +1402,8 @@ CREATE TABLE `notice_periods` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `notice_periods_code_unique` ON `notice_periods` (`code`);--> statement-breakpoint
-CREATE INDEX `notice_emp_idx` ON `notice_periods` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `notice_periods_page_idx` ON `notice_periods` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `notice_emp_idx` ON `notice_periods` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `notice_status_idx` ON `notice_periods` (`status`);--> statement-breakpoint
 CREATE TABLE `notification_digest_queue` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1394,7 +1440,8 @@ CREATE TABLE `notifications` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `notifications_code_unique` ON `notifications` (`code`);--> statement-breakpoint
-CREATE INDEX `notif_recipient_idx` ON `notifications` (`recipient_id`);--> statement-breakpoint
+CREATE INDEX `notifications_page_idx` ON `notifications` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `notif_recipient_idx` ON `notifications` (`recipient_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `notif_read_idx` ON `notifications` (`read_time`);--> statement-breakpoint
 CREATE TABLE `offers` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1420,6 +1467,7 @@ CREATE TABLE `offers` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `offers_code_unique` ON `offers` (`code`);--> statement-breakpoint
+CREATE INDEX `offers_page_idx` ON `offers` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `offer_application_idx` ON `offers` (`application_id`);--> statement-breakpoint
 CREATE TABLE `org_documents` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1446,6 +1494,7 @@ CREATE TABLE `org_documents` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `org_documents_code_unique` ON `org_documents` (`code`);--> statement-breakpoint
+CREATE INDEX `org_documents_page_idx` ON `org_documents` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `overtime_requests` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1467,7 +1516,8 @@ CREATE TABLE `overtime_requests` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `overtime_requests_code_unique` ON `overtime_requests` (`code`);--> statement-breakpoint
-CREATE INDEX `ot_emp_idx` ON `overtime_requests` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `overtime_requests_page_idx` ON `overtime_requests` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `ot_emp_idx` ON `overtime_requests` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `ot_state_idx` ON `overtime_requests` (`state`);--> statement-breakpoint
 CREATE TABLE `pay_components` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1490,6 +1540,7 @@ CREATE TABLE `pay_components` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `pay_components_code_unique` ON `pay_components` (`code`);--> statement-breakpoint
+CREATE INDEX `pay_components_page_idx` ON `pay_components` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `pay_grades` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1506,6 +1557,7 @@ CREATE TABLE `pay_grades` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `pay_grades_code_unique` ON `pay_grades` (`code`);--> statement-breakpoint
+CREATE INDEX `pay_grades_page_idx` ON `pay_grades` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `pay_periods` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1522,6 +1574,7 @@ CREATE TABLE `pay_periods` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `pay_periods_code_unique` ON `pay_periods` (`code`);--> statement-breakpoint
+CREATE INDEX `pay_periods_page_idx` ON `pay_periods` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `payroll_run_items` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1563,6 +1616,7 @@ CREATE TABLE `payroll_runs` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `payroll_runs_code_unique` ON `payroll_runs` (`code`);--> statement-breakpoint
+CREATE INDEX `payroll_runs_page_idx` ON `payroll_runs` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `run_period_idx` ON `payroll_runs` (`pay_period_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `run_period_committed_idx` ON `payroll_runs` (`pay_period_id`) WHERE "payroll_runs"."state" in ('APPROVED', 'PUBLISHED');--> statement-breakpoint
 CREATE TABLE `payslips` (
@@ -1585,7 +1639,8 @@ CREATE TABLE `payslips` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `payslips_code_unique` ON `payslips` (`code`);--> statement-breakpoint
-CREATE INDEX `payslip_emp_idx` ON `payslips` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `payslips_page_idx` ON `payslips` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `payslip_emp_idx` ON `payslips` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `payslip_run_idx` ON `payslips` (`run_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `payslip_run_item_idx` ON `payslips` (`run_item_id`);--> statement-breakpoint
 CREATE TABLE `personal_documents` (
@@ -1626,7 +1681,8 @@ CREATE TABLE `personal_documents` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `personal_documents_code_unique` ON `personal_documents` (`code`);--> statement-breakpoint
-CREATE INDEX `pdoc_emp_idx` ON `personal_documents` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `personal_documents_page_idx` ON `personal_documents` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `pdoc_emp_idx` ON `personal_documents` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `pdoc_esign_ref_idx` ON `personal_documents` (`esign_request_id`);--> statement-breakpoint
 CREATE TABLE `policy` (
 	`key` text PRIMARY KEY NOT NULL,
@@ -1651,7 +1707,8 @@ CREATE TABLE `positions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `positions_code_unique` ON `positions` (`code`);--> statement-breakpoint
-CREATE INDEX `pos_emp_idx` ON `positions` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `positions_page_idx` ON `positions` (`effective_from`,`uuid`);--> statement-breakpoint
+CREATE INDEX `pos_emp_idx` ON `positions` (`employee_id`,`effective_from`,`uuid`);--> statement-breakpoint
 CREATE UNIQUE INDEX `pos_open_idx` ON `positions` (`employee_id`) WHERE "positions"."effective_to" is null;--> statement-breakpoint
 CREATE TABLE `preferences` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1709,7 +1766,8 @@ CREATE TABLE `referrals` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `referrals_code_unique` ON `referrals` (`code`);--> statement-breakpoint
-CREATE INDEX `referral_referrer_idx` ON `referrals` (`referrer_id`);--> statement-breakpoint
+CREATE INDEX `referrals_page_idx` ON `referrals` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `referral_referrer_idx` ON `referrals` (`referrer_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `referral_hired_idx` ON `referrals` (`hired_employee_id`);--> statement-breakpoint
 CREATE TABLE `reimbursement_categories` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1725,6 +1783,7 @@ CREATE TABLE `reimbursement_categories` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `reimbursement_categories_code_unique` ON `reimbursement_categories` (`code`);--> statement-breakpoint
+CREATE INDEX `reimbursement_categories_page_idx` ON `reimbursement_categories` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `reimbursements` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1746,7 +1805,8 @@ CREATE TABLE `reimbursements` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `reimbursements_code_unique` ON `reimbursements` (`code`);--> statement-breakpoint
-CREATE INDEX `reimb_emp_idx` ON `reimbursements` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `reimbursements_page_idx` ON `reimbursements` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `reimb_emp_idx` ON `reimbursements` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `reimb_state_idx` ON `reimbursements` (`state`);--> statement-breakpoint
 CREATE TABLE `remote_work_requests` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1768,7 +1828,8 @@ CREATE TABLE `remote_work_requests` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `remote_work_requests_code_unique` ON `remote_work_requests` (`code`);--> statement-breakpoint
-CREATE INDEX `rwr_emp_idx` ON `remote_work_requests` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `remote_work_requests_page_idx` ON `remote_work_requests` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `rwr_emp_idx` ON `remote_work_requests` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `rwr_state_idx` ON `remote_work_requests` (`state`);--> statement-breakpoint
 CREATE TABLE `review_cycles` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1787,6 +1848,7 @@ CREATE TABLE `review_cycles` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `review_cycles_code_unique` ON `review_cycles` (`code`);--> statement-breakpoint
+CREATE INDEX `review_cycles_page_idx` ON `review_cycles` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `review_feedback` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1805,6 +1867,7 @@ CREATE TABLE `review_feedback` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `review_feedback_code_unique` ON `review_feedback` (`code`);--> statement-breakpoint
+CREATE INDEX `review_feedback_page_idx` ON `review_feedback` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `rf_review_idx` ON `review_feedback` (`review_id`);--> statement-breakpoint
 CREATE INDEX `rf_author_idx` ON `review_feedback` (`author_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `rf_once_idx` ON `review_feedback` (`review_id`,`author_id`);--> statement-breakpoint
@@ -1831,8 +1894,9 @@ CREATE TABLE `reviews` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `reviews_code_unique` ON `reviews` (`code`);--> statement-breakpoint
+CREATE INDEX `reviews_page_idx` ON `reviews` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `rev_cycle_idx` ON `reviews` (`cycle_id`);--> statement-breakpoint
-CREATE INDEX `rev_emp_idx` ON `reviews` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `rev_emp_idx` ON `reviews` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `roles` (
 	`name` text PRIMARY KEY NOT NULL,
 	`label` text NOT NULL,
@@ -1853,6 +1917,7 @@ CREATE TABLE `salary_structures` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `salary_structures_code_unique` ON `salary_structures` (`code`);--> statement-breakpoint
+CREATE INDEX `salary_structures_page_idx` ON `salary_structures` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `search_docs` (
 	`collection` text NOT NULL,
 	`record_id` text NOT NULL,
@@ -1894,7 +1959,8 @@ CREATE TABLE `settlements` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `settlements_code_unique` ON `settlements` (`code`);--> statement-breakpoint
-CREATE INDEX `settle_emp_idx` ON `settlements` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `settlements_page_idx` ON `settlements` (`settlement_date`,`uuid`);--> statement-breakpoint
+CREATE INDEX `settle_emp_idx` ON `settlements` (`employee_id`,`settlement_date`,`uuid`);--> statement-breakpoint
 CREATE TABLE `shift_assignments` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -1910,7 +1976,8 @@ CREATE TABLE `shift_assignments` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `shift_assignments_code_unique` ON `shift_assignments` (`code`);--> statement-breakpoint
-CREATE INDEX `sa_emp_idx` ON `shift_assignments` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `shift_assignments_page_idx` ON `shift_assignments` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `sa_emp_idx` ON `shift_assignments` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `sa_shift_idx` ON `shift_assignments` (`shift_id`);--> statement-breakpoint
 CREATE INDEX `sa_date_idx` ON `shift_assignments` (`date`);--> statement-breakpoint
 CREATE UNIQUE INDEX `sa_emp_day_idx` ON `shift_assignments` (`employee_id`,`date`) WHERE "shift_assignments"."delete_time" is null;--> statement-breakpoint
@@ -1944,6 +2011,7 @@ CREATE TABLE `sprints` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `sprints_code_unique` ON `sprints` (`code`);--> statement-breakpoint
+CREATE INDEX `sprints_page_idx` ON `sprints` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `sprint_board_idx` ON `sprints` (`board_id`);--> statement-breakpoint
 CREATE TABLE `stocktakes` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -1966,6 +2034,7 @@ CREATE TABLE `stocktakes` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `stocktakes_code_unique` ON `stocktakes` (`code`);--> statement-breakpoint
+CREATE INDEX `stocktakes_page_idx` ON `stocktakes` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `stocktake_status_idx` ON `stocktakes` (`status`);--> statement-breakpoint
 CREATE TABLE `suggestion_votes` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -2000,7 +2069,8 @@ CREATE TABLE `suggestions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `suggestions_code_unique` ON `suggestions` (`code`);--> statement-breakpoint
-CREATE INDEX `sugg_submitter_idx` ON `suggestions` (`submitter_id`);--> statement-breakpoint
+CREATE INDEX `suggestions_page_idx` ON `suggestions` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `sugg_submitter_idx` ON `suggestions` (`submitter_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `sugg_status_idx` ON `suggestions` (`status`);--> statement-breakpoint
 CREATE TABLE `table_views` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -2020,6 +2090,7 @@ CREATE TABLE `table_views` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `table_views_code_unique` ON `table_views` (`code`);--> statement-breakpoint
+CREATE INDEX `table_views_page_idx` ON `table_views` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `table_view_owner_idx` ON `table_views` (`owner_id`);--> statement-breakpoint
 CREATE TABLE `tax_declarations` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -2041,7 +2112,8 @@ CREATE TABLE `tax_declarations` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `tax_declarations_code_unique` ON `tax_declarations` (`code`);--> statement-breakpoint
-CREATE INDEX `td_emp_idx` ON `tax_declarations` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `tax_declarations_page_idx` ON `tax_declarations` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `td_emp_idx` ON `tax_declarations` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `td_fy_idx` ON `tax_declarations` (`financial_year`);--> statement-breakpoint
 CREATE TABLE `ticket_checklists` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -2054,6 +2126,7 @@ CREATE TABLE `ticket_checklists` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `ticket_checklists_code_unique` ON `ticket_checklists` (`code`);--> statement-breakpoint
+CREATE INDEX `ticket_checklists_page_idx` ON `ticket_checklists` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `ticket_comments` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`ticket_id` text NOT NULL,
@@ -2100,7 +2173,8 @@ CREATE TABLE `tickets` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `tickets_code_unique` ON `tickets` (`code`);--> statement-breakpoint
-CREATE INDEX `ticket_emp_idx` ON `tickets` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `tickets_page_idx` ON `tickets` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `ticket_emp_idx` ON `tickets` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `ticket_dept_idx` ON `tickets` (`department_id`);--> statement-breakpoint
 CREATE INDEX `ticket_assignee_idx` ON `tickets` (`assignee_id`);--> statement-breakpoint
 CREATE INDEX `ticket_state_idx` ON `tickets` (`state`);--> statement-breakpoint
@@ -2126,7 +2200,8 @@ CREATE TABLE `time_entries` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `time_entries_code_unique` ON `time_entries` (`code`);--> statement-breakpoint
-CREATE INDEX `te_emp_idx` ON `time_entries` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `time_entries_page_idx` ON `time_entries` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `te_emp_idx` ON `time_entries` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `te_proj_idx` ON `time_entries` (`project_id`);--> statement-breakpoint
 CREATE INDEX `te_card_idx` ON `time_entries` (`card_id`);--> statement-breakpoint
 CREATE INDEX `te_date_idx` ON `time_entries` (`date`);--> statement-breakpoint
@@ -2156,6 +2231,7 @@ CREATE TABLE `transition_tasks` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `transition_tasks_code_unique` ON `transition_tasks` (`code`);--> statement-breakpoint
+CREATE INDEX `transition_tasks_page_idx` ON `transition_tasks` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `trt_trn_idx` ON `transition_tasks` (`transition_id`);--> statement-breakpoint
 CREATE INDEX `trt_assignee_idx` ON `transition_tasks` (`assignee_id`);--> statement-breakpoint
 CREATE TABLE `transitions` (
@@ -2173,7 +2249,8 @@ CREATE TABLE `transitions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `transitions_code_unique` ON `transitions` (`code`);--> statement-breakpoint
-CREATE INDEX `trn_emp_idx` ON `transitions` (`employee_id`);--> statement-breakpoint
+CREATE INDEX `transitions_page_idx` ON `transitions` (`created_at`,`uuid`);--> statement-breakpoint
+CREATE INDEX `trn_emp_idx` ON `transitions` (`employee_id`,`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `users` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -2190,6 +2267,7 @@ CREATE TABLE `users` (
 --> statement-breakpoint
 CREATE UNIQUE INDEX `users_code_unique` ON `users` (`code`);--> statement-breakpoint
 CREATE UNIQUE INDEX `users_email_unique` ON `users` (`email`);--> statement-breakpoint
+CREATE INDEX `users_page_idx` ON `users` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE UNIQUE INDEX `users_employee_idx` ON `users` (`employee_id`);--> statement-breakpoint
 CREATE TABLE `vendors` (
 	`uuid` text PRIMARY KEY NOT NULL,
@@ -2212,6 +2290,7 @@ CREATE TABLE `vendors` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `vendors_code_unique` ON `vendors` (`code`);--> statement-breakpoint
+CREATE INDEX `vendors_page_idx` ON `vendors` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE TABLE `workflow_instances` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,
@@ -2233,6 +2312,7 @@ CREATE TABLE `workflow_instances` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `workflow_instances_code_unique` ON `workflow_instances` (`code`);--> statement-breakpoint
+CREATE INDEX `workflow_instances_page_idx` ON `workflow_instances` (`created_at`,`uuid`);--> statement-breakpoint
 CREATE INDEX `workflow_instances_status_idx` ON `workflow_instances` (`status`);
 --> statement-breakpoint
 -- Global search index. GENERATED from src/domain/searchIndex.ts by scripts/genSearchDdl.ts - do not edit

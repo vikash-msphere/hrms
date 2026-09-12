@@ -442,7 +442,10 @@ export async function markAnnouncementRead(deps: Deps, actor: AppUser, id: strin
       .from(schema.announcementReads)
       .where(and(eq(schema.announcementReads.announcementId, id), eq(schema.announcementReads.employeeId, actor.employeeId)))
       .limit(1))[0];
-    if (!existing) await deps.db.insert(schema.announcementReads).values({ announcementId: id, employeeId: actor.employeeId });
+    // `onConflictDoNothing` against `ar_ann_emp_uniq`: the pre-read above is the cheap path, and the index is
+    // what makes the answer true when two of these run at once. A lost race is the receipt already existing,
+    // which is the outcome this wanted anyway - so it is a no-op, never a 500.
+    if (!existing) await deps.db.insert(schema.announcementReads).values({ announcementId: id, employeeId: actor.employeeId }).onConflictDoNothing();
   }
   return row;
 }
@@ -471,7 +474,7 @@ export async function markAllAnnouncementsRead(deps: Deps, actor: AppUser, scope
   if (!missing.length) return { marked: 0 };
   // Split under D1's bound-parameter cap, measured rather than guessed (see insertBatches).
   const reads = missing.map((a) => ({ announcementId: a.uuid, employeeId: me }));
-  await runBatch(deps.db, insertBatches(reads, (rows) => deps.db.insert(schema.announcementReads).values(rows)));
+  await runBatch(deps.db, insertBatches(reads, (rows) => deps.db.insert(schema.announcementReads).values(rows).onConflictDoNothing()));
   // No audit line, for the same reason markAnnouncementRead writes none: a read receipt is the caller's own
   // state, not an accountability event (see NO_AUDIT_VERBS).
   return { marked: missing.length };
@@ -495,7 +498,7 @@ export async function toggleReaction(deps: Deps, actor: AppUser, id: string, emo
   const mine = await deps.db.select({ emoji: rx.emoji }).from(rx).where(target);
   // Clear any existing reaction by this viewer on this target, then re-add unless they tapped the same one.
   if (mine.length) await deps.db.delete(rx).where(target);
-  if (!mine.some((m) => m.emoji === glyph)) await deps.db.insert(rx).values({ announcementId: id, replyId: replyId ?? null, employeeId: actor.employeeId, emoji: glyph });
+  if (!mine.some((m) => m.emoji === glyph)) await deps.db.insert(rx).values({ announcementId: id, replyId: replyId ?? null, employeeId: actor.employeeId, emoji: glyph }).onConflictDoNothing();
   return row;
 }
 
@@ -624,11 +627,11 @@ export async function castVote(deps: Deps, actor: AppUser, id: string, optionId:
   if (row.pollMultiple) {
     // Toggle just this option.
     if (already) await deps.db.delete(pv).where(and(eq(pv.announcementId, id), eq(pv.employeeId, actor.employeeId), eq(pv.optionId, optionId)));
-    else await deps.db.insert(pv).values({ announcementId: id, optionId, employeeId: actor.employeeId });
+    else await deps.db.insert(pv).values({ announcementId: id, optionId, employeeId: actor.employeeId }).onConflictDoNothing();
   } else {
     // Single choice: clear any prior vote, then add this one unless they tapped their current choice (toggle off).
     if (mine.length) await deps.db.delete(pv).where(and(eq(pv.announcementId, id), eq(pv.employeeId, actor.employeeId)));
-    if (!already) await deps.db.insert(pv).values({ announcementId: id, optionId, employeeId: actor.employeeId });
+    if (!already) await deps.db.insert(pv).values({ announcementId: id, optionId, employeeId: actor.employeeId }).onConflictDoNothing();
   }
   return row;
 }

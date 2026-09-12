@@ -236,3 +236,45 @@ describe("automations - the route accepts every writable field in the contract",
     expect(missing, "writable in openapi.yaml but not named in the .strict() writeSchema - the route 400s the whole body").toEqual([]);
   });
 });
+
+// A CONDITION TREE IS CALLER-SUPPLIED STRUCTURE, and it was the one recursive walk in this file with no
+// ceiling on it. `validateAction` has bounded action nesting since it was written; `validateCondition` took no
+// depth at all, and `evalCondition` - which runs on EVERY event of a matching trigger - recursed freely.
+//
+// A `{not:{not:…}}` chain 20,000 deep is about 160 KB of JSON, far inside the request body cap, and overflows
+// the stack: authoring one 500s inside the validator rather than being refused as the bad request it is, and a
+// stored one takes the engine down for that trigger every time it fires, because the parsed rule is cached.
+describe("automations - condition depth", () => {
+  const nest = (n: number): Condition => {
+    let c: Condition = { field: "days", op: "gt", value: 3 };
+    for (let i = 0; i < n; i++) c = { not: c };
+    return c;
+  };
+
+  it("evaluates an ordinary nested condition", () => {
+    // Two `not`s cancel, so this is the underlying comparison - and it is nowhere near the ceiling.
+    expect(evalCondition(nest(2), ctx({ days: 5 }))).toBe(true);
+    expect(evalCondition(nest(3), ctx({ days: 5 }))).toBe(false);
+  });
+
+  it("refuses to author a condition nested past the ceiling", () => {
+    const rule = { name: "deep", triggerType: "leave.approved", condition: nest(5000), actions: [{ kind: "notify", title: "hi", recipient: { of: "subject" } }] };
+    const errors = validateAutomation(rule as unknown as Automation);
+    expect(errors.some((e) => /nesting too deep/.test(e))).toBe(true);
+  });
+
+  // The evaluator carries the bound too, not just the validator: a row can predate the validator (a seed, a
+  // direct write, an older build), and this is the path that runs per event. Past the ceiling the condition is
+  // treated as UNMET - the rule declines to fire rather than firing on everything or blowing the stack.
+  //
+  // BOTH PARITIES, because the first attempt at this bound returned `false` at the depth limit and handed it
+  // back to the enclosing `not`s - so an odd number of them inverted the refusal into `true` and the rule
+  // would have fired on everything. The ceiling unwinds the whole evaluation now; these two cases are what
+  // tells the difference.
+  it("evaluates a condition past the ceiling as unmet, whatever its nesting parity", () => {
+    for (const n of [50_000, 50_001]) {
+      expect(() => evalCondition(nest(n), ctx({ days: 5 }))).not.toThrow();
+      expect(evalCondition(nest(n), ctx({ days: 5 })), `nesting ${n}`).toBe(false);
+    }
+  });
+});
