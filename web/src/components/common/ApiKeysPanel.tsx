@@ -109,13 +109,27 @@ function keyWarning(k: ApiKey): { label: string; title: string } | null {
   return idle > 90 * DAY ? { label: `idle ${Math.round(idle / DAY)}d`, title: "Not used in over 90 days. A credential nobody uses is only a risk." } : null;
 }
 
+// THE ACTIONS AXIS BELONGS IN THIS SENTENCE, and leaving it out was the one way to be actively misled by it.
+//
+// A scope has three axes and `max_level` is only one of them: custom methods are gated by `verbs`, and the
+// ceiling does not apply to them (domain/keyScope.ts `inScope` checks the collection and the verb list, never
+// the level - a verb is not on the read/write/admin ladder). So a key minted with `max_level: "read"` and the
+// "Allow actions" box ticked can approve a leave request and publish a payroll run, and this column called it
+// "read only, all collections". The mint dialog is honest about it (a separate checkbox, off by default, and
+// the pre-mint sentence ends "· actions allowed"); the list a person actually audits keys in was not, and the
+// list is where a key minted months ago gets looked at.
+//
+// Same clause and same words as the mint sentence, so what was authored and what is listed read the same -
+// which is what the comment beside `scopeSentence` already claimed and this is what makes true.
 function scopeSummary(k: ApiKey): string {
   const s = k.scope;
   if (!s || !s.collections || !s.max_level) return "-";
   const cols = s.collections;
   const where = cols === "*" ? "all collections" : `${cols.length} collection${cols.length === 1 ? "" : "s"}`;
   const what = s.max_level === "read" ? "read only" : s.max_level === "write" ? "read & write" : "full access";
-  return `${what}, ${where}`;
+  // `verbs` is "*" or an allowlist; an empty list is the lock, so anything else can perform actions.
+  const actions = s.verbs === "*" || (Array.isArray(s.verbs) && s.verbs.length > 0);
+  return `${what}, ${where}${actions ? " · actions" : ""}`;
 }
 
 export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | null }) {

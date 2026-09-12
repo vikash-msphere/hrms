@@ -39,15 +39,30 @@ describe("webhook SSRF guard: an address is judged as an address, not as a strin
     blocked("https://[2002:c0a8:1::1]/hook"); // 192.168.0.1
     // ...but a 6to4 address wrapping a PUBLIC v4 address is public, so the decomposition must not over-block.
     allowed("https://[2002:808:808::1]/hook"); // 8.8.8.8
+    // IPv4-TRANSLATED (::ffff:0:0/96) is the FOURTH embedded-v4 spelling, and it is the one the mapped form's
+    // own test cannot see: the `ffff` sits one hextet earlier, so the "top six are zero" check declines it and
+    // it used to fall through to the ULA/link-local test, which says nothing about an embedded v4 address.
+    blocked("https://[::ffff:0:7f00:1]/hook"); // 127.0.0.1
+    blocked("https://[::ffff:0:a9fe:a9fe]/hook"); // 169.254.169.254
+    blocked("https://[::ffff:0:c0a8:1]/hook"); // 192.168.0.1
+    // Same rule in the other direction: wrapping a public v4 address stays public.
+    allowed("https://[::ffff:0:808:808]/hook"); // 8.8.8.8
   });
 
   it("blocks every private and non-routable IPv4 range", () => {
     for (const h of ["10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1", "100.64.0.1", "0.0.0.0", "224.0.0.1", "198.18.0.1"]) {
       blocked(`https://${h}/hook`);
     }
-    // 172.15 and 172.32 are OUTSIDE 172.16/12 - the range check must not over-block either.
+    // The RFC 5737 documentation ranges. Nothing routes there, and they are the addresses that travel in
+    // copied examples - which is how one ends up saved in a rule and quietly never delivering.
+    for (const h of ["192.0.2.1", "198.51.100.1", "203.0.113.1"]) blocked(`https://${h}/hook`);
+    // 172.15 and 172.32 are OUTSIDE 172.16/12 - the range check must not over-block either. Same for the
+    // neighbours of each documentation /24, which are ordinary public space.
     allowed("https://172.15.0.1/hook");
     allowed("https://172.32.0.1/hook");
+    allowed("https://192.0.3.1/hook");
+    allowed("https://198.51.101.1/hook");
+    allowed("https://203.0.114.1/hook");
   });
 
   // The metadata endpoints that are NOT on the link-local alias. Alibaba's is inside 100.64/10 (which runs to

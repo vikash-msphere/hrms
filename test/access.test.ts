@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { actorCan, hasCapability, actorScope, actorVerbScope, stateReadAllowed } from "../src/domain/access";
+import { actorCan, hasCapability, actorScope, actorVerbScope, stateReadAllowed, deptOf } from "../src/domain/access";
 import { grantFor } from "../src/domain/grants";
 import { STATE_VISIBILITY } from "../src/domain/manifests";
 
@@ -89,5 +89,30 @@ describe("access.stateReadAllowed (item draft visibility, no BOLA)", () => {
   it("editors (write on the collection) read non-public rows", () => {
     expect(read("hr_admin", { published: false, disabled: false })).toBe(true);
     expect(read("super_admin", { published: false, disabled: true })).toBe(true);
+  });
+});
+
+// A dept is the caller's employee code minus its own last segment, and the ONE value it must never be is the
+// empty string: `''` is a missing scope, not a scope, and an empty prefix reaching a containment test is how a
+// dept-scoped grant once read as an org-wide one (see domain/codes.ts#isUnder, which now refuses it outright).
+// `domain/permissions.ts#deptOf` normalises it; this is the twin, and the two must agree.
+describe("deptOf - a missing dept is null, never an empty prefix", () => {
+  const who = (employeeCode: string | null) => ({ employeeCode }) as Parameters<typeof deptOf>[0];
+
+  it("returns the parent segments of an ordinary code", () => {
+    expect(deptOf(who("04-002-001"))).toBe("04-002");
+    expect(deptOf(who("04-001"))).toBe("04");
+  });
+
+  it("returns null when there is no dept to name", () => {
+    expect(deptOf(who(null))).toBeNull();
+    expect(deptOf(who(""))).toBeNull();
+    expect(deptOf(who("04"))).toBeNull(); // single segment: no parent
+    expect(deptOf(who("-0kf"))).toBeNull(); // leading '-' -> a leading EMPTY segment, which is not a dept
+  });
+
+  it("keeps the list breadth from reading a leading-dash code as a department", () => {
+    // The probe would otherwise ask about `-zzzz`, and an empty prefix is exactly what must not decide a scope.
+    expect(actorScope(a("employee", "-0kf"), "leave-requests")).toBe("own");
   });
 });

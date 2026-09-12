@@ -125,3 +125,38 @@ describe("compileGrants - narrowing keys", () => {
     expect(deriveNarrowing("leave-requests.04-002-001")).toEqual({ namespace: "leave-requests", scopeKind: "exact", scopeCode: "04-002-001" });
   });
 });
+
+// Two rows can carry the SAME pattern at different levels. The write path refuses an identical
+// (subject, pattern, effect) - but that is a check-then-insert with no unique index behind it, and
+// bootstrap.sql seeds rows directly, so it is storable. The rows then arrive from an unordered `select`, and
+// "whichever came last" is not an answer: it would hand the same role `write` on one replica and `read` on
+// another. The max is the only order-independent reading, and it is the one `mergeGrants` already takes.
+describe("rulesToGrant - a repeated pattern takes the highest level, whatever order the rows arrive in", () => {
+  const rows = (levels: ("read" | "write" | "admin")[]) =>
+    levels.map((level) => ({
+      namespace: "leave-requests",
+      pattern: "leave-requests.**",
+      scopeKind: "all" as const,
+      scopeCode: "",
+      matchCode: null,
+      level,
+      effect: "allow" as const,
+    }));
+
+  it("keeps the higher level regardless of row order", () => {
+    expect(rulesToGrant(rows(["read", "write"])).levels["leave-requests.**"]).toBe("write");
+    expect(rulesToGrant(rows(["write", "read"])).levels["leave-requests.**"]).toBe("write");
+    expect(rulesToGrant(rows(["admin", "read", "write"])).levels["leave-requests.**"]).toBe("admin");
+    expect(rulesToGrant(rows(["read", "admin", "write"])).levels["leave-requests.**"]).toBe("admin");
+  });
+
+  it("leaves the ordinary single-row case exactly as it was", () => {
+    expect(rulesToGrant(rows(["read"])).levels).toEqual({ "leave-requests.**": "read" });
+  });
+
+  it("still decides with the higher level, not just stores it", () => {
+    const grant = rulesToGrant(rows(["read", "write"]));
+    const write = decide(grant, resolveRequest("POST", "/v1/leave-requests/04-002-001"), { employeeCode: "04-002-001" });
+    expect(write.allow).toBe(true);
+  });
+});

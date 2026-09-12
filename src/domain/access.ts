@@ -56,7 +56,10 @@ export function actorScope(actor: Pick<AppUser, "grant" | "employeeCode">, colle
   const self = { employeeCode: actor.employeeCode ?? null };
   const canRead = (code: string) => decide(grant, resolveRequest("GET", `/v1/${collection}/${code}`), self).allow;
   if (canRead(SCOPE_PROBE_CODE)) return "all"; // a code under no real dept -> only an unscoped grant matches
-  const dept = actor.employeeCode ? actor.employeeCode.split("-").slice(0, -1).join("-") : "";
+  // `deptOf`, not a second inline copy of the same split. The two had already drifted - this one derived the
+  // dept itself while `actorVerbScope` below called the helper - and the whole point of the helper is that the
+  // breadth of a list and the breadth of a verb over the same rows are decided from the same value.
+  const dept = deptOf(actor);
   if (dept && canRead(`${dept}-${SCOPE_PROBE_LEAF}`)) return "dept"; // a sibling in the caller's dept, not the caller
   return "own";
 }
@@ -78,10 +81,17 @@ export function actorVerbScope(actor: Pick<AppUser, "grant" | "employeeCode">, c
 }
 
 // The caller's department code (their employee code minus its own last segment), or null.
+//
+// The `|| null` is the same guard `domain/permissions.ts#deptOf` carries and for the same reason: a code that
+// begins with '-' splits to a leading EMPTY segment, so `"-0kf"` yields the dept `""`. That is a missing value,
+// not a scope, and it must never reach a containment test as if it were one - `isUnder` refuses an empty prefix
+// precisely because an empty scope prefix once meant "everything". Every consumer here happens to test the
+// result for truthiness, so nothing is reachable today; the twin normalises, and a function whose declared
+// return type is `string | null` should not be the one that hands out `""` instead.
 export function deptOf(actor: Pick<AppUser, "employeeCode">): string | null {
   if (!actor.employeeCode) return null;
   const segs = actor.employeeCode.split("-");
-  return segs.length >= 2 ? segs.slice(0, -1).join("-") : null;
+  return (segs.length >= 2 ? segs.slice(0, -1).join("-") : "") || null;
 }
 
 // May the caller see a state-gated collection's NON-public rows (drafts/disabled)? Derived from the grant

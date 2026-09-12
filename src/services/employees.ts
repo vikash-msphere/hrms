@@ -2,7 +2,7 @@ import { allocFlatCode, allocUnderDept, withFreshCode, CODE_WIDTH } from "./code
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
-import { eq, and, isNotNull, isNull, sql } from "drizzle-orm";
+import { eq, and, asc, isNotNull, isNull, sql } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { SetOf } from "./crud";
 import type { Deps } from "../deps";
@@ -94,11 +94,17 @@ export async function getEmployee(deps: Deps, actor: AppUser, id: string) {
 // employee it points at. `email` is UNIQUE, so this must look before it inserts.
 async function provisionAccount(deps: Deps, employeeId: string, workEmail: string) {
   const email = workEmail.toLowerCase();
+  // Ordered, because `lower(email) = ?` is not a unique predicate: `email` is UNIQUE on the RAW column, so a
+  // row stored as `Alice@corp` and one stored as `alice@corp` can both exist and both match. Unordered, which
+  // of them this links the new employee to is whatever the engine happened to return first - and the two rows
+  // carry different roles and different access rules. Oldest first, so the account that has been accruing the
+  // grants is the one that gets the link (middleware/auth.ts breaks the same tie the same way).
   const existing = (
     await deps.db
       .select({ uuid: schema.users.uuid, employeeId: schema.users.employeeId })
       .from(schema.users)
       .where(sql`lower(${schema.users.email}) = ${email}`)
+      .orderBy(asc(schema.users.createdAt), asc(schema.users.uuid))
       .limit(1)
   )[0];
   if (existing) {

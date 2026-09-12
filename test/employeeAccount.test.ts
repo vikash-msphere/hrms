@@ -60,6 +60,23 @@ describe("employee sign-in accounts", () => {
     expect((await accountFor(row.uuid))?.uuid).toBe(existing);
   });
 
+  it("links the OLDEST of two accounts that differ only in case, not whichever the engine returns first", async () => {
+    // `users.email` is UNIQUE on the RAW column, so both of these are legal rows and `lower(email) = ?` matches
+    // both. Which one the new employee is linked to is not a cosmetic choice - the two carry different roles and
+    // different access rules - so the tie is broken by age rather than by the query plan. Oldest first, because
+    // that is the row that has been accruing the grants. The middleware's own first-login lookup breaks the same
+    // tie the same way (middleware/auth.ts loadUserRow `stable`).
+    const older = genId();
+    const newer = genId();
+    await deps.db.insert(schema.users).values([
+      { uuid: older, code: "01", email: "Dev@test.example", role: "employee", createdAt: new Date(1_700_000_000_000) },
+      { uuid: newer, code: "02", email: "DEV@test.example", role: "employee", createdAt: new Date(1_800_000_000_000) },
+    ]);
+    const row = await hire("dev@test.example", "Dev");
+    expect((await accountFor(row.uuid))?.uuid).toBe(older);
+    expect((await deps.db.select().from(schema.users)).length).toBe(2); // neither clobbered, none minted
+  });
+
   it("leaves an account that already holds the new address alone", async () => {
     // Somebody signed in with that address already (an account of their own, no employee link). `users.email` is
     // UNIQUE, so moving this employee's account onto it would have to clobber theirs: the employee edit stands

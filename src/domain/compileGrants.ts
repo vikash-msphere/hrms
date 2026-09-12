@@ -81,14 +81,27 @@ export function compileGrant(grant: Grant): CompiledRule[] {
 // reconstructor - P1 feeds it the rows narrowed for one request, then calls the unchanged `decide()`. So
 // the decision is always rendered by the tested engine over verbatim patterns; the rows never re-implement
 // any matching. Lossless by construction (it is the exact inverse), which the differential test asserts.
+//
+// THE HIGHER LEVEL WINS when two rows carry the same pattern, for the same reason `mergeGrants` below takes a
+// max rather than letting one side overwrite the other: both rows were granted, so keeping the max widens
+// nothing, while letting the last one seen win is a silent DOWNGRADE of an authority somebody was given. And
+// "last one seen" is not even a stable notion here - the rows arrive from an unordered `select`, so a role
+// holding `write` and `read` on one pattern would flip between them across replicas and across isolates.
+//
+// The write path does try to keep this from arising: `services/accessRules.ts` refuses an identical
+// (subject, pattern, effect). But that is a check-then-insert with no unique index behind it, and
+// `bootstrap/bootstrap.sql` seeds rows directly, so a duplicate is storable - and the one thing a grant
+// reconstructor must not do is answer a different question depending on row order.
 export function rulesToGrant(rules: CompiledRule[]): Grant {
   const levels: Record<string, Level> = {};
   const allow: string[] = [];
   const deny: string[] = [];
   for (const r of rules) {
     if (r.effect === "deny") deny.push(r.pattern);
-    else if (r.level !== null) levels[r.pattern] = r.level;
-    else allow.push(r.pattern);
+    else if (r.level !== null) {
+      const held = levels[r.pattern];
+      if (held === undefined || LVL[r.level] > LVL[held]) levels[r.pattern] = r.level;
+    } else allow.push(r.pattern);
   }
   const grant: Grant = { levels, allow };
   if (deny.length) grant.deny = deny;

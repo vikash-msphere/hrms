@@ -3,8 +3,7 @@
 // day-tick calls flushDigests() to coalesce each recipient's queue into ONE summary notification and clear the
 // rows. Keeps the feed calm without dropping anything. See domain/notificationConfig.ts isDigestible.
 import { inArray } from "drizzle-orm";
-import { CODE_WIDTH } from "./codeAlloc";
-import { nextChildCode } from "../domain/codes";
+import { CODE_WIDTH, allocOwnedCodesFor } from "./codeAlloc";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { runBatch, chunk, insertBatches } from "../lib/dbBatch";
@@ -42,12 +41,26 @@ export async function flushDigests(deps: Deps): Promise<number> {
       byRecipient.set(q.recipientId, arr);
     }
 
-    // Sibling codes for owned-code allocation, one read across all recipients.
+    // OWNED CODES COME FROM THE COUNTER, like every other notification in the app.
+    //
+    // This used to compose them itself - read every existing notification for each recipient, take the highest
+    // child segment, add one - which is the allocation shape `code_sequences` exists to replace, and it is
+    // wrong here in the way that matters: it never BUMPS the counter. `notify` / `notifyMany` take their codes
+    // from it (services/notifications.ts), so the sequence still believed N was free after the digest had
+    // written it, and the next ordinary notification for that person minted N again ->
+    // `UNIQUE constraint failed: notifications.code`.
+    //
+    // And the failure lands on the wrong side of an atomic batch. The insert and the queue clear go down
+    // together (below, deliberately), so one collision rolled BOTH back: no digests delivered, and the queue
+    // left full - which the next night re-read, re-collided on, and rolled back again. The outer catch logs it
+    // as non-fatal, so digest delivery stops for the whole org and nothing says so louder than a console line.
+    //
+    // `allocOwnedCodesFor` is the same counter-backed allocator `notifyMany` uses, one batch of indexed bumps
+    // for every recipient at once - so this also drops a read of every notification row belonging to every
+    // digest recipient, on the table that grows fastest in the app.
     const recipients = [...byRecipient.keys()];
     const empCode = new Map((await deps.db.select({ uuid: schema.employees.uuid, code: schema.employees.code }).from(schema.employees).where(inArray(schema.employees.uuid, recipients))).map((e) => [e.uuid, e.code]));
-    const existing = await deps.db.select({ recipientId: schema.notifications.recipientId, code: schema.notifications.code }).from(schema.notifications).where(inArray(schema.notifications.recipientId, recipients));
-    const siblings = new Map<string, (string | null)[]>();
-    for (const r of existing) { const a = siblings.get(r.recipientId) ?? []; a.push(r.code); siblings.set(r.recipientId, a); }
+    const codes = await allocOwnedCodesFor(deps, schema.notifications, schema.notifications.recipientId, recipients, CODE_WIDTH.owned, empCode);
 
     const rows = recipients.map((rid) => {
       const items = byRecipient.get(rid)!;
@@ -56,7 +69,7 @@ export async function flushDigests(deps: Deps): Promise<number> {
       const preview = items.slice(0, 5).map((i) => `• ${i.title}`).join("\n");
       const more = items.length > 5 ? `\n…and ${items.length - 5} more.` : "";
       return {
-        code: nextChildCode(siblings.get(rid) ?? [], empCode.get(rid) ?? null, CODE_WIDTH.owned),
+        code: codes.get(rid)!,
         recipientId: rid,
         type: "notification.digest",
         title: `Your daily digest: ${items.length} update${items.length === 1 ? "" : "s"}`,

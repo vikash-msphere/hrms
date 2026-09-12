@@ -70,6 +70,12 @@ function blockedIpv4(v: number): boolean {
     (a === 192 && b === 0 && c === 0) ||
     (a === 192 && b === 168) || // private
     (a === 198 && (b === 18 || b === 19)) || // benchmarking
+    // The three documentation ranges (RFC 5737): 192.0.2/24, 198.51.100/24, 203.0.113/24. Nothing routes
+    // there, so a webhook naming one is a typo or a probe either way - and they are the addresses that appear
+    // in copied-and-pasted examples, which is exactly how one ends up saved in a rule.
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
     a >= 224 // multicast + reserved
   );
 }
@@ -146,6 +152,16 @@ export function assertPublicHttpsUrl(raw: string): URL {
       // `::` and `::1` are the unspecified and loopback addresses, not 0.0.0.0/0.0.0.1 - still blocked, and
       // blockedIpv4 already refuses a leading zero octet, so both paths agree.
       if (blockedIpv4(v4)) reject();
+      return u;
+    }
+    // IPv4-TRANSLATED (`::ffff:0:a.b.c.d`, RFC 6145 ::ffff:0:0/96). The fourth embedded-v4 spelling, and the
+    // one the `topSix` test above cannot reach: the `ffff` sits in hextet FIVE here, not six, so `e` is not 0
+    // and the mapped/compatible branch declines it. It then fell past NAT64 and 6to4 to the unique-local /
+    // link-local / multicast test, which says nothing about an embedded v4 address - so `::ffff:0:7f00:1` was
+    // blessed as "some public v6 address" while being loopback written the long way. Judged by the v4 rules
+    // like its three siblings; the list of spellings is only correct if it is complete.
+    if (a === 0 && b === 0 && c === 0 && d === 0 && e === 0xffff && f === 0) {
+      if (blockedIpv4(((g << 16) | i) >>> 0)) reject();
       return u;
     }
     // 64:ff9b::/96 is the well-known NAT64 prefix: the last 32 bits are an IPv4 address that a NAT64 gateway

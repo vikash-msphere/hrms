@@ -11,6 +11,7 @@ import { makeDeps, type Deps } from "../src/deps";
 import { runScheduledAutomations, invalidateAutomationCache, withDispatchBudget, dispatchAutomations, MAX_TOTAL_DISPATCHES } from "../src/services/automationEngine";
 import { computeEmployeeMetrics } from "../src/services/scheduledMetrics";
 import { queueForDigest, flushDigests } from "../src/services/notificationDigest";
+import { notify } from "../src/services/notifications";
 import { activeDelegatesFor } from "../src/services/approvalDelegations";
 import { SCHEDULE_TRIGGER, type Schedule, type Condition, type Action } from "../src/domain/automations";
 import { genId } from "../src/lib/idCodec";
@@ -263,6 +264,45 @@ describe("notification digest", () => {
 
     // Queue is drained; a second flush delivers nothing.
     expect(await flushDigests(deps)).toBe(0);
+  });
+
+  // A DIGEST'S CODE MUST COME OFF THE SAME COUNTER EVERY OTHER NOTIFICATION USES.
+  //
+  // The digest used to compose its own: read the recipient's existing notifications, take the highest child
+  // segment, add one. That never bumped `code_sequences`, so the sequence still believed the value was free and
+  // the NEXT ordinary notification for that person minted it again - `UNIQUE constraint failed:
+  // notifications.code`. The digest's insert and its queue clear go down as one atomic batch, so a collision
+  // rolled back both: nothing delivered, queue still full, and the next night re-read it and collided again.
+  // `flushDigests` swallows its own errors, so the whole org's digests stop with one console line.
+  it("takes its code from the shared counter, so an ordinary notification after it does not collide", async () => {
+    const emp = await seedEmployee({ code: "04-202" });
+    // The counter has to EXIST for the divergence to show: on a recipient with no notifications at all the
+    // counter is absent, and its first touch seeds itself from the rows already on disk - which papers over a
+    // sibling-max allocation exactly once. So this notification is the setup, not the assertion.
+    await notify(deps, { recipient: emp, type: "t", title: "Sets the counter" });
+
+    await queueForDigest(deps, { recipientId: emp, type: "t", title: "Parked" });
+    expect(await flushDigests(deps)).toBe(1);
+
+    // Sibling-max would have handed the digest the counter's next value without bumping it, so THIS is the row
+    // that collided and was swallowed ("[notify] insert failed (non-fatal)").
+    await notify(deps, { recipient: emp, type: "t", title: "Live one" });
+
+    const rows = await notifsFor(emp);
+    expect(rows.length).toBe(3); // all three landed
+    expect(new Set(rows.map((r) => r.code)).size).toBe(3);
+  });
+
+  it("keeps delivering on later nights, which a rolled-back batch would have stopped", async () => {
+    const emp = await seedEmployee({ code: "04-203" });
+    for (const night of ["one", "two", "three"]) {
+      await queueForDigest(deps, { recipientId: emp, type: "t", title: `Night ${night}` });
+      expect(await flushDigests(deps)).toBe(1);
+      await notify(deps, { recipient: emp, type: "t", title: `Live ${night}` }); // interleave the other allocator
+    }
+    const rows = await notifsFor(emp);
+    expect(rows.length).toBe(6);
+    expect(new Set(rows.map((r) => r.code)).size).toBe(6); // every code distinct
   });
 });
 

@@ -1,7 +1,7 @@
 import { allocFlatCode } from "../services/codeAlloc";
 import type { MiddlewareHandler } from "hono";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import { eq, sql, and, isNull } from "drizzle-orm";
+import { eq, sql, and, asc, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AppEnv, AppUser } from "../env";
 import type { Deps } from "../deps";
@@ -10,7 +10,7 @@ import type { Policy } from "../domain/manifests";
 import { mergeGrants } from "../domain/compileGrants";
 import { loadRoleGrant, loadUserGrant, loadManifest } from "../lib/policyLoad";
 import { resolveViewAs, VIEW_AS_HEADER } from "../lib/viewAs";
-import { unauthenticated, forbidden, isUserEmailCollision } from "../lib/errors";
+import { unauthenticated, forbidden, isUserEmailCollision, isUserEmployeeCollision } from "../lib/errors";
 import { getCookie } from "hono/cookie";
 import { openSession } from "../lib/session";
 import { SESSION_COOKIE } from "../routes/authRoutes";
@@ -35,25 +35,31 @@ type UserRow = {
 
 // The one caller read, shared by every lane: user + their employee `code` (the dept-scope key) in a single
 // left join. The browser lanes look the caller up by email; the API-key lane already holds the owner's uuid.
-async function loadUserRow(deps: Deps, where: SQL | undefined): Promise<UserRow | undefined> {
-  return (
-    await deps.db
-      .select({
-        uuid: schema.users.uuid,
-        email: schema.users.email,
-        role: schema.users.role,
-        status: schema.users.status,
-        employeeId: schema.users.employeeId,
-        employeeCode: schema.employees.code,
-        firstName: schema.employees.firstName,
-        lastName: schema.employees.lastName,
-        sessionsValidFrom: schema.users.sessionsValidFrom,
-      })
-      .from(schema.users)
-      .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
-      .where(where)
-      .limit(1)
-  )[0];
+//
+// `stable` orders the result before taking one row, and is for the predicates that are NOT unique. `email` is
+// UNIQUE on the raw column, so `lower(email) = ?` can match two rows (`Alice@x` and `alice@x` may both exist -
+// see the second lookup below); with no ORDER BY, which of them answers is whatever the engine returned first,
+// and the two rows carry different roles and different access rules. Which account a person signs in to must
+// not be a plan detail, so the tie is broken by age: the older row is the one that has been accruing the
+// grants. Off by default because the exact-match lookup IS unique and runs on every request - a sort step
+// there would buy nothing.
+async function loadUserRow(deps: Deps, where: SQL | undefined, stable = false): Promise<UserRow | undefined> {
+  const q = deps.db
+    .select({
+      uuid: schema.users.uuid,
+      email: schema.users.email,
+      role: schema.users.role,
+      status: schema.users.status,
+      employeeId: schema.users.employeeId,
+      employeeCode: schema.employees.code,
+      firstName: schema.employees.firstName,
+      lastName: schema.employees.lastName,
+      sessionsValidFrom: schema.users.sessionsValidFrom,
+    })
+    .from(schema.users)
+    .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
+    .where(where);
+  return (await (stable ? q.orderBy(asc(schema.users.createdAt), asc(schema.users.uuid)) : q).limit(1))[0];
 }
 
 // The caller's broad authority: their role grant (which already folds in `everyone`) merged with their own
@@ -230,8 +236,9 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
   // first login or a row stored with different case by an older build (`email` is UNIQUE on the raw column, so
   // both could exist at once). Provisioning on top of such a row is the harmful outcome - a second account at
   // the default role, while the one carrying their real role and their access rules goes unused - so it is
-  // adopted here instead. One unindexed read, on the path that was about to write a row.
-  if (!user) user = await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`);
+  // adopted here instead. One unindexed read, on the path that was about to write a row. `stable`, because
+  // this predicate is the one that can match more than one row - see loadUserRow.
+  if (!user) user = await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`, true);
   if (!user) {
     // First-login auto-provisioning. Optional second perimeter (Access is primary): if ALLOWED_EMAIL_DOMAINS
     // is configured, only those domains may mint a new user, so a too-broad Access policy can't silently create
@@ -244,12 +251,15 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
       const domain = email.split("@")[1] ?? "";
       if (!allowed.includes(domain)) throw forbidden("email domain not permitted");
     }
-    // Auto-link to an employee record with the same work email, if one exists.
+    // Auto-link to an employee record with the same work email, if one exists. Ordered for the same reason the
+    // user lookup above is: `work_email` is UNIQUE on the raw column, so a case-only difference can put two
+    // live rows behind this predicate, and which person a new account is linked to must not be a plan detail.
     const emp = (
       await deps.db
         .select({ uuid: schema.employees.uuid, code: schema.employees.code })
         .from(schema.employees)
         .where(and(sql`lower(${schema.employees.workEmail}) = ${email}`, isNull(schema.employees.deleteTime)))
+        .orderBy(asc(schema.employees.createdAt), asc(schema.employees.uuid))
         .limit(1)
     )[0];
     // ADOPT THE WINNER on a lost race. A first login is not one request: a cold page load fires the bootstrap
@@ -279,8 +289,29 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
         sessionsValidFrom: inserted.sessionsValidFrom,
       };
     } catch (e) {
+      // THE OTHER UNIQUE INDEX ON THIS INSERT, and it is not a race.
+      //
+      // `users_employee_idx` is one account per person (schema.ts). The employee this provisioning matched by
+      // work email can already be linked to a DIFFERENT account, at which point the insert above fails on
+      // `users.employee_id` rather than on `users.email` - a shape the email-collision branch below does not
+      // recognise, so it used to rethrow into the catch-all and answer 500. Nothing about that is retryable or
+      // self-healing: the state is stable, so EVERY subsequent request repeats it and the person is locked out
+      // of the app entirely, reading "Internal Server Error" while the logs fill with `unhandled error`.
+      //
+      // Reachable from two ordinary HR edits, because `syncAccountEmail` (services/employees.ts) declines to
+      // move a linked account onto an address another account already holds: change employee E's work email to
+      // one that is taken, then free that address by editing the OTHER employee, and E now names a work email
+      // no account carries while E itself is still linked to the account under its old address.
+      //
+      // Answered as what it is - a data conflict a person has to resolve - rather than by unlinking or by
+      // minting an account with no employee. An unlinked account is the worse outcome it looks like: every
+      // self-scoped grant matches by employee CODE (domain/permissions.ts `me`), so such a person signs in to
+      // an app with nothing in it and no error, which is harder to diagnose than a refusal that names the fix.
+      if (isUserEmployeeCollision(e)) {
+        throw forbidden("your work email is linked to a different sign-in account; ask HR to correct the account link");
+      }
       if (!isUserEmailCollision(e)) throw e;
-      const winner = await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`);
+      const winner = await loadUserRow(deps, sql`lower(${schema.users.email}) = ${email}`, true);
       // The row was there a moment ago and is not now: only a delete landing between the two statements
       // explains that, and re-entering the race is not better than saying so.
       if (!winner) throw unauthenticated("sign-in raced an account change; try again");

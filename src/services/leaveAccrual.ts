@@ -54,8 +54,25 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // later pass computes `add: 0` and writes nothing anyway. A `terminated` row with NO end date is excluded, as
   // before - there is no clamp to stop it accruing forever.
   const leaverCutoff = new Date(now - 62 * 86_400_000);
+  // THE FIVE COLUMNS THE WALK BELOW ACTUALLY READS, not the whole row.
+  //
+  // This is one read for the entire roster and it is held in isolate memory for the length of the tick, so
+  // what it selects is the tick's memory floor. `employees` is the widest table in the schema - the encrypted
+  // national id, the addresses, every profile field - and none of it takes part in accrual: the loop wants an
+  // id, a code, and the three dates. Selecting the row meant a nightly job whose working set grew with every
+  // column anyone ever added to a person, against a 128 MiB isolate, for data it never looked at.
+  //
+  // Deliberately still ONE unpaginated read: the subrequest budget is what bounds this job (see the note on
+  // the code reservation below), so paging it would trade a memory bound for the failure mode that actually
+  // bites. Narrowing costs nothing and moves the ceiling out by roughly an order of magnitude.
   const employees = await deps.db
-    .select()
+    .select({
+      uuid: schema.employees.uuid,
+      code: schema.employees.code,
+      startDate: schema.employees.startDate,
+      endDate: schema.employees.endDate,
+      probationEndDate: schema.employees.probationEndDate,
+    })
     .from(schema.employees)
     .where(
       and(
@@ -69,7 +86,17 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   const leaveTypes = (await refLeaveTypes(deps)).filter((lt) => !onlyLeaveTypeId || lt.uuid === onlyLeaveTypeId);
   // One read for every balance row, keyed (employee, type) - the nightly walk over employees x types is then
   // pure lookups, instead of one query per pair (which alone could blow the per-invocation subrequest budget).
-  const balances = await deps.db.select().from(schema.leaveBalances);
+  // Same reason as the roster read above: the map is keyed (employee, type) and the walk reads the row's id,
+  // its balance and its accrual marker. `code` and the carry-forward marker are along for the ride otherwise.
+  const balances = await deps.db
+    .select({
+      uuid: schema.leaveBalances.uuid,
+      employeeId: schema.leaveBalances.employeeId,
+      leaveTypeId: schema.leaveBalances.leaveTypeId,
+      balanceDays: schema.leaveBalances.balanceDays,
+      lastAccrualYm: schema.leaveBalances.lastAccrualYm,
+    })
+    .from(schema.leaveBalances);
   const balByKey = new Map(balances.map((b) => [`${b.employeeId}|${b.leaveTypeId}`, b]));
   // Every write of the tick collects into ONE atomic batch. The batch costs one subrequest where a
   // month-boundary night would cost one per balance row. Because the write is an ABSOLUTE balance derived from
