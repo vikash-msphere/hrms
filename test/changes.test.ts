@@ -34,6 +34,14 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await deps.db.delete(schema.holidays);
+  // Bottom-up: the side-table cases below hang watchers and contributors off goals and cards, which hang off
+  // employees, so clearing the parents first would be refused by the foreign keys.
+  await deps.db.delete(schema.goalWatchers);
+  await deps.db.delete(schema.goalContributors);
+  await deps.db.delete(schema.cardWatchers);
+  await deps.db.delete(schema.cards);
+  await deps.db.delete(schema.boards);
+  await deps.db.delete(schema.goals);
   await deps.db.delete(schema.employees);
   await deps.db.delete(schema.collectionVersions);
 });
@@ -94,6 +102,67 @@ describe("changes feed", () => {
     await seedHoliday("Diwali");
     const weekAgo = Date.now() - 7 * 24 * 60 * 60_000;
     expect((await changedSince(deps, weekAgo)).collections).toContain("holidays");
+  });
+});
+
+// A SIDE TABLE HAS TO STAMP ITS PARENT.
+//
+// `goal_watchers`, `goal_contributors` and `card_watchers` back fields the PARENT resource ships - a goal
+// carries `watching`/`watcher_count`/`contributors`, a card carries the first two (src/http/serialize.ts) -
+// and the verbs that write them (`:watch`, `:unwatch`, `:setContributors`) touch nothing else. So nothing
+// stamped `goals` or `cards`, this feed reported that neither had changed, and a stored copy kept the old
+// watch state and the old credit split for as long as it lived: press Watch, reload, and the button is back
+// where it started. The global list validator (src/http/listEtag.ts) is built from these same stamps, so the
+// list re-read that would have corrected it was answered 304 as well.
+//
+// Written through the ORDINARY tables, exactly as the cases above are, so this is a test of the generated
+// trigger rather than of a mapping table.
+describe("a write to a side table stamps the collection it changes", () => {
+  const seedEmployee = async () => {
+    const uuid = genId();
+    await deps.db.insert(schema.employees).values({
+      uuid, code: `04-${genId().slice(0, 3)}`, firstName: "Watch", lastName: "Er",
+      workEmail: `${uuid}@test.example`, status: "active",
+    });
+    return uuid;
+  };
+
+  it("stamps `goals` when somebody watches one, and when they stop", async () => {
+    const employeeId = await seedEmployee();
+    const goalId = genId();
+    await deps.db.insert(schema.goals).values({ uuid: goalId, code: `04-${genId().slice(0, 6)}`, employeeId, title: "Ship it" });
+
+    await deps.db.delete(schema.collectionVersions); // forget the goal's own insert stamp
+    const watchId = genId();
+    await deps.db.insert(schema.goalWatchers).values({ uuid: watchId, goalId, employeeId });
+    expect((await changedSince(deps, Date.now() - AGO)).collections).toContain("goals");
+
+    await deps.db.delete(schema.collectionVersions);
+    await deps.db.delete(schema.goalWatchers).where(eq(schema.goalWatchers.uuid, watchId));
+    expect((await changedSince(deps, Date.now() - AGO)).collections).toContain("goals");
+  });
+
+  it("stamps `goals` when the credit split is rewritten", async () => {
+    const employeeId = await seedEmployee();
+    const other = await seedEmployee();
+    const goalId = genId();
+    await deps.db.insert(schema.goals).values({ uuid: goalId, code: `04-${genId().slice(0, 6)}`, employeeId, title: "Ship it" });
+
+    await deps.db.delete(schema.collectionVersions);
+    await deps.db.insert(schema.goalContributors).values({ uuid: genId(), goalId, employeeId: other, share: 30 });
+    expect((await changedSince(deps, Date.now() - AGO)).collections).toContain("goals");
+  });
+
+  it("stamps `cards` when somebody watches one", async () => {
+    const employeeId = await seedEmployee();
+    const boardId = genId();
+    await deps.db.insert(schema.boards).values({ uuid: boardId, code: `b-${genId().slice(0, 5)}`, name: "Board" });
+    const cardId = genId();
+    await deps.db.insert(schema.cards).values({ uuid: cardId, code: `c-${genId().slice(0, 5)}`, boardId, employeeId, columnKey: "todo", title: "Card" });
+
+    await deps.db.delete(schema.collectionVersions);
+    await deps.db.insert(schema.cardWatchers).values({ uuid: genId(), cardId, employeeId });
+    expect((await changedSince(deps, Date.now() - AGO)).collections).toContain("cards");
   });
 });
 

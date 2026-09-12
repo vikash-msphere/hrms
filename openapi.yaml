@@ -112,7 +112,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         name: { type: string, description: Human-readable rule name. }
         description: { type: string, nullable: true }
         trigger_type: { type: string, description: The domain event type that fires this rule (see workflow-meta events). }
@@ -389,7 +389,7 @@ components:
             signature: { type: boolean, description: A signature image is set. }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -733,7 +733,7 @@ components:
         managers: { type: array, nullable: true, items: { type: string }, description: "Employee resource paths of the department's managers. Null or empty when nobody leads it yet." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -765,7 +765,7 @@ components:
         selection: { type: string, readOnly: true, description: "Resource path of the caller's selection, when selected: holiday-selections/{holiday_selection_id}" }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1045,7 +1045,7 @@ components:
         pin_time: { type: string, format: date-time, readOnly: true, description: "When the post was pinned to the top of the board (the :pin verb; :unpin clears it). Absent = not pinned. The feed shows pinned posts first, most recently pinned leading." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         published: { type: boolean, description: "Live on the board. Accepted on create only (false = a draft: no notification, visible only to editors); afterwards use the publish/unpublish methods, which own the broadcast. Ignored on update." }
         read: { type: boolean, readOnly: true, description: "Whether the calling viewer has opened (read) this post. Drives the dashboard unread widget." }
         read_count: { type: integer, readOnly: true, description: "Number of viewers who have read this post. Present only for the author and HR." }
@@ -1132,7 +1132,7 @@ components:
         carry_forward_cap_days: { type: number, nullable: true, description: Max days of this type that carry into the next year (null = uncapped). Ignored when leave_caps uses cumulative carry-forward. }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -1509,7 +1509,7 @@ components:
               clock_out: { type: string, description: ISO 8601 timestamp of the corrected clock-out. }
         reason: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
-        decided_by: { type: string, readOnly: true }
+        decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
         singular: attendance-regularization
@@ -1532,7 +1532,7 @@ components:
         minutes: { type: integer, readOnly: true, description: Derived duration in minutes (end_time - start_time); sum per employee per month for the monthly total. }
         reason: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
-        decided_by: { type: string, readOnly: true }
+        decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
         decision_note: { type: string, readOnly: true }
         paid: { type: boolean, readOnly: true, description: "Whether a payroll run has paid this overtime (opt-in via settings/overtime)." }
         paid_run: { type: string, readOnly: true, description: "payroll-runs/{id} that paid it." }
@@ -1560,7 +1560,7 @@ components:
         location: { type: string, description: Where they'll work from (e.g. Home). }
         reason: { type: string }
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
-        decided_by: { type: string, readOnly: true }
+        decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
         decision_note: { type: string, readOnly: true }
         access: { readOnly: true, $ref: '#/components/schemas/access_hint' }
       x-aep-resource:
@@ -1586,7 +1586,7 @@ components:
         justification: { type: string, description: "Why they need it (what an approver reads)." }
         needed_by: { type: string, format: date, description: "When it stops being useful, e.g. a client visit." }
         state: { type: string, readOnly: true, description: "State value PENDING/APPROVED/REJECTED/CANCELLED/ISSUED." }
-        decided_by: { type: string, readOnly: true }
+        decided_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved or rejected the request." }
         decision_note: { type: string, readOnly: true }
         issued_asset: { type: string, readOnly: true, description: "Resource path: assets/{asset_id} - what they were actually given (set by :issue)." }
         issued_time: { type: string, format: date-time, readOnly: true }
@@ -1678,7 +1678,7 @@ components:
         body: { type: string }
         status: { type: string, readOnly: true, description: "new | under_review | planned | implemented | declined (set via :respond)." }
         response: { type: string, readOnly: true, description: "HR's public reply (set via :respond)." }
-        responded_by: { type: string, readOnly: true }
+        responded_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who posted the response." }
         upvotes: { type: integer, readOnly: true }
         downvotes: { type: integer, readOnly: true }
         my_vote: { type: integer, readOnly: true, description: "The caller's vote direction: -1 down, 0 none, +1 up." }
@@ -2424,7 +2424,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         disabled: { type: boolean, description: "A draft: still being built, hidden from the saved-table list." }
         locked: { type: boolean }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         display_name: { type: string, description: "What the table is called." }
         description: { type: string, nullable: true, description: "What the table is for. Null when unset." }
         owner:
@@ -2784,7 +2784,7 @@ components:
         requires_serial: { type: boolean, description: "When true an asset in this category must have its serial number recorded." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2810,7 +2810,7 @@ components:
         requires_receipt: { type: boolean, description: "When true a claim in this category must carry a receipt attachment before submission." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2891,7 +2891,7 @@ components:
         gl_code: { type: string, nullable: true, description: "Accounting general-ledger code. Null when unset." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -2924,7 +2924,7 @@ components:
         notes: { type: string }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -3340,7 +3340,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         disabled: { type: boolean, readOnly: true, description: "Lifecycle flag; toggled via :enable / :disable." }
         locked: { type: boolean, readOnly: true, description: "Locked rows reject writes until :unlock." }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         display_name: { type: string }
         document_type: { type: string, description: Document type CONTRACT/ID/PAYSLIP/POLICY/LETTER/INSURANCE/OTHER. }
         file_name: { type: string, readOnly: true, description: Original uploaded filename including extension. }
@@ -3413,7 +3413,7 @@ components:
         delete_time: { type: string, format: date-time, readOnly: true }
         disabled: { type: boolean, readOnly: true, description: "Lifecycle flag; toggled via :enable / :disable." }
         locked: { type: boolean, readOnly: true, description: "Locked rows reject writes until :unlock." }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         employee: { type: string, description: "Resource path: employees/{employee_id}" }
         source_document: { type: string, readOnly: true, description: "Source policy this was generated from (org-documents/{id}); set on a signed acknowledgement copy." }
         requires_signature: { type: boolean, readOnly: true, description: "True when this generated letter/contract has an e-signature placeholder the owner must sign via :sign." }
@@ -3466,7 +3466,7 @@ components:
         pf_wages: { type: boolean, description: "earning only: does this allowance count as PF wages when settings/ctc pf_wage_basis is basic_plus? Ignored under the default basic basis (PF wages = basic). Always false for deductions/employer contributions." }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -3556,7 +3556,7 @@ components:
         pay_date: { type: string, format: date }
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
-        locked_by: { type: string, readOnly: true }
+        locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'
@@ -3579,9 +3579,9 @@ components:
         etag: { type: string, readOnly: true }
         pay_period: { type: string, description: "Resource path: pay-periods/{pay_period_id}" }
         state: { type: string, readOnly: true, description: State value DRAFT/REVIEW/APPROVED/PUBLISHED. }
-        submitted_by: { type: string, readOnly: true }
+        submitted_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who submitted the run for review." }
         submitted_by_name: { type: string, readOnly: true, description: Display name of the submitter. }
-        approved_by: { type: string, readOnly: true }
+        approved_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who approved the run." }
         approved_by_name: { type: string, readOnly: true, description: Display name of the approver. }
         bank_file_time: { type: string, format: date-time, readOnly: true, description: "When a bank payout file was first generated for this run; null if never. Once set the run can no longer be deleted, since deleting releases the one-off payables it paid and the money may already have left." }
         built_time: { type: string, format: date-time, readOnly: true, description: "When the run's line items were last (re)built from live inputs; null if never built. Detail GET only." }

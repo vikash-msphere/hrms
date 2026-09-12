@@ -42,10 +42,24 @@ function baseResource(row: BaseRow, collection: string) {
     ...(row.deleteTime ? { delete_time: iso(row.deleteTime) } : {}),
     ...(row.disabled !== undefined ? { disabled: !!row.disabled } : {}),
     ...(row.locked !== undefined ? { locked: !!row.locked } : {}),
-    ...(row.lockedBy ? { locked_by: row.lockedBy } : {}),
+    // A REF, NOT A BARE ID - see the note on `ref` below. `lockedBy` is `actor.uuid` (services/lifecycle.ts),
+    // i.e. a `users` primary key, and this rode out in the clear on every lockable collection.
+    ...(row.lockedBy ? { locked_by: ref("users", row.lockedBy) } : {}),
     ...(row.published !== undefined ? { published: !!row.published } : {}),
   };
 }
+/**
+ * A wire reference to another record: `<collection>/<id>`.
+ *
+ * EVERY id THAT LEAVES THIS FILE GOES THROUGH HERE, and the reason is the outbound edge rather than tidiness.
+ * middleware/encodeWireIds rewrites `<collection>/<13-char id>` strings into `<collection>/<token>` on the way
+ * out; a BARE id matches nothing it looks for, so it is published exactly as stored. Eight fields were emitted
+ * that way - `locked_by` on every lockable collection, `decided_by` on the four request collections,
+ * `responded_by`, and payroll's `submitted_by`/`approved_by` - and each of them is a `users` primary key: the
+ * one value the codec exists to keep off the wire, on the rows that record who approved money and who unlocked
+ * a record. They were unusable to a client as well, since the inbound edge decodes a token and these were not
+ * one, so the SPA rendered `submitted_by` by stripping a prefix that was never there.
+ */
 const ref = (collection: string, id: string | null) => (id ? `${collection}/${id}` : undefined);
 
 /**
@@ -188,7 +202,18 @@ export function toHolidayResource(r: any): Wire<"holiday"> {
 }
 
 export function toComplianceEventResource(r: any): Wire<"compliance-event"> {
-  const overdue = r.status === "pending" && r.dueDate ? +new Date(r.dueDate) < Date.now() : false;
+  // DUE TODAY IS NOT OVERDUE. `due_date` is a date-only column anchored at UTC midnight (the service's own
+  // `parseDate` appends `T00:00:00Z`), so comparing it against the current INSTANT made a filing overdue from
+  // the first millisecond of the day it is due - a statutory deadline shown in red, with a penalty implied,
+  // on the morning somebody still has all day to meet it. The app contradicted itself about it in one dialog:
+  // web/src/pages/Compliance.tsx computes its own hint from calendar days and says "Due today" beside the
+  // badge this flag was painting "Overdue". Both sides of the comparison are now the same kind of thing - the
+  // start of a day against the start of a day - so the flag turns over when the due day ENDS.
+  const startOfToday = (() => {
+    const n = new Date();
+    return Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  })();
+  const overdue = r.status === "pending" && r.dueDate ? +new Date(r.dueDate) < startOfToday : false;
   return {
     ...baseResource(r, "compliance-events"),
     title: r.title,
@@ -1223,7 +1248,7 @@ export function toAttendanceRegularizationResource(r: any): Wire<"attendance-reg
     sessions: (typeof r.sessions === "string" ? jsonOr<Wire<"attendance-regularization">["sessions"]>(r.sessions, []) : r.sessions) ?? [],
     reason: r.reason ?? undefined,
     state: r.state,
-    decided_by: r.decidedBy ?? undefined,
+    decided_by: ref("users", r.decidedBy),
   };
 }
 
@@ -1238,7 +1263,7 @@ export function toOvertimeRequestResource(r: any): Wire<"overtime-request"> {
     minutes, // derived duration; clients sum these per employee per month for the monthly total
     reason: r.reason ?? undefined,
     state: r.state,
-    decided_by: r.decidedBy ?? undefined,
+    decided_by: ref("users", r.decidedBy),
     decision_note: r.decisionNote ?? undefined,
     paid: !!r.paidRunId, // whether a payroll run has paid this overtime
     paid_run: r.paidRunId ? ref("payroll-runs", r.paidRunId) : undefined,
@@ -1271,7 +1296,7 @@ export function toRemoteWorkRequestResource(r: any): Wire<"remote-work-request">
     location: r.location ?? undefined,
     reason: r.reason ?? undefined,
     state: r.state,
-    decided_by: r.decidedBy ?? undefined,
+    decided_by: ref("users", r.decidedBy),
     decision_note: r.decisionNote ?? undefined,
   };
 }
@@ -1286,7 +1311,7 @@ export function toAssetRequestResource(r: any): Wire<"asset-request"> {
     justification: r.justification ?? undefined,
     needed_by: r.neededBy ? iso(r.neededBy).slice(0, 10) : undefined,
     state: r.state,
-    decided_by: r.decidedBy ?? undefined,
+    decided_by: ref("users", r.decidedBy),
     decision_note: r.decisionNote ?? undefined,
     issued_asset: r.issuedAssetId ? ref("assets", r.issuedAssetId) : undefined,
     issued_time: r.issuedAt ? iso(r.issuedAt) : undefined,
@@ -1325,7 +1350,7 @@ export function toSuggestionResource(r: any): Wire<"suggestion"> {
     body: r.body,
     status: r.status,
     response: r.response ?? undefined,
-    responded_by: r.respondedById ?? undefined,
+    responded_by: ref("users", r.respondedById),
     upvotes: r.upCount ?? 0,
     downvotes: r.downCount ?? 0,
     my_vote: r.myVote ?? 0, // -1 down, 0 none, +1 up
@@ -1795,9 +1820,9 @@ export function toPayrollRunResource(r: any): Wire<"payroll-run"> {
     ...baseResource(r, "payroll-runs"),
     pay_period: ref("pay-periods", r.payPeriodId),
     state: r.state,
-    submitted_by: r.submittedBy ?? undefined,
+    submitted_by: ref("users", r.submittedBy),
     submitted_by_name: r.submittedByName ?? undefined,
-    approved_by: r.approvedBy ?? undefined,
+    approved_by: ref("users", r.approvedBy),
     approved_by_name: r.approvedByName ?? undefined,
     // Set = a payout file has been handed to a bank, so the run is no longer deletable (deleteRun would
     // release the one-off payables it already paid). The UI drops the delete action on the strength of this.

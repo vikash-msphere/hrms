@@ -123,3 +123,35 @@ describe("amountInWords carries a full hundred paise into the rupees", () => {
     expect(amountInWords(1.995, false)).toBe("Two only");
   });
 });
+
+// THE CRORE COUNT HAS THE SAME OFF-THE-END DEFECT THE PAISE CLAUSE HAD, one group up.
+//
+// The crore part was read with the 0-999 helper, so a thousand crore printed "Ten Hundred Crore" and two
+// thousand indexed past the end of a twenty-entry array and printed "undefined Hundred Crore" - into an offer
+// letter's CTC clause (services/offerLetter.ts) or a letter template's `inrWords` (domain/letters.ts), which
+// are signed documents. Reading it with the same lakh/thousand decomposition the rupees get is both the
+// correct Indian form and the one that cannot index past 19.
+describe("amountInWords reads a crore count above 999", () => {
+  it("never emits undefined, at any magnitude the group boundaries can reach", () => {
+    for (const n of [1e9, 1e10, 2e10, 1.5e10, 1e11, 1e12, 1.2345e12, 9.99e13]) {
+      const words = amountInWords(n, false);
+      expect(words, `${n} -> ${words}`).not.toContain("undefined");
+      expect(words, `${n} -> ${words}`).not.toContain("Hundred Hundred");
+    }
+  });
+
+  it("groups the crore count itself, Indian style", () => {
+    expect(amountInWords(1_00_00_000, false)).toBe("One Crore only");
+    expect(amountInWords(999_00_00_000, false)).toBe("Nine Hundred Ninety Nine Crore only");
+    // 1000 crore = 10^10. "Ten Hundred Crore" was the old reading.
+    expect(amountInWords(1000_00_00_000, false)).toBe("One Thousand Crore only");
+    // 1 lakh crore = 10^12, the group above that.
+    expect(amountInWords(1_00_000_00_00_000, false)).toBe("One Lakh Crore only");
+  });
+
+  it("leaves every reading below a crore exactly as it was", () => {
+    expect(amountInWords(12_34_567, false)).toBe("Twelve Lakh Thirty Four Thousand Five Hundred Sixty Seven only");
+    expect(amountInWords(1_00_000, false)).toBe("One Lakh only");
+    expect(amountInWords(999, false)).toBe("Nine Hundred Ninety Nine only");
+  });
+});

@@ -90,6 +90,18 @@ const SIDE_TABLES: Record<string, { table: unknown; collection: string }> = {
   card_comments: { table: schema.cardComments, collection: "cards" },
   card_todos: { table: schema.cardTodos, collection: "cards" },
   card_movements: { table: schema.cardMovements, collection: "cards" },
+  // THE FOLLOW STATE AND THE CREDIT SPLIT, which are side tables of exactly the kind the paragraph above
+  // describes and were the three the list did not name. Both resources carry them as fields of the PARENT:
+  // a card ships `watchers`/`watcher_count`/`watching`, a goal ships those plus `contributors` (http/
+  // serialize.ts, decorated per page by cards.ts#watchersFor and goals.ts#goalWatchersFor/contributorsFor).
+  // `:watch` and `:setContributors` write ONLY here - neither touches the parent row - so nothing stamped the
+  // collection and `GET /v1/changes` reported that goals and cards had not changed. A stored copy therefore
+  // kept the old watch state and the old split for as long as it lived: press Watch, reload, and the button
+  // is back where it started. The global list validator (http/listEtag.ts) is built from the same stamps, so
+  // the list re-read was answered 304 as well.
+  goal_watchers: { table: schema.goalWatchers, collection: "goals" },
+  goal_contributors: { table: schema.goalContributors, collection: "goals" },
+  card_watchers: { table: schema.cardWatchers, collection: "cards" },
   goal_comments: { table: schema.goalComments, collection: "goals" },
   ticket_comments: { table: schema.ticketComments, collection: "tickets" },
   ticket_todos: { table: schema.ticketTodos, collection: "tickets" },
@@ -101,6 +113,36 @@ const SIDE_TABLES: Record<string, { table: unknown; collection: string }> = {
 
 /** The side tables and the collection each one stamps. Exported for the drift test. */
 export const SIDE_STAMPS = Object.entries(SIDE_TABLES).map(([table, { collection }]) => [table, collection] as const);
+
+/**
+ * The tables that deliberately stamp NOTHING, and why each one is safe.
+ *
+ * This list is the other half of the guard. Every check above asks "does what we declared get a trigger?",
+ * which is only ever wrong in the direction nobody notices: a table nobody REMEMBERED to declare passes all of
+ * them, because it appears in none of the maps being checked. That is precisely how `goal_watchers`,
+ * `goal_contributors` and `card_watchers` sat unstamped - each is a side table of a collection the client
+ * caches, and nothing anywhere said so. Held against `db/schema.ts` itself (test/changeDdlDrift.test.ts), this
+ * turns adding a table into a decision: stamp it, map it to its parent, or say here why it needs neither.
+ *
+ * The bar for membership is that NO WIRE RESOURCE CHANGES when the table is written. "It is internal" is not
+ * enough on its own - `card_movements` is internal too, and it moves a card's cycle-time numbers.
+ */
+export const UNSTAMPED_TABLES: Record<string, string> = {
+  // The stamp table itself; stamping it would make every write look like a change to everything.
+  collection_versions: "the stamp table",
+  // Read through `GET /v1/activity`, which pages on the audit row's own `at` and stores nothing client-side.
+  audit_log: "paged by its own timestamp; never cached as a collection",
+  // Allocation counters behind owned codes. Never read over the wire.
+  code_sequences: "internal counter, not part of any resource",
+  // The digest worker's queue. Its OUTPUT is a notification, and `notifications` is a stamped collection.
+  notification_digest_queue: "internal queue; the notification it produces is stamped",
+  // The FTS index. Written by the search triggers whenever a stamped row is written, so it is stamped already -
+  // one hop back - and `/v1/search` is a live query that caches nothing.
+  search_docs: "derived from stamped tables; search results are never stored",
+  // Per-VIEWER UI state (theme, tab badges), fetched by its own key-addressed route and never listed. The
+  // browser that wrote it is the only one that reads it back.
+  preferences: "per-viewer UI state, key-addressed, never listed",
+};
 
 // `attachments` is a side table too, but a POLYMORPHIC one: every row names its own parent collection, so
 // which stamp a write moves is data, not a mapping. Hence its own triggers, reading the collection off the

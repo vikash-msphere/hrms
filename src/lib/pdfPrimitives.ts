@@ -60,14 +60,27 @@ export function amountInWords(n: number, withPaise = true): string {
   let rupees = withPaise ? Math.floor(abs) : Math.round(abs);
   let paise = withPaise ? Math.round((abs - Math.floor(abs)) * 100) : 0;
   if (paise >= 100) { rupees += Math.floor(paise / 100); paise %= 100; }
+  // Below a crore, in the Indian grouping: lakh, thousand, then the last three digits.
+  const belowCrore = (n: number): string => {
+    const out: string[] = [];
+    let rest = n;
+    const lakh = Math.floor(rest / 100000); rest %= 100000;
+    const thousand = Math.floor(rest / 1000); rest %= 1000;
+    if (lakh) out.push(two(lakh) + " Lakh");
+    if (thousand) out.push(two(thousand) + " Thousand");
+    if (rest) out.push(three(rest));
+    return out.join(" ");
+  };
   const parts: string[] = [];
   const crore = Math.floor(rupees / 10000000); rupees %= 10000000;
-  const lakh = Math.floor(rupees / 100000); rupees %= 100000;
-  const thousand = Math.floor(rupees / 1000); rupees %= 1000;
-  if (crore) parts.push(three(crore) + " Crore");
-  if (lakh) parts.push(two(lakh) + " Lakh");
-  if (thousand) parts.push(two(thousand) + " Thousand");
-  if (rupees) parts.push(three(rupees));
+  // THE CRORE COUNT IS NOT CAPPED AT 999. It was read with `three()`, which handles 0-999 and nothing above:
+  // at a thousand crore it produced "Ten Hundred Crore", and at two thousand it read `ones[20]` - off the end
+  // of a twenty-entry array - and printed "undefined Hundred Crore" into a signed offer letter. Reading it
+  // with the SAME lakh/thousand decomposition the rupees get is both the correct Indian form ("One Thousand
+  // Crore", "One Lakh Crore") and the one that cannot run off an array, because it never indexes past 19.
+  if (crore) parts.push(belowCrore(crore) + " Crore");
+  const rest = belowCrore(rupees);
+  if (rest) parts.push(rest);
   let words = parts.join(" ");
   if (paise) words += (words ? " and " : "") + two(paise) + " Paise";
   return (neg ? "Minus " : "") + (words || "Zero") + " only";

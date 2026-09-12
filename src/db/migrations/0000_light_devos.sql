@@ -4768,6 +4768,18 @@ CREATE TRIGGER "chg_d_card_todos" AFTER DELETE ON "card_todos" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('cards', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint
+CREATE TRIGGER "chg_i_card_watchers" AFTER INSERT ON "card_watchers" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('cards', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_card_watchers" AFTER UPDATE ON "card_watchers" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('cards', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_card_watchers" AFTER DELETE ON "card_watchers" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('cards', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
 CREATE TRIGGER "chg_i_comp_off_credits" AFTER INSERT ON "comp_off_credits" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('leave-balances', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
@@ -4801,6 +4813,30 @@ CREATE TRIGGER "chg_u_goal_comments" AFTER UPDATE ON "goal_comments" BEGIN
 END;
 --> statement-breakpoint
 CREATE TRIGGER "chg_d_goal_comments" AFTER DELETE ON "goal_comments" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_goal_contributors" AFTER INSERT ON "goal_contributors" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_goal_contributors" AFTER UPDATE ON "goal_contributors" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_goal_contributors" AFTER DELETE ON "goal_contributors" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_i_goal_watchers" AFTER INSERT ON "goal_watchers" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_u_goal_watchers" AFTER UPDATE ON "goal_watchers" BEGIN
+  INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
+END;
+--> statement-breakpoint
+CREATE TRIGGER "chg_d_goal_watchers" AFTER DELETE ON "goal_watchers" BEGIN
   INSERT INTO "collection_versions" ("collection", "at") VALUES ('goals', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)) ON CONFLICT("collection") DO UPDATE SET "at" = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER);
 END;
 --> statement-breakpoint

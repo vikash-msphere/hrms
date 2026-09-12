@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 import { describe, it, expect } from "vitest";
-import { renderChangeDdl, CHANGE_DDL_MARKER, EXTRA_STAMPS, SIDE_STAMPS, stampSlug } from "../src/db/changeDdl";
+import { getTableConfig, SQLiteTable } from "drizzle-orm/sqlite-core";
+import { renderChangeDdl, CHANGE_DDL_MARKER, EXTRA_STAMPS, SIDE_STAMPS, UNSTAMPED_TABLES, stampSlug } from "../src/db/changeDdl";
+import * as dbSchema from "../src/db/schema";
 import { TABLES } from "../src/lib/authzResolve";
 import { CATALOG_COLLECTIONS, persistable } from "../web/src/lib/resourceStore";
 
@@ -9,6 +11,18 @@ import { CATALOG_COLLECTIONS, persistable } from "../web/src/lib/resourceStore";
 // if the two fell out of step, which is the danger: a collection whose trigger was never generated is reported
 // as "unchanged" forever, so every client keeps serving whatever it had stored. That is a silent wrong answer,
 // so it gets a gate.
+/** Every table `db/schema.ts` declares, by its SQL name. The module also exports enums and relations, hence
+ *  the `unknown[]` widening - `Object.values` over it is a union that no type predicate narrows cleanly. */
+function schemaTableNames(): string[] {
+  return [
+    ...new Set(
+      (Object.values(dbSchema) as unknown[])
+        .filter((v): v is SQLiteTable => v instanceof SQLiteTable)
+        .map((t) => getTableConfig(t).name),
+    ),
+  ];
+}
+
 const files = import.meta.glob("../src/db/migrations/*.sql", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 const paths = Object.keys(files).sort();
 const migration = paths.length === 1 ? files[paths[0]!]! : "";
@@ -85,6 +99,37 @@ describe("generated change-stamp DDL matches the migration", () => {
         .map((kind) => `${table}:${kind}`),
     );
     expect(wrong, "a side table that does not stamp its parent collection leaves the parent stale forever").toEqual([]);
+  });
+
+  // THE CHECK THAT LOOKS THE OTHER WAY.
+  //
+  // Every assertion above starts from something we DECLARED - the registry, EXTRA_STAMPS, SIDE_STAMPS - and
+  // asks whether the generator honoured it. All of them pass for a table nobody declared anywhere, because it
+  // is in none of the lists being iterated. That is not a hypothetical: `goal_watchers`, `goal_contributors`
+  // and `card_watchers` each back a field the parent resource ships (`watching`, `watcher_count`,
+  // `contributors`), each is written by a verb that touches nothing else, and all three sat unstamped through
+  // every test in this file - so `:watch` reported no change to `goals`, and a stored copy kept the old state.
+  //
+  // Starting from `db/schema.ts` instead closes that direction: a new table is stamped, mapped to the parent
+  // it changes, or explained in UNSTAMPED_TABLES. The failure message is the decision to make.
+  it("every table in the schema is stamped, mapped to a parent, or declared unstamped", () => {
+    const ddl = renderChangeDdl();
+    const declared = new Set([...SIDE_STAMPS.map(([t]) => t), ...Object.keys(UNSTAMPED_TABLES)]);
+    const missing = schemaTableNames()
+      .filter((name) => !declared.has(name) && !ddl.includes(`ON "${name}" BEGIN`))
+      .sort();
+    expect(
+      missing,
+      "unstamped and unexplained: a write here is invisible to GET /v1/changes and to the list validator - " +
+        "add it to SIDE_TABLES with the collection it changes, or to UNSTAMPED_TABLES with the reason it changes none",
+    ).toEqual([]);
+  });
+
+  // The other half of the same pair: an entry in UNSTAMPED_TABLES that no longer names a real table is a
+  // waiver for nothing, and it would go on silencing the check above if the table were ever re-added.
+  it("declares no waiver for a table that does not exist", () => {
+    const live = new Set(schemaTableNames());
+    expect(Object.keys(UNSTAMPED_TABLES).filter((t) => !live.has(t)), "stale waiver in UNSTAMPED_TABLES").toEqual([]);
   });
 
   it("emits one statement per trigger, none of them comment-only", () => {
