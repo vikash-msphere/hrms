@@ -18,8 +18,8 @@
 // exists to keep apart, and the bus went around it. Both directions are wrong: the admin's table quietly
 // showing the subject's narrowed rows, and the simulation showing rows the subject cannot see.
 //
-// Identity is known a beat after boot, so an early message from a tab that already knows one is dropped
-// rather than guessed at; the receiving tab then reads what it needs itself, which is the pre-bus behaviour.
+// Identity is known a beat after boot, so a message is dropped rather than guessed at whenever EITHER side
+// does not know one yet; the receiving tab then reads what it needs itself, which is the pre-bus behaviour.
 import { storedIdentity } from "@/lib/clientStore";
 
 type Handler<T> = (msg: T) => void;
@@ -33,13 +33,30 @@ const topics = new Map<string, Set<Handler<unknown>>>();
 
 export const crossTabAvailable = typeof BroadcastChannel !== "undefined";
 
+/**
+ * May a message stamped `who` be applied by a tab answering as `me`?
+ *
+ * AN UNKNOWN IDENTITY MATCHES NOTHING, on either side. This was `(env.who ?? null) !== storedIdentity()`,
+ * which let a message through whenever BOTH were null - two tabs that each boot before `/users/me` lands are
+ * both "null", so they delivered to each other, and one of them may be about to resolve as a "view as"
+ * simulation. A narrow window, and a pre-identity tab has little to corrupt; but it was the one comparison
+ * here that was not fail-closed, and "unknown equals unknown" is not what the identity stamp means. A dropped
+ * message costs a refetch - the receiving tab reads what it needs itself, which is the pre-bus behaviour.
+ *
+ * Exported so the rule is testable without a BroadcastChannel, which the test runtime does not have.
+ */
+export function deliverable(who: string | null, me: string | null): boolean {
+  if (who === EVERYONE) return true; // a dead session, and nothing else - see publishToAll
+  return !!me && !!who && who === me;
+}
+
 function ensureChannel(): BroadcastChannel | null {
   if (channel || !crossTabAvailable) return channel;
   channel = new BroadcastChannel(CHANNEL);
   channel.onmessage = (e) => {
     const env = e.data as Envelope | null;
     if (!env?.topic) return;
-    if (env.who !== EVERYONE && (env.who ?? null) !== storedIdentity()) return;
+    if (!deliverable(env.who ?? null, storedIdentity())) return;
     topics.get(env.topic)?.forEach((h) => h(env.data));
   };
   return channel;

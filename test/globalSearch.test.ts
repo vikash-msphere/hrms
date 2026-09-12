@@ -31,7 +31,7 @@ beforeAll(async () => {
   deps = makeDeps(b);
 });
 
-const TABLES = [schema.accessRules, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.roles];
+const TABLES = [schema.accessRules, schema.reviews, schema.reviewCycles, schema.leaveRequests, schema.leaveTypes, schema.holidays, schema.announcements, schema.tickets, schema.users, schema.employees, schema.roles];
 beforeEach(async () => {
   for (const t of TABLES) await deps.db.delete(t); // the delete triggers clear the index with them
 });
@@ -234,5 +234,71 @@ describe("search index integrity", () => {
   it("has no duplicate collections", () => {
     const seen = SEARCH_INDEX.map((e) => e.collection);
     expect(seen.length).toBe(new Set(seen).size);
+  });
+});
+
+// SEARCH NEVER PASSES THROUGH A SERIALIZER, so anything a serializer withholds must not be in the index.
+//
+// http/serialize.ts withholds the manager's assessment from the owner-employee until the review is SHARED
+// (`_managerVisible`, set by routes/reviews.ts), and the employee grant's own comment says so. The index
+// listed `managerComment` in both `match` and `title` - so the reviewee could match on their manager's
+// unshared words, and since `title` is "first non-empty", a review with no self-assessment yet rendered the
+// manager's verbatim comment as the ⌘K hit.
+//
+// `state_visibility` was NOT the fix: that gate is row-level and applies to every item method, so marking an
+// unshared review restricted would also have blocked the employee's own read and their `:submitSelf`. The
+// field does not belong in an index at all.
+const REVIEW_GRANT: Grant = { levels: { reviews: "read", "reviews.me.**": "read" }, allow: [] };
+
+type ReviewState = typeof schema.reviews.$inferInsert["state"];
+async function reviewFor(emp: AppUser, opts: { self?: string | null; manager?: string | null; state: ReviewState }) {
+  const cycleId = genId();
+  await deps.db.insert(schema.reviewCycles).values({ uuid: cycleId, code: `rc-${cycleId.slice(0, 4)}`, name: "H1", state: "ACTIVE" });
+  await deps.db.insert(schema.reviews).values({
+    uuid: genId(), code: `${emp.employeeCode}-001`, cycleId, employeeId: emp.employeeId!,
+    state: opts.state, selfComment: opts.self ?? null, managerComment: opts.manager ?? null,
+  });
+}
+
+describe("a review's manager assessment is not searchable", () => {
+  it("does not surface an unshared manager comment to the reviewee", async () => {
+    const asha = await seedPerson("04-001", "Asha", "Rao", REVIEW_GRANT);
+    // Mid-cycle: no self-assessment written yet, manager has typed a candid assessment.
+    await reviewFor(asha, { manager: "Not meeting the bar; recommend a performance plan", state: "MANAGER" });
+
+    // The words themselves are not matchable...
+    expect(await search(asha, "performance")).toEqual([]);
+    expect(await search(asha, "recommend")).toEqual([]);
+    // ...and nothing renders them as a hit title either.
+    const all = await search(asha, "MANAGER");
+    expect(JSON.stringify(all)).not.toMatch(/Not meeting the bar/);
+  });
+
+  it("still finds the review by the employee's own words", async () => {
+    const asha = await seedPerson("04-001", "Asha", "Rao", REVIEW_GRANT);
+    await reviewFor(asha, { self: "Shipped the billing migration", manager: "Secret assessment", state: "SHARED" });
+
+    const hits = await search(asha, "billing");
+    expect(hits.map((h) => h.collection)).toContain("reviews");
+    expect(hits.find((h) => h.collection === "reviews")?.title).toBe("Shipped the billing migration");
+  });
+
+  // The structural half: the rule is "a field the API serves conditionally is never indexed". Stated as the
+  // two surfaces that actually have such a gate, so re-adding either fails here rather than in production.
+  it("indexes no column the API serves conditionally", () => {
+    const withheld: Record<string, string[]> = {
+      // Withheld from the owner until the review is shared (serialize.ts `_managerVisible`).
+      reviews: ["managerComment", "ratingsJson", "overallRating", "goalRatingsJson"],
+      // Each side of a 1:1 keeps one note only they can read (schema.ts check_ins).
+      "check-ins": ["employeeNote", "counterpartNote"],
+    };
+    for (const [collection, columns] of Object.entries(withheld)) {
+      const entry = SEARCH_INDEX.find((e) => e.collection === collection);
+      expect(entry, `${collection} is no longer in SEARCH_INDEX`).toBeDefined();
+      const indexed = [...(entry!.match ?? []), ...(entry!.title ?? []), ...(entry!.subtitle ?? [])];
+      for (const c of columns) {
+        expect(indexed, `${collection}.${c} is withheld by the serializer but indexed for search`).not.toContain(c);
+      }
+    }
   });
 });

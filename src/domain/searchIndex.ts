@@ -78,8 +78,21 @@ export const SEARCH_INDEX: SearchEntry[] = [
   { collection: "cards", table: schema.cards, scoping: scoped("employeeId"),
     match: ["title", "description", "keyPrefix", "columnKey", "priority"], title: ["title"], subtitle: ["columnKey"] },
   { collection: "review-cycles", table: schema.reviewCycles, scoping: flat, match: ["name", "state"], title: ["name"], subtitle: ["state"] },
+  // `managerComment` IS DELIBERATELY NOT INDEXED, and neither may the rest of the manager's assessment be.
+  //
+  // http/serialize.ts withholds it from the owner-employee until the review is SHARED (`_managerVisible`,
+  // set by routes/reviews.ts), and the employee grant says so in its own comment. Indexing it went around
+  // that gate completely: search never passes through a serializer - it reads `search_docs.title`, written by
+  // a trigger - so the reviewee could match on their manager's unshared words, and because `title` is
+  // "first non-empty" a review with no self-assessment yet rendered the manager's comment VERBATIM as the
+  // ⌘K hit. `state_visibility` could not have saved it either: that gate is row-level and applies to every
+  // item method, so marking an unshared review restricted would also block the employee's own read and their
+  // `:submitSelf`. The field simply does not belong in an index.
+  //
+  // The self-assessment stays: it is the employee's own words, and it is served to them and to editors
+  // unconditionally. `state` keeps a review findable when no self-assessment has been written yet.
   { collection: "reviews", table: schema.reviews, scoping: scoped("employeeId"),
-    match: ["selfComment", "managerComment", "state"], title: ["selfComment", "managerComment"], subtitle: ["state"] },
+    match: ["selfComment", "state"], title: ["selfComment"], subtitle: ["state"] },
   { collection: "review-feedback", table: schema.reviewFeedback, scoping: scoped("authorId"),
     match: ["comment", "state"], title: ["comment"], subtitle: ["state"] },
   { collection: "check-ins", table: schema.checkIns, scoping: scoped("employeeId"), match: ["notes"], title: ["notes"] },

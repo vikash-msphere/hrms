@@ -2651,13 +2651,13 @@ CREATE TRIGGER "search_ad_review_cycles" AFTER DELETE ON "review_cycles" BEGIN
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_ai_reviews" AFTER INSERT ON "reviews" BEGIN
-  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('reviews', new."uuid", new."code", new."employee_id", coalesce(nullif(trim(new."self_comment"), ''), nullif(trim(new."manager_comment"), '')), nullif(trim(new."state"), ''), 0, 0, new."created_at");
-  INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), coalesce(new."self_comment", '') || ' ' || coalesce(new."manager_comment", '') || ' ' || coalesce(new."state", ''));
+  INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) VALUES ('reviews', new."uuid", new."code", new."employee_id", nullif(trim(new."self_comment"), ''), nullif(trim(new."state"), ''), 0, 0, new."created_at");
+  INSERT INTO "search_fts" ("rowid", "text") VALUES (last_insert_rowid(), coalesce(new."self_comment", '') || ' ' || coalesce(new."state", ''));
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_au_reviews" AFTER UPDATE ON "reviews" BEGIN
-  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."employee_id", "title" = coalesce(nullif(trim(new."self_comment"), ''), nullif(trim(new."manager_comment"), '')), "subtitle" = nullif(trim(new."state"), ''), "deleted" = 0, "restricted" = 0 WHERE "collection" = 'reviews' AND "record_id" = new."uuid";
-  UPDATE "search_fts" SET "text" = coalesce(new."self_comment", '') || ' ' || coalesce(new."manager_comment", '') || ' ' || coalesce(new."state", '') WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'reviews' AND "record_id" = new."uuid");
+  UPDATE "search_docs" SET "code" = new."code", "owner_id" = new."employee_id", "title" = nullif(trim(new."self_comment"), ''), "subtitle" = nullif(trim(new."state"), ''), "deleted" = 0, "restricted" = 0 WHERE "collection" = 'reviews' AND "record_id" = new."uuid";
+  UPDATE "search_fts" SET "text" = coalesce(new."self_comment", '') || ' ' || coalesce(new."state", '') WHERE "rowid" = (SELECT "rowid" FROM "search_docs" WHERE "collection" = 'reviews' AND "record_id" = new."uuid");
 END;
 --> statement-breakpoint
 CREATE TRIGGER "search_ad_reviews" AFTER DELETE ON "reviews" BEGIN
@@ -3428,9 +3428,9 @@ INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitl
 --> statement-breakpoint
 INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."name", '') || ' ' || coalesce(t."state", '') FROM "search_docs" d JOIN "review_cycles" t ON t."uuid" = d."record_id" WHERE d."collection" = 'review-cycles' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
-INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'reviews', t."uuid", t."code", t."employee_id", coalesce(nullif(trim(t."self_comment"), ''), nullif(trim(t."manager_comment"), '')), nullif(trim(t."state"), ''), 0, 0, t."created_at" FROM "reviews" t;
+INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'reviews', t."uuid", t."code", t."employee_id", nullif(trim(t."self_comment"), ''), nullif(trim(t."state"), ''), 0, 0, t."created_at" FROM "reviews" t;
 --> statement-breakpoint
-INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."self_comment", '') || ' ' || coalesce(t."manager_comment", '') || ' ' || coalesce(t."state", '') FROM "search_docs" d JOIN "reviews" t ON t."uuid" = d."record_id" WHERE d."collection" = 'reviews' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
+INSERT INTO "search_fts" ("rowid", "text") SELECT d."rowid", coalesce(t."self_comment", '') || ' ' || coalesce(t."state", '') FROM "search_docs" d JOIN "reviews" t ON t."uuid" = d."record_id" WHERE d."collection" = 'reviews' AND d."rowid" NOT IN (SELECT "rowid" FROM "search_fts");
 --> statement-breakpoint
 INSERT INTO "search_docs" (collection, record_id, code, owner_id, title, subtitle, deleted, restricted, created_at) SELECT 'review-feedback', t."uuid", t."code", t."author_id", nullif(trim(t."comment"), ''), nullif(trim(t."state"), ''), 0, 0, t."created_at" FROM "review_feedback" t;
 --> statement-breakpoint
