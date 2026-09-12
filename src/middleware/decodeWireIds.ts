@@ -164,7 +164,15 @@ export async function decodeWireIdsRequest(request: Request, codec: IdCodec): Pr
         outText = text; // not valid JSON - let the validator reject it
       }
     }
-    return new Request(url, { method: request.method, headers: request.headers, body: outText });
+    // `content-length` IS DROPPED, because this request's body is not the one that header describes: a wire
+    // token is 26 characters and the internal id it decodes to is 13, so every ref rewritten above shrinks the
+    // payload. Carrying the original length forward leaves a header that contradicts the body it is attached
+    // to - middleware/bodyLimit reads it (it only tests the over-cap case, so the mismatch is harmless there
+    // today) and anything else that trusts it would be reading the pre-decode size. The runtime derives the
+    // real length from the body it was handed.
+    const headers = new Headers(request.headers);
+    headers.delete("content-length");
+    return new Request(url, { method: request.method, headers, body: outText });
   }
   if (!pathChanged && !queryChanged) return request;
   return new Request(url, request); // non-JSON: reuse method/headers/body (binary upload stays intact)

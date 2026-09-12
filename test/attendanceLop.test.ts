@@ -118,6 +118,74 @@ describe("attendance LOP (loss of pay) derivation", () => {
     expect(lopDayUnits({ ...base, workedByDay: new Map() })).toBe(1); // absent
   });
 
+  // HALF-DAY LEAVE. `leaveDays` (domain/leave.ts) charges only half a day of balance for a boundary session,
+  // so a range read here as whole days excused a full day of loss of pay for half a day of leave - the
+  // employee spent 0.5 day of balance and was docked nothing for the half they did not work.
+  describe("half-day leave excuses only the half it covers", () => {
+    // 2026-06-01 is a Monday; 06-03 a Wednesday.
+    const base = {
+      startYmd: "2026-06-01",
+      endYmd: "2026-06-01",
+      workDays: WORK,
+      holidays: new Set<string>(),
+      fullDayMinutes: FULL,
+      halfDayMinutes: HALF,
+    };
+
+    it("a PM-only leave day with no punch at all still costs the unworked morning", () => {
+      const units = lopDayUnits({
+        ...base,
+        leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", startSession: 2, endSession: 2 }],
+        workedByDay: new Map(),
+      });
+      expect(units).toBe(0.5);
+    });
+
+    it("an AM-only leave day with no punch costs the unworked afternoon", () => {
+      const units = lopDayUnits({
+        ...base,
+        leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", startSession: 1, endSession: 1 }],
+        workedByDay: new Map(),
+      });
+      expect(units).toBe(0.5);
+    });
+
+    it("half a day's work discharges a half-day leave day", () => {
+      const half = { ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-01", startSession: 2, endSession: 2 }] };
+      expect(lopDayUnits({ ...half, workedByDay: new Map([["2026-06-01", HALF]]) })).toBe(0); // exactly the minimum
+      expect(lopDayUnits({ ...half, workedByDay: new Map([["2026-06-01", FULL]]) })).toBe(0); // more than owed
+      expect(lopDayUnits({ ...half, workedByDay: new Map([["2026-06-01", HALF - 1]]) })).toBe(0.5); // just short
+    });
+
+    it("sessions apply only at the range's own endpoints - interior days are whole", () => {
+      // Mon PM through Wed AM: Mon and Wed are halves, Tue is a full day of leave. Nothing is worked.
+      const units = lopDayUnits({
+        ...base,
+        endYmd: "2026-06-03",
+        leaveRanges: [{ start: "2026-06-01", end: "2026-06-03", startSession: 2, endSession: 1 }],
+        workedByDay: new Map(),
+      });
+      expect(units).toBe(1); // Mon 0.5 + Tue 0 + Wed 0.5
+    });
+
+    it("two ranges meeting on one day cover it whole, and cannot add up past it", () => {
+      const units = lopDayUnits({
+        ...base,
+        leaveRanges: [
+          { start: "2026-05-28", end: "2026-06-01", startSession: 1, endSession: 1 }, // ends Mon AM
+          { start: "2026-06-01", end: "2026-06-05", startSession: 2, endSession: 2 }, // starts Mon PM
+        ],
+        workedByDay: new Map(),
+      });
+      expect(units).toBe(0);
+    });
+
+    it("omitted sessions mean the whole day, so a caller that does not model halves is unchanged", () => {
+      const units = lopDayUnits({ ...base, leaveRanges: [{ start: "2026-06-01", end: "2026-06-01" }], workedByDay: new Map() });
+      expect(units).toBe(0);
+    });
+  });
+
   it("a punch below the half-day minimum doesn't earn a half day -> full absence", () => {
     const base = { startYmd: "2026-06-01", endYmd: "2026-06-01", workDays: WORK, holidays: new Set<string>(), leaveRanges: [], fullDayMinutes: FULL, halfDayMinutes: HALF };
     expect(lopDayUnits({ ...base, workedByDay: new Map([["2026-06-01", 239]]) })).toBe(1); // just under half min -> absent

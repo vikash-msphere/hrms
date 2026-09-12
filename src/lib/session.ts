@@ -8,6 +8,15 @@ const enc = new TextEncoder();
 
 export type Session = { email: string; iat: number; exp: number };
 
+/** How far ahead of the verifier's clock an `iat` may sit. Both clocks are this Worker's, so this only has to
+ *  absorb the milliseconds between sealing a cookie and reading it back. */
+const CLOCK_SKEW_MS = 60_000;
+/** The widest sitting this lane will honour, whatever a payload claims. A ceiling above the TTL that
+ *  routes/authRoutes.ts actually issues (12h), so shortening or lengthening that does not kill live cookies -
+ *  what this refuses is a window so wide that "short TTL plus a cut-off stamp" stops being the revocation
+ *  story. */
+const MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 const b64url = (bytes: ArrayBuffer | Uint8Array): string =>
   Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).toString("base64url");
 const fromB64url = (s: string): Uint8Array<ArrayBuffer> => {
@@ -47,6 +56,23 @@ export async function openSession(token: string, secretB64: string, nowMs: numbe
     // field that decides revocation is not also the one field nobody validates.
     if (!Number.isFinite(session.exp) || !Number.isFinite(session.iat)) return null;
     if (session.exp <= nowMs) return null;
+    // `iat` IS BOUNDED, not merely numeric, for the same reason it is validated at all: the auth middleware
+    // makes a security decision from it (a session issued before the user's `sessions_valid_from` stamp is
+    // dead), and two shapes defeat that decision while passing every check above.
+    //
+    // An `iat` in the FUTURE outlives any revocation stamp set from the present clock, so "sign out
+    // everywhere" would not reach it. A small skew is allowed because the issuing and verifying clocks are the
+    // same Worker's but need not tick in the same millisecond.
+    //
+    // An `iat` far in the PAST paired with a live `exp` is a session whose window is wider than the TTL this
+    // lane is built on - the whole revocation story here is "short TTL plus a cut-off stamp", so a cookie
+    // claiming a year-long sitting is not one the app issues. Bounded against MAX_TTL_MS rather than against
+    // the exact TTL, so changing the issued lifetime does not invalidate live cookies.
+    //
+    // Neither is mintable today (`sealSession` writes both from one clock) and the MAC stops an attacker
+    // writing either, so this is defence in depth on the one field that decides revocation.
+    if (session.iat > nowMs + CLOCK_SKEW_MS) return null;
+    if (session.exp - session.iat > MAX_TTL_MS) return null;
     return session;
   } catch {
     return null;

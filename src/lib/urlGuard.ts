@@ -180,6 +180,12 @@ export function assertPublicHttpsUrl(raw: string): URL {
     }
     // fc00::/7 unique-local, fe80::/10 link-local, ff00::/8 multicast.
     if ((a & 0xfe00) === 0xfc00 || (a & 0xffc0) === 0xfe80 || (a & 0xff00) === 0xff00) reject();
+    // 100::/64 is the discard-only prefix (RFC 6666): a black hole, so nothing is ever there to webhook.
+    if (a === 0x0100 && b === 0 && c === 0 && d === 0) reject();
+    // 2001:db8::/32 is the documentation range (RFC 3849) - the v6 counterpart of the three v4 doc ranges
+    // blockedIpv4 already refuses, and blocked for the same reason: nothing routes there, so a rule naming one
+    // is a copied example or a probe, and examples are exactly how such an address ends up saved.
+    if (a === 0x2001 && b === 0x0db8) reject();
     return u;
   }
   if (host.includes(":")) reject(); // colon-bearing but not a parseable IPv6 literal

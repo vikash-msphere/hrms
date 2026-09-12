@@ -11,12 +11,13 @@ Last verified against the working tree on **2026-09-12**.
 
 | Gate | Result |
 |------|--------|
-| `npm run test:gate` (vitest + count assertion) | 2775 tests across 234 files, 0 failures |
+| `npm run test:gate` (vitest + count assertion) | 2791 tests across 236 files, 0 failures |
 | `npm run typecheck` | 0 errors (api + web + e2e) |
 | `npm run lint` (eslint, `--max-warnings 0`) | 0 issues |
 | `npm run api:lint` (spectral) | 0 errors (23 infos) |
 | `npm run preflight` | **2 blocking errors** + 5 warnings — see below |
 | `npm run build:web` | ok |
+| `npm audit --omit=dev` | 0 vulnerabilities (dev toolchain: 9, none critical — see below) |
 | migrations | exactly one, `src/db/migrations/0000_*.sql` |
 
 Both preflight ERRORs are the same shape: a deployment-environment fact the repo cannot hold, which the gate
@@ -171,6 +172,24 @@ Each of these leaves production working but weaker.
   outage is still reported on the first call after it starts.
 - **No bulk employee import.** Deliberate for a first release: an import that silently mis-maps a salary or
   a reporting line is worse than data entry. It is the main reason step 13 takes real time.
+
+- **Nine `npm audit` advisories, all in the dev toolchain, none in the deployed Worker.**
+  `npm audit --omit=dev` is **0 vulnerabilities** — nothing the Worker bundles or the browser downloads is
+  affected. What remains is the build and test toolchain, and the critical one is already closed: `vitest` is
+  pinned at 3.2.7, past the 3.2.6 that fixes GHSA-5xrq-8626-4rwp (arbitrary file read and execution while the
+  `vitest --ui` server is listening), which also cleared the two nested-`wrangler` advisories. Until then,
+  `npm run test:e2e:ui` / `vitest --ui` was a live local file-read surface for anyone who could reach the port.
+
+  The rest need a major move the harness does not currently survive, so they are carried rather than fixed:
+
+  | Advisory | Fix requires | Why it is carried |
+  |---|---|---|
+  | `@vitest/mocker` path traversal (moderate) | `vitest` ≥ 4.1.11 | vitest 4 needs `@cloudflare/vitest-pool-workers` ≥ 0.22, which **removes `isolatedStorage`**. Every file in `test/` applies the migrations in its own `beforeAll` and needs a fresh D1 per file; without it the second file dies on `table access_rules already exists`. Measured: 161 of 2791 tests fail across 17 files. Reworking how all 236 files obtain a database is its own change, with its own verified pass. |
+  | `vite` path traversal / `fs.deny` bypass (high), `esbuild` (moderate) | `vite` ≥ 7 | Needs `@vitejs/plugin-react` 5 and a Node floor of 20.19+. Both are dev-server-only issues: they need an attacker able to reach `vite dev`, which is never exposed — production is static assets served by Cloudflare from `web/dist`. |
+  | `@esbuild-kit/*` via `drizzle-kit` (moderate) | `drizzle-kit` ≥ 0.31 | Only ever run by hand for `db:generate`. A major bump there can change generated migration SQL, and this repo keeps exactly one frozen migration — so it is done deliberately, alongside a regeneration diff, not as an audit sweep. |
+
+  Nothing here is a reason to hold a launch; all of it is a reason not to run a dev server or `vitest --ui` on
+  an untrusted network. Re-check with `npm audit --omit=dev` (must stay at zero) before each release.
 
 ## Where the detail lives
 

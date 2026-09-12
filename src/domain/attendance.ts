@@ -161,26 +161,68 @@ export function eventCreditByDay(opts: {
   return out;
 }
 
+/**
+ * One approved leave range as LOP sees it. `startSession`/`endSession` are the same half-day flags
+ * `leave_requests` stores (1 = first half / AM, 2 = second half / PM): the leave runs contiguously from
+ * `startSession` of `start` through `endSession` of `end`. Omitted means the whole of that boundary day, which
+ * is the column default and what a caller that does not model halves should pass.
+ */
+export type LeaveRange = { start: string; end: string; startSession?: number; endSession?: number };
+
+/**
+ * How much of day `d` approved leave excuses: 0, 0.5 (one session) or 1 (both).
+ *
+ * HALF DAYS HAVE TO BE READ HERE, because `leaveDays` (domain/leave.ts) already charges only HALF a day to the
+ * balance for a boundary session - so treating the same day as fully excused from loss of pay paid for half a
+ * day the employee neither worked nor spent leave on. Sessions are tracked as AM/PM rather than summed, so two
+ * ranges that touch the same day cannot add up past the day they are in.
+ */
+function leaveCover(d: string, ranges: LeaveRange[]): number {
+  let am = false;
+  let pm = false;
+  for (const r of ranges) {
+    if (d < r.start || d > r.end) continue;
+    // Interior days are whole; only the range's own endpoints can carry a session flag.
+    const first = d === r.start ? (r.startSession ?? 1) : 1;
+    const last = d === r.end ? (r.endSession ?? 2) : 2;
+    if (first <= 1) am = true;
+    if (last >= 2) pm = true;
+    if (am && pm) return 1;
+  }
+  return (am ? 0.5 : 0) + (pm ? 0.5 : 0);
+}
+
 // Unexcused loss-of-pay DAY-UNITS over the period for one employee (fractional). For each scheduled working
 // day that is not a holiday and not covered by approved leave: no punch is a full absence (1.0); worked below
 // the half-day minimum is also a full absence (the session is too short to count); worked from the half-day
 // minimum up to a full day is a half day (0.5); a full day adds nothing.
+//
+// A day HALF covered by leave owes half a day of work, so it is judged on the same ladder one notch down: a
+// punch worth at least the half-day minimum discharges it, anything less leaves 0.5 unexcused.
 export function lopDayUnits(opts: {
   startYmd: string;
   endYmd: string;
   workDays: number[];
   holidays: Set<string>;
-  leaveRanges: { start: string; end: string }[];
+  leaveRanges: LeaveRange[];
   workedByDay: Map<string, number>; // day -> worked minutes; absent if no entry
   fullDayMinutes: number;
   halfDayMinutes: number;
 }): number {
   const { startYmd, endYmd, workDays, holidays, leaveRanges, workedByDay, fullDayMinutes, halfDayMinutes } = opts;
-  const onLeave = (d: string) => leaveRanges.some((r) => r.start <= d && d <= r.end);
   let units = 0;
   for (const d of enumerate(startYmd, endYmd)) {
-    if (!workDays.includes(weekdayOf(d)) || holidays.has(d) || onLeave(d)) continue;
+    if (!workDays.includes(weekdayOf(d)) || holidays.has(d)) continue;
+    const excused = leaveCover(d, leaveRanges);
+    if (excused >= 1) continue; // whole day on leave
+    // `undefined` (never punched) is kept distinct from 0 so a configured `half_day_minutes` of 0 still reads
+    // a no-show as a no-show rather than as a satisfied half day.
     const worked = workedByDay.get(d);
+    if (excused > 0) {
+      // Half-day leave: the other half still has to be worked, and a half day's work is what discharges it.
+      units += worked !== undefined && worked >= halfDayMinutes ? 0 : 0.5;
+      continue;
+    }
     if (worked === undefined || worked < halfDayMinutes) units += 1; // no punch, or too short to earn a half day
     else if (worked < fullDayMinutes) units += 0.5; // earned a half day
     // else: a full day, nothing deducted

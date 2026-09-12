@@ -7,6 +7,20 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 // exist yet and the whole suite fails to start, so make sure the directory is there.
 mkdirSync("web/dist", { recursive: true });
 
+// PINNED TO THE POOL'S v0.12 CONFIG SHAPE, and to vitest 3, deliberately.
+//
+// `@cloudflare/vitest-pool-workers` v0.22 (which vitest 4 requires) is not a version bump, it is a different
+// test harness: the pool becomes a Vite PLUGIN rather than a `test.poolOptions` entry, and - the part that
+// matters - `isolatedStorage` is gone. Every file in test/ applies the migrations in its own `beforeAll` and
+// relies on getting a fresh D1 per file; without that isolation the second file to run dies on `table
+// access_rules already exists` and takes everything downstream with it. Measured: 161 of 2791 tests fail that
+// way on v0.22, across 17 files, and the fix is to rework how all 236 files obtain a database - not a flag.
+//
+// So the toolchain sits at the newest combination this harness actually supports: vitest 3.2.7 (>= 3.2.6,
+// which is what closes GHSA-5xrq-8626-4rwp, the critical `vitest --ui` arbitrary-file-read) against the pool's
+// own peer range of `2.0.x - 3.2.x`. The advisories that remain are the ones whose only fix is a major move
+// past this line - see the dependency note in production-readiness.md for what they are and why none of them
+// reaches the deployed Worker.
 export default defineWorkersConfig({
   // The web bundle's `@/…` alias (web/vite.config.ts), mirrored here so a PURE web module - the access-rule
   // sentence/lint logic, quick-action config, and anything else worth unit-testing without a browser - can be

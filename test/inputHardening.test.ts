@@ -85,6 +85,20 @@ describe("webhook SSRF guard: an address is judged as an address, not as a strin
     allowed("https://100.128.0.1/hook"); // just past the end of 100.64/10
   });
 
+  // The v6 counterparts of the v4 ranges above: a documentation prefix that nothing routes to, and a prefix
+  // whose entire purpose is to discard. Both read as "some public v6 address" until named.
+  it("blocks the IPv6 documentation and discard-only prefixes", () => {
+    blocked("https://[2001:db8::1]/hook"); // RFC 3849 documentation
+    blocked("https://[2001:db8:1234:5678::abcd]/hook");
+    blocked("https://[100::1]/hook"); // RFC 6666 discard-only
+    blocked("https://[100::]/hook");
+    // Their neighbours are ordinary global unicast and must not be caught: 2001:db9 is outside the /32, and
+    // 100:0:0:1:: is outside the discard /64.
+    allowed("https://[2001:db9::1]/hook");
+    allowed("https://[2001:4860:4860::8888]/hook"); // Google public DNS
+    allowed("https://[100:0:0:1::1]/hook");
+  });
+
   it("blocks internal-only names and bare hostnames", () => {
     for (const h of ["localhost", "metadata", "metadata.google.internal", "vault.internal", "printer.local", "db.home.arpa", "intranet"]) {
       blocked(`https://${h}/hook`);

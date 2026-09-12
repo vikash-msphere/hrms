@@ -8,6 +8,7 @@ import type { ListScope } from "../domain/access";
 import type { Deps } from "../deps";
 import { invalidArgument } from "../lib/errors";
 import { chunk } from "../lib/dbBatch";
+import { localDay } from "../domain/attendance";
 import {
   METRICS,
   METRIC_GROUPS,
@@ -99,6 +100,12 @@ function tzOffsetMs(tz: string, at: number): number {
   return Date.parse(`${local.replace(" ", "T")}Z`) - at;
 }
 
+// The calendar day a DATE-ONLY column names. Every such column in the schema is anchored at UTC midnight, so
+// this is read in UTC and nowhere else - see domain/attendance.ts#utcDay, which states the rule.
+//
+// NOT for an INSTANT. "Today" is an org-local question and comes from `localDay(ms, sched.timezone)` below;
+// this used to answer it too, which put the report's own clock in UTC while it bucketed punches in the org's
+// timezone a few lines later.
 const ymd = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const parseYmd = (s: string) => Date.parse(`${s}T00:00:00Z`);
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -133,7 +140,14 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   const t = schema;
   const db = deps.db;
   const now = deps.clock.now();
-  const todayYmd = ymd(now.getTime());
+  // ORG-LOCAL, not UTC. `now` is an instant and "today" is a calendar day, so which day it is depends on the
+  // org's timezone - the same timezone this function already buckets punches into a few lines below
+  // (`offsetMs`), and the one services/orgDay.ts exists to keep every such decision on. Read in UTC it was
+  // wrong for part of every day, in both directions: `expectedWorkingDays` clamps its window at this value, so
+  // west of UTC each evening counted the not-yet-started local day as a working day and charged an absence for
+  // it to everyone in the report, while the overdue counts below (`dueDate < today`) called a task overdue a
+  // day early. The schedule is already loaded, so this costs no read.
+  const todayYmd = localDay(now.getTime(), sched.timezone);
 
   // ---- The roster: the people this caller may list, in the window ----------------------------------------
   // Somebody who left before the window opened is not in this report; somebody who joins after it closes is

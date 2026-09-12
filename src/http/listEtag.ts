@@ -27,18 +27,9 @@ import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
 import { authzVersion } from "../domain/authzVersion";
+import { fnv1a64 } from "../lib/fnv";
 
 const WINDOW_MS = 5 * 60_000;
-
-/** FNV-1a over the request key, so two requests differing in path or in any parameter never share an etag. */
-function hash(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36);
-}
 
 /**
  * What was ASKED FOR: the path, plus every query parameter sorted - page size, cursor, the soft-delete view,
@@ -48,11 +39,15 @@ function hash(s: string): string {
  * `/v1/tickets?max_page_size=100` and `/v1/leave-requests?max_page_size=100` differ in nothing else, so a
  * validator that ever reached the wrong route would earn a 304 and leave the caller holding one collection's
  * rows as another's.
+ *
+ * Hashed 64-bit (lib/fnv.ts): the whole point of this key is that two different questions cannot mint the same
+ * validator, and a 304 is the answer "you already hold this" - so a collision here is precisely the wrong-rows
+ * outcome the paragraph above describes, reached by chance instead of by a routing mistake.
  */
 function requestKey(url: string): string {
   const u = new URL(url);
   const params = [...u.searchParams.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return hash([u.pathname, ...params.map(([k, v]) => `${k}=${v}`)].join("&"));
+  return fnv1a64([u.pathname, ...params.map(([k, v]) => `${k}=${v}`)].join("&"));
 }
 
 /** When anything in the database was last written. One row, off the `at` index. */

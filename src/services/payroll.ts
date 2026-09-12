@@ -25,7 +25,7 @@ import { runBatch, runBatchChecked, chunk, byIdChunks, insertBatches, groupBy, t
 import { getSettingValue } from "./settings";
 import { documentLetterhead, letterheadMark, type OrgWithDocumentLogos } from "./letterheads";
 import type { LetterheadSpec } from "../lib/letterPdf";
-import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, type LeaveRange, localDay, utcDay, workingDaysInRange, lopDayUnits, lopAmount, employmentFraction, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidOvertimeAll, markOvertimePaidByRun, resetOvertimePaidByRun } from "./overtimeRequests";
 import { resetCompArrearsPaidByRun, markCompArrearsPaidByRun, splitDriftFor } from "./compensation";
@@ -182,14 +182,17 @@ async function assembleLop(deps: Deps, period: typeof schema.payPeriods.$inferSe
   // real one `attendance_sessions` alone is two rows per employee per working day, all of them read (and
   // billed) on every payroll build. The JS predicates are kept exactly as they were; the SQL windows are the
   // same bounds, only decided by the database. `state` joins them because it is the same one-column filter.
-  const leaveByEmp = new Map<string, { start: string; end: string }[]>();
+  // The half-day SESSIONS travel with the range. `leaveDays` charges only half a day to the balance for a
+  // boundary session, so a range carried here as whole days excused a full day of loss of pay for half a day
+  // of leave - see domain/attendance.ts#leaveCover.
+  const leaveByEmp = new Map<string, LeaveRange[]>();
   for (const l of await deps.db
     .select()
     .from(schema.leaveRequests)
     .where(and(eq(schema.leaveRequests.state, "APPROVED"), gte(schema.leaveRequests.endDate, new Date(startMs)), lte(schema.leaveRequests.startDate, new Date(endMs))))) {
     if (l.state !== "APPROVED" || +new Date(l.endDate) < startMs || +new Date(l.startDate) > endMs) continue;
     const arr = leaveByEmp.get(l.employeeId) ?? [];
-    arr.push({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)) });
+    arr.push({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession });
     leaveByEmp.set(l.employeeId, arr);
   }
   const workedByEmp = new Map<string, Map<string, number>>(); // employee -> day -> worked minutes

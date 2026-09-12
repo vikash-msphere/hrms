@@ -16,6 +16,8 @@ import { invalidArgument, notFound, aborted, failedPrecondition, oneOf } from ".
 import { etagOf } from "../http/serialize";
 import { idFromPath } from "./documentsCommon";
 import { getSettingValue } from "./settings";
+import { orgToday, orgTimezone, dayStartMs } from "./orgDay";
+import { localDay } from "../domain/attendance";
 import {
   DEFAULT_ATS_CONFIG, type AtsConfig, isStage, nextStage, statusForStage, bandPointAmount,
   REQUISITION_STATUSES, type RequisitionStatus, canOfferTransition, type OfferStatus,
@@ -283,7 +285,13 @@ async function applicationEventPayload(
   const org = await getSettingValue<{ default_currency?: string }>(deps, "organization", {});
   const idx = cfg.stages.findIndex((s) => s.key === app.stage);
   const day = 86_400_000;
-  const now = +deps.clock.now();
+  // ORG-LOCAL, not UTC. These three are calendar DAYS an offer is dated and timed from, and the day an instant
+  // falls in depends on the org's timezone (services/orgDay.ts). Derived as `ymd(now)` they were the UTC day,
+  // so east of UTC an offer raised in the early hours carried yesterday's date and its notice and validity
+  // windows shifted with it. `dayStartMs` turns the org-local day back into the UTC midnight a date-only
+  // column stores, which is what the day arithmetic below steps over.
+  const today = await orgToday(deps);
+  const dayFrom = (n: number) => ymd(dayStartMs(today) + n * day);
   return {
     stage: app.stage,
     stageLabel: cfg.stages[idx]?.label ?? app.stage,
@@ -308,9 +316,9 @@ async function applicationEventPayload(
     currency: grade?.currency ?? org.default_currency ?? "INR",
     offerAmount: bandPointAmount(cfg, { min: grade?.bandMin, mid: grade?.bandMid, max: grade?.bandMax }),
     // Dates computed here once, from settings, so a rule body holds no arithmetic and no magic numbers.
-    offerDate: ymd(new Date(now)),
-    suggestedJoinDate: ymd(new Date(now + cfg.join_notice_days * day)),
-    suggestedExpiryDate: ymd(new Date(now + cfg.offer_validity_days * day)),
+    offerDate: today,
+    suggestedJoinDate: dayFrom(cfg.join_notice_days),
+    suggestedExpiryDate: dayFrom(cfg.offer_validity_days),
     ...extra,
   };
 }
@@ -820,7 +828,9 @@ async function convertCandidate(
         employee: `employees/${employee.uuid}`,
         annual_ctc: terms.baseComp,
         currency_code: terms.currency ?? undefined,
-        effective_from: terms.startDate ?? ymd(deps.clock.now()),
+        // The org's day, not UTC's: this is the date a compensation row takes effect from, and a hire recorded
+        // in the early hours east of UTC took effect a day before it was agreed. See services/orgDay.ts.
+        effective_from: terms.startDate ?? (await orgToday(deps)),
       });
     } catch { /* best-effort: leave comp for manual entry if the agreed CTC can't be split under current config */ }
   }
@@ -963,7 +973,13 @@ export const SCORECARD_NUDGE_DAYS = [1, 3, 7];
 
 export async function nudgeMissingScorecards(deps: Deps): Promise<number> {
   const now = +deps.clock.now();
-  const dayOf = (ms: number) => Date.UTC(new Date(ms).getUTCFullYear(), new Date(ms).getUTCMonth(), new Date(ms).getUTCDate());
+  // BOTH SIDES of the age below read their day in the ORG's timezone, which is the day an "N days after the
+  // interview" ladder is counted in. `scheduledStart` is an instant, so in UTC the rung an interview lands on
+  // flipped with the time of day it was held - the tick runs at 02:00 UTC, which is the previous evening west
+  // of UTC. Changing only one side would break the invariant the ladder depends on (the age must advance by
+  // exactly one per nightly tick, or a rung is skipped and nobody is ever chased), so they share one helper.
+  const tz = await orgTimezone(deps);
+  const dayOf = (ms: number) => Date.parse(`${localDay(ms, tz)}T00:00:00Z`);
   const today = dayOf(now);
   const held = await deps.db.select().from(schema.interviews).where(eq(schema.interviews.status, "done"));
   let sent = 0;

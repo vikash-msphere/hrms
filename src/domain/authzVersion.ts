@@ -19,6 +19,7 @@
 // what dept- and self-scoped rules match on, and which the code cascade rewrites when they move), it changes
 // exactly when the caller's effective access changes and at no other time.
 import type { Grant } from "./permissions";
+import { fnv1a64 } from "../lib/fnv";
 
 /**
  * Canonical text for a grant: sorted, so two structurally identical grants compiled in different rule order
@@ -35,16 +36,9 @@ function canonical(grant: Grant, scopeKey: string | null): string {
   return `${scopeKey ?? ""}|${levels}|${allow}|${deny}`;
 }
 
-/** FNV-1a, 32-bit. Not a security primitive and does not need to be: this identifies a version to the client
- *  that produced it, and the server re-derives it on every request rather than trusting one back. */
-function fnv1a(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36);
-}
-
-/** The caller's access version. Changes when their grant or their scope key does; stable otherwise. */
-export const authzVersion = (grant: Grant, employeeCode: string | null): string => fnv1a(canonical(grant, employeeCode));
+/** The caller's access version. Changes when their grant or their scope key does; stable otherwise.
+ *
+ *  Hashed 64-bit (lib/fnv.ts) rather than 32: this value is an IDENTITY that decides whether a stored payload
+ *  may still be served, so a collision means rows carrying the redactions and access hints of permissions the
+ *  caller no longer holds. See that file for why the extra lane is worth its one pass. */
+export const authzVersion = (grant: Grant, employeeCode: string | null): string => fnv1a64(canonical(grant, employeeCode));

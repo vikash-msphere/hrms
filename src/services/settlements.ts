@@ -149,7 +149,10 @@ async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number,
       lte(schema.leaveRequests.startDate, windowTo),
     )))
     .filter((l) => l.state === "APPROVED" && +new Date(l.endDate) >= fromMs && +new Date(l.startDate) <= toMs)
-    .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)) }));
+    // The half-day SESSIONS travel with the range, for the reason domain/attendance.ts#leaveCover gives: a
+    // boundary session costs half a day of balance, so excusing the whole day from loss of pay pays for the
+    // half the leaver neither worked nor took.
+    .map((l) => ({ start: utcDay(+new Date(l.startDate)), end: utcDay(+new Date(l.endDate)), startSession: l.startSession, endSession: l.endSession }));
   const workedByDay = new Map<string, number>();
   for (const s of await deps.db
     .select()

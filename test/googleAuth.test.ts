@@ -72,6 +72,25 @@ describe("session codec", () => {
     // The well-formed one still opens.
     expect((await openSession(await sign({ email: "ada@example.com", iat: now, exp: now + 60_000 }), KEY, now))?.iat).toBe(now);
   });
+
+  // The same field, bounded rather than merely numeric - both shapes below defeat the revocation decision the
+  // middleware makes from `iat` while passing every other check.
+  it("rejects an iat in the future or a sitting wider than the lane's ceiling", async () => {
+    const now = Date.now();
+    const sign = (payload: object) => sealSession(payload as never, KEY);
+    // A future `iat` outlives any `sessions_valid_from` stamp set from the present clock, so "sign out
+    // everywhere" would never reach it.
+    expect(await openSession(await sign({ email: "ada@example.com", iat: now + 600_000, exp: now + 900_000 }), KEY, now)).toBeNull();
+    // A small skew is tolerated: both clocks are this Worker's, and sealing then reading takes milliseconds.
+    expect(await openSession(await sign({ email: "ada@example.com", iat: now + 5_000, exp: now + 60_000 }), KEY, now)).not.toBeNull();
+    // A cookie claiming a year-long sitting is not one this lane issues (12h), and the revocation story here
+    // is "short TTL plus a cut-off stamp".
+    const year = 365 * 24 * 60 * 60 * 1000;
+    expect(await openSession(await sign({ email: "ada@example.com", iat: now - year, exp: now + 60_000 }), KEY, now)).toBeNull();
+    // The issued shape is well inside the ceiling and unaffected.
+    const twelveHours = 12 * 60 * 60 * 1000;
+    expect(await openSession(await sign({ email: "ada@example.com", iat: now, exp: now + twelveHours }), KEY, now)).not.toBeNull();
+  });
 });
 
 describe("/auth routes (Google mode)", () => {
