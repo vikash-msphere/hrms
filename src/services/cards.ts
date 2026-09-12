@@ -1,4 +1,4 @@
-import { eq, and, isNull, isNotNull, asc, inArray } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, asc, inArray, sql } from "drizzle-orm";
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import { keysetPage } from "./keysetPage";
@@ -310,6 +310,39 @@ const idFromPath = (p?: string | null) => (p ? p.split("/").pop()! : undefined);
 const dayMs = (s?: string | null) => (s ? Date.parse(s + "T00:00:00Z") : NaN);
 
 // Cards in a board column (non-deleted), for WIP counting + rank append. Optionally excluding one card.
+/**
+ * The next rank at the bottom of a column, and the next per-board `seq`, as AGGREGATES.
+ *
+ * Both were `reduce(Math.max)` over every row: `columnCards(...)` for the rank and a bare
+ * `select seq from cards where board_id = ?` for the sequence. That is the shape services/codeAlloc.ts was
+ * rewritten out of, in its own words - "fine on a bounded table and ruinous on an append-only one … composing
+ * one code came to mean reading every event ever recorded, per action, on a platform that bills rows read".
+ * A board is not bounded: finished cards stay for the history and the CFD analytics, so a mature board billed
+ * its whole card count on every new card - and the `seq` read sat INSIDE `withFreshCode`, so a contended
+ * board paid for it up to four times in one request.
+ *
+ * `max()` is one row instead of N, and index-backed in both cases (`card_board_seq_idx` on (board_id, seq),
+ * `card_board_idx` on board_id). The allocation rule is unchanged - still max+1 read-then-write, still caught
+ * by the unique index and retried by `withFreshCode` - so nothing about the collision story moves.
+ */
+const RANK_STEP = 1024;
+async function nextRank(deps: Deps, boardId: string, columnKey: string): Promise<number> {
+  const [r] = await deps.db
+    .select({ max: sql<number | null>`max(${schema.cards.rank})` })
+    .from(schema.cards)
+    .where(and(eq(schema.cards.boardId, boardId), eq(schema.cards.columnKey, columnKey), isNull(schema.cards.deleteTime)));
+  return (r?.max ?? 0) + RANK_STEP;
+}
+
+/** Deleted cards are deliberately counted: a seq is a human key (MS-4) and must never be handed out twice. */
+async function nextSeq(deps: Deps, boardId: string): Promise<number> {
+  const [r] = await deps.db
+    .select({ max: sql<number | null>`max(${schema.cards.seq})` })
+    .from(schema.cards)
+    .where(eq(schema.cards.boardId, boardId));
+  return (r?.max ?? 0) + 1;
+}
+
 async function columnCards(deps: Deps, boardId: string, columnKey: string) {
   return deps.db
     .select({ uuid: schema.cards.uuid, rank: schema.cards.rank, assigneeId: schema.cards.assigneeId })
@@ -509,16 +542,14 @@ export async function createCard(deps: Deps, actor: AppUser, input: CardInput, i
   const due = dayMs(input.due_date);
   if (input.due_date && Number.isNaN(due)) throw invalidArgument("due_date is invalid");
   // Append to the end of the target column unless a rank was supplied.
-  const existing = await columnCards(deps, boardId, columnKey);
-  const rank = input.rank ?? (existing.reduce((m, r) => Math.max(m, r.rank), 0) + 1024);
+  const rank = input.rank ?? (await nextRank(deps, boardId, columnKey));
   // Both of the card's allocated numbers are read-then-write max+1: its `code` and the per-board `seq` behind
   // the human key (MS-1, MS-2…). Two people filing a task on the same board at the same moment therefore
   // compose the same pair, and the unique indexes fail the loser rather than let two tasks answer to MS-4.
   // Allocating INSIDE the retry is what makes that recoverable: the second look sees the winner's row and
   // takes the next numbers. Prefix is copied from the board so the key survives a later prefix change.
   const row = (await withFreshCode(async () => {
-    const seqRows = await deps.db.select({ seq: schema.cards.seq }).from(schema.cards).where(eq(schema.cards.boardId, boardId));
-    const seq = seqRows.reduce((m, r) => Math.max(m, r.seq ?? 0), 0) + 1;
+    const seq = await nextSeq(deps, boardId);
     const code = await allocOwnedCode(deps, schema.cards, schema.cards.employeeId, employeeId);
     return deps.db
     .insert(schema.cards)
@@ -672,7 +703,7 @@ export async function moveCard(deps: Deps, actor: AppUser, id: string, to: MoveC
   // Backlog <-> sprint in the same atomic move (null = backlog), same semantics as PATCH `sprint`.
   if (toSprint !== undefined) set.sprintId = idFromPath(toSprint) ?? null;
   if (rank != null) set.rank = rank;
-  else if (changingColumn) set.rank = (await columnCards(deps, row.boardId, toColumn)).reduce((m, r) => Math.max(m, r.rank), 0) + 1024;
+  else if (changingColumn) set.rank = await nextRank(deps, row.boardId, toColumn);
 
   // Flow timestamps (stamped once, the first crossing). committed = at/after the commitment column; started =
   // past the commitment column (real work); delivered = the delivery column.

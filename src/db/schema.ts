@@ -1146,7 +1146,14 @@ export const cards = sqliteTable("cards", {
 // said out loud in a stand-up). It is allocated max+1 like a code, so two cards filed at the same moment
 // compose the same number - and without the index both would keep it, leaving two different tasks answering
 // to one name. The index fails the loser instead, and services/cards.ts re-numbers it.
-}, (t) => ({ pageIdx: index("cards_page_idx").on(t.createdAt, t.uuid), boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId, t.createdAt, t.uuid), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), reporterIdx: index("card_reporter_idx").on(t.reporterId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq) }));
+}, (t) => ({ pageIdx: index("cards_page_idx").on(t.createdAt, t.uuid), boardIdx: index("card_board_idx").on(t.boardId), empIdx: index("card_emp_idx").on(t.employeeId, t.createdAt, t.uuid), deptIdx: index("card_dept_idx").on(t.departmentId), assigneeIdx: index("card_assignee_idx").on(t.assigneeId), reporterIdx: index("card_reporter_idx").on(t.reporterId), goalIdx: index("card_goal_idx").on(t.goalId), boardSeqIdx: uniqueIndex("card_board_seq_idx").on(t.boardId, t.seq),
+  // The bottom of a column, as a SEEK rather than a walk. `nextRank` (services/cards.ts) asks
+  // `max(rank) where board_id = ? and column_key = ? and delete_time is null` on every card create and every
+  // cross-column move; without a matching index SQLite walks the board's whole range to answer it. With the
+  // equality columns leading and `rank` next, the min/max optimisation turns it into one backward seek
+  // (verified: SeekLE/Prev rather than Next). PARTIAL on the same predicate the query carries, so it indexes
+  // only live cards - which is also what the WIP-limit read filters on.
+  boardColRankIdx: index("card_board_col_rank_idx").on(t.boardId, t.columnKey, t.rank).where(sql`${t.deleteTime} is null`) }));
 
 // Append-only movement log: one row per column transition of a card. INTERNAL (not a wire collection / route):
 // written only by the card `move` verb and read only server-side by the board analytics roll-up, so it needs no

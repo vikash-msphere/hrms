@@ -503,3 +503,73 @@ describe("the reporter", () => {
     expect(watchers.map((w) => w.employeeId)).toEqual([actor.employeeId]);
   });
 });
+
+// THE TWO ALLOCATED NUMBERS ON A CARD, and what they cost to allocate.
+//
+// Creating one card used to read every card on the board (for the per-board `seq` behind the human key MS-4)
+// AND every live card in the destination column (for the rank at the bottom of it), then take `Math.max` in
+// the isolate. That is the shape services/codeAlloc.ts was rewritten out of - "ruinous on an append-only
+// table … per action, on a platform that bills rows read" - and a board is not bounded: finished cards stay
+// for the history and the CFD analytics. The `seq` read was inside `withFreshCode`, so a contended board paid
+// for it up to four times in one request.
+//
+// Both are `max()` aggregates now, each an index seek (schema.ts `card_board_seq_idx`,
+// `card_board_col_rank_idx`). The rule they implement is unchanged - max+1, read-then-write, the unique index
+// failing the loser and `withFreshCode` retrying - so these pin the BEHAVIOUR the rewrite had to preserve.
+describe("card numbering survives the aggregate rewrite", () => {
+  it("hands out consecutive per-board keys, and never reuses one a deleted card held", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Numbering" });
+    const b = `boards/${board.uuid}`;
+
+    const first = await createCard(deps, actor, { board: b, title: "One" });
+    const second = await createCard(deps, actor, { board: b, title: "Two" });
+    expect(second.seq).toBe(first.seq! + 1);
+
+    // A deleted card still owns its number: the key MS-2 was on a sticker, in a branch name, in a chat.
+    await deleteCard(deps, actor, second.uuid);
+    const third = await createCard(deps, actor, { board: b, title: "Three" });
+    expect(third.seq).toBe(second.seq! + 1);
+  });
+
+  it("numbers each board independently", async () => {
+    const actor = await seedActor();
+    const one = await createBoard(deps, actor, { name: "Board one" });
+    const two = await createBoard(deps, actor, { name: "Board two" });
+    const a = await createCard(deps, actor, { board: `boards/${one.uuid}`, title: "A" });
+    const b = await createCard(deps, actor, { board: `boards/${two.uuid}`, title: "B" });
+    expect(a.seq).toBe(1);
+    expect(b.seq).toBe(1); // a per-board sequence, not a global one
+  });
+
+  it("ranks a new card below the column it lands in, per column", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Ranking" });
+    const b = `boards/${board.uuid}`;
+
+    const t1 = await createCard(deps, actor, { board: b, title: "backlog one", column_key: "backlog" });
+    const t2 = await createCard(deps, actor, { board: b, title: "backlog two", column_key: "backlog" });
+    expect(t2.rank).toBeGreaterThan(t1.rank);
+
+    // Rank is per COLUMN, so the first card of another column starts from that column's own bottom.
+    const d1 = await createCard(deps, actor, { board: b, title: "review one", column_key: "review" });
+    expect(d1.rank).toBe(t1.rank);
+
+    // A deleted card does not hold a column's rank open - the aggregate filters it, as the old read did.
+    await deleteCard(deps, actor, t2.uuid);
+    const t3 = await createCard(deps, actor, { board: b, title: "backlog three", column_key: "backlog" });
+    expect(t3.rank).toBe(t1.rank + (t2.rank - t1.rank));
+  });
+
+  it("moves a card to the bottom of the destination column", async () => {
+    const actor = await seedActor();
+    const board = await createBoard(deps, actor, { name: "Moving" });
+    const b = `boards/${board.uuid}`;
+    const d1 = await createCard(deps, actor, { board: b, title: "review one", column_key: "review" });
+    const t1 = await createCard(deps, actor, { board: b, title: "backlog one", column_key: "backlog" });
+
+    const moved = await moveCard(deps, actor, t1.uuid, { column: "review" });
+    expect(moved.columnKey).toBe("review");
+    expect(moved.rank).toBeGreaterThan(d1.rank);
+  });
+});

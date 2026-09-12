@@ -627,6 +627,7 @@ CREATE INDEX `card_assignee_idx` ON `cards` (`assignee_id`);--> statement-breakp
 CREATE INDEX `card_reporter_idx` ON `cards` (`reporter_id`);--> statement-breakpoint
 CREATE INDEX `card_goal_idx` ON `cards` (`goal_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `card_board_seq_idx` ON `cards` (`board_id`,`seq`);--> statement-breakpoint
+CREATE INDEX `card_board_col_rank_idx` ON `cards` (`board_id`,`column_key`,`rank`) WHERE "cards"."delete_time" is null;--> statement-breakpoint
 CREATE TABLE `check_ins` (
 	`uuid` text PRIMARY KEY NOT NULL,
 	`code` text,

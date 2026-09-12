@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "0f428b17-7442-4293-8273-1063cb7a8451",
+  "id": "817403cc-f6a8-4724-ac28-ae2245a2f2b5",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -4512,6 +4512,16 @@
             "seq"
           ],
           "isUnique": true
+        },
+        "card_board_col_rank_idx": {
+          "name": "card_board_col_rank_idx",
+          "columns": [
+            "board_id",
+            "column_key",
+            "rank"
+          ],
+          "isUnique": false,
+          "where": "\"cards\".\"delete_time\" is null"
         }
       },
       "foreignKeys": {

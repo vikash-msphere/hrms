@@ -8,7 +8,7 @@ import * as schema from "../src/db/schema";
 import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
-import { SCORECARD_NUDGE_DAYS, nudgeMissingScorecards, inviteCandidate, rejectApplication } from "../src/services/ats";
+import { SCORECARD_NUDGE_DAYS, nudgeMissingScorecards, inviteCandidate, rejectApplication, hireApplication } from "../src/services/ats";
 import { renderOfferLetter } from "../src/services/offerLetter";
 
 // The three things recruiting gained that reach OUTSIDE the app: a chase-up for scorecards nobody filed, an
@@ -255,5 +255,64 @@ describe("offer letter", () => {
     });
     const { bytes } = await renderOfferLetter(deps, offerId);
     expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe("%PDF-");
+  });
+});
+
+// HIRING THE SAME PERSON TWICE.
+//
+// `hireApplication` looks for an employee who already holds the candidate's email before converting them. That
+// lookup was `eq(work_email, cand.email)` - exact and case-SENSITIVE over a column stored verbatim
+// (`createEmployee` writes `work_email` as typed; only the sign-in account is lowercased), against a candidate
+// email that is only trimmed. So `Asha.Rao@corp.com` on the application did not match `asha.rao@corp.com` on
+// the employee, and the conversion inserted a SECOND employee for one person - which the UNIQUE index accepts,
+// because the strings differ. middleware/auth.ts has a hard error for exactly that state ("your work email is
+// linked to a different sign-in account"), and this made a candidate's own capitalisation a route into it.
+//
+// It also had no soft-delete filter, so a leaver's row matched and the application was marked hired against a
+// deleted record - no onboarding, no compensation off the offer.
+describe("hiring an application that names an existing person", () => {
+  const employeeCount = async () => (await deps.db.select().from(schema.employees)).length;
+
+  async function existingEmployee(workEmail: string, opts: { deleted?: boolean } = {}) {
+    const uuid = genId();
+    await deps.db.insert(schema.employees).values({
+      uuid, code: `04-${genId().slice(0, 3)}`, firstName: "Asha", lastName: "Rao",
+      workEmail, status: "active", ...(opts.deleted ? { deleteTime: new Date() } : {}),
+    });
+    return uuid;
+  }
+
+  it("adopts the existing employee when the candidate's email differs only in case", async () => {
+    const existing = await existingEmployee("asha.rao@corp.com");
+    const before = await employeeCount();
+    const { appId } = await seedApplication({ email: "Asha.Rao@corp.com" });
+
+    const hired = await hireApplication(deps, actor, appId);
+    expect(hired.hiredEmployeeId).toBe(existing);
+    expect(await employeeCount(), "a second employee was created for one person").toBe(before);
+  });
+
+  it("still adopts on an exact match", async () => {
+    const existing = await existingEmployee("asha.rao@corp.com");
+    const before = await employeeCount();
+    const { appId } = await seedApplication({ email: "asha.rao@corp.com" });
+    expect((await hireApplication(deps, actor, appId)).hiredEmployeeId).toBe(existing);
+    expect(await employeeCount()).toBe(before);
+  });
+
+  // A leaver is not somebody to hire INTO - but `work_email` is UNIQUE regardless of `delete_time`, so the
+  // conversion cannot simply step around the row either: that is a UNIQUE violation and a 500. It has to be
+  // said out loud, with the fix in the sentence.
+  it("refuses rather than attaching the hire to a soft-deleted employee", async () => {
+    const gone = await existingEmployee("asha.rao@corp.com", { deleted: true });
+    const before = await employeeCount();
+    const { appId } = await seedApplication({ email: "Asha.Rao@corp.com" }); // case-differing, to pin both rules at once
+
+    await expect(hireApplication(deps, actor, appId)).rejects.toThrow(/deleted employee record/i);
+    // Nothing half-done: no second employee, and the application is not marked hired against the leaver.
+    expect(await employeeCount()).toBe(before);
+    const app = (await deps.db.select().from(schema.applications)).find((a) => a.uuid === appId);
+    expect(app?.hiredEmployeeId ?? null).not.toBe(gone);
+    expect(app?.hiredEmployeeId ?? null).toBeNull();
   });
 });

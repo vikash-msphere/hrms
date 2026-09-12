@@ -2,7 +2,7 @@
 // custom methods (`:advance`, `:reject`). NO access control here - the middleware gates each collection by
 // path + grants (private by default; recruiter/HR granted via the ACL). Mirrors the flat-collection pattern
 // of services/backgroundChecks.ts; the pipeline stage rules live in domain/ats.ts (pure + tested).
-import { eq, and, isNull, sql } from "drizzle-orm";
+import { asc, eq, and, isNull, sql } from "drizzle-orm";
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
 import type { ListScope } from "../domain/access";
@@ -878,9 +878,40 @@ export async function hireApplication(deps: Deps, actor: AppUser, id: string) {
   // accepted (before this column existed, or by someone else a moment ago), or the person was created by hand.
   const offers = await deps.db.select().from(schema.offers).where(eq(schema.offers.applicationId, app.uuid));
   const converted = offers.find((o) => o.createdEmployeeId)?.createdEmployeeId ?? null;
-  const existing = converted
+  // ASKED THE WAY middleware/auth.ts ASKS IT: case-insensitively.
+  //
+  // This was `eq(workEmail, cand.email)` - an exact, case-SENSITIVE match over a column stored verbatim
+  // (`createEmployee` writes `work_email` as typed; only `provisionAccount` lowercases, and only for
+  // `users.email`), against a candidate email that is only trimmed. So a candidate who wrote
+  // `Asha.Rao@corp.com` against an employee row holding `asha.rao@corp.com` was not detected, and the
+  // conversion below inserted a SECOND employee for one person - which the UNIQUE index accepts, because the
+  // strings differ. That is the state auth.ts already has a hard error for ("your work email is linked to a
+  // different sign-in account"), reached here by nothing more than how a candidate capitalised their address.
+  //
+  // Ordered, because `lower(work_email)` is not the unique one: two rows differing only in case can both sit
+  // behind it, and which person a hire attaches to must not be a query-plan detail. Same rule, same reason, as
+  // loadUserRow's `stable` lookup.
+  //
+  // SOFT-DELETED ROWS ARE FOUND BUT NOT ADOPTED, and that distinction has to be made HERE rather than by
+  // filtering them out. A leaver is not somebody to hire into - attaching the application to a deleted record
+  // means no onboarding transition, no compensation off the offer, and a `hired_employee_id` no list will ever
+  // return. But `work_email` is UNIQUE regardless of `delete_time`, so simply skipping the row sends
+  // `convertCandidate` into a UNIQUE violation and answers 500 for what is an ordinary situation with an
+  // ordinary fix. So it is named: a rehire is a decision somebody makes, not a side effect of pressing Hire.
+  const match = converted
     ? null
-    : (await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(eq(schema.employees.workEmail, cand.email)).limit(1))[0]?.uuid ?? null;
+    : (await deps.db
+        .select({ uuid: schema.employees.uuid, deleteTime: schema.employees.deleteTime })
+        .from(schema.employees)
+        .where(sql`lower(${schema.employees.workEmail}) = ${cand.email.toLowerCase()}`)
+        .orderBy(asc(schema.employees.createdAt), asc(schema.employees.uuid))
+        .limit(1))[0] ?? null;
+  if (match?.deleteTime) {
+    throw failedPrecondition(
+      "a deleted employee record already uses that work email - restore it to rehire this person, or give the candidate a different address",
+    );
+  }
+  const existing = match?.uuid ?? null;
   const already = converted ?? existing;
 
   if (!already) {

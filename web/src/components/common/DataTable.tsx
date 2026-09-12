@@ -500,6 +500,16 @@ export function DataTable<T>({
       else next.add(id);
       return next;
     });
+  // The selection is re-read AFTER the confirm dialog, not captured before it.
+  //
+  // `selectedRows` is a render-time value, so an awaited modal freezes it: a background refetch (a sibling
+  // tab's write, the change feed, a poll) can replace `filtered` while the dialog is open, and the effect
+  // above that prunes rows which have since filtered out cannot run across the await. The action then ran
+  // against the rows as they were when the dialog opened. The server re-authorizes every row, so this was
+  // stale COPIES rather than forbidden rows - but a destructive bulk action should act on what is on screen
+  // when it is confirmed, not on what was there when it was clicked.
+  const liveSelection = React.useRef<T[]>(selectedRows);
+  liveSelection.current = selectedRows;
   async function runBulk(action: BulkAction<T>) {
     if (action.confirm) {
       const ok = await confirmDialog({
@@ -510,9 +520,13 @@ export function DataTable<T>({
       });
       if (!ok) return;
     }
+    // Whatever is still selected now the dialog has closed. Empty means every selected row went away while it
+    // was open, and running an action over nothing is not what the person confirmed.
+    const rows = liveSelection.current;
+    if (rows.length === 0) return;
     setBulkBusy(action.label);
     try {
-      await action.run(selectedRows);
+      await action.run(rows);
       setSelected(new Set()); // success: the selection's job is done
     } catch {
       // the caller's run() surfaces its own error toast; keep the selection so the user can retry
