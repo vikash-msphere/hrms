@@ -342,6 +342,7 @@ export function patch<T>(path: string, body: Record<string, unknown>, etag?: str
 }
 
 import { coalescedGet, coalescedGetDetailed, NOT_MODIFIED } from "@/lib/getCoalescer";
+import { saveBlob } from "@/lib/download";
 
 // ---- AEP-shaped helpers -----------------------------------------------------
 
@@ -624,13 +625,5 @@ export async function blobUrl(path: string, opts: BinaryOpts = {}): Promise<stri
 
 /** Download a binary via a `:download` (or custom `verb`) method and trigger a browser save. */
 export async function download(path: string, filename: string, opts: BinaryOpts = {}): Promise<void> {
-  const blob = await postBinary(path, opts);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  saveBlob(await postBinary(path, opts), filename);
 }

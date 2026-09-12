@@ -56,6 +56,13 @@ beforeEach(async () => {
 });
 
 // Insert a seeded rule BY NAME (so we test the real shipped definition), optionally overriding enabled.
+// Employee codes come from a COUNTER, not from random characters. `04-${genId().slice(0, 3)}` draws three
+// base32 characters - 32,768 possibilities - and this file seeds a whole roster, so the birthday bound makes a
+// duplicate `employees.code` (UNIQUE) a matter of when, not if: the suite failed roughly one run in a hundred
+// on an insert that has nothing to do with what is being tested. A counter is unique by construction.
+let seedSeq = 0;
+const nextCode = () => `04-${(++seedSeq).toString(36).padStart(3, "0")}`;
+
 async function seedRule(name: string, enabled = true) {
   const a = AUTOMATIONS.find((r) => r.name === name);
   if (!a) throw new Error(`no seeded automation named "${name}"`);
@@ -70,7 +77,7 @@ async function seedRule(name: string, enabled = true) {
 async function seedEmployee(over: Partial<typeof schema.employees.$inferInsert> = {}): Promise<string> {
   const uuid = genId();
   await deps.db.insert(schema.employees).values({
-    uuid, code: over.code ?? `04-${genId().slice(0, 3)}`, firstName: "Test", lastName: "User",
+    uuid, code: over.code ?? nextCode(), firstName: "Test", lastName: "User",
     workEmail: `${uuid}@test.example`, status: "active", ...over,
   });
   return uuid;

@@ -9,6 +9,7 @@ import type { Bindings } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { searchFilter } from "../src/services/searchFilter";
+import { eq, sql } from "drizzle-orm";
 
 // D1 binds at most 100 parameters per statement (lib/dbBatch.ts PARAM_CAP). `searchFilter` returns up to
 // MAX_MATCHES (500) ids, and binding one parameter per id blew that cap: a text search on a collection where
@@ -75,5 +76,48 @@ describe("searchFilter stays inside D1's parameter cap", () => {
     await seedMatching(2);
     expect(await searchFilter(deps, "employees", "", schema.employees.uuid)).toBeUndefined();
     expect(await searchFilter(deps, "employees", "a", schema.employees.uuid)).toBeUndefined();
+  });
+});
+
+// WHICH matches come back when there are more than the cap allows - and whether a deleted row is allowed to
+// take one of those slots.
+//
+// Neither was decided before: the query had no ORDER BY, so `LIMIT 500` took whatever the FTS join reached
+// first (rowid order, i.e. the OLDEST rows), and it had no `deleted` filter, so trash consumed the budget that
+// live rows needed. On a collection big enough to be worth searching, the list's search box answered with old
+// records and silently omitted recent ones. services/globalSearch.ts already did both; this is the sibling
+// catching up.
+describe("searchFilter spends its cap on the right rows", () => {
+  it("excludes soft-deleted rows, so they cannot eat the match budget", async () => {
+    const ids = await seedMatching(4);
+    // The index carries a `deleted` flag rather than dropping the row (see db/searchDdl.ts), which is exactly
+    // why the filter has to be asked for.
+    await deps.db.update(schema.employees).set({ deleteTime: new Date() }).where(eq(schema.employees.uuid, ids[0]!));
+
+    const where = await searchFilter(deps, "employees", "searchable", schema.employees.uuid);
+    // Asked WITHOUT the caller's own soft-delete filter, so what is measured is this function's own answer.
+    const rows = await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(where);
+    expect(rows.map((r) => r.uuid)).not.toContain(ids[0]);
+    expect(rows).toHaveLength(3);
+  });
+
+  it("orders by relevance, so the cap keeps the best matches and not the oldest", async () => {
+    // An exact-title match and a body-only match, inserted oldest-first. Under rowid order the older, weaker
+    // row leads; under rank the stronger one does.
+    const weak = genId();
+    await deps.db.insert(schema.employees).values({ uuid: weak, code: "04-w", firstName: "Priya", lastName: "Kumar", jobTitle: "Rigging Specialist", workEmail: "weak@test.example", status: "active" });
+    const strong = genId();
+    await deps.db.insert(schema.employees).values({ uuid: strong, code: "04-s", firstName: "Rigging", lastName: "Rigging", jobTitle: "Rigging", workEmail: "strong@test.example", status: "active" });
+
+    const ranked = await deps.db.all<{ id: string }>(sql`
+      select d."record_id" as id
+      from "search_fts" f join "search_docs" d on d."rowid" = f."rowid"
+      where f."text" match '"rigging"*' and d."collection" = 'employees' and d."deleted" = 0
+      order by f."rank"
+    `);
+    expect(ranked.map((r) => r.id)).toHaveLength(2);
+    // The denser match leads. Without `order by f."rank"` this is insertion order and `weak` comes first -
+    // which is the whole failure: at the cap, the tail is dropped.
+    expect(ranked[0]!.id).toBe(strong);
   });
 });

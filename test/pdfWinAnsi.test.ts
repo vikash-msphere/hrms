@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { enc } from "../src/lib/winAnsi";
+import { amountInWords } from "../src/lib/pdfPrimitives";
 import { stampSignature } from "../src/lib/pdfStamp";
 import { renderLetterPdf, type LetterContent } from "../src/lib/letterPdf";
 import { renderPayslipPdf, type PayslipData } from "../src/lib/pdf";
@@ -86,5 +87,39 @@ describe("no renderer throws on a name the base font cannot encode", () => {
       net: 48_200,
     };
     expect(isPdf(await renderPayslipPdf(data))).toBe(true);
+  });
+});
+
+// A HUNDRED PAISE IS A RUPEE, not a hundred-paise clause.
+//
+// `amountInWords` took the fraction and rounded it to paise, and that round can land on 100 - at which point
+// `two(100)` reads `tens[10]`, which is not there, and the amount on a payslip printed as "... and undefined
+// Paise". Nothing reached it (every figure is `round2`-ed upstream, and two of the three call sites
+// additionally `Math.round` first), which is exactly why it would have sat there until a caller handed over an
+// unrounded total. The carry is what a hundred paise means.
+describe("amountInWords carries a full hundred paise into the rupees", () => {
+  it("never emits an undefined paise clause, at any fraction", () => {
+    for (const n of [1.995, 99.999, 1234.9951, 0.999, 1_00_00_000.9999]) {
+      const words = amountInWords(n);
+      expect(words, `${n} -> ${words}`).not.toContain("undefined");
+      expect(words, `${n} -> ${words}`).not.toMatch(/Hundred Paise/);
+    }
+  });
+
+  it("rounds 1.995 up to two rupees rather than one rupee and a hundred paise", () => {
+    expect(amountInWords(1.995)).toBe("Two only");
+    expect(amountInWords(99.999)).toBe("One Hundred only");
+  });
+
+  it("still reads an ordinary paise amount", () => {
+    expect(amountInWords(1.5)).toBe("One and Fifty Paise only");
+    expect(amountInWords(1234.25)).toBe("One Thousand Two Hundred Thirty Four and Twenty Five Paise only");
+    expect(amountInWords(0)).toBe("Zero only");
+    expect(amountInWords(-1.5)).toBe("Minus One and Fifty Paise only");
+  });
+
+  // A whole-rupee currency (INR at 0dp) reads with no paise clause at all.
+  it("omits the clause entirely when the currency shows no decimals", () => {
+    expect(amountInWords(1.995, false)).toBe("Two only");
   });
 });

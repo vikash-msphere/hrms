@@ -51,8 +51,15 @@ export function amountInWords(n: number, withPaise = true): string {
   const two = (num: number): string => (num < 20 ? ones[num]! : tens[Math.floor(num / 10)]! + (num % 10 ? " " + ones[num % 10]! : ""));
   const three = (num: number): string => (num >= 100 ? ones[Math.floor(num / 100)]! + " Hundred" + (num % 100 ? " " + two(num % 100) : "") : two(num));
   const neg = n < 0;
-  let rupees = withPaise ? Math.floor(Math.abs(n)) : Math.round(Math.abs(n));
-  const paise = withPaise ? Math.round((Math.abs(n) - Math.floor(Math.abs(n))) * 100) : 0;
+  const abs = Math.abs(n);
+  // THE PAISE CAN ROUND TO A HUNDRED, and a hundred paise is a rupee - not a hundred-paise clause. `two(100)`
+  // reads `tens[10]`, which does not exist, so the amount printed as "... and undefined Paise" on a payslip.
+  // Nothing reaches it today (every figure here is `round2`-ed upstream, and two of the three call sites
+  // additionally `Math.round` first - somebody already felt this), which is exactly why it would have sat there
+  // until a caller handed over an unrounded total. Carried into the rupees, which is what a hundred paise IS.
+  let rupees = withPaise ? Math.floor(abs) : Math.round(abs);
+  let paise = withPaise ? Math.round((abs - Math.floor(abs)) * 100) : 0;
+  if (paise >= 100) { rupees += Math.floor(paise / 100); paise %= 100; }
   const parts: string[] = [];
   const crore = Math.floor(rupees / 10000000); rupees %= 10000000;
   const lakh = Math.floor(rupees / 100000); rupees %= 100000;

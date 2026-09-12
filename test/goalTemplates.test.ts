@@ -39,10 +39,17 @@ beforeEach(async () => {
   await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
 });
 
+// Employee codes come from a COUNTER, not from random characters. `04-${genId().slice(0, 3)}` draws three
+// base32 characters - 32,768 possibilities - and this file seeds a whole roster, so the birthday bound makes a
+// duplicate `employees.code` (UNIQUE) a matter of when, not if: the suite failed roughly one run in a hundred
+// on an insert that has nothing to do with what is being tested. A counter is unique by construction.
+let seedSeq = 0;
+const nextCode = () => `04-${(++seedSeq).toString(36).padStart(3, "0")}`;
+
 async function seedActor(): Promise<AppUser & { employeeId: string }> {
   const employeeId = genId();
   await deps.db.insert(schema.employees).values({
-    uuid: employeeId, code: `04-${genId().slice(0, 3)}`, firstName: "Test", lastName: "User",
+    uuid: employeeId, code: nextCode(), firstName: "Test", lastName: "User",
     workEmail: `${employeeId}@test.example`, status: "active",
   });
   const uuid = genId();

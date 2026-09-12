@@ -2,6 +2,7 @@
 // AFTER the last day because the spec's end is exclusive - an off-by-one here shows up as a leave that ends a
 // day early in someone's Outlook, which is exactly the kind of quiet wrong this app can't afford.
 
+import { saveBytes } from "./download";
 export type IcsEvent = {
   uid: string;
   start: string; // YYYY-MM-DD, inclusive
@@ -16,7 +17,15 @@ const stamp = (d: Date) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}
 const dateOnly = (ymd: string) => ymd.slice(0, 10).replace(/-/g, "");
 const nextDay = (ymd: string) => new Date(Date.parse(ymd.slice(0, 10) + "T00:00:00Z") + 86_400_000).toISOString().slice(0, 10);
 // Escape per RFC 5545 §3.3.11: backslash first, then the delimiters, then newlines.
-const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/([;,])/g, "\\$1").replace(/\r?\n/g, "\\n");
+//
+// EVERY NEWLINE FORM, which `\r?\n` was not: a LONE CARRIAGE RETURN passed through untouched. ICS content
+// lines are CRLF-delimited and parsers in the wild accept a bare CR as a line break, so a value carrying one
+// injected whole properties into the VEVENT - `Diwali\rDESCRIPTION:...\rX-EVIL:1` escaped to itself. The value
+// that reaches SUMMARY here is a holiday name, and routes/holidayFeed.ts publishes it on an unauthenticated,
+// long-lived URL people paste into Google Calendar and Outlook; the same escape carries interview summaries
+// and locations into candidate invitation mail. One alternation, so CRLF folds to a single `\n` and the two
+// bare forms cannot be the case somebody forgets.
+const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/([;,])/g, "\\$1").replace(/\r\n|[\r\n]/g, "\\n");
 // Content lines are folded at 75 OCTETS (RFC 5545 §3.1); a continuation begins with one space. Measured in
 // octets, not characters: a name in Devanagari is three bytes per character, so 75 characters is 225 octets and
 // a strict parser may reject the line. Mirrors src/lib/ics.ts exactly - the two must agree, since the same
@@ -72,14 +81,7 @@ export function buildIcs(events: IcsEvent[], calendarName: string, now = new Dat
 
 /** Hand the built calendar to the browser as a .ics download. */
 export function downloadIcs(filename: string, ics: string) {
-  const url = URL.createObjectURL(new Blob([ics], { type: "text/calendar;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename.endsWith(".ics") ? filename : `${filename}.ics`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  saveBytes(ics, filename.endsWith(".ics") ? filename : `${filename}.ics`, "text/calendar;charset=utf-8");
 }
 
 // ── Timed events ────────────────────────────────────────────────────────────────────────────────────────────

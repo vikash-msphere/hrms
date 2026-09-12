@@ -4,6 +4,7 @@
 // `export` capability - but the ACT is recorded server-side (see `record` below).
 import { api } from "@/api";
 import { toast } from "@/components/ui/use-toast";
+import { saveBlob } from "@/lib/download";
 
 type Cell = string | number | boolean | null | undefined;
 
@@ -25,17 +26,6 @@ async function record(collection: string, format: "csv" | "xlsx", rows: number, 
   } catch (e) {
     console.warn("[export] the export was not recorded in the audit trail", e);
   }
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
 }
 
 // Excel, Sheets and LibreOffice read a CSV cell that STARTS with `=`, `+`, `-`, `@` (or a tab/CR) as the start
@@ -81,7 +71,7 @@ export async function exportTable(filename: string, headers: string[], rows: Cel
   try {
     if (format === "csv") {
       // Prepend a BOM so Excel reads UTF-8 (accents, ₹, etc.) correctly.
-      downloadBlob(new Blob(["﻿" + toCsv(headers, rows)], { type: "text/csv;charset=utf-8;" }), `${filename}.csv`);
+      saveBlob(new Blob(["﻿" + toCsv(headers, rows)], { type: "text/csv;charset=utf-8;" }), `${filename}.csv`);
     } else {
       // Lazy-load SheetJS only when an Excel export is actually requested (keeps it out of the main bundle).
       const XLSX = await import("xlsx");

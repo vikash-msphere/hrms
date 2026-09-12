@@ -6,6 +6,7 @@ import { slotPos, fitLabelBlock, labelLineSpecs, labelTextBox, LABEL_LINE_HEIGHT
 // The SAME sanitizer the Worker's PDF renderers use (src/lib/winAnsi.ts), not a copy: the standard fonts here
 // are WinAnsi-encoded exactly as they are there. See the note at the specs below for what it prevents.
 import { enc } from "../../../src/lib/winAnsi";
+import { saveBytes } from "./download";
 
 const MM = 72 / 25.4; // mm -> pt
 const A4 = { w: 210 * MM, h: 297 * MM };
@@ -138,11 +139,5 @@ export async function buildTagSheetsPdf(opts: PdfOptions): Promise<Uint8Array> {
 }
 
 export function downloadPdf(bytes: Uint8Array, filename: string) {
-  const blob = new Blob([bytes as BlobPart], { type: "application/pdf" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  saveBytes(bytes as BlobPart, filename, "application/pdf");
 }

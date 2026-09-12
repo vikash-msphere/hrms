@@ -35,10 +35,23 @@ export async function searchFilter(deps: Deps, collection: string, q: string | u
   if (trimmed.length < MIN_QUERY) return undefined;
   const match = matchExpression(trimmed);
   if (!match) return undefined;
+  // ORDERED BY RANK, AND DELETED ROWS EXCLUDED - the two things services/globalSearch.ts already does and this
+  // sibling did not.
+  //
+  // Without the ordering, `LIMIT 500` takes whatever rows the scan reaches first, which for an FTS join is
+  // rowid order: on any collection with more than 500 text matches the list's search box answered with the
+  // OLDEST matches, every time, and the record somebody was actually looking for was simply absent with
+  // nothing saying the result had been truncated. Ranked, the cap keeps the 500 best instead of the 500
+  // eldest.
+  //
+  // The `deleted` filter is not about leaking - the caller's own list re-applies its soft-delete filter, so a
+  // deleted id in this list matches nothing. It is about the BUDGET: every deleted row in the 500 is a slot a
+  // live row needed, so a collection with a lot of trash quietly lost search coverage.
   const rows = await deps.db.all<{ id: string }>(sql`
     select d."record_id" as id
     from "search_fts" f join "search_docs" d on d."rowid" = f."rowid"
-    where f."text" match ${match} and d."collection" = ${collection}
+    where f."text" match ${match} and d."collection" = ${collection} and d."deleted" = 0
+    order by f."rank"
     limit ${sql.raw(String(MAX_MATCHES))}
   `);
   // The id list goes in as LITERALS, not as bound parameters. D1 binds at most 100 per statement (see

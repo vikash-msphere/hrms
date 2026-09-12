@@ -15,7 +15,15 @@ const stamp = (ms: number) => new Date(ms).toISOString().replace(/[-:]/g, "").re
 const dateOnly = (ymd: string) => ymd.slice(0, 10).replace(/-/g, "");
 const nextDay = (ymd: string) => new Date(Date.parse(ymd.slice(0, 10) + "T00:00:00Z") + 86_400_000).toISOString().slice(0, 10);
 // Escape per RFC 5545 §3.3.11: backslash first, then the delimiters, then newlines.
-const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/([;,])/g, "\\$1").replace(/\r?\n/g, "\\n");
+//
+// EVERY NEWLINE FORM, which `\r?\n` was not: a LONE CARRIAGE RETURN passed through untouched. ICS content
+// lines are CRLF-delimited and parsers in the wild accept a bare CR as a line break, so a value carrying one
+// injected whole properties into the VEVENT - `Diwali\rDESCRIPTION:...\rX-EVIL:1` escaped to itself. The value
+// that reaches SUMMARY here is a holiday name, and routes/holidayFeed.ts publishes it on an unauthenticated,
+// long-lived URL people paste into Google Calendar and Outlook; the same escape carries interview summaries
+// and locations into candidate invitation mail. One alternation, so CRLF folds to a single `\n` and the two
+// bare forms cannot be the case somebody forgets.
+const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/([;,])/g, "\\$1").replace(/\r\n|[\r\n]/g, "\\n");
 // Content lines fold at 75 OCTETS (RFC 5545 §3.1), a continuation beginning with one space.
 //
 // Measured in octets, not characters: a holiday or candidate name in Devanagari is three bytes per character,

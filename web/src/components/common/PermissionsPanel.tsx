@@ -26,6 +26,7 @@ import { useToast } from "@/components/ui/use-toast";
 import type { User } from "@/types";
 import { getSetting, saveSetting } from "@/lib/settingsStore";
 import { todayStr } from "@/lib/orgDay";
+import { saveBytes } from "@/lib/download";
 
 type Role = { path: string; name: string; label?: string };
 
@@ -248,12 +249,7 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   // (and therefore the same validation, four-eyes queue and audit trail) - never a direct row write.
   function exportRules() {
     const payload = { exported_at: new Date().toISOString(), rules: rules.filter((r) => r.subject_kind === subjectKind).map(ruleBody) };
-    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `access-rules-${subjectKind}s-${todayStr()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    saveBytes(JSON.stringify(payload, null, 2), `access-rules-${subjectKind}s-${todayStr()}.json`, "application/json");
   }
 
   async function importRules(file: File) {
