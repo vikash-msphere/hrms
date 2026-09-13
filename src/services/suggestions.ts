@@ -79,6 +79,16 @@ export async function listSuggestions(deps: Deps, scope: ListScope, maxPageSize:
   return { items, nextPageToken };
 }
 
+/**
+ * The actor an audit entry may name for a suggestion: nobody, when the submitter asked to be anonymous and the
+ * act is their own. A string actor writes the row with no `actor_id` (lib/audit.ts), so the act is still
+ * recorded against the suggestion - which is what the trail is for - without naming the person the whole
+ * feature exists not to name. Acts by OTHER people (HR responding, a peer voting) name them as normal:
+ * anonymity protects the submitter, not everyone who touches the row.
+ */
+const anonymousActor = (actor: AppUser, row: { anonymous: boolean; submitterId: string }): AppUser | string =>
+  row.anonymous && actor.employeeId === row.submitterId ? "system" : actor;
+
 export async function createSuggestion(deps: Deps, actor: AppUser, input: SuggestionInput) {
   const title = (input.title ?? "").trim();
   const body = (input.body ?? "").trim();
@@ -91,8 +101,20 @@ export async function createSuggestion(deps: Deps, actor: AppUser, input: Sugges
     .insert(schema.suggestions)
     .values({ code: await allocOwnedCode(deps, schema.suggestions, schema.suggestions.submitterId, submitterId), submitterId, anonymous: !!input.anonymous, category: input.category?.trim() || null, title, body })
     .returning()))[0]!;
-  await audit(deps, actor, "suggestion.create", "suggestions", row.uuid, createdMeta(row, "suggestions"), row);
-  await emitEvent(deps, actor, "suggestion.submitted", { subject: `suggestions/${row.uuid}`, employeeId: submitterId, payload: { anonymous: !!input.anonymous, category: row.category } });
+  // ANONYMITY REACHES THE TRAIL TOO. The feature strips the submitter from every surface a person can see -
+  // the serializer hides it, the reviewer nudge drops the actor face - and the audit entry is such a surface:
+  // `GET /v1/activity?resource=suggestions/<id>` reads `actor_id` back to anyone holding `activity` on the
+  // collection, which an admin can grant for ordinary triage visibility without being told it un-anonymizes
+  // the box. So an anonymous create is recorded as a system act: the ROW is named, the person is not. The same
+  // reason keeps `submitter_id` out of the meta (lib/audit.ts AUDIT_DENY).
+  await audit(deps, anonymousActor(actor, row), "suggestion.create", "suggestions", row.uuid, createdMeta(row, "suggestions"), row);
+  // ...and out of the event, for the same reason one layer over: `event_log` carries `employee_id`, and an
+  // HR-authored automation on `suggestion.submitted` can template `{{employeeId}}` straight out of it.
+  await emitEvent(deps, row.anonymous ? null : actor, "suggestion.submitted", {
+    subject: `suggestions/${row.uuid}`,
+    employeeId: row.anonymous ? null : submitterId,
+    payload: { anonymous: !!input.anonymous, category: row.category },
+  });
   // Nudge the reviewers so a new idea doesn't sit unseen. Respect anonymity: no actor face on an anonymous
   // submission (the title is the suggestion's own content, which reviewers see regardless).
   await notifyMany(deps, await suggestionReviewerIds(deps, submitterId), {
@@ -117,7 +139,9 @@ export async function updateSuggestion(deps: Deps, actor: AppUser, id: string, p
   if (has("category")) set.category = patch.category?.trim() || null;
   if (has("anonymous")) set.anonymous = !!patch.anonymous;
   const updated = await updateAtVersion(deps, schema.suggestions, "suggestion", row, set);
-  await audit(deps, actor, "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
+  // Same rule as the create: the submitter editing their own anonymous suggestion must not be named by the
+  // trail either - an edit entry beside the create would give away exactly what the create no longer does.
+  await audit(deps, anonymousActor(actor, updated), "suggestion.update", "suggestions", id, diffMeta(row, updated, set, "suggestions"), updated);
   return updated;
 }
 

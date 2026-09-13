@@ -59,9 +59,27 @@ export function ymOf(ms: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-// Monotonic month index so we can compare/iterate "YYYY-MM" values arithmetically.
+/**
+ * The marker suffix that says a period was priced against a KNOWN last working day - and so is final.
+ *
+ * The marker column is the only state this computation has, and without this it cannot answer the question the
+ * exit reconciliation below has to ask: was this month credited for a whole month, or for the part of it the
+ * employee was actually here? `monthFraction(idx, start, null)` is 1, so any month credited while the end date
+ * was still unknown got the full rate; a month credited after it was known got the true fraction. The suffix
+ * records which of those happened, so the reconciliation runs exactly once and never against a month that was
+ * already priced correctly.
+ *
+ * Carried in the existing text column rather than in a new one: it is a property OF the marker, and a second
+ * column would be a second thing to keep in step.
+ */
+const FINAL_MARK = "~";
+const stripMark = (ym: string): string => (ym.endsWith(FINAL_MARK) ? ym.slice(0, -1) : ym);
+const isFinalMarker = (ym: string | null): boolean => !!ym && ym.endsWith(FINAL_MARK);
+
+// Monotonic month index so we can compare/iterate "YYYY-MM" values arithmetically. Tolerates the final mark
+// (and the semi-monthly "-H1/-H2" tail, which `Number` on the second segment already ignored).
 function ymIndex(ym: string): number {
-  const parts = ym.split("-");
+  const parts = stripMark(ym).split("-");
   return Number(parts[0]) * 12 + (Number(parts[1]) - 1);
 }
 function ymFromIndex(idx: number): string {
@@ -129,15 +147,40 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
   let fromIdx = i.lastAccrualYm ? ymIndex(i.lastAccrualYm) + 1 : startIdx;
   if (fromIdx < startIdx) fromIdx = startIdx;
 
+  const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? monthlyProbation : monthly);
+
   let add = 0;
   let credited = i.lastAccrualYm;
   for (let idx = fromIdx; idx <= lastIdx; idx++) {
-    credited = ymFromIndex(idx); // month is processed even if it accrues nothing
-    const inProbation = probationEndIdx !== null && idx < probationEndIdx;
-    const rate = inProbation ? monthlyProbation : monthly;
+    // A month priced against a KNOWN last working day is final - see FINAL_MARK. Every other month is priced
+    // as if employment continues, because at that moment, as far as anything here knows, it does.
+    credited = ymFromIndex(idx) + (i.endMs != null && idx >= endIdx ? FINAL_MARK : ""); // processed even if it accrues nothing
     // Prorated at BOTH ends of employment, not just the joining month - see monthFraction. A full month in the
     // middle is 1, so this is the same arithmetic as before everywhere except the first and last months.
-    add += rate * monthFraction(idx, i.startMs!, i.endMs);
+    add += rateAt(idx) * monthFraction(idx, i.startMs!, i.endMs);
+  }
+
+  // ---- The exit reconciliation ---------------------------------------------------------------------------
+  //
+  // WHY THE CLAMP ABOVE WAS NOT ENOUGH ON ITS OWN. A month is credited on its FIRST tick, in advance, and the
+  // marker then says it is done - `add` is only ever added to the stored balance, and nothing recomputes a
+  // month once it is behind the marker. So `monthFraction`'s leaver clamp only ever bit when the last working
+  // day was already on the record when that month was first credited. Someone active on the 1st who leaves on
+  // the 3rd had the whole month credited two days earlier, the next tick finds the month already marked and
+  // adds nothing, and the over-credit stands - which is the exact case the clamp was written for. It is money,
+  // not tidiness: those days are encashable and services/settlements.ts prices the balance into the FnF.
+  //
+  // So when a last working day appears for months that were already credited, the difference is taken back:
+  // per month, what was credited (the full rate, since the end date was unknown then) less what was actually
+  // earned. A month entirely after the exit reconciles to zero, which is the backdated-exit case. It runs at
+  // most once - the final mark is what says so - and never against a month already priced with the end date
+  // known, because that month carries the mark already.
+  if (i.endMs != null && credited && !isFinalMarker(credited)) {
+    const markerIdx = ymIndex(credited);
+    if (markerIdx >= endIdx && endIdx >= startIdx) {
+      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (1 - monthFraction(idx, i.startMs!, i.endMs));
+      credited = ymFromIndex(endIdx) + FINAL_MARK;
+    }
   }
   return { add: round2(add), newLastYm: credited };
 }
@@ -149,9 +192,11 @@ const monthIndex0 = (ms: number) => { const d = new Date(ms); return d.getUTCFul
 const halfIndexOf = (ms: number) => monthIndex0(ms) * 2 + (new Date(ms).getUTCDate() >= 16 ? 1 : 0);
 const halfMarker = (hIdx: number) => `${ymFromIndex(Math.floor(hIdx / 2))}-H${(hIdx % 2) + 1}`;
 function halfMarkerToIndex(marker: string): number {
-  const m = marker.match(/-H([12])$/);
-  if (m) return ymIndex(marker) * 2 + (Number(m[1]) - 1); // ymIndex ignores the trailing -Hx segment
-  return ymIndex(marker) * 2 + 1; // a monthly-format marker (frequency was switched) = whole month covered
+  // The final mark comes off first: it is a property of the marker, not part of the period it names.
+  const bare = stripMark(marker);
+  const m = bare.match(/-H([12])$/);
+  if (m) return ymIndex(bare) * 2 + (Number(m[1]) - 1); // ymIndex ignores the trailing -Hx segment
+  return ymIndex(bare) * 2 + 1; // a monthly-format marker (frequency was switched) = whole month covered
 }
 // Fraction of one half-period the employee is employed for - the semi-monthly twin of `monthFraction`, and
 // clamped at BOTH ends for the same reason (a leaver must not be credited a whole half-period for a day of it).
@@ -183,13 +228,23 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
   let fromIdx = i.lastAccrualYm ? halfMarkerToIndex(i.lastAccrualYm) + 1 : startIdx;
   if (fromIdx < startIdx) fromIdx = startIdx;
 
+  const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? halfProbation : half);
+
   let add = 0;
   let credited = i.lastAccrualYm;
   for (let idx = fromIdx; idx <= lastIdx; idx++) {
-    credited = halfMarker(idx);
-    const inProbation = probationEndIdx !== null && idx < probationEndIdx;
-    const rate = inProbation ? halfProbation : half;
-    add += rate * halfFraction(idx, i.startMs!, i.endMs);
+    credited = halfMarker(idx) + (i.endMs != null && idx >= endIdx ? FINAL_MARK : "");
+    add += rateAt(idx) * halfFraction(idx, i.startMs!, i.endMs);
+  }
+  // The exit reconciliation, on half-periods - see the monthly twin for the whole argument. The window is
+  // narrower here (half a period rather than a whole month), and the failure is the same one: a half-period
+  // credited in advance, before anyone knew it would be the employee's last.
+  if (i.endMs != null && credited && !isFinalMarker(credited)) {
+    const markerIdx = halfMarkerToIndex(credited);
+    if (markerIdx >= endIdx && endIdx >= startIdx) {
+      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (1 - halfFraction(idx, i.startMs!, i.endMs));
+      credited = halfMarker(endIdx) + FINAL_MARK;
+    }
   }
   return { add: round2(add), newLastYm: credited };
 }

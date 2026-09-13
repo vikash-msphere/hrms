@@ -59,7 +59,10 @@ test("a rule is duplicated into a real second rule, and both are deleted", async
     await confirmOrig.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(cardOf(ruleName)).toHaveCount(0, { timeout: 30_000 });
   } finally {
-    await purge(page, original.path);
+    // By NAME, not by the path this test has just deleted through the UI: `automations` is a hard delete
+    // (src/routes/automations.ts - "a rule that no longer exists must not sit in the trash still firing"),
+    // so purging the row the body removed answers 404 for a rule that is correctly gone.
+    await purgeNamed(page, ruleName);
     await purgeNamed(page, copyName);
   }
 });

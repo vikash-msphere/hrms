@@ -19,6 +19,13 @@ import { invalidArgument } from "../lib/errors";
  *
  * Bounded on purpose. Each walk is a fixed number of queries over indexed foreign keys and returns at most
  * `MAX_CASE_RECORDS` members, because the audit query it feeds turns each member into an OR term.
+ *
+ * That bound is about READABILITY, not about the query's limits, and it is worth being clear which is which:
+ * each member costs TWO bound parameters in the audit query, against D1's ceiling of 100 per statement, so
+ * this cap and that ceiling used to be the same number read two different ways - and at 60 members the
+ * statement bound 120 and threw `too many SQL variables`, precisely when the cap did its job. The audit query
+ * now chunks its OR list and merges the pages (services/activity.ts ENTITY_PAIR_CHUNK), so this number is free
+ * to be what its own comment says it is.
  */
 export type CaseMember = { entity: string; id: string };
 

@@ -18,6 +18,7 @@ import { assertNotLocked } from "./lifecycle";
 import { getSettingValue } from "./settings";
 import { DEFAULT_EMPLOYEE_NUMBER_CONFIG, formatEmployeeNumber, nextSeq } from "../domain/employeeNumber";
 import { checkEtag, updateAtVersion } from "./versionGuard";
+import { softDeleteRow } from "./softDelete";
 
 // Wire input is snake_case (matches the OpenAPI schema). national_id/bank_details are write-only.
 export type EmployeeInput = {
@@ -207,6 +208,35 @@ async function syncAccountEmail(deps: Deps, employeeId: string, workEmail: strin
   if (!linked) return provisionAccount(deps, employeeId, workEmail);
   // Lowercased, for the reason `provisionAccount` gives: this column is what a login is looked up by.
   await deps.db.update(schema.users).set({ email: workEmail.toLowerCase(), updatedAt: new Date() }).where(eq(schema.users.uuid, linked.uuid));
+}
+
+/**
+ * Soft-delete an employee AND end their access, which the generic lane did not.
+ *
+ * There are two ways out of the company and they used to give two different answers. Offboarding says what it
+ * means - `terminateForOffboarding` stamps the employee terminated and sets the linked `users` row to
+ * `disabled`, under the comment "disable their login". `DELETE /v1/employees/<id>` declared no override, so the
+ * generic `softDeleteRow` ran: it stamped `employees.delete_time` and touched nothing else. The person vanished
+ * from the directory and went on signing in with full self-service - clocking in, filing leave, raising
+ * tickets, posting to the board - because every `me`-scoped grant still resolved off the deleted row.
+ *
+ * The delete itself stays the generic one (etag check, lifecycle lock, `removedMeta` audit, restorable); what
+ * is added is the half offboarding already does. The login is disabled AFTER the delete lands, so a delete that
+ * loses its version guard leaves the account alone.
+ *
+ * A restore does NOT re-enable the login, deliberately: re-granting access is a decision, not a side effect of
+ * undoing a deletion, and `users.status` is editable on its own.
+ */
+export async function removeEmployee(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
+  await softDeleteRow(deps, actor, schema.employees, "employee", "employees", id, ifMatch);
+  const disabled = await deps.db
+    .update(schema.users)
+    .set({ status: "disabled", updatedAt: new Date() })
+    .where(and(eq(schema.users.employeeId, id), eq(schema.users.status, "active")))
+    .returning({ uuid: schema.users.uuid });
+  // Recorded separately from the delete: "their account was switched off" is a different fact from "their row
+  // was removed", and it is the one somebody asks about later.
+  if (disabled.length) await audit(deps, actor, "employee.disableLogin", "employees", id, { via: "delete", users: disabled.length });
 }
 
 // JSON Merge Patch: present = set, explicit null = clear, absent = unchanged.

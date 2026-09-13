@@ -76,6 +76,38 @@ async function labelFromDb(deps: Deps, entity: string, entityId: string): Promis
 // somewhere else must not be copied here.
 const SECRETISH = /secret|token|hash|password|salt|nonce|otp|signature|enc$/i;
 const STRUCTURAL = new Set(["uuid", "code", "id", "createdAt", "updatedAt", "deleteTime"]);
+
+/**
+ * PER-COLLECTION column denies - the same rule SECRETISH states, for columns whose NAMES give nothing away.
+ *
+ * SECRETISH catches material that looks like a secret. These are columns that are ordinary text on an ordinary
+ * table and are nevertheless narrower than `audit_log`'s readership, which is the whole of the rule: "material
+ * whose own access control lives somewhere else must not be copied here". A name-matched pattern cannot reach
+ * them, so they are named per collection - the same way DIFFABLE_BLOBS opts IN by collection.
+ *
+ * Applies to both halves of the walk: `rowValues` (create/delete) and `fieldDiff` (update). What a person did
+ * still lands in the trail - the action, the row, the actor - it is only the VALUES that stay on the record.
+ */
+const AUDIT_DENY: Record<string, string[]> = {
+  // A private 1:1 note is served to the ONE person who wrote it and to nobody else - not to the other party,
+  // not to an HR admin who can read the row (http/serialize.ts toCheckInResource says so in those words). The
+  // generic walk did not know that: `employee_note` / `counterpart_note` are plain text and match no filter,
+  // so an edit copied both sides of the note into `audit_log.meta` as a from/to pair, and a soft delete copied
+  // the whole note. Out of the box only super reads that table - and super is precisely who the serializer
+  // says must not see these.
+  "check-ins": ["employeeNote", "counterpartNote"],
+  // The suggestion box's only promise is that an anonymous submitter is not named. The row's own serializer
+  // hides `submitter` and the reviewer nudge drops the actor face; a create that copied `submitter_id` into
+  // the trail handed it back to anyone holding `activity` on the collection. Denied for named submissions too:
+  // the actor column on the audit row already says who submitted one of those, so nothing is lost.
+  suggestions: ["submitterId"],
+  // The manager's assessment, withheld from the employee until the review is SHARED. `ratings_json` and
+  // `goal_ratings_json` are already out by the `/(Json|Key)$/` rule; these two are plain columns and were not.
+  reviews: ["managerComment", "overallRating"],
+};
+
+/** Columns denied for this collection (never copied into an audit entry's meta). */
+const deniedColumns = (collection: string | undefined): string[] => (collection ? AUDIT_DENY[collection] ?? [] : []);
 /** Enough to describe a record; past this it is a dump, not a trail. */
 const MAX_AUDIT_FIELDS = 24;
 /** A description or a comment is worth recording; the whole of one is not. */
@@ -155,8 +187,17 @@ function collectionOfTable(table: SQLiteTable): string | undefined {
  */
 const DIFFABLE_BLOBS: Record<string, string[]> = {
   boards: ["columnsJson", "swimlanesJson", "labelsJson"],
-  reviews: ["ratingsJson", "selfRatingsJson"],
-  "review-feedback": ["ratingsJson"],
+  // `ratingsJson` on `reviews` is NOT here, deliberately: it is the manager's competency scoring, withheld
+  // from the employee until the review is SHARED (http/serialize.ts toReviewResource), and an audit entry is
+  // read through a capability that does not know about that state. `selfRatingsJson` is the employee's own
+  // answers and carries no such rule. `reviews` mounts no generic update today, so this was an armed gun
+  // rather than a live leak - the same invariant the table builder (domain/tableFields.ts) and the search
+  // index (domain/searchIndex.ts) each carry explicitly.
+  reviews: ["selfRatingsJson"],
+  // No `review-feedback` entry: `review_feedback` has no `ratings_json` column at all (db/schema.ts), so the
+  // one that used to sit here named nothing. This map is not checked against the schema, which is exactly how
+  // a line like that survives - so it is worth saying that these are column names and are only as good as the
+  // reading that put them here.
   "interview-feedback": ["ratingsJson"],
 };
 
@@ -234,9 +275,10 @@ export function rowValues(row: Record<string, unknown> | null | undefined, colle
   if (!row || typeof row !== "object") return out;
   const fks = fkColumns(collection);
   const blobs = (collection && DIFFABLE_BLOBS[collection]) ?? [];
+  const denied = deniedColumns(collection);
   for (const [k, raw] of Object.entries(row)) {
     if (Object.keys(out).length >= MAX_AUDIT_FIELDS) break;
-    if (STRUCTURAL.has(k) || SECRETISH.test(k)) continue;
+    if (STRUCTURAL.has(k) || SECRETISH.test(k) || denied.includes(k)) continue;
     // An opted-in blob contributes its CONTENTS; every other one stays out (see DIFFABLE_BLOBS).
     if (blobs.includes(k)) {
       for (const [bk, bv] of Object.entries(flattenBlob(k, raw))) {
@@ -295,6 +337,7 @@ export function fieldsMeta(patch: Record<string, unknown> | null | undefined) {
 export function fieldDiff(before: Record<string, unknown>, after: Record<string, unknown>, keys: string[], collection?: string): Record<string, { from: unknown; to: unknown }> {
   const fks = fkColumns(collection);
   const blobs = (collection && DIFFABLE_BLOBS[collection]) ?? [];
+  const denied = deniedColumns(collection);
   // Same rule as rowValues: a foreign key is a REF on the way out, never the raw internal id.
   const norm = (v: unknown, ref?: string) => (v instanceof Date ? v.toISOString() : ref && typeof v === "string" ? `${ref}/${v}` : v);
   const out: Record<string, { from: unknown; to: unknown }> = {};
@@ -305,7 +348,7 @@ export function fieldDiff(before: Record<string, unknown>, after: Record<string,
     // Everything rowValues excludes, excluded here too. `fieldDiff` never applied this rule, so any service
     // that passed a blob column in its `set` put the whole of it - a payroll item's computed lines, a job
     // payload - into the audit meta. Only an opted-in blob survives, and as expanded keys.
-    if (SECRETISH.test(k)) continue;
+    if (SECRETISH.test(k) || denied.includes(k)) continue;
     if (/(Json|Key)$/.test(k) && !blobs.includes(k)) continue;
     if (blobs.includes(k)) {
       const b = flattenBlob(k, before[k]);

@@ -103,6 +103,9 @@ const STATUS_DOT: Record<DayStatus, string | null> = {
   half_day: "bg-yellow-400",
   insufficient: "bg-red-400",
   absent: "bg-red-400",
+  // Half the day was leave and the other half was never worked - it shows a dot (something is owed) rather
+  // than the leave pill, which would read as a day fully spoken for.
+  half_day_leave: "bg-yellow-400",
   on_leave: null,
   holiday: null,
 };
@@ -115,6 +118,7 @@ const STATUS_LABEL: Record<DayStatus, string> = {
   half_day: "Short day",
   insufficient: "Too short to count",
   absent: "No log",
+  half_day_leave: "Half day leave, half unworked",
   on_leave: "On leave",
   holiday: "Holiday",
 };
@@ -131,6 +135,7 @@ const STATUS_TEXT: Record<DayStatus, string> = {
   half_day: "text-yellow-600 dark:text-yellow-400",
   insufficient: "text-red-600 dark:text-red-400",
   absent: "text-red-600 dark:text-red-400",
+  half_day_leave: "text-yellow-600 dark:text-yellow-400",
   on_leave: "text-brand-neutral-500 dark:text-brand-neutral-400",
   holiday: "text-violet-600 dark:text-violet-400",
 };
@@ -335,7 +340,14 @@ export function TeamTimeline({ me, employees, leaves, leaveTypes, holidays, cele
       if (empFrom > toYmd) continue;
       const summaries = summarizeByDay(byEmp.get(eid) ?? [], schedule);
       const punchedDays = new Set(summaries.map((s) => s.day)); // days the employee actually clocked in
-      const leaveRanges = (leavesByEmp.get(eid) ?? []).map((l) => ({ start: l.start_date.slice(0, 10), end: l.end_date.slice(0, 10) }));
+      // The session flags come along, so a half-day leave reads as half a day here too rather than as a day
+      // fully excused (see lib/attendance.ts `leaveRanges`).
+      const leaveRanges = (leavesByEmp.get(eid) ?? []).map((l) => ({
+        start: l.start_date.slice(0, 10),
+        end: l.end_date.slice(0, 10),
+        startSession: l.start_session,
+        endSession: l.end_session,
+      }));
       const onLeaveDay = (day: string) => leaveRanges.some((r) => r.start <= day && day <= r.end);
       // Split the employee's events: count-as-work events credit per-day worked minutes; the rest just mark
       // Only count_as_work events touch attendance, and only as credited minutes: an event that doesn't count

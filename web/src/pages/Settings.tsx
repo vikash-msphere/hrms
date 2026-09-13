@@ -910,7 +910,21 @@ function AtsTab({ toast }: { toast: Toast }) {
   }, []);
 
   const setStage = (i: number, patchStage: Partial<AtsStage>) => setCfg((c) => ({ ...c, stages: c.stages.map((s, j) => (j === i ? { ...s, ...patchStage } : s)) }));
-  const addStage = () => setCfg((c) => ({ ...c, stages: [...c.stages, { key: `stage_${c.stages.length + 1}`, label: "New stage", kind: "active" }] }));
+  // A key that is FREE, not one derived from how many stages there happen to be.
+  //
+  // `stage_${stages.length + 1}` collides the moment the list has ever shrunk: add a sixth stage (`stage_6`),
+  // delete an earlier one, add another, and the length is 5 again - so the new stage is `stage_6` too. An
+  // application's stage is stored AS this key, so two stages sharing one are the same stage to everything
+  // downstream: the board seeds a column per key and the second overwrites the first (both columns then render
+  // the same applications), and `nextStage` resolves by `indexOf`, so `:advance` from either moves to the
+  // successor of the FIRST and skips a stage of the pipeline. The server refuses a duplicate now
+  // (domain/ats.ts#validateAtsConfig); this is so the panel never produces one to be refused.
+  const addStage = () => setCfg((c) => {
+    const taken = new Set(c.stages.map((s) => s.key));
+    let n = c.stages.length + 1;
+    while (taken.has(`stage_${n}`)) n++;
+    return { ...c, stages: [...c.stages, { key: `stage_${n}`, label: "New stage", kind: "active" }] };
+  });
   const removeStage = (i: number) => setCfg((c) => ({ ...c, stages: c.stages.filter((_, j) => j !== i) }));
   const moveStage = (i: number, dir: -1 | 1) => setCfg((c) => {
     const j = i + dir; if (j < 0 || j >= c.stages.length) return c;
@@ -920,8 +934,17 @@ function AtsTab({ toast }: { toast: Toast }) {
   const [saving, setSaving] = useState(false);
   const { markSaved } = useUnsaved(cfg, ready, save);
   async function save() {
-    // Freeze a stable key per stage from its label (keep an existing key so live applications keep their stage).
-    const stages = cfg.stages.map((s) => ({ ...s, key: s.key || stageSlug(s.label), label: s.label.trim() || s.key }));
+    // Freeze a stable key per stage from its label (keep an existing key so live applications keep their stage),
+    // and make it unique - the same pass BoardConfigPanel runs over a board's columns, for the same reason: the
+    // key is the stored identity, so two stages may not share one. A collision can only come from a key derived
+    // here (an existing one is already distinct), so suffixing is safe for live applications.
+    const taken = new Set<string>();
+    const stages = cfg.stages.map((s) => {
+      let key = s.key || stageSlug(s.label);
+      while (taken.has(key)) key = `${key}_`;
+      taken.add(key);
+      return { ...s, key, label: s.label.trim() || key };
+    });
     if (!stages.some((s) => s.kind === "hired")) { toast({ variant: "destructive", title: "Add a Hired stage", description: "One stage must have kind Hired (the success terminal)." }); return; }
     setSaving(true);
     try {

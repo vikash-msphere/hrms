@@ -86,7 +86,9 @@ test("a submitted expense is rejected with a canned reason, a draft is cancelled
     page.waitForEvent("download"),
     page.getByRole("menuitem", { name: "Download invoice" }).click(),
   ]);
-  expect(dl.suggestedFilename()).toMatch(/^invoice-/);
+  // The name the UPLOADER gave it, not one the client invents: a stored attachment is saved under the name
+  // the server sends in `Content-Disposition`, which is the only side that knows it (web/src/lib/download.ts).
+  expect(dl.suggestedFilename()).toBe("e2e-invoice.pdf");
 });
 
 // A category can require a receipt (`expense-categories.requires_receipt`) - and that requirement is enforced

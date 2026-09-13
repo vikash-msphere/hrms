@@ -144,11 +144,26 @@ describe("paginate: the cursor's uid half is a wire token, not an internal id", 
     expect(seen).toEqual(["0abc1def2ghj3", "0abc1def2ghj4", "0abc1def2ghj5"]);
   });
 
-  it("falls back to a timestamp-only bound when the token does not decode", async () => {
+  it("falls back to an INCLUSIVE timestamp bound when the token does not decode", async () => {
     // A cursor minted under another collection (or forged) must not error and must not skip rows - the same
     // fail-safe direction services/keysetPage.ts takes.
+    //
+    // Inclusive of the cursor's own instant, deliberately. With no uid to tiebreak on the only choice is to
+    // re-show the rows that tie at that timestamp or to drop them, and a strict bound drops them from EVERY
+    // page. Ties are the normal case for the tokens that reach this branch, since rows written in one seed or
+    // one batch share a `createdAt`. So the row at the cursor instant comes back - a visible duplicate rather
+    // than a row no page ever shows.
     const forged = Buffer.from(`3|bbbbbbbbbbbbbbbbbbbbbbbbb1`).toString("base64url");
     const page = await paginate(rows, 10, forged, (r) => r.at, (r) => r.uuid, "desc", wire);
-    expect(page.items.map((r) => r.uuid)).toEqual(["0abc1def2ghj4", "0abc1def2ghj5"]);
+    expect(page.items.map((r) => r.uuid)).toEqual(["0abc1def2ghj3", "0abc1def2ghj4", "0abc1def2ghj5"]);
+  });
+
+  it("re-shows a whole tied boundary instead of skipping it, on an undecodable token", async () => {
+    // Three rows sharing one timestamp - a seed batch. Under the old strict bound `findIndex` landed past all
+    // three and they were returned by no page at all.
+    const tied = [{ uuid: "0abc1def2ghj3", at: 3 }, { uuid: "0abc1def2ghj4", at: 3 }, { uuid: "0abc1def2ghj5", at: 3 }];
+    const forged = Buffer.from(`3|bbbbbbbbbbbbbbbbbbbbbbbbb1`).toString("base64url");
+    const page = await paginate(tied, 10, forged, (r) => r.at, (r) => r.uuid, "desc", wire);
+    expect(page.items.map((r) => r.uuid)).toEqual(["0abc1def2ghj3", "0abc1def2ghj4", "0abc1def2ghj5"]);
   });
 });

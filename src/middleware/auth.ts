@@ -31,6 +31,8 @@ type UserRow = {
   employeeCode: string | null;
   firstName: string | null;
   lastName: string | null;
+  /** The linked employee's soft-delete stamp, when they have one. See `assertLive`. */
+  employeeDeleteTime: Date | number | null;
   sessionsValidFrom: Date | number | null;
 };
 
@@ -55,12 +57,37 @@ async function loadUserRow(deps: Deps, where: SQL | undefined, stable = false): 
       employeeCode: schema.employees.code,
       firstName: schema.employees.firstName,
       lastName: schema.employees.lastName,
+      employeeDeleteTime: schema.employees.deleteTime,
       sessionsValidFrom: schema.users.sessionsValidFrom,
     })
     .from(schema.users)
     .leftJoin(schema.employees, eq(schema.users.employeeId, schema.employees.uuid))
     .where(where);
   return (await (stable ? q.orderBy(asc(schema.users.createdAt), asc(schema.users.uuid)) : q).limit(1))[0];
+}
+
+/**
+ * A user whose linked employee row has been soft-deleted is not a user any more.
+ *
+ * TWO EXITS FROM THE COMPANY USED TO GIVE TWO ANSWERS. Offboarding does it properly and says so
+ * (services/transitions.ts: "disable their login" - it stamps the employee terminated AND sets the `users` row
+ * to disabled). `DELETE /v1/employees/<id>` did not: `employees` declares no `remove` override, so the generic
+ * soft delete ran, stamped `employees.delete_time` and touched nothing else. The `users` row stayed active, and
+ * this join carried no soft-delete filter - so `employeeCode` and `employeeId` resolved off the deleted row,
+ * every `me`-scoped grant still matched, every own-breadth list still bound, and the person kept full
+ * self-service (clock in/out, file leave, raise tickets, upload documents, post to the board) while being gone
+ * from the directory. None of those services re-checks liveness, and none of them should have to: the
+ * invariant belongs at the door.
+ *
+ * The `employees` remove override now disables the linked user the way offboarding does, which is the fix that
+ * matches the stated intent - "gone" should mean the account is off. This is the second half of it: an account
+ * whose employee was deleted BEFORE that existed, or by any other path, is refused here rather than quietly
+ * losing its scopes. The same file already knew the column mattered - the auto-provision lookup below filters
+ * it - so one lookup applied the rule and the other did not.
+ */
+function assertLive(user: UserRow): void {
+  if (user.status !== "active") throw forbidden("user disabled");
+  if (user.employeeDeleteTime) throw forbidden("user disabled");
 }
 
 // The caller's broad authority: their role grant (which already folds in `everyone`) merged with their own
@@ -104,7 +131,7 @@ async function authenticateApiKey(c: Parameters<MiddlewareHandler<AppEnv>>[0], d
   // active - disabling a user therefore kills every key they own, with no extra bookkeeping.
   const user = await loadUserRow(deps, eq(schema.users.uuid, key.ownerUserId));
   if (!user) throw unauthenticated("API key owner no longer exists");
-  if (user.status !== "active") throw forbidden("user disabled");
+  assertLive(user);
 
   const { grant, policy } = await loadAuthority(deps, user);
 
@@ -285,6 +312,8 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
         status: inserted.status,
         employeeId: inserted.employeeId,
         employeeCode: emp?.code ?? null,
+        // The auto-provision lookup already filters `delete_time`, so an employee resolved here is a live one.
+        employeeDeleteTime: null,
         firstName: null,
         lastName: null,
         sessionsValidFrom: inserted.sessionsValidFrom,
@@ -320,7 +349,7 @@ export const auth: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
     user = provisioned;
   }
-  if (user.status !== "active") throw forbidden("user disabled");
+  assertLive(user);
   // Session revocation. A session cookie issued before the user's cut-off is dead, whatever its `exp` says -
   // this is what makes "sign out" mean something for a stateless token, and what answers a lost device without
   // rotating the signing key for everyone. Strictly BEFORE, so a session minted in the same millisecond as the

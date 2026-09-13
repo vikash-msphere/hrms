@@ -101,6 +101,21 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
       seen.add(k);
       return { ...c, key: k, wipLimit: c.wipLimit === null || Number.isNaN(c.wipLimit) ? null : Number(c.wipLimit) };
     });
+    // THE SAME PASS FOR LANES AND LABELS, which had the slug and not the uniquing.
+    //
+    // `normalizeSwimlanes` / `normalizeLabels` refuse a duplicate key exactly as `normalizeColumns` does, so a
+    // save that produced one failed at the server with a message naming a key the user never typed and no
+    // control anywhere in this panel to change it. Two ways to produce one: the `lane_${length + 1}` mint below
+    // repeats once the list has shrunk, and two lanes given the same label slug to the same thing.
+    const unique = <T extends { key: string; label: string }>(items: T[]): T[] => {
+      const used = new Set<string>();
+      return items.map((it) => {
+        let k = slug(it.key || it.label);
+        while (used.has(k)) k = `${k}_`;
+        used.add(k);
+        return { ...it, key: k };
+      });
+    };
     // Name/description are a plain PATCH (do it first, while the etag is fresh); the structural config goes
     // through the :configure verb (which doesn't gate on the etag).
     const cleanPrefix = prefix.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
@@ -112,8 +127,8 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
       await invoke(`boards/${idOf(board.path)}`, "configure", undefined, {
         columns,
         swimlane_mode: mode,
-        swimlanes: mode === "custom" ? lanes.map((l) => ({ ...l, key: slug(l.key || l.label) })) : board.swimlanes,
-        labels: labelCat.map((l) => ({ ...l, key: slug(l.key || l.label) })),
+        swimlanes: mode === "custom" ? unique(lanes) : board.swimlanes,
+        labels: unique(labelCat),
         hide_empty_lanes: hideEmpty,
         reassign_lane_on_move: reassignLane,
         no_lane_label: mode === "custom" ? noLaneLabel.trim() : board.no_lane_label ?? "",

@@ -6,7 +6,7 @@ import { asc, eq, and, or, ne, isNull, isNotNull, lte, lt, gte, sql, inArray } f
 import * as schema from "./db/schema";
 import type { Deps } from "./deps";
 import { processPayslipRunJob } from "./services/payroll";
-import { runDeferredActions, runWorkflowTimer, runScheduledAutomations, withDispatchBudget } from "./services/automationEngine";
+import { runDeferredActions, runWorkflowTimer, runScheduledAutomations, runScheduledFanOut, SCHEDULED_FAN_OUT_JOB, withDispatchBudget } from "./services/automationEngine";
 import { flushDigests } from "./services/notificationDigest";
 import { generateRecurringExpenses } from "./services/expenses";
 import { checkBudgetThresholds, openRecurringBudgetPeriods } from "./services/expenseBudgets";
@@ -367,6 +367,20 @@ async function processOneJob(deps: Deps, job: JobRow): Promise<"done" | "error" 
         await deps.db
           .update(schema.jobs)
           .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...reminder, after: res.after }) })
+          .where(eq(schema.jobs.uuid, job.uuid));
+        return "requeued";
+      }
+    } else if (job.kind === SCHEDULED_FAN_OUT_JOB) {
+      // A `perEmployee` scheduled automation past the employees the nightly tick fanned out to. Same LRO shape
+      // as the reminder mail: a bounded slice of the roster per invocation, requeued with the advanced offset
+      // until the roster is exhausted. The rule's per-day claim is already stamped, so this cannot re-fire the
+      // day; it only carries it the rest of the way.
+      const fan = payload as { automationId: string; day: string; offset: number };
+      const res = await runScheduledFanOut(deps, fan);
+      if (!res.done) {
+        await deps.db
+          .update(schema.jobs)
+          .set({ status: "queued", runAfter: null, payload: JSON.stringify({ ...fan, offset: res.nextOffset }) })
           .where(eq(schema.jobs.uuid, job.uuid));
         return "requeued";
       }

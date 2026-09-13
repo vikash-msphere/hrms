@@ -11,7 +11,7 @@
 // correlated event is emitted (resume hook below) or a timer arm fires (cron `workflow.timer`). First arm wins
 // (atomic claim). Data-passing: apiCall `captureAs` stores the response in the `results` bag, which later
 // actions template into `path`/`body` via `{{...}}`.
-import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, like, ne, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { systemActor } from "../lib/systemActor";
@@ -22,7 +22,7 @@ import { notify, notifyManager, notifyAudience, audienceEmployeeIds } from "./no
 import type { Action, Automation, EvalContext, RecipientSpec, WaitArm, Schedule, EmailAttachmentSpec } from "../domain/automations";
 import type { EmailAttachment } from "../ports";
 import { evalCondition, hasPrivilegedAction, privilegedActionKinds, resolveField, scheduleDueOn, SCHEDULE_TRIGGER } from "../domain/automations";
-import { computeEmployeeMetrics, NEVER_TAKEN_LEAVE } from "./scheduledMetrics";
+import { computeEmployeeMetrics, NEVER_TAKEN_LEAVE, type EmployeeMetrics } from "./scheduledMetrics";
 import { orgToday, dayStartMs } from "./orgDay";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { buildBankFile } from "./bankFile";
@@ -442,6 +442,22 @@ async function suspend(deps: Deps, ctx: EvalContext, event: DomainEvent, arms: W
   }
 }
 
+/**
+ * NARROW THE WAITING SET IN SQL, not in JS. `resumeWaiting` runs on every dispatched event - i.e. after every
+ * write in the app - and it used to read EVERY waiting instance and then drop the non-matching ones in a loop.
+ * A single workflow with a long wait arm, fanned out per employee, makes that table headcount-sized, and then
+ * every write in the app pays to read all of it.
+ *
+ * `awaited_types` is the comma-joined list of event types the instance's arms are listening for, denormalized
+ * onto the row for exactly this filter. A LIKE over that list is deliberately APPROXIMATE - `_` is a LIKE
+ * wildcard, and a substring can straddle two entries - so it only ever narrows: the caller still runs the exact
+ * `split(",").includes` check (and then `armMatches`) on what comes back. A null/empty column means the
+ * instance predates the denormalization and must be considered, which is what the `isNull` arm preserves.
+ */
+function awaitsType(type: string) {
+  return or(isNull(schema.workflowInstances.awaitedTypes), eq(schema.workflowInstances.awaitedTypes, ""), like(schema.workflowInstances.awaitedTypes, `%${type}%`));
+}
+
 // Atomically flip a waiting instance to `done` (first arm wins). Returns the row if THIS caller won the race.
 async function claim(deps: Deps, instanceId: string): Promise<typeof schema.workflowInstances.$inferSelect | null> {
   const rows = await deps.db
@@ -474,10 +490,10 @@ function ctxFromInstance(inst: typeof schema.workflowInstances.$inferSelect, res
 // Resume any waiting workflows whose event arm matches this event. Called by dispatchAutomations after the
 // normal rules. First matching arm per instance wins; the atomic claim guards against double-resume.
 async function resumeWaiting(deps: Deps, event: DomainEvent, depth: number, relayedUntrusted: boolean): Promise<number> {
-  const waiting = await deps.db.select().from(schema.workflowInstances).where(eq(schema.workflowInstances.status, "waiting"));
+  const waiting = await deps.db.select().from(schema.workflowInstances).where(and(eq(schema.workflowInstances.status, "waiting"), awaitsType(event.type)));
   let resumed = 0;
   for (const inst of waiting) {
-    if (inst.awaitedTypes && !inst.awaitedTypes.split(",").includes(event.type)) continue; // cheap prefilter
+    if (inst.awaitedTypes && !inst.awaitedTypes.split(",").includes(event.type)) continue; // exact re-check (see awaitsType)
     let arms: WaitArm[];
     try { arms = JSON.parse(inst.armsJson) as WaitArm[]; } catch { continue; }
     const arm = arms.find((a): a is Extract<WaitArm, { event: string }> => "event" in a && armMatches(inst, a, event));
@@ -567,7 +583,7 @@ export async function anyAutomationInterest(deps: Deps, type: string): Promise<b
   const waiting = await deps.db
     .select({ awaitedTypes: schema.workflowInstances.awaitedTypes })
     .from(schema.workflowInstances)
-    .where(eq(schema.workflowInstances.status, "waiting"));
+    .where(and(eq(schema.workflowInstances.status, "waiting"), awaitsType(type)));
   return waiting.some((w) => !w.awaitedTypes || w.awaitedTypes.split(",").includes(type));
 }
 
@@ -635,11 +651,70 @@ export async function dispatchAutomations(deps: Deps, event: DomainEvent, eventI
   }
 }
 
+// The queued continuation of a `perEmployee` scheduled rule, past the employees the nightly tick got through.
+// Exported because the enqueue (here) and the drain (cron.ts processOneJob) have to agree on the string.
+export const SCHEDULED_FAN_OUT_JOB = "automation.scheduledFanOut";
+
+// How many employees one invocation fans a `perEmployee` scheduled rule out to.
+//
+// This was the one headcount-scaled nightly subtask with no bound. Every firing costs `recordRun` (a code
+// allocation plus an insert) before the rule's own actions, and a `notify` action is about three D1 calls more
+// - so roughly five or six subrequests a head, inside the single invocation this tick shares with twenty-one
+// other subtasks. Past the platform's per-invocation subrequest budget every later D1 call throws, and because
+// the day was already claimed the rest of the roster got nothing that day AND tomorrow's tick skipped the rule
+// (its claim was satisfied) - no retry, ever, plus every cron subtask after this one died with it.
+//
+// Ten is the same figure CARRY_FORWARD_EMPLOYEE_BATCH settled on, and for the same arithmetic: the drain takes
+// one pass of this job every five minutes, so a 500-person roster finishes over the following few hours. A
+// scheduled nudge is a nudge - landing at 06:00 instead of 02:00 costs nothing, whereas half the roster never
+// hearing from the rule costs the feature.
+const SCHEDULED_EMPLOYEE_BATCH = 10;
+
+// The active roster a `perEmployee` fan-out walks, in a STABLE order: the continuation resumes by offset into
+// this list, so it has to be the same list, ordered the same way, on every pass. `uuid` is unique and immutable,
+// which makes it the only ordering that cannot shift under a pass (a name edit or a status change can).
+async function fanOutRoster(deps: Deps): Promise<{ uuid: string; managerId: string | null }[]> {
+  const emps = await deps.db
+    .select({ uuid: schema.employees.uuid, managerId: schema.employees.managerId, deleteTime: schema.employees.deleteTime, status: schema.employees.status })
+    .from(schema.employees);
+  return emps
+    .filter((e) => !e.deleteTime && e.status === "active")
+    .map((e) => ({ uuid: e.uuid, managerId: e.managerId }))
+    .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
+}
+
+// The payload a scheduled firing carries: the recurrence fields plus the derived per-employee metrics, so a
+// data-defined condition can be smart without the evaluator learning to aggregate.
+function scheduledPayload(base: { weekday: number; dayOfMonth: number }, m: EmployeeMetrics | undefined): Record<string, unknown> {
+  return {
+    ...base,
+    pendingApprovals: m?.pendingApprovals ?? 0,
+    daysSinceLastLeave: m?.daysSinceLastLeave ?? NEVER_TAKEN_LEAVE,
+    leaveBalanceDays: m?.leaveBalanceDays ?? 0,
+    goalsDueSoon: m?.goalsDueSoon ?? 0,
+    goalsOverdue: m?.goalsOverdue ?? 0,
+    goalsAtRisk: m?.goalsAtRisk ?? 0,
+    goalsStale: m?.goalsStale ?? 0,
+    tasksDueSoon: m?.tasksDueSoon ?? 0,
+    tasksOverdue: m?.tasksOverdue ?? 0,
+    tasksBlocked: m?.tasksBlocked ?? 0,
+    selfReviewsDue: m?.selfReviewsDue ?? 0,
+    teamReviewsDue: m?.teamReviewsDue ?? 0,
+    goalSettingMissing: m?.goalSettingMissing ?? 0,
+    teamGoalSettingMissing: m?.teamGoalSettingMissing ?? 0,
+  };
+}
+
 // Daily scanner: fire the time-driven ("schedule.recurring") rules whose recurrence matches today. Called
 // from the cron day-tick. Each rule is claimed with a guarded per-day stamp so a re-run of the tick can't
 // double-fire it. A `perEmployee` rule fans out one firing per active employee, carrying derived metrics in
 // the payload (so conditions stay smart); a `once` rule fires a single employee-less firing (for
 // notifyAudience / apiCall broadcasts). Returns how many firings ran their actions. Never throws.
+//
+// The per-employee fan-out is BOUNDED PER INVOCATION (SCHEDULED_EMPLOYEE_BATCH) with the remainder handed to
+// the queue, the same shape as the year-end rollover. The day-claim stays where it is - it is what makes a
+// re-run of the tick idempotent - and resumability comes from the queued continuation instead, which is
+// enqueued BEFORE the slice runs so a pass that exhausts its budget still leaves the rest of the roster owed.
 export async function runScheduledAutomations(deps: Deps): Promise<number> {
   const now = deps.clock.now();
   // The org's calendar day, anchored at UTC midnight. `scheduleDueOn` and the `weekday`/`dayOfMonth` payload
@@ -675,55 +750,116 @@ export async function runScheduledAutomations(deps: Deps): Promise<number> {
     if (!claimed.length) continue;
 
     const base = { weekday: today.getUTCDay(), dayOfMonth: today.getUTCDate() };
-    const run = async (event: DomainEvent) => {
-      const ctx = contextOf(event);
-      if (!evalCondition(automation.condition, ctx)) return;
-      const start = +deps.clock.now();
-      const outcomes = await runActions(deps, ctx, event, automation.actions, 0, { automationId: row.uuid, trusted: !!row.superAuthored });
-      await recordRun(deps, row.uuid, null, event, start, outcomes);
-      fired++;
-    };
 
     if ((schedule.scope ?? "once") === "once") {
-      await run({ type: SCHEDULE_TRIGGER, subject: null, actorId: null, employeeId: null, payload: base, occurredAt: now });
+      fired += await runScheduledFiring(deps, row, automation, { type: SCHEDULE_TRIGGER, subject: null, actorId: null, employeeId: null, payload: base, occurredAt: now });
       continue;
     }
 
-    // perEmployee: compute the roster + metrics once, then fan out one firing per active employee.
-    if (!roster) {
-      const emps = await deps.db.select({ uuid: schema.employees.uuid, managerId: schema.employees.managerId, deleteTime: schema.employees.deleteTime, status: schema.employees.status }).from(schema.employees);
-      roster = emps.filter((e) => !e.deleteTime && e.status === "active").map((e) => ({ uuid: e.uuid, managerId: e.managerId }));
-    }
+    // perEmployee: compute the roster + metrics once, then fan out one firing per active employee - a slice of
+    // them per invocation, with the rest queued.
+    if (!roster) roster = await fanOutRoster(deps);
     if (!metrics) metrics = await computeEmployeeMetrics(deps, roster);
-    for (const emp of roster) {
-      const m = metrics.get(emp.uuid);
-      await run({
-        type: SCHEDULE_TRIGGER,
-        subject: `employees/${emp.uuid}`,
-        actorId: null,
-        employeeId: emp.uuid,
-        payload: {
-          ...base,
-          pendingApprovals: m?.pendingApprovals ?? 0,
-          daysSinceLastLeave: m?.daysSinceLastLeave ?? NEVER_TAKEN_LEAVE,
-          leaveBalanceDays: m?.leaveBalanceDays ?? 0,
-          goalsDueSoon: m?.goalsDueSoon ?? 0,
-          goalsOverdue: m?.goalsOverdue ?? 0,
-          goalsAtRisk: m?.goalsAtRisk ?? 0,
-          goalsStale: m?.goalsStale ?? 0,
-          tasksDueSoon: m?.tasksDueSoon ?? 0,
-          tasksOverdue: m?.tasksOverdue ?? 0,
-          tasksBlocked: m?.tasksBlocked ?? 0,
-          selfReviewsDue: m?.selfReviewsDue ?? 0,
-          teamReviewsDue: m?.teamReviewsDue ?? 0,
-          goalSettingMissing: m?.goalSettingMissing ?? 0,
-          teamGoalSettingMissing: m?.teamGoalSettingMissing ?? 0,
-        },
-        occurredAt: now,
-      });
+    // ENQUEUED BEFORE THE SLICE RUNS, not after. The whole failure this bound exists to stop is an invocation
+    // that runs out of subrequests part-way through the fan-out; a continuation enqueued afterwards is exactly
+    // the write that would not happen. Two calls now buy the rest of the roster a retry even if this pass dies.
+    if (roster.length > SCHEDULED_EMPLOYEE_BATCH) {
+      try {
+        await deps.db.insert(schema.jobs).values({
+          code: await allocFlatCode(deps, schema.jobs),
+          kind: SCHEDULED_FAN_OUT_JOB,
+          payload: JSON.stringify({ automationId: row.uuid, day: todayStr, offset: SCHEDULED_EMPLOYEE_BATCH, correlationId: deps.trace }),
+        });
+        console.warn(`[automationEngine] scheduled rule ${row.uuid} queued for ${roster.length - SCHEDULED_EMPLOYEE_BATCH} more employee(s): the roster outran one invocation`);
+      } catch (e) {
+        // Best-effort like the rest of this function. A continuation that cannot be enqueued is the old
+        // behaviour (this pass's slice only), not a reason to abandon the slice as well.
+        console.error(`[automationEngine] could not queue the scheduled fan-out continuation for ${row.uuid}`, e);
+      }
     }
+    fired += await fanOutSlice(deps, row, automation, roster.slice(0, SCHEDULED_EMPLOYEE_BATCH), metrics, base, now);
   }
   return fired;
+}
+
+// One firing: evaluate the rule's condition against the event, run its actions, record the run. Returns 1 if
+// the actions ran, 0 if the condition said no.
+//
+// WHOLLY GUARDED, because the function that calls it is documented "never throws" and used to hold that only by
+// the accident of two callees swallowing their own errors. `runActions` and `recordRun` are best-effort today;
+// `contextOf`/`evalCondition` are not, and a single malformed rule must not take the rest of the night's
+// scheduled rules - or the twenty-one cron subtasks after this one - down with it.
+async function runScheduledFiring(deps: Deps, row: AutomationRow, automation: Automation, event: DomainEvent): Promise<number> {
+  try {
+    const ctx = contextOf(event);
+    if (!evalCondition(automation.condition, ctx)) return 0;
+    const start = +deps.clock.now();
+    const outcomes = await runActions(deps, ctx, event, automation.actions, 0, { automationId: row.uuid, trusted: !!row.superAuthored });
+    await recordRun(deps, row.uuid, null, event, start, outcomes);
+    return 1;
+  } catch (e) {
+    console.error(`[automationEngine] scheduled firing of ${row.uuid} for ${event.subject ?? "the org"} failed (skipped)`, e);
+    return 0;
+  }
+}
+
+// Fan one perEmployee rule out over a slice of the roster. Returns how many firings ran their actions.
+async function fanOutSlice(
+  deps: Deps,
+  row: AutomationRow,
+  automation: Automation,
+  slice: { uuid: string }[],
+  metrics: Map<string, EmployeeMetrics>,
+  base: { weekday: number; dayOfMonth: number },
+  now: Date,
+): Promise<number> {
+  let fired = 0;
+  for (const emp of slice) {
+    fired += await runScheduledFiring(deps, row, automation, {
+      type: SCHEDULE_TRIGGER,
+      subject: `employees/${emp.uuid}`,
+      actorId: null,
+      employeeId: emp.uuid,
+      payload: scheduledPayload(base, metrics.get(emp.uuid)),
+      occurredAt: now,
+    });
+  }
+  return fired;
+}
+
+/**
+ * Another pass of a `perEmployee` scheduled fan-out, past the employees the nightly tick reached. Drained by
+ * cron `processOneJob`, which advances `offset` and requeues until this reports `done`.
+ *
+ * The roster is re-read and re-sorted each pass rather than carried in the payload: a roster of 500 uuids is
+ * not a payload, and the sort is by uuid precisely so the list a later pass indexes into is the same list. A
+ * hire made between passes therefore shifts the window slightly - one employee may be missed or repeated at a
+ * boundary - which is the right side of the trade for a nudge, and the alternative (freezing the list) costs a
+ * payload that grows with headcount.
+ */
+export async function runScheduledFanOut(deps: Deps, payload: { automationId: string; day: string; offset: number }): Promise<{ fired: number; done: boolean; nextOffset: number }> {
+  const offset = Math.max(0, payload.offset | 0);
+  const row = (await loadEnabled(deps)).find((r) => r.uuid === payload.automationId);
+  // Disabled, deleted or edited to a different trigger since the tick claimed it: the continuation is moot.
+  if (!row || row.triggerType !== SCHEDULE_TRIGGER || !row.scheduleJson) return { fired: 0, done: true, nextOffset: offset };
+  // A rule whose claim has moved on belongs to another day's run; this continuation is stale.
+  if (row.lastScheduledOn !== payload.day) return { fired: 0, done: true, nextOffset: offset };
+  let automation: Automation;
+  try {
+    automation = parseAutomation(row);
+  } catch (e) {
+    console.error(`[automationEngine] scheduled rule ${row.uuid} malformed (continuation abandoned)`, e);
+    return { fired: 0, done: true, nextOffset: offset };
+  }
+  const today = new Date(dayStartMs(payload.day));
+  const base = { weekday: today.getUTCDay(), dayOfMonth: today.getUTCDate() };
+  const roster = await fanOutRoster(deps);
+  if (offset >= roster.length) return { fired: 0, done: true, nextOffset: offset };
+  const slice = roster.slice(offset, offset + SCHEDULED_EMPLOYEE_BATCH);
+  const metrics = await computeEmployeeMetrics(deps, roster);
+  const fired = await fanOutSlice(deps, row, automation, slice, metrics, base, deps.clock.now());
+  const nextOffset = offset + slice.length;
+  return { fired, done: nextOffset >= roster.length, nextOffset };
 }
 
 // Run a deferred (`wait`) automation payload - called by the cron drain when the job's runAfter has passed.

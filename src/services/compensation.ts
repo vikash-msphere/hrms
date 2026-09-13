@@ -1,6 +1,7 @@
 import { allocOwnedCode } from "./codeAlloc";
 import { has } from "./crud";
-import { and, eq, isNull, isNotNull, inArray } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, inArray, sql, type SQL } from "drizzle-orm";
+import { keysetPage } from "./keysetPage";
 import { applyScope } from "./listScope";
 import { applyStructure, ctcLines, splitCtc, pfWagesOf, DEFAULT_CTC_CONFIG, type CtcConfig } from "../domain/payroll";
 import { round2 } from "../domain/money";
@@ -262,14 +263,27 @@ export async function decorateCompensation(deps: Deps, _actor: AppUser, rows: an
 // One employee's salary history (newest first), or - unfiltered - everything the caller may see. Removed
 // revisions are out of the timeline, so they are excluded unless the caller asked for the trash (`?show_deleted`
 // / `?deleted_only`) - the same three states the generic list offers.
-export async function listCompensation(deps: Deps, scope: ListScope, employeeId?: string, showDeleted = false, deletedOnly = false) {
+// PAGED IN SQL, on `effective_from`, exactly like its twin `positions` (same page, same key, same
+// employee-history shape). One employee's timeline is short by nature, but the UNFILTERED list is org-wide and
+// grows with headcount x every increment, correction and CTC re-split the org ever records - each row then
+// widened by `withGrades` and the CTC build-up - and it used to return all of it with
+// `nextPageToken: undefined`, so the client was told it held everything while the only thing truncating the
+// answer was the Worker's memory. compensation is the bigger and wider of the two; positions was converted for
+// this and settlements and bonuses say the same thing in their own words.
+export async function listCompensation(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, employeeId?: string, showDeleted = false, deletedOnly = false) {
   const conds = [applyScope(scope, schema.compensation.code, schema.compensation.employeeId)];
   if (employeeId) conds.push(eq(schema.compensation.employeeId, employeeId));
   if (deletedOnly) conds.push(isNotNull(schema.compensation.deleteTime));
   else if (!showDeleted) conds.push(isNull(schema.compensation.deleteTime));
-  const rows = await deps.db.select().from(schema.compensation).where(conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as any)) : undefined);
-  rows.sort((a, b) => +new Date(b.effectiveFrom) - +new Date(a.effectiveFrom) || b.uuid.localeCompare(a.uuid));
-  return withGrades(deps, rows);
+  const where = conds.filter(Boolean).length ? and(...(conds.filter(Boolean) as SQL[])) : undefined;
+  const page = await keysetPage<typeof schema.compensation.$inferSelect>(deps, schema.compensation, "compensation", where, {
+    max: maxPageSize,
+    pageToken,
+    order: { expr: sql`${schema.compensation.effectiveFrom}`, value: (r) => +new Date(r.effectiveFrom) },
+  });
+  // The grade/structure decoration is applied to the PAGE, not to the whole table - which is the other half of
+  // what this cost: it reads pay grades and salary structures per row's references.
+  return { items: await withGrades(deps, page.items), nextPageToken: page.nextPageToken };
 }
 
 export async function getCompensation(deps: Deps, id: string) {

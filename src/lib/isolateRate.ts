@@ -81,9 +81,35 @@ export function keyedCounter(maxPerWindow: number, windowMs = 60_000, maxKeys = 
       let w = windows.get(key);
       if (!w || nowMs - w.startedAt >= windowMs) {
         if (!w && windows.size >= maxKeys) {
+          // Expired windows first: they are counting nothing, so dropping them is free.
           for (const [k, v] of windows) if (nowMs - v.startedAt >= windowMs) windows.delete(k);
-          if (windows.size >= maxKeys) windows.clear();
+          // Still full, i.e. every window is LIVE. This used to `windows.clear()`, which hands the whole map's
+          // budget back at once - and it did so under exactly the traffic the map exists to bound. On the
+          // authenticated budgets the key is the caller's uuid and the map is bounded by headcount, so it never
+          // fires; on the PUBLIC lanes (/auth, /found, /diag) the key is the client IP, which an attacker picks.
+          // maxKeys distinct addresses inside one window therefore wiped every counter, and so did every sweep
+          // after it - the per-IP floor simply stopped counting for as long as the flood lasted.
+          //
+          // Bounded eviction instead: drop the OLDEST windows and keep the rest. Same cost (one pass), and the
+          // counters that matter survive - a flood evicts its own oldest keys rather than everyone else's live
+          // ones. Insertion order is window-start order (see the delete-before-set below), so the front of the
+          // map is the oldest window.
+          //
+          // An eighth at a time, so eviction runs once per `maxKeys / 8` new keys rather than on every call
+          // while the map is full - the difference between an O(n) pass amortized to O(1) and one per request.
+          if (windows.size >= maxKeys) {
+            let evict = Math.max(1, Math.ceil(maxKeys / 8));
+            for (const k of windows.keys()) {
+              if (evict-- <= 0) break;
+              windows.delete(k);
+            }
+          }
         }
+        // DELETE BEFORE SET on a rollover, so the key moves to the BACK of the map. `Map.set` on an existing
+        // key keeps its original position, which would make insertion order "first ever seen" instead of
+        // "window started" - and the eviction above would then drop long-lived legitimate callers ahead of
+        // keys that arrived yesterday and have been idle since.
+        if (w) windows.delete(key);
         windows.set(key, (w = { startedAt: nowMs, count: 0 }));
       }
       // At least one, and integral: a caller must never buy a free call by declaring a cost of zero (or a

@@ -262,11 +262,34 @@ function ActiveProvider({ queues, withHistory, children }: { queues: readonly st
   // Only the ENABLED queues count: a disabled collection sits at its initial state forever, so including it
   // would leave the page waiting on a read that is never issued. A queue that has already delivered rows is
   // not "loading" either, even while it revalidates - the reader has something true to look at.
-  const reads = [leave, reimb, overtime, remote, regular, encash, loan, time, expense, assetReq];
-  const loading = reads.some((q) => q.state === "loading" && q.rows.length === 0);
+  //
+  // THE FLAG TRAVELS WITH THE READ, which is what makes that paragraph true. Written as a bare array, the rule
+  // was stated here and implemented nowhere: `useCollection` with `enabled: false` still calls `getSnapshot`,
+  // which MINTS an entry in state "loading" with no rows (lib/resourceStore.ts) and never fetches it - so a
+  // disabled queue satisfies the predicate for the life of the page. Only the inbox reads `loading` today, and
+  // its route asks for every queue WITH history, so all ten are enabled and the bug was invisible; every other
+  // route leaves most of them off (and, with `withHistory` false, disables even a listed queue whose server
+  // count is zero), so the first page to render a spinner or an empty state off this would have rendered it
+  // permanently - and it would have read as a data problem rather than a predicate one.
+  const reads: [boolean, { state: string; rows: unknown[]; error?: string | null }][] = [
+    [wanted("leave-requests"), leave],
+    [wanted("reimbursements"), reimb],
+    [wanted("overtime-requests"), overtime],
+    [wanted("remote-work-requests"), remote],
+    [wanted("attendance-regularizations"), regular],
+    [wanted("leave-encashments"), encash],
+    [wanted("loans"), loan],
+    [wanted("time-entries"), time],
+    [wanted("expenses"), expense],
+    [wanted("asset-requests"), assetReq],
+  ];
+  const active = reads.filter(([on]) => on).map(([, q]) => q);
+  const loading = active.some((q) => q.state === "loading" && q.rows.length === 0);
   // A caller without a capability gets a 403 that `useCollection` isolates into an empty collection rather
-  // than an error, so this only fires on a real failure to read something the caller may read.
-  const error = reads.find((q) => q.state === "error")?.error ?? null;
+  // than an error, so this only fires on a real failure to read something the caller may read. Over the same
+  // enabled set: an entry nobody fetched has no error to report either, and pretending otherwise would only
+  // be right by accident.
+  const error = active.find((q) => q.state === "error")?.error ?? null;
 
   const value = useMemo<ApprovalsState>(
     () => ({

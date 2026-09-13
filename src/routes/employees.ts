@@ -6,7 +6,7 @@ import type { AppEnv, AppUser } from "../env";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { collectionRoutes } from "../http/collectionRoute";
-import { listEmployees, getEmployee, createEmployee, updateEmployee, setBio } from "../services/employees";
+import { listEmployees, getEmployee, createEmployee, updateEmployee, removeEmployee, setBio } from "../services/employees";
 import { enrollDefaultBenefits } from "../services/benefitEnrollments";
 import { getBankDetails, setBankDetails } from "../services/bankDetails";
 import { getIdentityDetails, setIdentityDetails } from "../services/identityDetails";
@@ -97,6 +97,9 @@ const records = collectionRoutes<EmployeeWrite, typeof schema.employees>({
     get: async (deps, actor, id) => withCompleteness(deps, actor, await getEmployee(deps, actor, id)),
     create: (deps, actor, input, id) => createEmployee(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateEmployee(deps, actor, id, patch, ifMatch),
+    // Deleting an employee ends their ACCESS too, the way offboarding does - the generic soft delete stamps
+    // the row and leaves the linked login active. See services/employees.ts removeEmployee.
+    remove: (deps, actor, id, ifMatch) => removeEmployee(deps, actor, id, ifMatch),
   },
   list: (c, page) => listEmployees(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q"), page.deletedOnly),
   verbs: {
@@ -148,7 +151,14 @@ async function identityDoc(c: Context<AppEnv>, id: string, action: "upload" | "d
   const field = c.req.query("field");
   if (!field) throw invalidArgument("field is required");
   const code = fieldScopeCode(c);
-  if (deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }).has(field)) {
+  // ASKED AT THE LEVEL THE ACTION ACTUALLY IS. All three verbs used to share one `read` check, so a caller who
+  // may read a field but is denied write on it could still replace or delete the supporting document behind it
+  // - the converse of the rule stated over `redactedSub` below ("a caller's write grant and their read grant
+  // are decided separately"), failing in the destructive direction. Not reachable with the seeded grants, where
+  // every employee holds `employees.me.identity.**: write` so read and write coincide on their own record;
+  // reachable the moment an admin writes a read-only per-field rule, which the ACL offers.
+  const level = action === "download" ? "read" : "write";
+  if (deniedFieldKeys(c.get("objectGrant"), "employees", code, "identity", [field], { employeeCode: user.employeeCode }, level).has(field)) {
     throw forbidden("you do not have permission to perform this action");
   }
   const slot = identityDocSlot(field);

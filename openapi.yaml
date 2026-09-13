@@ -2232,7 +2232,7 @@ components:
           items:
             type: object
             properties:
-              id: { type: string, description: "Feedback id (sub-resource handle)." }
+              id: { type: string, description: "Feedback id (sub-resource handle). Present only where the entry's author is named - the id is stable across the row's whole life, so handing it out on an anonymized entry would let the reviewee join it back to the nomination they made themselves." }
               state: { type: string, enum: [SUGGESTED, REQUESTED, SUBMITTED, DECLINED], description: "SUGGESTED is the reviewee's own nomination, inert until a manager nominates that person for real; then REQUESTED, SUBMITTED or DECLINED." }
               comment: { type: string }
               overall_rating: { type: integer }

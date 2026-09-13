@@ -13,7 +13,8 @@ import { EVERYONE_ROLE, EMPTY_GRANT, isSuperGrant } from "../domain/grants";
 import { ancestorsOf } from "../domain/codes";
 import { loadRoleGrant, loadUserGrant, loadObjectRulesForRequest } from "../lib/policyLoad";
 import { uuidToCode, tableFor } from "../lib/authzResolve";
-import { invalidArgument, notFound } from "../lib/errors";
+import { invalidArgument, notFound, forbidden } from "../lib/errors";
+import type { AppUser } from "../env";
 
 const NAME_RE = /^[a-z][a-z0-9-]*$/; // collection / field tokens
 const VERB_RE = /^[a-zA-Z]+$/;
@@ -45,7 +46,13 @@ export type PreviewVerdict = {
   capabilities?: string[]; // present when include_capabilities was asked ([] for a disabled account)
 };
 
-export async function previewAccess(deps: Deps, body: PreviewBody): Promise<PreviewVerdict[]> {
+/**
+ * `actor` is the caller the preview is run FOR, and it is what bounds which subjects they may ask about.
+ *
+ * Optional only for the internal paths that have no principal; every route passes it. See the scope check
+ * below the subject resolution.
+ */
+export async function previewAccess(deps: Deps, body: PreviewBody, actor?: AppUser): Promise<PreviewVerdict[]> {
   const { field, verb } = body;
   // Capability-only calls may omit the collection (there is no target to grade); a graded call needs one.
   const collection = body.collection ?? "";
@@ -80,7 +87,7 @@ export async function previewAccess(deps: Deps, body: PreviewBody): Promise<Prev
   if (field !== undefined && code === null) throw invalidArgument("a field target needs an object");
 
   // One uniform record per subject, whichever way it was addressed.
-  type Subject = { ref: string; userUuid: string | null; email: string; role: string; status: string; employeeCode: string | null; firstName: string | null; lastName: string | null };
+  type Subject = { ref: string; userUuid: string | null; userCode: string | null; email: string; role: string; status: string; employeeCode: string | null; firstName: string | null; lastName: string | null };
   const userIds = parsed.filter((p) => p.kind === "account").map((p) => p.id);
   const empIds = parsed.filter((p) => p.kind === "person").map((p) => p.id);
   // Chunked, because MAX_SUBJECTS is 100 and D1 binds at most 100 parameters per statement (PARAM_CAP): a
@@ -91,6 +98,7 @@ export async function previewAccess(deps: Deps, body: PreviewBody): Promise<Prev
     deps.db
       .select({
         uuid: schema.users.uuid,
+        code: schema.users.code,
         email: schema.users.email,
         role: schema.users.role,
         status: schema.users.status,
@@ -111,6 +119,7 @@ export async function previewAccess(deps: Deps, body: PreviewBody): Promise<Prev
         lastName: schema.employees.lastName,
         workEmail: schema.employees.workEmail,
         userUuid: schema.users.uuid,
+        userCode: schema.users.code,
         email: schema.users.email,
         role: schema.users.role,
         status: schema.users.status,
@@ -125,14 +134,37 @@ export async function previewAccess(deps: Deps, body: PreviewBody): Promise<Prev
     if (p.kind === "account") {
       const u = byUserId.get(p.id);
       if (!u) throw notFound(`subject ${p.ref} not found`);
-      return { ref: p.ref, userUuid: u.uuid, email: u.email, role: u.role, status: u.status, employeeCode: u.employeeCode ?? null, firstName: u.firstName ?? null, lastName: u.lastName ?? null };
+      return { ref: p.ref, userUuid: u.uuid, userCode: u.code ?? null, email: u.email, role: u.role, status: u.status, employeeCode: u.employeeCode ?? null, firstName: u.firstName ?? null, lastName: u.lastName ?? null };
     }
     const e = byEmpId.get(p.id);
     if (!e) throw notFound(`subject ${p.ref} not found`);
     return e.userUuid
-      ? { ref: p.ref, userUuid: e.userUuid, email: e.email!, role: e.role!, status: e.status!, employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName }
-      : { ref: p.ref, userUuid: null, email: e.workEmail, role: "employee", status: "active", employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName };
+      ? { ref: p.ref, userUuid: e.userUuid, userCode: e.userCode ?? null, email: e.email!, role: e.role!, status: e.status!, employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName }
+      : { ref: p.ref, userUuid: null, userCode: null, email: e.workEmail, role: "employee", status: "active", employeeCode: e.empCode, firstName: e.firstName, lastName: e.lastName };
   });
+
+  // THE CALLER'S OWN SCOPE OVER THE SUBJECTS, which this had none of.
+  //
+  // The verdict rows carry each subject's email, name, role and - with `include_capabilities` - their whole
+  // capability set, for up to MAX_SUBJECTS arbitrary refs. The verb gating the route (`access-rules.preview`)
+  // is collection-level, so it carries no object to scope on: granting "let the access admins use the preview
+  // panel" therefore handed over an org-wide email/role directory, which is exactly what services/users.ts
+  // narrowed listUsers to stop ("an admin holds users.**, everyone else holds only users.me.**... so their page
+  // is their own account and not every email and role in the company").
+  //
+  // Decided on the caller's BROAD grant, in memory, with no per-object rule merge: a per-object share that
+  // would widen the caller's reach is not consulted, so the check can only be narrower than a real
+  // `GET /v1/users/<id>` would be - the fail-closed direction, and no extra read per subject. A subject with no
+  // account yet is graded against `employees.<code>` instead, because that is the record they actually are.
+  if (actor) {
+    const self = { employeeCode: actor.employeeCode ?? null };
+    const maySee = (s: Subject) => {
+      const resource = s.userCode ? `users.${s.userCode}` : s.employeeCode ? `employees.${s.employeeCode}` : null;
+      return !!resource && decide(actor.grant, { kind: "standard", resource, level: "read" }, self).allow;
+    };
+    const hidden = subjectsResolved.find((s) => !maySee(s));
+    if (hidden) throw forbidden(`you don't have access to ${hidden.ref}`);
+  }
 
   const resource = [collection, ...(code ? [code] : []), ...(field ? [field] : [])].join(".");
   const ancestors = code ? ancestorsOf(code) : [];

@@ -347,6 +347,7 @@ CREATE INDEX `audit_at_idx` ON `audit_log` (`at`);--> statement-breakpoint
 CREATE INDEX `audit_corr_idx` ON `audit_log` (`correlation_id`,`at`) WHERE "audit_log"."correlation_id" is not null;--> statement-breakpoint
 CREATE INDEX `audit_subject_idx` ON `audit_log` (`subject_id`,`at`) WHERE "audit_log"."subject_id" is not null;--> statement-breakpoint
 CREATE INDEX `audit_session_idx` ON `audit_log` (`session_id`,`at`) WHERE "audit_log"."session_id" is not null;--> statement-breakpoint
+CREATE INDEX `audit_actor_email_idx` ON `audit_log` (`actor_email`,`at`);--> statement-breakpoint
 CREATE INDEX `audit_api_key_idx` ON `audit_log` (`api_key_id`,`at`) WHERE "audit_log"."api_key_id" is not null;--> statement-breakpoint
 CREATE TABLE `automation_runs` (
 	`uuid` text PRIMARY KEY NOT NULL,

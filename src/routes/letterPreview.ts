@@ -40,7 +40,14 @@ export const letterPreview = new Hono<AppEnv>().post("/", async (c) => {
   const employeeId = idFromPath(employee);
   if (!employeeId) throw invalidArgument("employee is required");
 
-  const ctx = await assembleLetterContext(c.get("deps"), employeeId);
+  // THE HARDER HALF OF THE PAIR, and the reason the actor has to reach the context builder. `:generateLetter`
+  // at least gates the TEMPLATE (canReadObjectId over letter-templates); this route takes the template inline
+  // in the request body by design - it is the live preview in the template editor, where the template does not
+  // exist yet - so there is no stored object to gate and no id to scope on. Without the actor, a caller could
+  // therefore post an ad-hoc template containing {{ctc_annual}} against any employee and read the figure back
+  // as a PDF, with no compensation grant anywhere in the picture. The narrowing happens in the context instead:
+  // the blocks the caller may not read are simply absent, so those placeholders resolve to nothing.
+  const ctx = await assembleLetterContext(c.get("deps"), employeeId, c.get("user"));
   const org = await getSettingValue<OrgWithDocumentLogos>(c.get("deps"), "organization", {});
   const letterhead = await documentLetterhead(c.get("deps"), org, "letter", [letterheadRef, template.letterhead]);
   if (letterhead) ctx.letterhead = letterhead;

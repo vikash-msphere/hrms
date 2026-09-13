@@ -27,6 +27,10 @@ function StampCard({ r, compact }: { r: SignatureResult; compact?: boolean }) {
       <Icon className={`${compact ? "h-6 w-6" : "h-8 w-8"} shrink-0 ${s.cls}`} strokeWidth={2.25} />
       <div className="min-w-0 leading-tight">
         <p className={`text-[11px] font-semibold ${s.cls}`}>{s.label}</p>
+        {/* WHY it is not a plain valid - "content was appended after signing" is the one a reader has to be
+            able to act on, and a coloured icon on its own does not say it. Kept on the compact chip too:
+            an invisible signature that fails coverage is exactly as serious as a visible one that does. */}
+        {r.note && <p className={`text-[10px] ${s.cls}`}>{r.note}</p>}
         {r.signerName && <p className="truncate text-[10px] text-foreground/80">Digitally signed by {r.signerName}</p>}
         {r.signingTime && <p className="text-[10px] text-muted-foreground">Date: {new Date(r.signingTime).toLocaleString()}</p>}
         {!compact && r.reason && <p className="truncate text-[10px] text-muted-foreground">Reason: {r.reason}</p>}

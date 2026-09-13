@@ -11,6 +11,10 @@ import { upstreamFailed } from "./errors";
 // production deploy (`scripts/preflight.ts`); anywhere else it is the safe default to develop against.
 export type EmailProvider = "resend" | "brevo" | "sendgrid" | "postmark" | "mailgun" | "console";
 
+// How long one send may hold the invocation. Generous for a vendor accepting a message with attachments, and
+// far short of a Worker's own ceiling - see the note in `send` for why this is not optional on the cron path.
+const VENDOR_TIMEOUT_MS = 15_000;
+
 type ProviderRequest = { url: string; headers: Record<string, string>; body: unknown };
 type ProviderConfig = {
   // apiKey: the provider secret. from: verified sender ("Name <addr>" or bare address). region: provider-specific
@@ -158,9 +162,16 @@ export function makeEmailSender(
       // reporting it as one costs an "unhandled error" with a stack in the log and a 500 the caller cannot act
       // on. `upstreamFailed` says which hop failed and carries the vendor's own words, so the operator reads
       // "the mail vendor rejected the key" rather than going looking for a bug here.
+      //
+      // BOUNDED, like every other outbound call in the app (services/esign/cashfree.ts#vendorFetch, the OAuth
+      // code exchange in routes/authRoutes.ts). This was the one that was not, and it is the one on the path
+      // that can least afford it: the nightly tick's reminder subtasks and services/emailFanOut.ts send in
+      // SEQUENCE, so a provider that accepts the connection and then says nothing holds the whole invocation
+      // until the platform kills it - and takes every subtask that had not run yet with it. A timeout turns
+      // that into one failed message the existing branch below reports by name.
       let res: Response;
       try {
-        res = await fetch(req.url, { method: "POST", headers: req.headers, body });
+        res = await fetch(req.url, { method: "POST", headers: req.headers, body, signal: AbortSignal.timeout(VENDOR_TIMEOUT_MS) });
       } catch (e) {
         throw upstreamFailed(`the email provider (${provider}) could not be reached: ${(e as Error).message}`);
       }

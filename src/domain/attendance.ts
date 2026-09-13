@@ -202,8 +202,13 @@ export type LeaveRange = { start: string; end: string; startSession?: number; en
  * balance for a boundary session - so treating the same day as fully excused from loss of pay paid for half a
  * day the employee neither worked nor spent leave on. Sessions are tracked as AM/PM rather than summed, so two
  * ranges that touch the same day cannot add up past the day they are in.
+ *
+ * EXPORTED for the web bundle, which imports it directly (web/src/lib/attendance.ts) rather than restating it.
+ * The attendance grid and the payroll build have to agree about which days leave excuses - a day the grid calls
+ * "On leave" and payroll then docks half of is the exact drift `eventCreditByDay` warns about one file over -
+ * and the only way two copies of this rule stay in step is for there to be one.
  */
-function leaveCover(d: string, ranges: LeaveRange[]): number {
+export function leaveCover(d: string, ranges: LeaveRange[]): number {
   let am = false;
   let pm = false;
   for (const r of ranges) {

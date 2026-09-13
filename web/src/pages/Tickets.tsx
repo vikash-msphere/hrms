@@ -51,7 +51,7 @@ import { WriteDialog } from "@/components/common/WriteDialog";
 import { FormError } from "@/components/common/FormError";
 import { describeError } from "@/lib/formError";
 import { useToast } from "@/components/ui/use-toast";
-import { TICKET_WORKFLOW, TICKET_STATUS, ticketMove, ticketMovesFrom, ticketStatusLabel } from "@/lib/ticketWorkflow";
+import { useTicketWorkflow, ticketStatusMeta, ticketMove, ticketMovesFrom, ticketStatusLabel } from "@/lib/ticketWorkflow";
 import { getSetting } from "@/lib/settingsStore";
 
 const upper = (s?: string) => (s ?? "").toUpperCase();
@@ -96,6 +96,9 @@ function TicketStatusMenu({ ticket, busy, onPick, align = "start" }: {
 }) {
   const stateU = upper(ticket.state);
   const can = ticket.access?.can ?? [];
+  // The ORG's workflow, not the seeded default - the server decides every move from `settings/ticket-workflow`,
+  // so a menu built from the default offers moves it would refuse and hides any state the org added.
+  const workflow = useTicketWorkflow();
   if (!ticketMovesFrom(stateU).some((m) => can.includes(m.verb))) return <StatusBadge state={ticket.state} />;
   return (
     <DropdownMenu>
@@ -112,8 +115,8 @@ function TicketStatusMenu({ ticket, busy, onPick, align = "start" }: {
       </DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="w-64" onClick={(e) => e.stopPropagation()}>
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Move this ticket to</DropdownMenuLabel>
-        {TICKET_WORKFLOW.states.map((s) => {
-          const meta = TICKET_STATUS[s];
+        {workflow.states.map((s) => {
+          const meta = ticketStatusMeta(s);
           const current = s === stateU;
           const move = ticketMove(stateU, s);
           const blocked = current ? "Where it is now"
@@ -763,6 +766,8 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
   toast: ReturnType<typeof useToast>["toast"];
 }) {
   const confirm = useConfirm();
+  // The org's own workflow - the access affordances below list its verbs, not the seeded default's.
+  const workflow = useTicketWorkflow();
   const [full, setFull] = useState<Ticket | null>(null); // ticket + comments + checklist (from Get)
   const [reply, setReply] = useState("");
   const [newTodo, setNewTodo] = useState("");
@@ -952,7 +957,10 @@ function TicketDetail({ ticket, onClose, employees, departments, checklists, cat
           <TicketStatusMenu ticket={t} busy={!!busy} onPick={moveTo} />
           <PriorityBadge value={t.priority} />
           <Badge variant="secondary">{catName(t.category)}</Badge>
-          {TICKET_WORKFLOW.transitions.map((x) => (
+          {/* One access affordance per DISTINCT verb: a workflow may legitimately author the same verb over
+              several from-state rows ("close" from OPEN and from RESOLVED), and the grant is per verb, not per
+              row - so listing rows would repeat the same key and give React duplicate children keys. */}
+          {[...new Map(workflow.transitions.map((x) => [x.verb, x])).values()].map((x) => (
             <AccessAction key={x.verb} collection="tickets" objectPath={t.path} verb={x.verb} can={can} label={`Move to ${ticketStatusLabel(x.to)}`} />
           ))}
         </div>

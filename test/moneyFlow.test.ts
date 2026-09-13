@@ -1857,10 +1857,10 @@ describe("compensation: a self-service read is priced by the server and carries 
     // (what My Profile's tab gets once an org grants compensation.read to its people).
     const orgWide = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true } as const;
     const ownOnly = { breadth: "own", deptCode: null, ownerId: emp, seeRestricted: true } as const;
-    const rows = await listCompensation(deps, orgWide, emp);
+    const rows = (await listCompensation(deps, orgWide, 50, undefined, emp)).items;
 
     const [asPayroll] = await decorateCompensation(deps, actor, rows, orgWide);
-    const [asSelf] = await decorateCompensation(deps, actor, await listCompensation(deps, ownOnly, emp), ownOnly);
+    const [asSelf] = await decorateCompensation(deps, actor, (await listCompensation(deps, ownOnly, 50, undefined, emp)).items, ownOnly);
 
     // Payroll keeps the ladder context; the employee gets the pay, not where it sits against the band.
     expect(toCompensationResource(asPayroll).pay_grade_name).toBe("L4");
@@ -1889,7 +1889,7 @@ describe("compensation: a self-service read is priced by the server and carries 
     await seedComp(b, { basePay: 40000, ctcAnnual: 672000 });
 
     const orgWide = { breadth: "all", deptCode: null, ownerId: null, seeRestricted: true } as const;
-    const rows = await listCompensation(deps, orgWide);
+    const rows = (await listCompensation(deps, orgWide, 50)).items;
     const decorated = await decorateCompensation(deps, actor, rows, orgWide);
     expect(decorated).toHaveLength(2);
     expect(decorated.every((r) => toCompensationResource(r).breakdown === undefined)).toBe(true);

@@ -796,11 +796,24 @@ export function toReviewResource(r: any): Wire<"review"> {
   return out;
 }
 
-// A single 360 feedback entry embedded on a review. `id` is the raw pk (a sub-resource handle, like a reply id
-// - NOT wire-id encoded). `author` is present only when the viewer may see who gave it.
+// A single 360 feedback entry embedded on a review. `author` is present only when the viewer may see who gave
+// it.
+//
+// `id` IS OMITTED WHEN THE AUTHOR IS. It used to be emitted in both states as a sub-resource handle, and that
+// handle de-anonymized the whole feature: the row is promoted in place through its life (SUGGESTED -> REQUESTED
+// -> SUBMITTED), so its pk never changes, and the reviewee sees the same row at both ends. They see it first as
+// their own SUGGESTED nomination, which names the author deliberately (there is no answer yet to protect), and
+// again after sharing as an anonymous SUBMITTED entry - with the same id. Joining the two lists on it names
+// every peer the employee suggested against that peer's supposedly anonymous rating and comment, which is most
+// of the panel.
+//
+// Nothing on the anonymous view acts on the handle (the SPA uses it only as a React key), so there is nothing
+// to replace it with. A named viewer - manager, HR - still gets it, because for them there is no anonymity to
+// protect and the id is the sub-resource handle it was meant to be.
 function reviewFeedbackEntry(f: any, named: boolean) {
+  const identified = named || f.state === "SUGGESTED";
   return {
-    id: f.uuid,
+    ...(identified ? { id: f.uuid } : {}),
     state: f.state,
     comment: f.comment ?? undefined,
     overall_rating: f.overallRating ?? undefined,
@@ -809,7 +822,7 @@ function reviewFeedbackEntry(f: any, named: boolean) {
     ...(named && f.declineReason ? { decline_reason: f.declineReason } : {}),
     // A SUGGESTED row is a name the REVIEWEE typed and nothing else - no rating, no comment, nobody asked
     // anything of yet - so its author is named even to them. Anonymity protects an ANSWER; there isn't one.
-    ...(named || f.state === "SUGGESTED" ? { author: ref("employees", f.authorId) } : {}),
+    ...(identified ? { author: ref("employees", f.authorId) } : {}),
   };
 }
 

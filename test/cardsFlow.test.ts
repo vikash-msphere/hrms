@@ -331,11 +331,16 @@ describe("kanban flow: WIP + timestamps + movements + goal roll-up", () => {
     expect(JSON.parse(upd.meta!).diff.title).toEqual({ from: "Tracked", to: "Renamed" }); // before → after
     const mv = rows.find((r) => r.action === "card.move")!;
     expect(JSON.parse(mv.meta!)).toEqual({ from: "backlog", to: "ready" }); // move records from → to
-    // Server-side filters: by action category (tone) and free text (over action/meta/actor).
+    // Server-side filters: by action category (tone) and free text (over the action, the actor and the
+    // snapshotted object name). NOT over `meta` - that column holds the from/to VALUES of whatever the audit
+    // filters let through, and a substring search across it is a grep over material whose own access control
+    // lives elsewhere (see services/activity.ts textAndToneConds).
     const byTone = await listActivity(deps, "cards", card.uuid, { tone: "move" });
     expect(byTone.items.map((r) => r.action)).toEqual(["card.move"]);
-    const byText = await listActivity(deps, "cards", card.uuid, { q: "ready" });
-    expect(byText.items.map((r) => r.action)).toEqual(["card.move"]); // meta {to:"ready"} matches
+    const byText = await listActivity(deps, "cards", card.uuid, { q: "move" });
+    expect(byText.items.map((r) => r.action)).toEqual(["card.move"]); // action "card.move" matches
+    // A word that appears ONLY inside the meta blob finds nothing.
+    expect((await listActivity(deps, "cards", card.uuid, { q: "ready" })).items).toEqual([]);
   });
 
   it("threads comments on a card", async () => {

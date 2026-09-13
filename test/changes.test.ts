@@ -103,6 +103,31 @@ describe("changes feed", () => {
     const weekAgo = Date.now() - 7 * 24 * 60 * 60_000;
     expect((await changedSince(deps, weekAgo)).collections).toContain("holidays");
   });
+
+  // THE REFERENCE POINT IS REWOUND, and the two clocks are why.
+  //
+  // The stamps come from the DATABASE's clock (a SQLite trigger, src/db/changeDdl.ts); `now` is the Worker's.
+  // Handing the client the Worker's reading unrewound means a database clock even slightly behind it stamps a
+  // write BELOW the value the client will send back, `at > since` is false for it ever after, and that
+  // collection is never named again until somebody writes to it - a stored copy served stale for its whole
+  // life, which is the one failure this mechanism exists to prevent. Re-reporting a collection costs a read;
+  // missing one is silent.
+  it("hands back a reference point BEHIND its own clock, so a skewed database clock cannot hide a write", async () => {
+    const before = Date.now();
+    const out = await changedSince(deps, before - 1000);
+    expect(out.now).toBeLessThan(before);
+    // And the unknown-window answer carries the same rewound value, since the client stores that one too.
+    expect((await changedSince(deps, 0)).now).toBeLessThan(before);
+  });
+
+  // A stamp EQUAL to the reference point is reported, not dropped. `now` is captured before the read, so a
+  // write committing in that same millisecond lands exactly on the boundary a strict `>` discards.
+  it("reports a collection stamped at the reference point itself", async () => {
+    await seedHoliday("Diwali");
+    const stamp = (await deps.db.select().from(schema.collectionVersions))
+      .find((r) => r.collection === "holidays")!;
+    expect((await changedSince(deps, +new Date(stamp.at))).collections).toContain("holidays");
+  });
 });
 
 // A SIDE TABLE HAS TO STAMP ITS PARENT.

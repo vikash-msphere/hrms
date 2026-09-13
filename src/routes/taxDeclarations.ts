@@ -47,8 +47,10 @@ export const taxDeclarations = collectionRoutes<TaxDeclarationInput, typeof sche
   list: (c, page) =>
     listTaxDeclarations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("employee"), c.req.query("financial_year"), c.req.query("status"), page.showDeleted),
   verbs: {
-    verify: { schema: verifySchema, run: (deps, user, id, body) => verifyTaxDeclaration(deps, user, id, body.verified_amount) },
-    reject: { run: (deps, user, id) => rejectTaxDeclaration(deps, user, id) },
+    // The ETag rides through: verifying is a decision about a row its own employee may still be editing, so it
+    // is refused when that row has moved since the verifier read it (services/taxDeclarations.ts says why).
+    verify: { schema: verifySchema, run: (deps, user, id, body, c) => verifyTaxDeclaration(deps, user, id, body.verified_amount, c.req.header("If-Match")) },
+    reject: { run: (deps, user, id, _body, c) => rejectTaxDeclaration(deps, user, id, c.req.header("If-Match")) },
     upload: {
       run: async (deps, user, id, _body, c) => {
         const bytes = new Uint8Array(await requireCappedBody(c.req.raw));

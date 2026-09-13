@@ -64,12 +64,18 @@ export async function pushToEmployee(
   try {
     // One joined read (not user-then-prefs): this runs on EVERY single-recipient notify when push is
     // configured, and most recipients have no registered device - keep the common no-op path at 1 D1 read.
+    // AND THE ACCOUNT MUST STILL BE ON. A push subscription is the one delivery channel that outlives the
+    // session: it is registered on a device and answered by the push service, so nothing about signing out,
+    // being disabled, or leaving the company stops it on its own. The join was on `employee_id` alone, so a
+    // leaver's phone went on receiving whatever was addressed to them - company announcements included, since
+    // that audience had the same gap (services/notifications.ts activeEmployeeIds). One more equality on a
+    // join this read already makes.
     const row = (
       await deps.db
         .select({ uuid: schema.preferences.uuid, value: schema.preferences.value })
         .from(schema.preferences)
         .innerJoin(schema.users, eq(schema.preferences.userId, schema.users.uuid))
-        .where(and(eq(schema.users.employeeId, employeeId), eq(schema.preferences.key, PUSH_PREF_KEY)))
+        .where(and(eq(schema.users.employeeId, employeeId), eq(schema.users.status, "active"), eq(schema.preferences.key, PUSH_PREF_KEY)))
         .limit(1)
     )[0];
     if (!row) return;

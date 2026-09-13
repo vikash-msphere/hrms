@@ -4,7 +4,7 @@
 //
 // Opt-in (settings/holidays `comp_off_on_holiday_work`), because plenty of orgs pay overtime for this instead -
 // and the overtime lane already exists. Nothing here is retroactive: it only ever looks at one day.
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { allocOwnedCodesFor } from "./codeAlloc";
@@ -68,11 +68,21 @@ export async function creditHolidayCompOff(deps: Deps): Promise<number> {
   }
 
   // Which office each of them works at, so a regional holiday only credits the people it closed.
-  const positions = await deps.db
-    .select({ employeeId: schema.positions.employeeId, location: schema.positions.location, effectiveTo: schema.positions.effectiveTo })
-    .from(schema.positions);
+  //
+  // BOUNDED TO THE PEOPLE WHO PUNCHED, and to the OPEN row. `positions` is effective-dated history - a row per
+  // revision per person, never pruned - and this read all of it to answer a question about the handful of
+  // employees who worked a holiday. D1 bills rows read, so the cost of crediting comp-off grew with the org's
+  // promotion history rather than with the number of people being credited. That is the shape the rest of this
+  // function was rewritten to remove (see the note over `planned`); this read was the one left whole.
   const locationOf = new Map<string, string | null>();
-  for (const p of positions) if (!p.effectiveTo) locationOf.set(p.employeeId, p.location ?? null);
+  for (const p of await byIdChunks([...minutesByEmployee.keys()], (group) =>
+    deps.db
+      .select({ employeeId: schema.positions.employeeId, location: schema.positions.location })
+      .from(schema.positions)
+      .where(and(inArray(schema.positions.employeeId, group), isNull(schema.positions.effectiveTo))),
+  )) {
+    locationOf.set(p.employeeId, p.location ?? null);
+  }
 
   const full = att.full_day_minutes ?? DEFAULT_ATTENDANCE.full_day_minutes ?? 480;
   const half = att.half_day_minutes ?? DEFAULT_ATTENDANCE.half_day_minutes ?? 240;

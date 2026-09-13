@@ -1,5 +1,10 @@
 import type { AttendanceSession } from "@/types";
 import { dateFormat } from "./intl";
+// The server's own leave-coverage rule, imported rather than mirrored. The "the web bundle can't import from
+// src/" premise does not hold - lib/leaveForecast.ts, lib/eventRepeat.ts, lib/assetTagsPdf.ts and several pages
+// already do it - and a copy of this particular rule is what let the grid and the payroll build disagree about
+// which days leave excuses.
+import { leaveCover, type LeaveRange } from "../../../src/domain/attendance";
 
 // Org work schedule (stored in settings/attendance; HR edits it). Day status (late/early) is derived on the
 // client from sessions + this schedule. Times are wall-clock in `timezone`; punches are real instants.
@@ -185,7 +190,10 @@ export function enumerateDays(fromYmd: string, toYmd: string): string[] {
 
 // No "on_event": a count_as_work=false event does not excuse the day, so an attendee who never punched is
 // plain "absent" (and docked). count_as_work events show up as credited minutes, not as a status of their own.
-export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "holiday" | "absent";
+// `half_day_leave` = approved leave covered ONE session of the day and nothing was worked in the other, which
+// is a day payroll charges 0.5 days of loss of pay for. It is deliberately distinct from `on_leave`: they are
+// the two sides of the drift this grid used to have with `lopDayUnits`.
+export type DayStatus = "open" | "present" | "late" | "left_early" | "late_early" | "half_day" | "insufficient" | "on_leave" | "half_day_leave" | "holiday" | "absent";
 export type AttendanceRow = { day: string; summary?: DaySummary; status: DayStatus };
 
 // Status of a day that has punches and/or event work credit. `total` is clocked + event-credited minutes;
@@ -211,13 +219,19 @@ export function buildAttendanceRows(opts: {
   sched: AttendanceSchedule;
   summaries: DaySummary[];
   holidays: Set<string>;
-  leaveRanges: { start: string; end: string }[];
+  // The SESSION FLAGS ride along, and they are not optional decoration. Approved leave can cover half a day
+  // (the `start_session`/`end_session` columns on a leave request), and the server excuses exactly that half:
+  // `lopDayUnits` still charges 0.5 days of loss of pay for a PM half-day with no punch. This grid used to take
+  // `{start, end}` only, call the whole day "On leave", and so show as fully excused a day payroll then docked.
+  leaveRanges: LeaveRange[];
   workMinutesByDay?: Map<string, number>; // count_as_work events: minutes credited toward the day's worked total
   joinedYmd?: string; // employee start date; days before it aren't their attendance, so they're omitted (no absent)
 }): AttendanceRow[] {
   const { fromYmd, toYmd, todayYmd, sched, summaries, holidays, leaveRanges, workMinutesByDay = new Map(), joinedYmd } = opts;
   const byDay = new Map(summaries.map((s) => [s.day, s]));
-  const onLeave = (day: string) => leaveRanges.some((r) => r.start <= day && day <= r.end);
+  // The SERVER'S rule, imported rather than restated - see the note on `leaveRanges` above and on
+  // `leaveCover` in src/domain/attendance.ts. 1 = the whole day is excused, 0.5 = one session is.
+  const excusedOn = (day: string) => leaveCover(day, leaveRanges);
   const rows: AttendanceRow[] = [];
   for (const day of enumerateDays(fromYmd, toYmd)) {
     if (joinedYmd && day < joinedYmd) continue; // before the employee joined -> not their attendance
@@ -235,9 +249,15 @@ export function buildAttendanceRows(opts: {
       continue; // weekend / non-working day with no punch
     } else if (holidays.has(day)) {
       rows.push({ day, status: "holiday" });
-    } else if (onLeave(day)) {
+    } else if (excusedOn(day) >= 1) {
       rows.push({ day, status: "on_leave" });
-    } else if (day < todayYmd) {
+    } else if (excusedOn(day) > 0 && day < todayYmd) {
+      // Half the day is excused and the other half was never worked. That is neither "On leave" (it isn't, and
+      // payroll charges 0.5 days for it) nor a plain absence (half of it is spoken for), so it gets its own
+      // status and the same ladder `lopDayUnits` reads. A half-day still in the future stays omitted, like any
+      // other day nobody has clocked into yet.
+      rows.push({ day, status: "half_day_leave" });
+    } else if (day < todayYmd && excusedOn(day) === 0) {
       rows.push({ day, status: "absent" }); // a past working day with no punch and no leave/holiday
     }
     // today / future with no punch yet -> omit
@@ -301,6 +321,7 @@ export const STATUS_UI: Record<DayStatus, StatusUi> = {
   half_day: { label: "Half day", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
   insufficient: { label: "Under hours", badge: "destructive", dot: "bg-rose-500", cell: "bg-rose-50 dark:bg-rose-950/40" },
   on_leave: { label: "On leave", badge: "secondary", dot: "bg-teal-500", cell: "bg-teal-50 dark:bg-teal-950/40" },
+  half_day_leave: { label: "Half day leave", badge: "warning", dot: "bg-amber-500", cell: "bg-amber-50 dark:bg-amber-950/40" },
   holiday: { label: "Holiday", badge: "muted", dot: "bg-violet-500", cell: "bg-violet-50 dark:bg-violet-950/40" },
   absent: { label: "Absent", badge: "destructive", dot: "bg-rose-500", cell: "bg-rose-50 dark:bg-rose-950/40" },
 };

@@ -8,6 +8,10 @@ import { clampPageSize } from "../http/pagination";
 import { notFound, invalidArgument } from "../lib/errors";
 import { parsePayslipTemplate } from "../domain/payslipTemplate";
 import { DOCUMENT_KINDS } from "../services/letterheads";
+import { validateStateMachine, type StateMachine } from "../domain/stateMachines";
+import { assertPublicHttpsUrl } from "../lib/urlGuard";
+import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
+import { stagesInUse } from "../services/ats";
 
 const writeSchema = z.object({ value: z.unknown().optional(), key: z.string().optional() }).strict();
 
@@ -23,9 +27,72 @@ function validateCtc(value: unknown) {
   if (typeof p !== "number" || !Number.isFinite(p) || p <= 0 || p > 100) throw invalidArgument("ctc.basic_pct must be a number in (0, 100]");
 }
 
+/**
+ * `esign`: the master switch, and per-driver vendor config.
+ *
+ * THE URLS ARE THE PART THAT MATTERS, and they were the part not looked at. A driver's `api_base` is where the
+ * app sends the document to be signed - carrying `x-client-id` / `x-client-secret`, i.e. the vendor credentials
+ * out of env (services/esign/cashfree.ts#authHeaders). Left as free text, whoever may write this key could
+ * point it at a host they control and be handed those secrets, or at an internal address the Worker can reach:
+ * an SSRF primitive and a secret-exfiltration path out of a settings capability.
+ *
+ * `assertPublicHttpsUrl` is the guard the rest of the app already applies to every URL a person can nominate -
+ * the workflow webhook action, a push subscription endpoint, and each hop of the vendor's own `signed_doc_url`.
+ * The one URL that is CONFIGURED rather than vendor-supplied, and the only one that travels beside the secret,
+ * had no check at all. `redirect_url` is where the SIGNER is sent when they are done, so it is judged the same
+ * way rather than being left as an open redirect off the org's own domain.
+ *
+ * Both are validated for EVERY driver, present or future: the keys are the provider registry's own
+ * (`configFields`), and a new driver that adds a URL field should not have to remember this file.
+ */
+const URL_CONFIG_KEYS = ["api_base", "redirect_url", "webhook_url", "callback_url"];
 function validateEsign(value: unknown) {
-  if (!isObj(value) || !("enabled" in value)) return;
-  if (typeof value.enabled !== "boolean") throw invalidArgument("esign.enabled must be a boolean");
+  if (!isObj(value)) return;
+  if ("enabled" in value && typeof value.enabled !== "boolean") throw invalidArgument("esign.enabled must be a boolean");
+  if (value.providers == null) return;
+  if (!isObj(value.providers)) throw invalidArgument("esign.providers must be an object keyed by driver id");
+  for (const [driver, cfg] of Object.entries(value.providers)) {
+    if (!isObj(cfg)) throw invalidArgument(`esign.providers.${driver} must be an object`);
+    for (const key of URL_CONFIG_KEYS) {
+      const raw = cfg[key];
+      if (raw == null || raw === "") continue;
+      if (typeof raw !== "string") throw invalidArgument(`esign.providers.${driver}.${key} must be a string`);
+      try {
+        assertPublicHttpsUrl(raw.trim());
+      } catch {
+        throw invalidArgument(`esign.providers.${driver}.${key} must be an https URL on the default port and on a public host (the app sends vendor credentials to it)`);
+      }
+    }
+  }
+}
+
+/**
+ * `gratuity`: what the full & final settlement pays a leaver, and the last money-shaping key with no validator.
+ *
+ * Every field is written straight from a number input, and `domain/settlement.ts#gratuityAmount` guards exactly
+ * one of them (`divisor`). The other two fail silently in opposite directions: `days_per_year: 0` pays every
+ * leaver nothing, and `min_years: 0` pays statutory gratuity to somebody who left in their first week. Both are
+ * one emptied field away (`Number("")` is 0), both land on the one payout there is no later run to correct, and
+ * neither says anything at the time - which is the failure shape `validateTaxConfig` and
+ * `validateProfessionalTax` were added for, one notch up.
+ *
+ * Only checked when the policy is ON: a disabled gratuity pays nothing whatever the numbers say, and refusing
+ * to store a blank form somebody has switched off would be noise.
+ */
+function validateGratuity(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("gratuity must be an object");
+  if (value.enabled != null && typeof value.enabled !== "boolean") throw invalidArgument("gratuity.enabled must be a boolean");
+  if (value.enabled === false) return;
+  const req = (k: string, min: number, what: string) => {
+    if (value[k] == null) return; // absent = the default stands (the merge is shallow, and these are flat)
+    if (typeof value[k] !== "number" || !Number.isFinite(value[k] as number) || (value[k] as number) < min) {
+      throw invalidArgument(`gratuity.${k} must be ${what}`);
+    }
+  };
+  req("min_years", 1, "a number of at least 1 - a qualifying service of 0 pays statutory gratuity to someone who left in their first week");
+  req("days_per_year", 0.5, "a number of at least 0.5 - 0 days per year pays every leaver nothing, without saying so");
+  req("divisor", 1, "a number of at least 1 (the statutory monthly divisor is 26)");
+  req("exemption_cap", 0, "a non-negative number");
 }
 
 // The payslip DESIGN (block layout). Validated here so a malformed template is rejected at save time with a
@@ -191,9 +258,128 @@ function validateOrganization(value: unknown) {
   }
 }
 
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const nonNegative = (v: unknown): v is number => finite(v) && v >= 0;
+
+/**
+ * One regime block of `tax-config`. Every field the charge is computed from must be PRESENT and finite here,
+ * because `getSettingValue` merges the stored blob over the default SHALLOWLY: a row that sets `regimes` at
+ * all replaces the whole default `regimes` map, so a block written with only `slabs` has no
+ * `standardDeduction`, no `rebate87A`, no `cessRate` and no `surcharge` - and none of them are defaulted.
+ *
+ * What that used to produce is the reason this validator exists. `gross - undefined` is NaN, `Math.max(0, NaN)`
+ * is NaN rather than 0, every later step propagates it, and `payroll.ts` drops the TDS line on `tax > 0` -
+ * which NaN fails. So an admin editing the Budget's slabs and omitting a sibling field shipped a month of
+ * payslips with no income tax withheld: no error, no audit signal, nothing until Form 16.
+ */
+function validateTaxRegime(name: string, r: unknown) {
+  const at = `tax-config.regimes.${name}`;
+  if (!isObj(r)) throw invalidArgument(`${at} must be an object`);
+  if (typeof r.label !== "string" || !r.label.trim()) throw invalidArgument(`${at}.label must be a non-empty string`);
+  if (!nonNegative(r.standardDeduction)) throw invalidArgument(`${at}.standardDeduction must be a non-negative number`);
+  if (!nonNegative(r.cessRate)) throw invalidArgument(`${at}.cessRate must be a non-negative number (a percent)`);
+  if (!Array.isArray(r.slabs) || !r.slabs.length) throw invalidArgument(`${at}.slabs must be a non-empty array`);
+  const slabs = r.slabs as unknown[];
+  // ASCENDING, with exactly one open top band. `slabTax` walks the bands in order and treats `upTo: null` as
+  // "the rest", so an unordered table charges the wrong rate on real income rather than failing.
+  let prev = 0;
+  slabs.forEach((s, i) => {
+    if (!isObj(s)) throw invalidArgument(`${at}.slabs[${i}] must be an object`);
+    if (!nonNegative(s.rate)) throw invalidArgument(`${at}.slabs[${i}].rate must be a non-negative number (a percent)`);
+    const top = s.upTo;
+    if (top === null || top === undefined) {
+      if (i !== slabs.length - 1) throw invalidArgument(`${at}.slabs: only the LAST band may have a null upTo (it is the open top band)`);
+      return;
+    }
+    if (!nonNegative(top)) throw invalidArgument(`${at}.slabs[${i}].upTo must be a non-negative number, or null on the last band`);
+    if (top <= prev) throw invalidArgument(`${at}.slabs must ascend by upTo; band ${i} (${top}) does not exceed the one before it (${prev})`);
+    prev = top;
+  });
+  const last = slabs[slabs.length - 1] as Record<string, unknown>;
+  if (last.upTo !== null && last.upTo !== undefined) throw invalidArgument(`${at}.slabs must end with an open band (upTo: null), or income above the top band is untaxed`);
+  const rebate = r.rebate87A;
+  if (!isObj(rebate)) throw invalidArgument(`${at}.rebate87A must be an object { taxableLimit, maxRebate, marginalRelief }`);
+  if (!nonNegative(rebate.taxableLimit)) throw invalidArgument(`${at}.rebate87A.taxableLimit must be a non-negative number`);
+  if (!nonNegative(rebate.maxRebate)) throw invalidArgument(`${at}.rebate87A.maxRebate must be a non-negative number`);
+  if (typeof rebate.marginalRelief !== "boolean") throw invalidArgument(`${at}.rebate87A.marginalRelief must be a boolean`);
+  if (!Array.isArray(r.surcharge)) throw invalidArgument(`${at}.surcharge must be an array (empty when the regime has none)`);
+  let over = -1;
+  r.surcharge.forEach((s, i) => {
+    if (!isObj(s) || !nonNegative(s.over) || !nonNegative(s.rate)) throw invalidArgument(`${at}.surcharge[${i}] must be { over: number, rate: number }`);
+    if (s.over <= over) throw invalidArgument(`${at}.surcharge must ascend by over; band ${i} does not exceed the one before it`);
+    over = s.over;
+  });
+}
+
+// The key that decides what is withheld from every payslip, and it was the one money-shaping key with no
+// validator at all.
+function validateTaxConfig(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("tax-config must be an object");
+  for (const k of ["assessmentYear", "financialYear"] as const) {
+    if (value[k] != null && (typeof value[k] !== "string" || !/^\d{4}-\d{2}$/.test(value[k] as string))) {
+      throw invalidArgument(`tax-config.${k} must look like "2026-27"`);
+    }
+  }
+  if (value.regimes == null) return; // not touching the regimes: the default table stands
+  if (!isObj(value.regimes)) throw invalidArgument("tax-config.regimes must be an object keyed by regime name");
+  // `new` is the only regime this build can compute (domain/incomeTax.ts SUPPORTED_REGIMES), and because the
+  // merge is shallow a `regimes` object that omits it leaves the app with no computable regime at all - which
+  // surfaces as a 500 on every payroll build and every Tax page rather than as a bad setting.
+  if (!("new" in value.regimes)) throw invalidArgument('tax-config.regimes must include "new": it is the regime this build computes, and a stored regimes object REPLACES the default one rather than merging into it');
+  for (const [name, r] of Object.entries(value.regimes)) validateTaxRegime(name, r);
+}
+
+// `professional-tax`: a slab table plus an optional annual cap. Same shallow-merge hazard as tax-config, and
+// the same blast radius one notch smaller - `[...cfg.slabs]` on a stored `{ annual_cap: 2500 }` is a
+// TypeError, i.e. a 500 on every payroll build and every full-and-final from a settings edit.
+function validateProfessionalTax(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("professional-tax must be an object");
+  if (value.annual_cap != null && !nonNegative(value.annual_cap)) throw invalidArgument("professional-tax.annual_cap must be a non-negative number");
+  if (value.slabs == null) return;
+  if (!Array.isArray(value.slabs) || !value.slabs.length) throw invalidArgument("professional-tax.slabs must be a non-empty array");
+  value.slabs.forEach((s, i) => {
+    if (!isObj(s)) throw invalidArgument(`professional-tax.slabs[${i}] must be an object`);
+    if (!nonNegative(s.amount)) throw invalidArgument(`professional-tax.slabs[${i}].amount must be a non-negative number`);
+    const upTo = s.up_to;
+    if (upTo !== null && upTo !== undefined && !nonNegative(upTo)) throw invalidArgument(`professional-tax.slabs[${i}].up_to must be a non-negative number, or null for the top band`);
+  });
+}
+
+/**
+ * The ticket lifecycle (`settings/ticket-workflow`). `validateStateMachine` has always existed and said what a
+ * valid machine is - and its only caller in the repo was its own unit test, because this key was never
+ * registered here. `upsertSetting` writes any JSON to any key, so a machine whose `to` names a state outside
+ * `states` was accepted, cast as a ticket state and written onto a row - and `transitionFor` then found no
+ * transition out of it, leaving the ticket stranded with no column and no legal move.
+ */
+function validateTicketWorkflow(value: unknown) {
+  if (!isObj(value)) throw invalidArgument("ticket-workflow must be an object { states, initial, transitions }");
+  const errors = validateStateMachine(value as unknown as StateMachine);
+  if (errors.length) throw invalidArgument(`ticket-workflow: ${errors.join("; ")}`);
+}
+
+/**
+ * The recruiting pipeline (`settings/ats`) - the OTHER configurable lifecycle, and it was registered nowhere.
+ *
+ * An application's stage is stored as the key, so the rules `validateAtsConfig` states (unique slug keys, a
+ * `hired` terminal) are the ones that decide whether a saved pipeline can be walked at all. Same relationship
+ * to this file as `validateStateMachine`: the rules are pure and testable in the domain, the registration is
+ * what makes them a check rather than a document.
+ */
+function validateAts(value: unknown) {
+  const errors = validateAtsConfig(value);
+  if (errors.length) throw invalidArgument(`ats: ${errors.join("; ")}`);
+}
+
 // Per-key value validation for settings whose shape the money math relies on. Generic settings accept any
 // JSON; a few keys must be guarded so a bad config can't silently corrupt payroll. A Map (not an object) so a
 // setting_id like "constructor" resolves to nothing rather than to an inherited prototype member.
+//
+// THE STATUTORY KEYS BELONG HERE, and their absence was the gap: `tax-config` and `professional-tax` are the
+// two keys that decide what the state takes out of somebody's pay, and neither was validated while six keys
+// with far less at stake were. `upsertSetting` writes any JSON to any key, and `getSettingValue` merges it
+// over the default shallowly - so the only place a partial statutory blob can be caught is here, before it is
+// stored.
 const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["ctc", validateCtc],
   ["esign", validateEsign],
@@ -201,6 +387,11 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["asset-tags", validateAssetTags],
   ["organization", validateOrganization],
   ["attendance", validateAttendance],
+  ["tax-config", validateTaxConfig],
+  ["professional-tax", validateProfessionalTax],
+  ["ticket-workflow", validateTicketWorkflow],
+  ["ats", validateAts],
+  ["gratuity", validateGratuity],
 ]);
 
 // Exported so test/attendanceSettings.test.ts can drive the per-key rules without a request: these guard the
@@ -225,7 +416,25 @@ export const settings = new Hono<AppEnv>()
   })
   .patch("/:setting_id", zValidator("json", writeSchema), async (c) => {
     if (MANAGED_KEYS.has(c.req.param("setting_id"))) throw notFound("setting not found");
-    validateSettingValue(c.req.param("setting_id"), c.req.valid("json").value);
+    const key = c.req.param("setting_id");
+    validateSettingValue(key, c.req.valid("json").value);
+    // The one rule that cannot be decided from the value alone: a pipeline stage may not be REMOVED while live
+    // applications are parked in it. Deleting one leaves those rows naming a stage nothing resolves - no board
+    // column, no `nextStage`, so no way forward - and web/src/pages/Pipeline.tsx shows an active candidate under
+    // "Closed". One read, on a write to this one key, and it names the stages that are in the way so the admin
+    // can move those candidates first.
+    if (key === "ats") {
+      const value = c.req.valid("json").value;
+      const stages = isObj(value) && Array.isArray(value.stages) ? (value.stages as AtsStage[]) : null;
+      if (stages) {
+        const orphaned = orphanedStages(stages, await stagesInUse(c.get("deps")));
+        if (orphaned.length) {
+          throw invalidArgument(
+            `these stages still hold active applications and cannot be removed: ${orphaned.join(", ")}. Move those candidates to another stage first.`,
+          );
+        }
+      }
+    }
     // Optional, like every other patch in the API: send the ETag the edited value was read at and a save that
     // would overwrite somebody else's is refused with 409 instead of silently winning (services/settings.ts).
     const row = await upsertSetting(c.get("deps"), c.get("user"), c.req.param("setting_id"), c.req.valid("json").value, c.req.header("If-Match"));

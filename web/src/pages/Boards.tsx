@@ -790,9 +790,17 @@ const STALE_AFTER_DAYS = 7; // aging signal: card untouched this long (and not d
 
 function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, menu, onDragStart, onClick }: { card: CardT; assignee: { id: string; name: string } | null; catalog: BoardLabel[]; goalName?: string; blockerKey?: string; deptLabel?: string; menu?: ReactNode; onDragStart: () => void; onClick: () => void }) {
   // Due chip: red when overdue, amber when due within 3 days, quiet otherwise. Hidden once delivered.
-  const due = card.due_date && !card.deliver_time ? new Date(card.due_date) : null;
-  const overdue = !!due && due < new Date();
-  const dueSoon = !!due && !overdue && due.getTime() - Date.now() < 3 * 86400e3;
+  //
+  // DAYS, NOT INSTANTS. `due_date` is a date-only value, so `new Date(due_date)` is that day at UTC midnight,
+  // and comparing it against the current instant asks "is it past the START of the due day" - true for all but
+  // the first moments of the day itself. In IST a card due TODAY went red at 05:30 local, with a tooltip
+  // reading "Overdue - was due <today>", and `dueSoon` could never fire for it either because the delta was
+  // already negative. Goals asks the same question correctly (`g.due_date < todayStr()`), so the two surfaces
+  // a person tracks their own work on disagreed about the same column.
+  const dueYmd = card.due_date && !card.deliver_time ? card.due_date.slice(0, 10) : null;
+  const due = dueYmd ? new Date(`${dueYmd}T00:00:00Z`) : null;
+  const overdue = !!dueYmd && dueYmd < todayStr();
+  const dueSoon = !!dueYmd && !overdue && daysBetweenYmd(todayStr(), dueYmd) <= 3;
   const ageDays = card.update_time ? Math.floor((Date.now() - new Date(card.update_time).getTime()) / 86400e3) : 0;
   const stale = ageDays >= STALE_AFTER_DAYS && !card.deliver_time;
   return (
@@ -834,10 +842,12 @@ function CardTile({ card, assignee, catalog, goalName, blockerKey, deptLabel, me
           <Tooltip>
             <TooltipTrigger asChild>
               <span className={cn("inline-flex items-center gap-0.5 text-[10px] font-medium", overdue ? "text-destructive" : dueSoon ? "text-warning" : "text-muted-foreground")}>
-                <CalendarDays className="h-3 w-3" />{due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                {/* Rendered in UTC because that is the timezone the value is anchored at: a date-only day
+                    formatted through the viewer's local clock names the PREVIOUS day west of UTC. */}
+                <CalendarDays className="h-3 w-3" />{due.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" })}
               </span>
             </TooltipTrigger>
-            <TooltipContent>{overdue ? "Overdue — was due" : "Due"} {due.toLocaleDateString()}</TooltipContent>
+            <TooltipContent>{overdue ? "Overdue — was due" : "Due"} {due.toLocaleDateString(undefined, { timeZone: "UTC" })}</TooltipContent>
           </Tooltip>
         )}
         {card.description && <Tooltip><TooltipTrigger asChild><AlignLeft className="h-3 w-3 text-muted-foreground/70" /></TooltipTrigger><TooltipContent>Has a description</TooltipContent></Tooltip>}

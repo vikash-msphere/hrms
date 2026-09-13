@@ -57,7 +57,6 @@ export const compensation = collectionRoutes<CompensationInput, typeof schema.co
     // Optional ?employee=employees/<token> filter. The inbound edge (decodeWireIds) already decoded the query
     // ref to its internal id, so just take the id segment - do NOT decode again (that drops the filter).
     const emp = c.req.query("employee");
-    return listCompensation(c.get("deps"), c.get("scope"), emp ? emp.split("/").pop()! : undefined, page.showDeleted, page.deletedOnly)
-      .then((items) => ({ items, nextPageToken: undefined }));
+    return listCompensation(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, emp ? emp.split("/").pop()! : undefined, page.showDeleted, page.deletedOnly);
   },
 });

@@ -22,11 +22,25 @@ export type SignatureResult = {
   validity: SignatureValidity;
   integrity: boolean; // signed content digest + signature verify (document not altered, signature authentic)
   trusted: boolean; // signer cert chains to a bundled trusted root (as of signing time)
+  /**
+   * The signed byte ranges account for the WHOLE file - everything except the signature container itself.
+   *
+   * Separate from `integrity`, and the distinction is the point. `/ByteRange` is the signer's own claim about
+   * which bytes are covered, so verifying "the bytes it named" always succeeds on a well-formed container,
+   * whatever else is in the file. A PDF is appendable: an incremental update can supersede every visible page
+   * while leaving the original trailer, `/ByteRange` and `/Contents` untouched, and the PKCS#7 still verifies
+   * perfectly - over bytes that are no longer what the document shows. Adobe reports this separately ("the
+   * signature covers only part of the document"); here it decides `validity`, because a stamp that says
+   * "Signature valid" over content nobody signed is worse than no stamp at all.
+   */
+  coversDocument: boolean;
   signerName?: string; // subject CN of the signer certificate
   serialNumber?: string; // certificate serial (hex)
   signingTime?: string; // ISO string, from the signed signing-time attribute if present
   reason?: string; // PDF /Reason, if present
   location?: string; // PDF /Location, if present
+  /** Why this is not a plain "valid" - shown under the stamp, so a refusal says what it saw. */
+  note?: string;
   error?: string;
 };
 
@@ -40,7 +54,16 @@ function ensureEngine() {
   engineReady = true;
 }
 
-type RawSig = { byteRange: [number, number, number, number]; der: Uint8Array; dictStart: number };
+type RawSig = {
+  byteRange: [number, number, number, number];
+  der: Uint8Array;
+  dictStart: number;
+  /** The two ranges are `[0, contents-start]` and `[contents-end, …]` - i.e. they omit the container and
+   *  nothing else. False means the signer named a window rather than the file. */
+  tilesFile: boolean;
+  /** Nothing but whitespace follows the second range: no later revision was appended after this signature. */
+  reachesEnd: boolean;
+};
 
 function toBinary(bytes: Uint8Array): string {
   let s = "";
@@ -62,7 +85,22 @@ function hexToLatin1(hex: string): string {
 
 // Read the four /ByteRange integers and the /Contents (detached PKCS#7) for every signature. The /Contents hex
 // occupies the gap between the two byte-range segments; PDFs zero-pad it, which is fine (BER stops at the SEQ).
-function extractRawSignatures(pdfBin: string): RawSig[] {
+//
+// AND WHAT THE RANGES LEAVE OUT, which is the half that decides whether verifying them means anything. Two
+// properties are measured here, while the offsets are in hand:
+//
+//   `tilesFile`  - the first range starts at byte 0 and ends exactly where `<` begins, and the second resumes
+//                  immediately after `>`. So the covered bytes are the file minus the signature container, and
+//                  nothing else is hidden in a gap the signer declined to sign.
+//   `reachesEnd` - nothing but whitespace follows the second range. This is what an appended incremental
+//                  update breaks: the original signature still verifies over the original revision while the
+//                  pages the reader is looking at come from bytes written after it.
+//
+// Trailing whitespace is tolerated (some producers end the range before a final newline, and whitespace cannot
+// change what renders); any non-space byte past the range is a later revision and is reported as one.
+// Exported for test/pdfSignatureCoverage.test.ts: the coverage decision is the part with security meaning and
+// it is pure string arithmetic, so it is worth pinning without a real signed PDF to hand.
+export function extractRawSignatures(pdfBin: string): RawSig[] {
   const out: RawSig[] = [];
   const re = /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/g;
   let m: RegExpExecArray | null;
@@ -73,7 +111,11 @@ function extractRawSignatures(pdfBin: string): RawSig[] {
     if (lt === -1 || gt === -1 || gt <= lt) continue;
     const der = hexToBytes(gap.slice(lt + 1, gt));
     if (!der.length) continue;
-    out.push({ byteRange: [a, b, c, d], der, dictStart: m.index });
+    // Everything between the end of range 1 and the `<`, and between the `>` and the start of range 2, must be
+    // whitespace - otherwise the ranges skip real content.
+    const tilesFile = a === 0 && gap.slice(0, lt).trim() === "" && gap.slice(gt + 1).trim() === "";
+    const reachesEnd = c + d <= pdfBin.length && pdfBin.slice(c + d).trim() === "";
+    out.push({ byteRange: [a, b, c, d], der, dictStart: m.index, tilesFile, reachesEnd });
   }
   return out;
 }
@@ -114,6 +156,45 @@ function subjectCN(cert: pkijs.Certificate): string | undefined {
   return undefined;
 }
 
+const hexOf = (view: Uint8Array): string => Array.from(view).map((x) => x.toString(16).padStart(2, "0")).join("");
+
+/**
+ * THE certificate that made this signature, resolved from the SignerInfo rather than guessed.
+ *
+ * `sd.certificates[0]` is whatever the producer put first in the bag, and a PKCS#7 that carries a chain
+ * routinely leads with an intermediate CA. `sd.verify({ signer: 0 })` always resolved the right one internally,
+ * so the maths was never wrong - but the NAME, serial and trust anchor shown on the stamp came from the bag's
+ * first entry, which is how a stamp ends up attributing a signature to the wrong subject with a green tick
+ * beside it. The SignerInfo names its certificate either by issuer + serial or by subject key identifier;
+ * both are honoured, and `certificates[0]` remains the last resort so an unusual container still renders.
+ */
+function signerCertificate(sd: pkijs.SignedData): pkijs.Certificate | undefined {
+  const certs = (sd.certificates ?? []).filter((c): c is pkijs.Certificate => c instanceof pkijs.Certificate);
+  const sid = sd.signerInfos?.[0]?.sid as any;
+  try {
+    if (sid?.serialNumber && sid?.issuer) {
+      const want = hexOf(new Uint8Array(sid.serialNumber.valueBlock.valueHexView));
+      const match = certs.find(
+        (c) => hexOf(new Uint8Array(c.serialNumber.valueBlock.valueHexView)) === want && c.issuer.isEqual(sid.issuer),
+      );
+      if (match) return match;
+    }
+    // SubjectKeyIdentifier form: the sid IS the key id, matched against each certificate's own SKI extension.
+    const ski = sid?.valueBlock?.valueHexView ? hexOf(new Uint8Array(sid.valueBlock.valueHexView)) : null;
+    if (ski) {
+      const match = certs.find((c) => {
+        const ext = c.extensions?.find((e) => e.extnID === "2.5.29.14");
+        const raw = (ext?.parsedValue as any)?.valueBlock?.valueHexView ?? (ext as any)?.extnValue?.valueBlock?.valueHexView;
+        return raw ? hexOf(new Uint8Array(raw)).endsWith(ski) : false;
+      });
+      if (match) return match;
+    }
+  } catch {
+    /* an unusual sid shape: fall through to the bag's first certificate */
+  }
+  return certs[0];
+}
+
 function ab(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
@@ -132,7 +213,16 @@ function trustedRoots(): pkijs.Certificate[] {
   return certs;
 }
 
-async function verifyOne(pdfBin: string, raw: RawSig): Promise<SignatureResult> {
+/**
+ * Verify one signature.
+ *
+ * `isLast` says whether this is the newest signature in the file, and it is what makes the coverage rule usable
+ * on a multi-signer document: in a countersigned PDF each earlier signature legitimately stops short of the end
+ * (the next signer's revision was appended after it), so only the LAST one is expected to reach EOF. Earlier
+ * ones still have to TILE - start at 0 and omit nothing but their own container - because that property has
+ * nothing to do with who signed afterwards.
+ */
+async function verifyOne(pdfBin: string, raw: RawSig, isLast: boolean): Promise<SignatureResult> {
   try {
     const ci = new pkijs.ContentInfo({ schema: asn1js.fromBER(ab(raw.der)).result });
     const sd = new pkijs.SignedData({ schema: ci.content });
@@ -150,7 +240,7 @@ async function verifyOne(pdfBin: string, raw: RawSig): Promise<SignatureResult> 
       integrity = res === true || res?.signatureVerified === true;
     } catch { integrity = false; }
 
-    const signer = sd.certificates?.[0] as pkijs.Certificate | undefined;
+    const signer = signerCertificate(sd);
 
     // signing time attribute (1.2.840.113549.1.9.5)
     let signingTime: string | undefined;
@@ -174,28 +264,43 @@ async function verifyOne(pdfBin: string, raw: RawSig): Promise<SignatureResult> 
       } catch { trusted = false; }
     }
 
-    const validity: SignatureValidity = !integrity ? "invalid" : trusted ? "valid" : "unknown";
-    const serial = signer ? Array.from(new Uint8Array(signer.serialNumber.valueBlock.valueHexView)).map((x) => x.toString(16).padStart(2, "0")).join("") : undefined;
+    // COVERAGE, decided before validity. See `coversDocument` on the result type: the digest above proves only
+    // that the bytes the signature NAMED are unaltered, and a file can carry any amount of content those bytes
+    // do not include. A signature over part of a document is not a signature over the document, so it can never
+    // read "valid", however cleanly it verifies and however well its certificate chains.
+    const coversDocument = raw.tilesFile && (isLast ? raw.reachesEnd : true);
+    const coverageNote = !raw.tilesFile
+      ? "the signature covers only part of the file"
+      : !raw.reachesEnd && isLast
+        ? "the document was changed after it was signed (content was appended)"
+        : undefined;
+
+    const validity: SignatureValidity = !integrity ? "invalid" : !coversDocument ? "invalid" : trusted ? "valid" : "unknown";
+    const serial = signer ? hexOf(new Uint8Array(signer.serialNumber.valueBlock.valueHexView)) : undefined;
 
     return {
-      validity, integrity, trusted,
+      validity, integrity, trusted, coversDocument,
       signerName: signer ? subjectCN(signer) : undefined,
       serialNumber: serial,
       signingTime,
       reason: pdfStringAfter(pdfBin, "/Reason", raw.dictStart),
       location: pdfStringAfter(pdfBin, "/Location", raw.dictStart),
+      note: coverageNote ?? (integrity && !trusted ? "the signer's certificate does not chain to a trusted root" : undefined),
     };
   } catch (e) {
-    return { validity: "unknown", integrity: false, trusted: false, error: (e as Error).message || "could not parse signature" };
+    return { validity: "unknown", integrity: false, trusted: false, coversDocument: false, error: (e as Error).message || "could not parse signature" };
   }
 }
 
 // Verify every embedded signature in the PDF. Returns [] when the file carries no digital signature.
+//
+// Document order is revision order (each incremental update appends), so the LAST entry is the newest
+// signature - the one whose ranges have to reach the end of the file. See verifyOne's `isLast`.
 export async function verifyPdfSignatures(bytes: Uint8Array): Promise<SignatureResult[]> {
   ensureEngine();
   const pdfBin = toBinary(bytes);
   const raws = extractRawSignatures(pdfBin);
   const out: SignatureResult[] = [];
-  for (const raw of raws) out.push(await verifyOne(pdfBin, raw));
+  for (let i = 0; i < raws.length; i++) out.push(await verifyOne(pdfBin, raws[i]!, i === raws.length - 1));
   return out;
 }

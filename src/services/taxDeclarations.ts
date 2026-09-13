@@ -90,24 +90,45 @@ export async function updateTaxDeclaration(deps: Deps, actor: AppUser, id: strin
   return updated;
 }
 
-// Payroll/HR verify (accept an amount) or reject.
-export async function verifyTaxDeclaration(deps: Deps, actor: AppUser, id: string, verifiedAmount?: number | null) {
+/**
+ * Payroll/HR verify (accept an amount) or reject.
+ *
+ * VERSION-GUARDED, because the person who benefits from the decision is the one who can move the thing being
+ * decided. A declaration is editable by its own employee for as long as it is not verified - `updateTaxDeclaration`
+ * above deliberately resets `status` to DECLARED on every patch - and the proof document behind it is an
+ * attachment slot that an upload overwrites. Without a guard this verb re-read the row and stamped VERIFIED on
+ * whatever it found, so an edit landing between the verifier reading the queue and pressing the button was
+ * verified unseen: `verified_amount ?? row.declaredAmount` takes the NEW figure, and only a verified amount
+ * reduces withholding (services/taxProjection.ts). That is the single decision in the app whose subject
+ * controls its input, and it was the one with neither an `If-Match` nor a from-state guard.
+ *
+ * `updateAtVersion` applies with or without a header (services/versionGuard.ts says why): sending no `If-Match`
+ * is a request not to be bothered about a stale read, not permission to decide a row that has moved.
+ */
+export async function verifyTaxDeclaration(deps: Deps, actor: AppUser, id: string, verifiedAmount?: number | null, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.taxDeclarations).where(eq(schema.taxDeclarations.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("declaration not found");
+  checkEtag(row, ifMatch);
   if (verifiedAmount != null && verifiedAmount < 0) throw invalidArgument("verified_amount must be >= 0");
-  const updated = (await deps.db.update(schema.taxDeclarations)
-    .set({ status: "VERIFIED", verifiedAmount: verifiedAmount ?? row.declaredAmount, decidedBy: actor.uuid, updatedAt: new Date() })
-    .where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
+  const updated = await updateAtVersion(deps, schema.taxDeclarations, "declaration", row, {
+    status: "VERIFIED",
+    verifiedAmount: verifiedAmount ?? row.declaredAmount,
+    decidedBy: actor.uuid,
+    updatedAt: new Date(),
+  });
   await audit(deps, actor, "tax-declaration.verify", "tax-declarations", id, stateMeta(row.status, "VERIFIED", { employee: `employees/${row.employeeId}`, diff: { status: { from: row.status, to: "VERIFIED" }, verifiedAmount: { from: row.verifiedAmount, to: updated.verifiedAmount } } }), updated);
   // Notify only on an actual status change so a re-verify (amount correction) doesn't re-spam the employee.
   if (row.status !== "VERIFIED")
     await notify(deps, { recipient: row.employeeId, type: "tax.verified", title: "Tax declaration verified", body: "Your investment/tax declaration was verified.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });
   return updated;
 }
-export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: string) {
+// Rejection is guarded the same way, for the converse reason: rejecting the declaration somebody has just
+// corrected sends them a "please review and resubmit" about a row they already fixed.
+export async function rejectTaxDeclaration(deps: Deps, actor: AppUser, id: string, ifMatch?: string) {
   const row = (await deps.db.select().from(schema.taxDeclarations).where(eq(schema.taxDeclarations.uuid, id)).limit(1))[0];
   if (!row || row.deleteTime) throw notFound("declaration not found");
-  const updated = (await deps.db.update(schema.taxDeclarations).set({ status: "REJECTED", verifiedAmount: null, decidedBy: actor.uuid, updatedAt: new Date() }).where(eq(schema.taxDeclarations.uuid, id)).returning())[0]!;
+  checkEtag(row, ifMatch);
+  const updated = await updateAtVersion(deps, schema.taxDeclarations, "declaration", row, { status: "REJECTED", verifiedAmount: null, decidedBy: actor.uuid, updatedAt: new Date() });
   await audit(deps, actor, "tax-declaration.reject", "tax-declarations", id, stateMeta(row.status, "REJECTED", { employee: `employees/${row.employeeId}` }), updated);
   if (row.status !== "REJECTED")
     await notify(deps, { recipient: row.employeeId, type: "tax.rejected", title: "Tax declaration rejected", body: "Your investment/tax declaration was rejected - please review and resubmit.", link: "tax-declarations", subject: `tax-declarations/${id}`, actorId: actor.employeeId });

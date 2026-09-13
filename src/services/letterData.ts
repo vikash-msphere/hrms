@@ -14,10 +14,31 @@ type OrgSettings = { name?: string; legal_name?: string; logo?: string; address?
 
 import { round2 } from "../domain/money";
 import { refDepartments, refPayComponents } from "../lib/refData";
+import { canReadObjectCode } from "../lib/objectAccess";
+import type { AppUser } from "../env";
 
-export async function assembleLetterContext(deps: Deps, employeeId: string): Promise<LetterContext> {
+/**
+ * Build the letter context for `employeeId`, narrowed to what `viewer` may actually read.
+ *
+ * THE ACTOR IS NOT OPTIONAL DECORATION. This function reads the employee's `compensation` timeline and exposes
+ * it as `{{ctc_annual}}`, `{{ctc_monthly}}`, `{{ctc_in_words}}` and a full CTC annexure table - and it used to
+ * take no actor and make no access decision at all. The seeded `hr_admin` grant deliberately holds NO
+ * compensation entry (domain/grants.ts says so in the grant itself: "comp catalogs are payroll-authored; HR
+ * reads for letters/requisitions" - `pay-grades` and `salary-structures`, the catalogues, and not the figures).
+ * But hr_admin does hold `personal-documents.**`, which covers `:generateLetter` and `:previewLetter` - so
+ * anyone who could generate a letter could read anyone's CTC through one, with no compensation grant anywhere.
+ *
+ * The narrowing is the same shape `deniedSubresourceKeys` already applies to PII in the grid: the blocks the
+ * caller may not read are simply absent from the context, so an `{{ctc_annual}}` in a template resolves to
+ * nothing rather than to a figure. A caller is omitted entirely (the cron/system path, a self-service letter
+ * assembled by code rather than by a person) only where there is no principal to decide against.
+ */
+export async function assembleLetterContext(deps: Deps, employeeId: string, viewer?: AppUser): Promise<LetterContext> {
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
   if (!emp || emp.deleteTime) throw notFound("employee not found");
+  // Decided against the EMPLOYEE's code, which is the scoping key every compensation row for them hangs off -
+  // so a `compensation.me.**` rule matches a person's own letter and an org-wide `compensation.**` matches any.
+  const mayReadComp = viewer ? await canReadObjectCode(deps, viewer, "compensation", emp.code) : true;
 
   const org = await getSettingValue<OrgSettings>(deps, "organization", {});
 
@@ -33,12 +54,16 @@ export async function assembleLetterContext(deps: Deps, employeeId: string): Pro
     if (m) managerName = `${m.firstName} ${m.lastName}`;
   }
 
-  // Compensation: current row for CTC; the two newest rows for the increment (old -> new).
-  const comps = await deps.db
-    .select()
-    .from(schema.compensation)
-    .where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.deleteTime)))
-    .orderBy(desc(schema.compensation.effectiveFrom));
+  // Compensation: current row for CTC; the two newest rows for the increment (old -> new). Not read at all for
+  // a caller with no compensation grant - `comp` and `increment` then stay undefined and the letter's CTC
+  // placeholders resolve to nothing (see the header).
+  const comps = mayReadComp
+    ? await deps.db
+        .select()
+        .from(schema.compensation)
+        .where(and(eq(schema.compensation.employeeId, employeeId), isNull(schema.compensation.deleteTime)))
+        .orderBy(desc(schema.compensation.effectiveFrom))
+    : [];
   const current = comps.find((c) => c.effectiveTo === null) ?? comps[0];
   const components = await refPayComponents(deps);
 

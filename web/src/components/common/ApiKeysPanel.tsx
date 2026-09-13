@@ -603,18 +603,24 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
             <Checkbox
               id="key-verbs"
               className="mt-0.5"
+              aria-describedby="key-verbs-hint"
               disabled={draft.maxLevel === "read"}
               checked={draft.allowVerbs}
               onCheckedChange={(v) => setDraft({ ...draft, allowVerbs: v === true })}
             />
-            <Label htmlFor="key-verbs" className="font-normal leading-snug">
-              Allow actions (approve, cancel, download, …)
-              <span className="block text-xs text-muted-foreground">
+            {/* The hint stays OUT of the label: text inside one becomes part of the checkbox's accessible
+                name, and a name carrying "Raise the access level…" makes this box answer to the same label
+                as the Access level select above it. Described, not named. */}
+            <span className="leading-snug">
+              <Label htmlFor="key-verbs" className="font-normal">
+                Allow actions (approve, cancel, download, …)
+              </Label>
+              <span id="key-verbs-hint" className="block text-xs text-muted-foreground">
                 {draft.maxLevel === "read"
                   ? "Unavailable on a read-only key: an action runs a service, so it counts as a write. Raise the access level to allow actions."
                   : "Off by default: an integration that only reads or writes rows should not be able to approve a leave request or pay a run."}
               </span>
-            </Label>
+            </span>
           </div>
 
           {/* What the key will be able to do, in one sentence, before it exists. */}

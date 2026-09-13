@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { grantFor } from "../src/domain/grants";
 import { resolveRequest, decide } from "../src/domain/permissions";
+import { OWNER_REFS } from "../src/domain/manifests";
 
 // DoD #3 acceptance suite: free of BOLA. Every owner-scoped item decision resolves the object's code and
 // matches it against the caller's scope (me / my-dept). These assert object-level isolation directly on the
@@ -73,5 +74,41 @@ describe("BOLA - super_admin reaches every object (the only ** principal)", () =
     expect(d("super_admin", "GET", `/v1/employees/${OTHER}/bank-account`, null)).toBe(true);
     expect(d("super_admin", "PATCH", `/v1/employees/${OTHER}`, null)).toBe(true);
     for (const col of OWNED_COLLECTIONS) expect(d("super_admin", "GET", `/v1/${col}/${owned(OTHER)}`, null)).toBe(true);
+  });
+});
+
+// THE WRITE HALF OF THE SAME PROPERTY, which is decided by a manifest rather than by the engine.
+//
+// A body field that names the new row's OWNER assigns who it belongs to, and middleware/authz.ts gates it by
+// iterating the collection's `OWNER_REFS` entry - so a collection ABSENT from that map has its owner field
+// accepted exactly as sent, whatever the caller's scope. The map's own comment states the rule ("if any of
+// these is ever granted at a narrow (self/dept) scope via the ACL, create-on-behalf-of-another is blocked ...
+// closing a BOLA-write gap"), and two collections whose services take their owner from the body were not in it:
+//
+//   - `approval-delegations.delegator` decides whose approval notifications are copied to the delegate
+//     (services/notifications.ts), so an undeclared field meant naming somebody else as the delegator and
+//     yourself as the delegate - an unconsented subscription to that person's approval queue.
+//   - `background-checks.employee` is settable on create AND on patch, so a check could be filed under, or
+//     moved onto, another person's record.
+//
+// Listed by name rather than derived: the point is that adding a collection whose owner comes off the body
+// means adding it here too.
+describe("BOLA - a body-supplied owner is declared, so the middleware can gate it", () => {
+  const OWNER_BEARING: [collection: string, field: string][] = [
+    ["leave-requests", "employee"],
+    ["reimbursements", "employee"],
+    ["tickets", "employee"],
+    ["compensation", "employee"],
+    ["bonuses", "employee"],
+    ["settlements", "employee"],
+    ["leave-encashments", "employee"],
+    ["positions", "employee"],
+    ["approval-delegations", "delegator"],
+    ["background-checks", "employee"],
+  ];
+  it("names the owner field of every collection that accepts one", () => {
+    for (const [collection, field] of OWNER_BEARING) {
+      expect(OWNER_REFS[collection]?.[field], `${collection}.${field}`).toEqual({ collection: "employees" });
+    }
   });
 });

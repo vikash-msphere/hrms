@@ -220,7 +220,9 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
     goals: [t.goals.code, t.goals.employeeId],
     reviews: [t.reviews.code, t.reviews.employeeId],
     "check-ins": [t.checkIns.code, t.checkIns.employeeId],
-    announcements: [t.announcements.code, t.announcements.authorEmployeeId],
+    // No `announcements` entry: the one measure over that table counts kudos RECEIVED, and this map is the
+    // owner-scope parity - `author_employee_id` for announcements - which is the wrong column for it. Binding
+    // it here was the whole of that bug; see the `kudos` aggregate below for what replaced it.
     tickets: [t.tickets.code, t.tickets.employeeId],
   };
   const scoped = (collection: string, ...conds: (SQL | undefined)[]) => {
@@ -448,16 +450,32 @@ export async function peopleAnalytics(deps: Deps, scopes: Map<string, ListScope>
   if (wants("announcements")) {
     // Recognition received: kudos posts naming the person. A department kudo credits nobody (it carries no
     // per-head points), so it is not counted here either - same rule the leaderboard uses.
+    //
+    // SCOPED BY THE RECIPIENT, WHICH IS WHY THIS ONE DOES NOT GO THROUGH `scoped()`. Every other aggregate here
+    // is about rows the subject OWNS, and `SCOPE_COLUMNS` binds announcements to `author_employee_id` - correct
+    // for "posts you wrote", which is what visibleWhere uses it for, and wrong for this measure, which is about
+    // who the kudos was FOR. Bound to the author, "Recognition received" counted the kudos the VIEWER gave,
+    // filed under each recipient's name (own breadth), or the kudos authored inside the viewer's department
+    // (dept breadth); only an `all`-breadth caller ever saw the number the label claims.
+    //
+    // What bounds it instead is the subject list: `ids` is the set of people this report may be run over, gated
+    // before we get here, and a published, non-disabled kudos post is visible to every reader of the board. So
+    // the honest predicate is "kudos naming these people, that anyone may see" - which is the announcements
+    // visibility rule (services/announcements.ts visibleWhere) minus the author scope: published, not
+    // moderated out, not deleted. `disabled` is the half that was also missing - a kudos an editor had
+    // moderated out still counted toward recognition for a caller who could not see it.
     add("kudos", db
       .select({ employeeId: t.announcements.recipientEmployeeId, received: sql<number>`count(*)`.as("received") })
       .from(t.announcements)
-      .where(scoped("announcements",
+      .where(and(
         eq(t.announcements.kind, "kudos"),
         eq(t.announcements.published, true),
+        eq(t.announcements.disabled, false),
         isNull(t.announcements.deleteTime),
         gte(sql`coalesce(${t.announcements.publishTime}, ${t.announcements.createdAt})`, from),
         lt(sql`coalesce(${t.announcements.publishTime}, ${t.announcements.createdAt})`, toExclusive),
-        inArray(t.announcements.recipientEmployeeId, ids)))
+        inArray(t.announcements.recipientEmployeeId, ids),
+      ))
       .groupBy(t.announcements.recipientEmployeeId));
   }
 

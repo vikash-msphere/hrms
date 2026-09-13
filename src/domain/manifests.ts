@@ -129,6 +129,19 @@ export const OWNER_REFS: Record<string, Record<string, OwnerRef>> = {
   bonuses: { employee: { collection: "employees" } },
   settlements: { employee: { collection: "employees" } },
   "leave-encashments": { employee: { collection: "employees" } },
+  // A delegation says whose approvals somebody else is covering, and `delegator` is the owner: the row is
+  // scoped by `delegator_id` (lib/authzResolve.ts) and `activeDelegatesFor` reads it to decide who gets a copy
+  // of that person's approval nudges (services/notifications.ts). Undeclared, the field was accepted as given -
+  // so a holder of `approval-delegations.write` at ANY scope, including the `me` scope this self-service
+  // feature invites, could name somebody else as the delegator and themselves as the delegate, and every
+  // approval notification addressed to that person was copied to them. Not an escalation (a delegate still
+  // needs their own grant to decide anything) - an unconsented subscription to another manager's queue, and one
+  // the delegator is never told about.
+  "approval-delegations": { delegator: { collection: "employees" } },
+  // A background check belongs to the person it is about, and `employee` is settable on create AND on patch
+  // (services/backgroundChecks.ts) - so without this a narrowly-granted holder could file a check under
+  // somebody else, or re-point an existing one, moving a vendor report into another person's file.
+  "background-checks": { employee: { collection: "employees" } },
 };
 
 // Which SUBJECT-RELATIVE scope tiers are meaningful when granting access on a collection, narrowest-first (so

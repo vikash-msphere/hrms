@@ -114,7 +114,7 @@ describe("audit meta: what a create, a delete and a transition record", () => {
   it("expands an opted-in blob into per-key entries, and leaves every other blob out", () => {
     const before = { ratingsJson: JSON.stringify({ communication: 3, delivery: 4 }) };
     const after = { ratingsJson: JSON.stringify({ communication: 5, delivery: 4 }) };
-    expect(fieldDiff(before, after, ["ratingsJson"], "reviews"))
+    expect(fieldDiff(before, after, ["ratingsJson"], "interview-feedback"))
       .toEqual({ "ratings.communication": { from: 3, to: 5 } }); // only what moved; `delivery` is unchanged
     // A collection that has not opted in keeps the blob out entirely.
     expect(fieldDiff({ linesJson: "[1]" }, { linesJson: "[2]" }, ["linesJson"], "payslips")).toEqual({});
@@ -141,16 +141,44 @@ describe("audit meta: what a create, a delete and a transition record", () => {
     const meta = diffMeta({ actionsJson: "[1]" }, { actionsJson: "[2]" }, { actionsJson: "[2]" }, "automations");
     expect(meta).toEqual({ changed: ["actionsJson"] });
     // An expanded one reports its keys instead, and is NOT also listed by name.
-    const board = diffMeta({ ratingsJson: '{"a":1}' }, { ratingsJson: '{"a":2}' }, { ratingsJson: "" }, "reviews");
+    const board = diffMeta({ ratingsJson: '{"a":1}' }, { ratingsJson: '{"a":2}' }, { ratingsJson: "" }, "interview-feedback");
     expect(board).toEqual({ diff: { "ratings.a": { from: 1, to: 2 } } });
     // An unchanged blob is not reported at all.
     expect(diffMeta({ actionsJson: "[1]" }, { actionsJson: "[1]" }, { actionsJson: "[1]" }, "automations")).toBeUndefined();
   });
 
+  // audit_log is read through a capability that knows nothing about a review's state, and the manager's
+  // assessment is withheld from the employee until the review is SHARED. So none of it may be copied into an
+  // entry - not the ratings blob (which is why `reviews` is not in DIFFABLE_BLOBS) and not the two plain
+  // columns beside it, which no name-matched rule would ever catch.
+  it("keeps a manager's unshared assessment out of the trail entirely", () => {
+    expect(fieldDiff(
+      { managerComment: "not ready", overallRating: 2, ratingsJson: '{"a":1}' },
+      { managerComment: "coasting", overallRating: 3, ratingsJson: '{"a":2}' },
+      ["managerComment", "overallRating", "ratingsJson"],
+      "reviews",
+    )).toEqual({});
+    expect(rowValues({ managerComment: "not ready", overallRating: 2, state: "SELF" }, "reviews")).toEqual({ state: "SELF" });
+  });
+
+  // The suggestion box's one promise. The row's serializer hides an anonymous submitter and the reviewer nudge
+  // drops the actor face; a create that copied `submitter_id` into the meta handed it straight back.
+  it("keeps a suggestion's submitter out of the trail", () => {
+    expect(rowValues({ submitterId: "aa11bb22cc33d", title: "better coffee" }, "suggestions")).toEqual({ title: "better coffee" });
+  });
+
+  // A private 1:1 note is served to the ONE person who wrote it. Neither column matches SECRETISH or the
+  // Json/Key rule, so an edit used to copy both sides of the note into the meta as a from/to pair.
+  it("keeps private check-in notes out of the trail", () => {
+    expect(fieldDiff({ employeeNote: "old" }, { employeeNote: "new" }, ["employeeNote"], "check-ins")).toEqual({});
+    expect(rowValues({ employeeNote: "mine", counterpartNote: "theirs", meetingDate: "2026-01-02" }, "check-ins"))
+      .toEqual({ meetingDate: "2026-01-02" });
+  });
+
   it("applies the field cap and the secret denylist INSIDE a blob too", () => {
     const wide = JSON.stringify(Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`c${i}`, i])));
-    expect(Object.keys(rowValues({ ratingsJson: wide }, "reviews")).length).toBeLessThanOrEqual(24);
-    expect(rowValues({ ratingsJson: JSON.stringify({ apiToken: "tok_live_x", communication: 4 }) }, "reviews"))
+    expect(Object.keys(rowValues({ ratingsJson: wide }, "interview-feedback")).length).toBeLessThanOrEqual(24);
+    expect(rowValues({ ratingsJson: JSON.stringify({ apiToken: "tok_live_x", communication: 4 }) }, "interview-feedback"))
       .toEqual({ "ratings.communication": 4 });
   });
 

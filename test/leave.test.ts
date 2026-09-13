@@ -26,6 +26,9 @@ describe("computeAccrual", () => {
   // left on the 2nd earned a whole month's entitlement for two days. Accrued leave is encashable, so the FnF
   // pays cash for it - the same two days were worth a full month on the way out and a fifteenth of one on the
   // way in.
+  //
+  // The marker comes back as "2026-03~". The tilde says the month was priced against a KNOWN last working day,
+  // which is what stops the exit reconciliation (below) taking the same difference off a second time.
   it("prorates the leaving month, not just the joining month", () => {
     const r = computeAccrual({
       accrualDaysPerYear: ANNUAL,
@@ -37,7 +40,7 @@ describe("computeAccrual", () => {
       currentMs: ms("2026-03-20"),
     });
     expect(r.add).toBeCloseTo(1 + 1 + 2 / 31, 2); // Jan + Feb full, March prorated
-    expect(r.newLastYm).toBe("2026-03");
+    expect(r.newLastYm).toBe("2026-03~");
   });
 
   it("prorates a month that is both the joining and the leaving month", () => {
@@ -51,7 +54,7 @@ describe("computeAccrual", () => {
       currentMs: ms("2026-07-05"),
     });
     expect(r.add).toBeCloseTo(11 / 30, 2);
-    expect(r.newLastYm).toBe("2026-06");
+    expect(r.newLastYm).toBe("2026-06~");
   });
 
   it("still credits a whole month to someone who leaves on its last day", () => {
@@ -79,7 +82,7 @@ describe("computeAccrual", () => {
       frequency: "semi_monthly",
     });
     expect(r.add).toBeCloseTo(1 + 5 / 16, 2);
-    expect(r.newLastYm).toBe("2026-01-H2");
+    expect(r.newLastYm).toBe("2026-01-H2~");
   });
 
   it("is idempotent within a month (nothing new once caught up)", () => {
@@ -169,7 +172,80 @@ describe("computeAccrual", () => {
     // to expect a flat 2: the walk stopped at the right MONTH but paid that month whole, which is the leaving
     // -month proration the case above pins.
     expect(r.add).toBeCloseTo(1 + 15 / 28, 2);
-    expect(r.newLastYm).toBe("2026-02");
+    expect(r.newLastYm).toBe("2026-02~");
+  });
+
+  // REGRESSION. The proration above only ever bit when the last working day was ALREADY on the record the
+  // first time that month was credited - and a month is credited on its first tick, in advance. Someone active
+  // on the 1st who leaves on the 3rd had the whole month paid for two days earlier; the next tick found the
+  // month behind the marker and added nothing, so the over-credit stood. Accrued days are encashable, so it
+  // left the FnF paying cash for a month nobody worked.
+  it("takes back the unearned part of a month that was credited before the exit was known", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-03-03"), // 3 of March's 31 days, recorded after March was credited in full
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-03", // no final mark: March was priced as if employment continued
+      currentMs: ms("2026-03-20"),
+    });
+    expect(r.add).toBeCloseTo(-(1 - 3 / 31), 2);
+    expect(r.newLastYm).toBe("2026-03~");
+  });
+
+  it("takes the reconciliation only once", () => {
+    const first = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-03-03"),
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-03",
+      currentMs: ms("2026-03-20"),
+    });
+    const second = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-03-03"),
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: first.newLastYm, // the marked month
+      currentMs: ms("2026-04-02"), // and a later tick, in a later month
+    });
+    expect(second.add).toBe(0);
+    expect(second.newLastYm).toBe("2026-03~");
+  });
+
+  // A backdated exit: months credited ENTIRELY after the last working day come back in full, not just the
+  // month the exit falls in.
+  it("takes back whole months credited after a backdated last working day", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-02-28"), // February in full; March and April were credited and never earned
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: "2026-04",
+      currentMs: ms("2026-04-20"),
+    });
+    expect(r.add).toBeCloseTo(-2, 5);
+    expect(r.newLastYm).toBe("2026-02~");
+  });
+
+  it("reconciles a half-period credited before the exit was known (semi-monthly)", () => {
+    const r = computeAccrual({
+      accrualDaysPerYear: 24, // 1 day per half-period
+      frequency: "semi_monthly",
+      startMs: ms("2026-01-01"),
+      endMs: ms("2026-01-20"), // 5 of H2's 16 days
+      probationEndMs: null,
+      probationAccrualDaysPerYear: 24,
+      lastAccrualYm: "2026-01-H2",
+      currentMs: ms("2026-01-25"),
+    });
+    expect(r.add).toBeCloseTo(-(1 - 5 / 16), 2);
+    expect(r.newLastYm).toBe("2026-01-H2~");
   });
 
   it("does nothing before the employee starts", () => {

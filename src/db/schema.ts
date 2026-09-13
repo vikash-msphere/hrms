@@ -1557,6 +1557,10 @@ export const auditLog = sqliteTable("audit_log", {
   // entries are about a record rather than a person, and indexing their nulls buys nothing.
   subjIdx: index("audit_subject_idx").on(t.subjectId, t.at).where(sql`${t.subjectId} is not null`),
   sessIdx: index("audit_session_idx").on(t.sessionId, t.at).where(sql`${t.sessionId} is not null`),
+  // "Everything this person did", asked by email rather than by id - the Activity page's actor box. It is a
+  // PREFIX match (services/activity.ts), which is what makes an index usable at all; with the leading-wildcard
+  // LIKE it used to be, this filter scanned the whole table beside three neighbours that are seeks.
+  actorEmailIdx: index("audit_actor_email_idx").on(t.actorEmail, t.at),
   // Partial: nearly every row is a human's, so indexing only the key-borne ones keeps this tiny and costs
   // almost nothing on the write path that every audited request pays.
   keyIdx: index("audit_api_key_idx").on(t.apiKeyId, t.at).where(sql`${t.apiKeyId} is not null`),

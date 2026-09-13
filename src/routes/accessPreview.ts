@@ -11,7 +11,9 @@ import { cloneAccessRules, decideAccessRule, ruleIdFromRef } from "../services/a
 // admins, requestAccess to `everyone` when an org wants the request flow.
 export const accessPreviewRoute = new Hono<AppEnv>().post("/", async (c) => {
   const body = await jsonBody<PreviewBody>(c);
-  return c.json({ results: await previewAccess(c.get("deps"), body) });
+  // The caller rides along: the verb key is collection-level and carries no object, so the only place the
+  // SUBJECTS can be scoped to what this caller may see is inside (services/accessPreview.ts).
+  return c.json({ results: await previewAccess(c.get("deps"), body, c.get("user")) });
 });
 
 export const accessRequestRoute = new Hono<AppEnv>().post("/", async (c) =>

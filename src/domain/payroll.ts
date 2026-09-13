@@ -189,7 +189,9 @@ export function employerCostLines(
 // amount. `pfWages` defaults to basic (the default wage basis). Shared by every CTC row so an earning and its
 // mirror employer contribution compute identically. Nothing about gratuity/PF/ESI is special-cased - each is
 // just a row.
-function componentMonthly(c: CtcComponent, basic: number, gross: number, pfWages = basic): number {
+// Exported for the compensation tab, which prices the same components for display (the earnings list, the
+// deductions list, the employer build-up) and used to carry its own copy of this dispatch. One rule, one place.
+export function componentMonthly(c: CtcComponent, basic: number, gross: number, pfWages = basic): number {
   switch (c.method) {
     case "fixed": return c.rate ?? 0;
     case "percent_base": return basic * ((c.rate ?? 0) / 100);

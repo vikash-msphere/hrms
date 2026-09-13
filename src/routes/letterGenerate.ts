@@ -47,7 +47,9 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
   // Per-template access gate (the real engine): the caller must be able to READ this letter-template object.
   if (!(await canReadObjectId(deps, user, "letter-templates", template.id))) throw forbidden("that letter type isn't available to you");
 
-  const ctx = await assembleLetterContext(deps, employeeId);
+  // The caller rides along so the CTC blocks are dropped for anyone without a compensation grant - the letter
+  // still generates, it just cannot state a figure its author may not read (see services/letterData.ts).
+  const ctx = await assembleLetterContext(deps, employeeId, user);
   // Letterhead: the request's choice wins over the template's, which wins over the org-wide letter default, and
   // each falls back to the organization logo when the id is blank, unknown or its image has gone.
   const orgLogos = await getSettingValue<OrgWithDocumentLogos>(deps, "organization", {});
@@ -112,8 +114,11 @@ export const letterGenerate = new Hono<AppEnv>().post("/", async (c) => {
         secrets: deps.esignSecrets?.[providerId] ?? {},
       });
     } catch (e) {
-      // Unwind the half-created document so a vendor outage doesn't leave an orphan row + R2 object.
+      // Unwind the half-created document so a vendor outage doesn't leave an orphan row + R2 object. The frozen
+      // content sidecar (`freezeLetterContent`, a few lines up) is part of that document and goes with it -
+      // once the row is gone nothing references the sidecar, so nothing could ever find it again.
       await deps.docs.delete(row.r2Key).catch(() => {});
+      await deps.docs.delete(`${row.r2Key}.content`).catch(() => {});
       await deps.db.delete(schema.personalDocuments).where(eq(schema.personalDocuments.uuid, row.uuid));
       throw e;
     }

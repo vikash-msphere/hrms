@@ -1,10 +1,19 @@
 // Indian financial year (Apr-Mar), formatted "YYYY-YY" - the label Form 16, tax declarations and the payroll
-// year all key off. Local calendar on purpose: a UTC month would still call April "last FY" for the first few
-// hours of the 1st in IST, which is exactly when someone files for the new year.
+// year all key off.
+//
+// THE ORG'S CALENDAR, not the browser's. This read `d.getMonth()`/`d.getFullYear()`, which is the VIEWER's
+// local calendar - right about UTC being wrong, wrong about whose local calendar settles it. Around the
+// 31 March / 1 April boundary a viewer whose local date differs from the org's got the wrong year as the
+// default for Form 16 and tax declarations, and the wrong answer to "is this year still running". lib/orgDay.ts
+// exists precisely to end that class of bug and every other date default in the SPA goes through it; this is
+// the one that did not.
+import { todayStr } from "./orgDay";
 
-/** FY label ("2025-26") that the given date falls in. */
-export function currentFy(d = new Date()): string {
-  const start = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
+/** FY label ("2025-26") for a day, defaulting to the org's today. `d` is "YYYY-MM-DD". */
+export function currentFy(d: string = todayStr()): string {
+  const year = Number(d.slice(0, 4));
+  const month = Number(d.slice(5, 7)); // 1-12
+  const start = month >= 4 ? year : year - 1;
   return fyLabel(start);
 }
 
@@ -14,7 +23,7 @@ export function fyLabel(startYear: number): string {
 }
 
 /** The current FY first, then `back` earlier ones - a picker beats a free-text year nobody can format right. */
-export function fyOptions(back = 4, from = new Date()): string[] {
+export function fyOptions(back = 4, from: string = todayStr()): string[] {
   const start = Number(currentFy(from).slice(0, 4));
   return Array.from({ length: back + 1 }, (_, i) => fyLabel(start - i));
 }

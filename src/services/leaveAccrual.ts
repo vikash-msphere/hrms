@@ -5,12 +5,16 @@ import { computeAccrual, roundToIncrement } from "../domain/leave";
 import { allocOwnedCodeRuns } from "./codeAlloc";
 import { getSettingValue } from "./settings";
 import { orgToday, dayStartMs } from "./orgDay";
-import { runBatchChecked, insertBatches, type CheckedStmt } from "../lib/dbBatch";
+import { runBatchChecked, insertBatches, chunk, type CheckedStmt } from "../lib/dbBatch";
 import { refLeaveTypes } from "../lib/refData";
 import { audit } from "../lib/audit";
 
 // How accrued balances are rounded (settings/leave_accrual). "half" keeps balances in 0.5-day steps (the
 // default - prorated joining months otherwise produce values like 2.41); "day" = whole days; "none" = exact.
+// Statements per D1 batch for the accrual write. One batch is one subrequest whatever it holds, so this is not
+// about round-trips - it bounds how big a single request the tick can build (see the note at the write below).
+const ACCRUAL_BATCH_STMTS = 200;
+
 const INCREMENT: Record<string, number> = { none: 0, half: 0.5, day: 1 };
 async function accrualIncrement(deps: Deps): Promise<number> {
   const v = await getSettingValue<{ rounding?: string }>(deps, "leave_accrual", {});
@@ -53,6 +57,13 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // so two months of slack covers a tick that was missed; past that their marker is at their end month and every
   // later pass computes `add: 0` and writes nothing anyway. A `terminated` row with NO end date is excluded, as
   // before - there is no clamp to stop it accruing forever.
+  //
+  // IT IS ALSO WHAT CARRIES THE EXIT RECONCILIATION. A month is credited on its first tick, in advance, so a
+  // last working day that appears mid-month lands after that month was already paid for in full; the claw-back
+  // for it (domain/leave.ts) happens on the next tick this roster includes them in. The window therefore has to
+  // outlast the gap between "someone leaves" and "their end date is recorded", which two months does for any
+  // ordinary exit - and an exit backdated further than that keeps the over-credit, which is the one case worth
+  // knowing about when reading a leaver's balance.
   const leaverCutoff = new Date(now - 62 * 86_400_000);
   // THE FIVE COLUMNS THE WALK BELOW ACTUALLY READS, not the whole row.
   //
@@ -88,6 +99,11 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // pure lookups, instead of one query per pair (which alone could blow the per-invocation subrequest budget).
   // Same reason as the roster read above: the map is keyed (employee, type) and the walk reads the row's id,
   // its balance and its accrual marker. `code` and the carry-forward marker are along for the ride otherwise.
+  //
+  // NARROWED TO THE ONE TYPE when the caller named one. The single-type path is not the nightly tick - it is a
+  // PATCH on a leave type (services/leaveTypes.ts afterUpdate), i.e. an HTTP request - and it was reading the
+  // whole leave_balances table, headcount x every type, to use one column of it. The roster read above is
+  // narrowed for its memory floor; this is the same floor and the same read.
   const balances = await deps.db
     .select({
       uuid: schema.leaveBalances.uuid,
@@ -96,7 +112,8 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       balanceDays: schema.leaveBalances.balanceDays,
       lastAccrualYm: schema.leaveBalances.lastAccrualYm,
     })
-    .from(schema.leaveBalances);
+    .from(schema.leaveBalances)
+    .where(onlyLeaveTypeId ? eq(schema.leaveBalances.leaveTypeId, onlyLeaveTypeId) : undefined);
   const balByKey = new Map(balances.map((b) => [`${b.employeeId}|${b.leaveTypeId}`, b]));
   // Every write of the tick collects into ONE atomic batch. The batch costs one subrequest where a
   // month-boundary night would cost one per balance row. Because the write is an ABSOLUTE balance derived from
@@ -138,7 +155,14 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       if (existing) {
         // Round the resulting balance to the configured increment; also re-rounds (normalizes) an existing
         // balance even when no new month accrued, so a tidied policy fixes old values like 2.41 on the next run.
-        const newBalance = roundToIncrement(existing.balanceDays + add, inc);
+        //
+        // `add` CAN BE NEGATIVE, and only in one case: an employee's last working day has appeared for a month
+        // that was already credited in advance, so the unearned part of it is taken back (domain/leave.ts, the
+        // exit reconciliation). Floored at zero, like every other debit against a balance in the app
+        // (services/settlements.ts writes `max(0, …)` for the same reason): the employee may already have SPENT
+        // those days, and a negative balance is not a thing this schema means anything by - the claw-back can
+        // remove days that are still there and no more.
+        const newBalance = Math.max(0, roundToIncrement(existing.balanceDays + add, inc));
         if (newBalance === existing.balanceDays && newLastYm === existing.lastAccrualYm) continue; // nothing changed
         // Compare-and-set on the balance we read: `newBalance` is absolute, so writing it blind would undo any
         // debit/credit committed between the snapshot at the top of this function and the batch at the bottom
@@ -202,10 +226,22 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
     }
     newRows.push({ code, employeeId: p.employeeId, leaveTypeId: p.leaveTypeId, balanceDays: p.balanceDays, lastAccrualYm: p.lastAccrualYm });
   }
-  // One atomic batch for the whole tick: the guarded updates plus any first-touch inserts, the latter split to
-  // stay inside the D1 bound-parameter cap (insertBatches measures the real per-row parameter count rather
-  // than guessing from the columns set).
-  const lost = await runBatchChecked(deps.db, [...updates, ...insertBatches(newRows, (group) => deps.db.insert(schema.leaveBalances).values(group))]);
+  // The tick's writes, as a small number of batches rather than one unbounded one. Each batch is one D1
+  // round-trip and one implicit transaction; the inserts are additionally split to stay inside the bound-
+  // parameter cap (insertBatches measures the real per-row parameter count rather than guessing at columns).
+  //
+  // WHY THIS IS CHUNKED AT ALL. `updates` is one guarded UPDATE per (employee x accruing type) that moved, so a
+  // month-boundary night on a 500-person org with five accruing types is 2,500 statements - in ONE db.batch(),
+  // i.e. one request carrying every one of them. That is not a round-trip count problem (the batch is the fix
+  // for those), it is a single request whose size grows with the org. ACCRUAL_BATCH_STMTS trades a handful of
+  // subrequests for a bounded statement count per call; the guards are per statement, so splitting changes no
+  // outcome - a claim that loses its race loses it in whichever batch it rides in.
+  const writes: (CheckedStmt | ReturnType<typeof insertBatches>[number])[] = [
+    ...updates,
+    ...insertBatches(newRows, (group) => deps.db.insert(schema.leaveBalances).values(group)),
+  ];
+  const lost: string[] = [];
+  for (const group of chunk(writes, ACCRUAL_BATCH_STMTS)) lost.push(...(await runBatchChecked(deps.db, group)));
   // A claim that matched nothing is a balance that moved under the snapshot - an approved leave request, an
   // encashment - between the read at the top of this function and the write here. Nothing is wrong and nothing
   // is retried: `last_accrual_ym` was not written, so the same month is still owed and accrues on the next tick

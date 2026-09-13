@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "00e3025c-88f2-44d7-8a09-7f17dbe890db",
+  "id": "62d8c258-b887-40e6-93e2-112b08762c65",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -2560,6 +2560,14 @@
           ],
           "isUnique": false,
           "where": "\"audit_log\".\"session_id\" is not null"
+        },
+        "audit_actor_email_idx": {
+          "name": "audit_actor_email_idx",
+          "columns": [
+            "actor_email",
+            "at"
+          ],
+          "isUnique": false
         },
         "audit_api_key_idx": {
           "name": "audit_api_key_idx",

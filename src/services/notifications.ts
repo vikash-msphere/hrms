@@ -9,7 +9,7 @@ import { keysetPage } from "./keysetPage";
 import { etagOf } from "../http/serialize";
 import { getSettingValue } from "./settings";
 import { DEFAULT_NOTIFICATION_CONFIG, eventConfig, isMutedByUser, isDigestible, parseNotificationPrefs, type NotificationConfig, type NotificationPriority } from "../domain/notificationConfig";
-import { queueForDigest } from "./notificationDigest";
+import { queueForDigest, queueManyForDigest } from "./notificationDigest";
 import { pushToEmployee } from "./webPush";
 import { insertBatches, runBatch } from "../lib/dbBatch";
 import { activeDelegatesFor } from "./approvalDelegations";
@@ -184,8 +184,9 @@ export async function notifyMany(
         .where(inArray(schema.employees.uuid, c)),
     );
     const empCode = new Map(emps.map((e) => [e.uuid, e.code]));
+    const prefsFor = new Map(emps.map((e) => [e.uuid, parseNotificationPrefs(e.prefs)]));
     // Drop recipients who have muted this category for themselves (per-user prefs layered over the org config).
-    const mutedFor = new Set(emps.filter((e) => isMutedByUser(parseNotificationPrefs(e.prefs), input.type)).map((e) => e.uuid));
+    const mutedFor = new Set(emps.filter((e) => isMutedByUser(prefsFor.get(e.uuid), input.type)).map((e) => e.uuid));
     // Denormalize the actor's display name once (a broadcast usually has none - it's a system event).
     const actorName = input.actorId ? nameOf(emps.find((e) => e.uuid === input.actorId)) : null;
     const body = input.body?.trim() || null;
@@ -195,7 +196,27 @@ export async function notifyMany(
     // it was about, and the "New" marker the web draws from `subject` never appeared for any of them.
     const subject = input.subject?.trim() || null;
     const actorId = input.actorId || null;
-    const targets = uniq.filter((rid) => !mutedFor.has(rid));
+    const titleOf = (rid: string) => (input.titleFor ? input.titleFor(rid)?.trim() : null) || input.title!;
+    const bodyOf = (rid: string) => (input.bodyFor ? input.bodyFor(rid)?.trim() || null : body);
+    const remaining = uniq.filter((rid) => !mutedFor.has(rid));
+    // THE DIGEST PREFERENCE APPLIES HERE TOO. `notify()` parks low-signal informational items for the daily
+    // summary; this path read the same prefs blob (it parses it for the mute check one line up) and applied
+    // only the mute half, so every fan-out went straight to the bell - mentions, announcements, ticket
+    // fan-outs, and, since the nightly reminders moved onto this function, precisely the low-priority no-CTA
+    // items the digest exists for. Somebody turning "daily digest" on saw essentially no change.
+    //
+    // The partition is per recipient because the preference is: one audience can hold both kinds of person.
+    // The digest side is parked in ONE batch (`queueManyForDigest`), so honouring the preference costs the
+    // fan-out a single extra round-trip rather than the per-recipient write this function exists to avoid.
+    const digestFor = remaining.filter((rid) => isDigestible(prefsFor.get(rid), priority, action));
+    if (digestFor.length) {
+      await queueManyForDigest(
+        deps,
+        digestFor.map((rid) => ({ recipientId: rid, type: input.type, title: titleOf(rid), body: bodyOf(rid), link })),
+      );
+    }
+    const digested = new Set(digestFor);
+    const targets = remaining.filter((rid) => !digested.has(rid));
     if (!targets.length) return;
     // Retried on a lost code race, for the reason notify() is: allocation and insert are not one statement, so
     // a burst against the same person can still have a loser, and the whole batch used to go out through the
@@ -212,8 +233,8 @@ export async function notifyMany(
         code: codes.get(rid)!,
         recipientId: rid,
         type: input.type,
-        title: (input.titleFor ? input.titleFor(rid)?.trim() : null) || input.title,
-        body: (input.bodyFor ? input.bodyFor(rid)?.trim() || null : body),
+        title: titleOf(rid),
+        body: bodyOf(rid),
         link,
         subject: input.subjectFor ? input.subjectFor(rid)?.trim() || null : subject,
         priority,
@@ -252,14 +273,15 @@ export async function audienceEmployeeIds(deps: Deps, audience: Audience): Promi
   if (audience.kind === "none") return [];
   if (audience.kind === "everyone") return activeEmployeeIds(deps);
   if (audience.kind === "employees") return audience.employees.map(bareId);
-  // department: direct members, excluding deleted. The audience is written by the workflow builder, which
-  // stores the department the way every other ref on the wire is written (`departments/<id>`) so the inbound
-  // edge decodes it; a bare id is accepted too, for a rule authored against the raw column.
+  // department: its LIVE members. The audience is written by the workflow builder, which stores the department
+  // the way every other ref on the wire is written (`departments/<id>`) so the inbound edge decodes it; a bare
+  // id is accepted too, for a rule authored against the raw column. Same roster rule as `activeEmployeeIds`
+  // below - see the note there for why `status` has to be part of it.
   const rows = await deps.db
-    .select({ uuid: schema.employees.uuid, deleteTime: schema.employees.deleteTime })
+    .select({ uuid: schema.employees.uuid })
     .from(schema.employees)
-    .where(eq(schema.employees.departmentId, bareId(audience.department)));
-  return rows.filter((r) => !r.deleteTime).map((r) => r.uuid);
+    .where(and(eq(schema.employees.departmentId, bareId(audience.department)), ...LIVE_EMPLOYEE));
+  return rows.map((r) => r.uuid);
 }
 
 // Notify an employee's manager that a report filed something needing review (the natural approver). No-op if
@@ -295,10 +317,34 @@ export async function managerIdOf(deps: Deps, employeeId: string): Promise<strin
   return e?.m && e.m !== employeeId ? e.m : null;
 }
 
-// All active (non-deleted) employee uuids - the broadcast audience for org-wide notifications (announcements).
+/**
+ * Everyone still HERE - the broadcast audience for org-wide notifications (announcements) and, through
+ * `audienceEmployeeIds`, for the workflow engine's `emailAudience` action.
+ *
+ * THREE COLUMNS, and `status` is the one that was missing. `status` and the soft-delete mark are independent:
+ * offboarding stamps `status: "terminated"` and disables the login (services/transitions.ts) and never touches
+ * `delete_time`, while the generic soft delete stamps `delete_time` and never touches `status`. Filtering only
+ * the second therefore kept every leaver the org has ever offboarded in the org-wide audience - and this
+ * audience reaches further than a bell: lifecycle.ts mails the same list when the author asks for it, and
+ * `notifyMany` pushes to registered devices, so a departed employee's phone went on buzzing with company
+ * announcements. `disabled` joins them because it is the same statement: an account switched off is not
+ * somebody to broadcast to either.
+ *
+ * The strict reading is what every other roster in the app already uses - src/cron.ts `activeRoster`,
+ * services/documentAck.ts `ackRoster`, and payroll's own build roster - each of which says so in a comment.
+ * This was the outlier, and the broadcast one.
+ *
+ * Filtered in SQL rather than in the isolate: the rows it drops do not have to be read, and D1 bills rows read.
+ */
+const LIVE_EMPLOYEE = [
+  eq(schema.employees.status, "active"),
+  isNull(schema.employees.deleteTime),
+  eq(schema.employees.disabled, false),
+];
+
 export async function activeEmployeeIds(deps: Deps): Promise<string[]> {
-  const rows = await deps.db.select({ uuid: schema.employees.uuid, deleteTime: schema.employees.deleteTime }).from(schema.employees);
-  return rows.filter((r) => !r.deleteTime).map((r) => r.uuid);
+  const rows = await deps.db.select({ uuid: schema.employees.uuid }).from(schema.employees).where(and(...LIVE_EMPLOYEE));
+  return rows.map((r) => r.uuid);
 }
 
 export async function listNotifications(

@@ -99,12 +99,17 @@ export async function paginate<T>(
   // The cursor carries the wire TOKEN; decode it back to the internal uid the seek compares against. Same
   // shape as keysetPage: a token that does not decode (forged, foreign, from another collection, or minted
   // before this collection was wired) falls back to a TIMESTAMP-ONLY bound rather than erroring or leaking.
-  // That bound can only re-show rows at the boundary instant, never skip them, so the fallback is the safe
-  // direction of wrong.
+  //
+  // That fallback is INCLUSIVE of the boundary instant, deliberately. With no uid to tiebreak on, the only two
+  // choices are to re-show the rows that tie at the cursor's timestamp or to skip them, and a strict `>` skips
+  // them: `findIndex` lands past every tied row, so they are never returned by any page. Ties are not the
+  // exotic case here either - they are the normal case in exactly the situation this branch exists for, since
+  // rows written in one seed or one batch all share `createdAt` (see the `byUid` note above). A duplicate row
+  // across a page boundary is a visible oddity; a row that no page ever shows is data loss.
   const curUid = cur && wire ? await wire.codec.decode(wire.collection, cur.uid) : cur?.uid ?? null;
   const past = (e: T) =>
     (dir === "asc" ? when(e) > cur!.createTimeMs : when(e) < cur!.createTimeMs) ||
-    (curUid !== null && when(e) === cur!.createTimeMs && uid(e) > curUid);
+    (curUid === null ? when(e) === cur!.createTimeMs : when(e) === cur!.createTimeMs && uid(e) > curUid);
   const start = cur ? sorted.findIndex(past) : 0;
   const slice = start < 0 ? [] : sorted.slice(start, start + maxPageSize);
   const last = slice[slice.length - 1];

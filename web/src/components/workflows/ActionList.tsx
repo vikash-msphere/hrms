@@ -54,16 +54,41 @@ function capturesBefore(actions: Action[], i: number): string[] {
 }
 
 export function ActionList({ actions, onChange, meta, triggerType, inArm }: { actions: Action[]; onChange: (a: Action[]) => void; meta: WorkflowMeta | null; triggerType: string; inArm?: boolean }) {
+  // A STABLE KEY PER ACTION, not the array index.
+  //
+  // Two of the editors below keep local state derived from the action they were opened on - the apiCall
+  // editor's "create / act on a record / raw" mode, and RecordCall's chosen record type - and both are
+  // deliberately seeded once rather than re-read, so that typing cannot swap the form out from under the
+  // caret. With index keys, "the same slot" is not "the same action": delete step 1, or press Move up, and
+  // step 2 renders into the surviving component and inherits step 1's mode, so a call authored as "Act on a
+  // record" reopens in the Raw editor and is then edited through the wrong form.
+  //
+  // The ids ride ALONGSIDE the list through the same splice/swap the actions take, so a component follows its
+  // action instead of following its position. `actions` is a controlled prop of plain JSON objects with no
+  // identity of their own, which is why the ids live here and not on the data.
+  const idsRef = useRef<number[]>([]);
+  const nextId = useRef(0);
+  const ids = idsRef.current;
+  while (ids.length < actions.length) ids.push(nextId.current++);
+  if (ids.length > actions.length) ids.length = actions.length;
+
   const set = (i: number, a: Action) => onChange(actions.map((x, j) => (j === i ? a : x)));
-  const del = (i: number) => onChange(actions.filter((_, j) => j !== i));
-  const move = (i: number, d: -1 | 1) => { const j = i + d; if (j < 0 || j >= actions.length) return; const copy = [...actions]; [copy[i], copy[j]] = [copy[j]!, copy[i]!]; onChange(copy); };
+  const del = (i: number) => { ids.splice(i, 1); onChange(actions.filter((_, j) => j !== i)); };
+  const move = (i: number, d: -1 | 1) => {
+    const j = i + d;
+    if (j < 0 || j >= actions.length) return;
+    const copy = [...actions];
+    [copy[i], copy[j]] = [copy[j]!, copy[i]!];
+    [ids[i], ids[j]] = [ids[j]!, ids[i]!];
+    onChange(copy);
+  };
   const add = (mk: () => Action) => onChange([...actions, mk()]);
   const hasTerminalWait = actions.some((a) => a.kind === "waitFor");
 
   return (
     <div className="space-y-2">
       {actions.map((a, i) => (
-        <Card key={i} className="p-3">
+        <Card key={ids[i]} className="p-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{i + 1}. {LABEL[a.kind]}</span>
             <div className="flex gap-0.5">
@@ -242,7 +267,7 @@ function rowsToBody(rows: BodyRow[]): Record<string, unknown> | undefined {
   return out;
 }
 
-function ApiCallEditor({ action, onChange, meta, vars }: { action: Extract<Action, { kind: "apiCall" }>; onChange: (a: Action) => void; meta: WorkflowMeta | null; vars: Variable[] }) {
+function ApiCallEditor({ action, onChange: onChangeProp, meta, vars }: { action: Extract<Action, { kind: "apiCall" }>; onChange: (a: Action) => void; meta: WorkflowMeta | null; vars: Variable[] }) {
   const resources = meta?.resources ?? [];
   // The shape a saved call was written in - the mode to OPEN on. It is only the opening guess: kept as the
   // live value, typing a variable into a raw call's path ("/v1/{{subject}}:prioritize" - a custom method on
@@ -251,6 +276,22 @@ function ApiCallEditor({ action, onChange, meta, vars }: { action: Extract<Actio
   // kind of call this is, that answer stands until they change it.
   const inferred = action.method.toUpperCase() === "POST" && !action.path.includes("{{") && /^\/v1\/[a-z-]+$/.test(action.path) ? "create" : action.path.includes("{{") ? "record" : "raw";
   const [mode, setMode] = useState<"create" | "record" | "raw">(inferred);
+  // ...and RE-SEEDED when a DIFFERENT action arrives in this slot, exactly the way `rows` below is. "Kept as
+  // the live value" is about our own writes - it must not also mean keeping the mode of an action that is no
+  // longer here. Stable keys (see ActionList) make that a rare event rather than the routine consequence of
+  // pressing Delete or Move up, but a parent that swaps the whole list in place can still do it.
+  const emittedAction = useRef(JSON.stringify(action));
+  const incomingAction = JSON.stringify(action);
+  if (incomingAction !== emittedAction.current) {
+    emittedAction.current = incomingAction;
+    setMode(inferred);
+  }
+  // Every write out of this editor and its children goes through here, so the ref above records what WE sent
+  // and the comparison only ever fires on a change from outside.
+  const onChange = (a: Action) => {
+    emittedAction.current = JSON.stringify(a);
+    onChangeProp(a);
+  };
   // The rows are state of their own rather than a read of `action.body`, because a body is an OBJECT: a row
   // whose key has not been typed yet has nowhere to live in it. Derived, "Add field" looked broken - the
   // empty row it appended was dropped by `rowsToBody` on the way out and never came back, so a rule's body
@@ -346,12 +387,27 @@ function RecordCall({ action, onChange, resources, vars, bodyForm }: { action: E
   const record = colon >= 0 ? withoutV1.slice(0, colon) : withoutV1;
   const verb = colon >= 0 ? withoutV1.slice(colon + 1) : action.method.toUpperCase() === "DELETE" ? "delete" : "update";
   const [resourceName, setResourceName] = useState("");
+  // Cleared when a DIFFERENT action lands in this slot, for the reason the apiCall editor re-seeds its mode:
+  // this is the record type whose custom verbs the dropdown lists, and carrying one action's answer over to
+  // another offers verbs the new record does not have. `action.path` is the whole of what this component
+  // reads, so it is the whole of what "a different action" means here.
+  const seededFor = useRef(action.path);
+  if (seededFor.current !== action.path && resourceName) {
+    // Only on a path this component did not itself write: every write below goes through `onChange` with a
+    // path built from the current `record`/`verb`, so the ref is advanced on the way out too.
+    seededFor.current = action.path;
+    setResourceName("");
+  }
+  const emit = (a: Action) => {
+    if (a.kind === "apiCall") seededFor.current = a.path;
+    onChange(a);
+  };
   const resource = resources.find((r) => r.name === resourceName);
-  const setRecord = (r: string) => onChange({ ...action, path: `/v1/${r}${verb === "update" || verb === "delete" ? "" : `:${verb}`}` });
+  const setRecord = (r: string) => emit({ ...action, path: `/v1/${r}${verb === "update" || verb === "delete" ? "" : `:${verb}`}` });
   const setVerb = (v: string) => {
-    if (v === "update") onChange({ ...action, method: "PATCH", path: `/v1/${record}` });
-    else if (v === "delete") onChange({ ...action, method: "DELETE", path: `/v1/${record}` });
-    else onChange({ ...action, method: "POST", path: `/v1/${record}:${v}` });
+    if (v === "update") emit({ ...action, method: "PATCH", path: `/v1/${record}` });
+    else if (v === "delete") emit({ ...action, method: "DELETE", path: `/v1/${record}` });
+    else emit({ ...action, method: "POST", path: `/v1/${record}:${v}` });
   };
   return (
     <>

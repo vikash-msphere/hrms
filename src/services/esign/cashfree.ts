@@ -25,7 +25,42 @@ function mapStatus(s: unknown): EsignStatus {
   }
 }
 
-const apiBase = (cfg: EsignProviderCfg): string => String(cfg.api_base || DEFAULT_BASE).replace(/\/+$/, "");
+// The vendor's base URL - CONFIGURATION, not a constant: `settings/esign` carries a per-driver `api_base` so an
+// org can point at the sandbox. That makes it a caller-supplied URL on the one request path that travels WITH
+// the credentials (`authHeaders` sends the client id + secret on every call below), so it is judged by the same
+// guard `downloadSigned` runs over the vendor's own `signed_doc_url`, and for the reason written out there: a
+// URL somebody configured must not be able to turn this into an internal fetch - or into a way to read this
+// org's vendor secret out of the Worker by naming a host that answers.
+//
+// TWO PLACES, deliberately. routes/settings.ts#validateEsign refuses to STORE one that fails, which is the
+// first line; this is the second, for a row written before that validator existed. Same rule, and the same
+// shape as domain/incomeTax.ts#assertComputableRegime.
+function apiBase(cfg: EsignProviderCfg): string {
+  const raw = String(cfg.api_base || DEFAULT_BASE).replace(/\/+$/, "");
+  try {
+    assertPublicHttpsUrl(raw);
+  } catch {
+    throw new Error(`esign: settings/esign api_base (${raw}) is not a permitted vendor URL - it must be https, on the default port, and on a public host`);
+  }
+  return raw;
+}
+
+// Where the signer lands once they are done. Also configuration, also somewhere a person is SENT - so a stored
+// value that is not a public https URL is dropped rather than passed to the vendor, which is the difference
+// between an e-signature journey that ends on the org's own app and one that ends wherever an admin (or someone
+// who reached the settings key) decided. Dropped rather than thrown, unlike `api_base`: the request can be
+// completed without it, and refusing to sign because a cosmetic redirect is malformed helps nobody.
+function redirectUrl(cfg: EsignProviderCfg): string | undefined {
+  const raw = String(cfg.redirect_url ?? "").trim();
+  if (!raw) return undefined;
+  try {
+    assertPublicHttpsUrl(raw);
+  } catch {
+    console.warn(`[esign] settings/esign redirect_url (${raw}) is not a permitted URL; the signer will not be redirected`);
+    return undefined;
+  }
+  return raw;
+}
 const num = (v: unknown, dflt: number): number => (Number.isFinite(Number(v)) ? Number(v) : dflt);
 
 // Append Cashfree's error body to a failure message so the real reason is visible (e.g. 422 ->
@@ -203,7 +238,7 @@ export const cashfreeProvider: EsignProvider = {
       auth_type: "AADHAAR",
       expiry_in_days: String(Math.min(15, Math.max(1, num(i.cfg.expiry_days, 7)))),
       capture_location: false,
-      redirect_url: i.cfg.redirect_url || undefined,
+      redirect_url: redirectUrl(i.cfg),
       signers: i.signers.map((s, idx) => ({
         name: s.name,
         email: s.email,
@@ -226,10 +261,16 @@ export const cashfreeProvider: EsignProvider = {
 
   async parseWebhook(i: WebhookInput): Promise<WebhookResult> {
     // Verify base64 HMAC-SHA256 over (timestamp + rawBody) before trusting anything. Cashfree signs with the
-    // client secret (apiSecret); webhookSecret is accepted as an override if an operator configures one.
+    // client secret (apiSecret); webhookSecret is an OVERRIDE for an operator who has configured a separate one.
+    //
+    // The override has to come FIRST to be one. Written `apiSecret || webhookSecret` it was a fallback reachable
+    // only when the client secret is absent - which is a configuration that cannot create a request in the first
+    // place (`requiredSecrets`), so the override was dead. An operator who set a distinct webhook secret had
+    // every delivery fail `timingSafeEqual` silently: `parseWebhook` returns null, the route still acks, and the
+    // signature only ever completes if the poll fallback happens to run.
     const provided = i.headers["x-webhook-signature"] || "";
     const ts = i.headers["x-webhook-timestamp"] || "";
-    const secret = i.secrets.apiSecret || i.secrets.webhookSecret;
+    const secret = i.secrets.webhookSecret || i.secrets.apiSecret;
     if (!secret || !provided || !ts) return null;
     const expected = await hmacB64(secret, ts + i.rawBody);
     if (!timingSafeEqual(provided, expected)) return null;

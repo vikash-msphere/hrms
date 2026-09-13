@@ -69,7 +69,10 @@ const loadView = (email: string): View => {
 
 // One week of the history list: its days plus the subtotal shown on the week's header row.
 type WeekGroup = { start: string; rows: AttendanceRow[]; minutes: number; days: number };
-type LeaveRange = { start: string; end: string };
+// The half-day session flags ride along: a leave request can cover one session of its boundary day, and the
+// grid has to see that or it calls a half-covered day "On leave" while payroll docks half of it. Shape (and
+// the rule that reads it) comes from the server - see lib/attendance.ts.
+type LeaveRange = { start: string; end: string; startSession?: number; endSession?: number };
 
 // Everything the summary strip, the ledger and the period comparison read off a window of days.
 type WindowStats = {
@@ -230,7 +233,10 @@ export default function Attendance({ me }: { me: Me }) {
   }, [holidays]);
   const holidaySet = useMemo(() => new Set(holidayByDay.keys()), [holidayByDay]);
   const myApprovedLeaves = useMemo(() => leaves.filter((l) => mine(l.employee) && upper(l.state) === "APPROVED"), [leaves, mine]);
-  const leaveRanges = useMemo<LeaveRange[]>(() => myApprovedLeaves.map((l) => ({ start: l.start_date, end: l.end_date })), [myApprovedLeaves]);
+  const leaveRanges = useMemo<LeaveRange[]>(
+    () => myApprovedLeaves.map((l) => ({ start: l.start_date, end: l.end_date, startSession: l.start_session, endSession: l.end_session })),
+    [myApprovedLeaves],
+  );
   // The approved leave covering a given day (for the expanded "why no punches" detail).
   const leaveForDay = useCallback((day: string) => myApprovedLeaves.find((l) => l.start_date <= day && day <= l.end_date), [myApprovedLeaves]);
   const leaveTypeName = useMemo(() => {
@@ -478,7 +484,7 @@ export default function Attendance({ me }: { me: Me }) {
       if (!l.employee || upper(l.state) !== "APPROVED") continue;
       const k = idOf(l.employee);
       const arr = m.get(k);
-      const range = { start: l.start_date, end: l.end_date };
+      const range = { start: l.start_date, end: l.end_date, startSession: l.start_session, endSession: l.end_session };
       if (arr) arr.push(range); else m.set(k, [range]);
     }
     return m;
@@ -558,8 +564,10 @@ export default function Attendance({ me }: { me: Me }) {
     punches: r.summary?.sessions ?? [],
     now,
     tz,
-    leave: r.status === "on_leave" ? leaveForDay(r.day) : undefined,
-    leaveType: r.status === "on_leave" ? leaveTypeName(leaveForDay(r.day)?.leave_type) : undefined,
+    // A half-day-leave row is about the leave too - it is the half that WAS excused - so the detail panel gets
+    // the same request to describe.
+    leave: r.status === "on_leave" || r.status === "half_day_leave" ? leaveForDay(r.day) : undefined,
+    leaveType: r.status === "on_leave" || r.status === "half_day_leave" ? leaveTypeName(leaveForDay(r.day)?.leave_type) : undefined,
     holiday: r.status === "holiday" ? holidayByDay.get(r.day) : undefined,
     onCorrect: () => setCorrecting([r]),
     // Offer the overtime hand-off only for a day that actually ran well past the shift (and only to callers
@@ -1676,7 +1684,7 @@ function DayDetail({ row, punches, now, tz, leave, leaveType, holiday, onCorrect
     );
   }
 
-  if (row.status === "on_leave" && leave) {
+  if ((row.status === "on_leave" || row.status === "half_day_leave") && leave) {
     // For a multi-day leave that starts/ends on a half-day, only the boundary day is partial.
     const half =
       row.day === leave.start_date && leave.start_session === 2 ? "Second half (PM)"

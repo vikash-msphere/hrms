@@ -24,6 +24,29 @@ export async function queueForDigest(deps: Deps, input: { recipientId: string; t
   }
 }
 
+/**
+ * Park a whole fan-out's worth of notifications for later digest delivery, in one batch.
+ *
+ * The single-item `queueForDigest` is a round-trip apiece, which is the per-recipient cost `notifyMany` exists
+ * to remove - so the broadcast path partitions its audience and hands the digest side here instead. Same
+ * best-effort contract: a failed park must not break the action that triggered it.
+ */
+export async function queueManyForDigest(deps: Deps, rows: { recipientId: string; type: string; title: string; body?: string | null; link?: string | null }[]): Promise<void> {
+  if (!rows.length) return;
+  try {
+    const values = rows.map((r) => ({
+      recipientId: r.recipientId,
+      type: r.type,
+      title: r.title,
+      body: r.body?.trim() || null,
+      link: r.link?.trim() || null,
+    }));
+    await runBatch(deps.db, insertBatches(values, (c) => deps.db.insert(schema.notificationDigestQueue).values(c)));
+  } catch (e) {
+    console.error("[digest] bulk queue failed (non-fatal)", e);
+  }
+}
+
 // Coalesce every recipient's parked notifications into a single summary and clear the queue. Returns the number
 // of digests delivered. Best-effort; never throws (a digest failure must not abort the cron tick).
 export async function flushDigests(deps: Deps): Promise<number> {

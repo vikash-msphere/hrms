@@ -20,7 +20,7 @@
 // only stable while the list is: one person joining the org between two passes shifts every index after them
 // and skips somebody, and one leaving duplicates somebody. The audience of a blast is decided once, when it
 // is sent, which is also the honest answer - "everyone" means everyone as at the moment of publication.
-import { and, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { allocFlatCode } from "./codeAlloc";
@@ -61,15 +61,26 @@ async function sendBatch(deps: Deps, payload: EmailFanOutPayload, batch: number)
   // so this never needs chunking - but it is read per batch rather than up front so a queued blast picks up
   // an address corrected after it started.
   //
-  // AND SO THAT A REMOVAL LANDS TOO. The recipient list is frozen into the payload when the blast is queued,
+  // AND SO THAT A DEPARTURE LANDS TOO. The recipient list is frozen into the payload when the blast is queued,
   // which is what makes the cursor an index into a list that cannot shift underneath it - but a frozen list is
-  // not a licence to mail somebody who has since been removed. A blast can sit in the queue across several
-  // five-minute ticks, and the soft delete is exactly the write that is supposed to stop company mail
-  // reaching a leaver. `delete_time` is read on the same query the address is, so this costs nothing.
+  // not a licence to mail somebody who has since gone. A blast can sit in the queue across several five-minute
+  // ticks, so the check is made per batch, on the same query the address comes from, and costs nothing.
+  //
+  // ALL THREE COLUMNS. This read `delete_time` alone, under a comment naming the soft delete as "the write
+  // that is supposed to stop company mail reaching a leaver" - which is the one write that does not happen
+  // when somebody leaves. Offboarding stamps `status: "terminated"` and disables the account
+  // (services/transitions.ts) and never stamps `delete_time`, so the guard that exists for leavers did not
+  // fire for anyone who left through the front door. Same roster rule as services/notifications.ts
+  // `activeEmployeeIds`, which decides who is in the blast in the first place.
   const emps = await deps.db
     .select({ uuid: schema.employees.uuid, workEmail: schema.employees.workEmail })
     .from(schema.employees)
-    .where(and(inArray(schema.employees.uuid, slice), isNull(schema.employees.deleteTime)));
+    .where(and(
+      inArray(schema.employees.uuid, slice),
+      eq(schema.employees.status, "active"),
+      isNull(schema.employees.deleteTime),
+      eq(schema.employees.disabled, false),
+    ));
   const emailOf = new Map(emps.map((e) => [e.uuid, e.workEmail]));
   for (const id of slice) {
     const to = emailOf.get(id);

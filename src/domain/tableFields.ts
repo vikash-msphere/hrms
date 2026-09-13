@@ -75,7 +75,14 @@ export const BASES: Record<string, BaseDef> = {
   sprints: { label: "Sprints" },
   goals: { label: "Goals" },
   "review-cycles": { label: "Review cycles" },
-  reviews: { label: "Reviews" },
+  // The manager's assessment is withheld from the employee until the review is SHARED (http/serialize.ts
+  // toReviewResource `_managerVisible`), and every employee holds `reviews`/`reviews.me.**` read - so without
+  // this an employee builds a grid on Reviews, adds these two columns and reads the draft verdict on their own
+  // review while it is still being written. `ratings_json` / `goal_ratings_json` are already caught by the
+  // global DENY_PATTERN; these two are plain columns and were not. The grid has no per-row state filter, so
+  // denying the columns is the only available answer - the same call domain/searchIndex.ts and
+  // services/peopleAnalytics.ts each make for the same invariant.
+  reviews: { label: "Reviews", deny: ["managerComment", "overallRating"] },
   transitions: { label: "Onboarding / offboarding" },
   "transition-tasks": { label: "Transition tasks" },
   "notice-periods": { label: "Notice periods" },

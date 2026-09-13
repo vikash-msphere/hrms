@@ -224,6 +224,27 @@ export async function listApplications(deps: Deps, scope: ListScope | undefined,
   return keysetPage(deps, schema.applications, "applications", conds.length ? and(...conds) : undefined, { max: maxPageSize, pageToken });
 }
 
+/**
+ * The stages LIVE applications are actually sitting in, distinct.
+ *
+ * Read when `settings/ats` is rewritten, so removing a stage out from under real candidates is refused rather
+ * than discovered later: an application whose stage no longer exists still has that string on its row, and
+ * every reader resolves a stage by key. `nextStage` returns null for it, so `:advance` stops working; the board
+ * has no column for it, so web/src/pages/Pipeline.tsx files it under the synthetic Closed column - an ACTIVE
+ * candidate displayed as closed, which is the ticket-workflow stranding (a state with no transition out) in
+ * another collection.
+ *
+ * One grouped read, only on a write to this one key, and only over live and still-active rows: a rejected or
+ * hired application is history and its stage is a record of where it ended, not a place anybody is stuck.
+ */
+export async function stagesInUse(deps: Deps): Promise<string[]> {
+  const rows = await deps.db
+    .selectDistinct({ stage: schema.applications.stage })
+    .from(schema.applications)
+    .where(and(isNull(schema.applications.deleteTime), eq(schema.applications.status, "active")));
+  return rows.map((r) => r.stage).filter((s): s is string => !!s);
+}
+
 async function getApplication(deps: Deps, id: string) {
   const row = (await deps.db.select().from(schema.applications).where(eq(schema.applications.uuid, id)).limit(1))[0];
   if (!row) throw notFound("application not found");

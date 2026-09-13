@@ -4,7 +4,7 @@
 // + prior-employer income; tax is computed once for the year, and the balance (annual tax - already deducted)
 // is spread over the remaining months. Pure date/assembly here; the slab math lives in the domain module.
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { chunk, groupBy } from "../lib/dbBatch";
+import { byIdChunks, chunk, groupBy } from "../lib/dbBatch";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { getSettingValue } from "./settings";
@@ -249,14 +249,26 @@ export async function finalizedTotals(
   employeeId?: string,
 ): Promise<Map<string, FinalizedTotals>> {
   const periods = new Map((await refPayPeriods(deps)).map((p) => [p.uuid, p]));
-  const runs = await deps.db.select().from(schema.payrollRuns);
   const inFy = (d: Date) => d >= fy.start && d <= fy.end;
-  const runIds = new Set(
-    runs
-      .filter((r) => (r.state === "APPROVED" || r.state === "PUBLISHED") && r.uuid !== excludeRunId)
-      .filter((r) => { const p = periods.get(r.payPeriodId); return !!p && inFy(p.payDate); })
-      .map((r) => r.uuid),
-  );
+  // THE RUNS, NARROWED IN SQL - state and financial year both. This read the whole `payroll_runs` table (every
+  // column of every run the org has ever built) and threw away the drafts and the other years in JS, on the
+  // path the paragraph below calls the hottest read in the app: the payroll build takes it once per build,
+  // every settlement takes it, Form 16 takes it, and the Tax page takes it on every render.
+  //
+  // Same shape services/settlements.ts#esiContributingAtExit already uses for this table and this question:
+  // the state filter is a plain `inArray`, and the year is expressed as the pay periods that fall in it, taken
+  // from the CACHED period list (lib/refData memoizes it per request) so bounding by it costs no query. Three
+  // columns instead of the row, because three is what the walk below reads.
+  const periodIdsInFy = [...periods.values()].filter((p) => inFy(p.payDate)).map((p) => p.uuid);
+  const runs = periodIdsInFy.length
+    ? await byIdChunks(periodIdsInFy, (group) =>
+        deps.db
+          .select({ uuid: schema.payrollRuns.uuid, payPeriodId: schema.payrollRuns.payPeriodId, state: schema.payrollRuns.state })
+          .from(schema.payrollRuns)
+          .where(and(inArray(schema.payrollRuns.state, ["APPROVED", "PUBLISHED"]), inArray(schema.payrollRuns.payPeriodId, group))),
+      )
+    : [];
+  const runIds = new Set(runs.filter((r) => r.uuid !== excludeRunId).map((r) => r.uuid));
   const out = new Map<string, FinalizedTotals>();
   if (!runIds.size) return out;
   const paidMonth = new Map<string, string>(); // run -> pay-date month (when TDS was collected)
@@ -368,7 +380,19 @@ export function assembleProjection(args: {
   // A configured regime this build cannot compute correctly must fail loudly, not fall back to the new regime's
   // slabs under the old regime's label - that withholds a number matching neither.
   assertSupportedRegime(args.regime);
-  const regimeCfg: RegimeConfig = args.cfg.regimes[args.regime] ?? args.cfg.regimes.new!;
+  // The `?? regimes.new!` fallback was a non-null assertion that could be a lie: `getSettingValue` merges a
+  // stored `tax-config` over the default SHALLOWLY, so a `regimes` object written without a `new` key leaves
+  // the map with no fallback at all - and `computeAnnualTax(x, undefined)` then threw on `cfg.standardDeduction`
+  // as a bare 500 on every payroll build and every Tax page, with nothing naming the setting that caused it.
+  // Refusing here says which key is wrong. (routes/settings.ts validateTaxConfig stops it being storable now;
+  // this covers a row written before that existed.)
+  const regimeCfg: RegimeConfig | undefined = args.cfg.regimes?.[args.regime] ?? args.cfg.regimes?.new;
+  if (!regimeCfg) {
+    throw new Error(
+      `settings/tax-config defines no "${args.regime}" regime and no "new" regime to fall back to. ` +
+      "A stored `regimes` object REPLACES the default one rather than merging into it, so it has to carry every regime it wants available.",
+    );
+  }
   const prior = Math.max(0, args.decl.priorEmployerIncome ?? 0);
   // Prior-employer income is folded into the full-year total, so the year's tax is computed on both jobs.
   const annualGross = args.paidGross + (args.currentRunGross ?? 0) + args.projectedGross + prior;

@@ -35,10 +35,12 @@ const STATUS: Record<TaxDeclarationStatus, { label: string; variant: "secondary"
   VERIFIED: { label: "Verified", variant: "success" },
   REJECTED: { label: "Rejected", variant: "destructive" },
 };
-// This year and the last one: a declaration is filed for the running year, or amended for the year just past.
-const FY_OPTIONS = fyOptions(1);
-
 export default function TaxDeclarations({ me, openId }: { me: Me; openId?: string }) {
+  // This year and the last one: a declaration is filed for the running year, or amended for the year just past.
+  // Resolved at RENDER, not at module load: the year comes from the org's calendar day (lib/orgDay.ts), whose
+  // timezone hydrates from the settings snapshot - a module-level const is computed before that lands and,
+  // unlike a render-time read, never corrects itself.
+  const FY_OPTIONS = useMemo(() => fyOptions(1), []);
   const { rows, state, error, reload } = useCollection<TaxDeclaration>("tax-declarations");
   const { rows: employees } = useCollection<Employee>("employees");
   const { toast } = useToast();
@@ -97,7 +99,11 @@ export default function TaxDeclarations({ me, openId }: { me: Me; openId?: strin
   // land behind the dialog, and they must not close on a failure the user never got to read.
   async function act(d: TaxDeclaration, verb: "verify" | "reject", body?: Record<string, unknown>, rethrow = false) {
     try {
-      await invoke(`tax-declarations/${idOf(d.path)}`, verb, undefined, body);
+      // THE ETag OF THE ROW THAT WAS READ. Verifying a declaration accepts a figure that reduces withholding,
+      // and the employee may edit their own declaration (and replace its proof) until it is verified - so the
+      // decision has to be pinned to the version on screen. A row that moved comes back 409 and the message
+      // says to look again, instead of quietly verifying an amount nobody reviewed.
+      await invoke(`tax-declarations/${idOf(d.path)}`, verb, d.etag, body);
       toast({ title: verb === "verify" ? "Declaration verified" : "Declaration rejected", variant: "success" });
       reload();
     } catch (e) {

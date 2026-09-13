@@ -221,7 +221,21 @@ export function makeDocumentService(cfg: Cfg) {
   const del = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) => softDeleteRow(deps, actor, table, singular, collection, id, ifMatch);
   const restore = (deps: Deps, actor: AppUser, id: string) => restoreRow(deps, actor, table, singular, collection, id);
   const purge = (deps: Deps, actor: AppUser, id: string, ifMatch?: string) =>
-    purgeRow(deps, actor, table, singular, collection, id, ifMatch, async (row) => { await deps.docs.delete(row.r2Key as string); });
+    purgeRow(deps, actor, table, singular, collection, id, ifMatch, async (row) => {
+      const key = row.r2Key as string;
+      await deps.docs.delete(key);
+      // AND THE FROZEN CONTENT BESIDE IT. Every generated letter and Form 16 writes a second object,
+      // `<key>.content` - the fully resolved LetterContent, so `:print` and the in-place e-sign can re-render
+      // (services/letterPrint.ts freezeLetterContent). The purge took only the PDF, so the irreversible,
+      // admin-gated hard delete left the sidecar in the bucket permanently: unreferenced by any row, and
+      // therefore unreachable by any later purge, cascade or retention sweep. For a salary or increment letter
+      // that object is the resolved CTC annexure and for a Form 16 the annual gross and tax - and "purge" is
+      // the operation this app documents as the one that actually erases.
+      //
+      // Tolerant, because most documents are uploads and have no sidecar: a missing object must not fail a
+      // purge whose real work (the row and the PDF) is already done.
+      await deps.docs.delete(`${key}.content`).catch(() => {});
+    });
 
   async function upload(deps: Deps, actor: AppUser, id: string, bytes: ArrayBuffer, opts: { fileName?: string; contentType?: string } = {}) {
     const row = await loadRow(deps, id);

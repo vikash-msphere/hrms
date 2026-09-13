@@ -10,12 +10,21 @@ import { PERSONAL_FIELDS } from "../services/personalDetails";
 import { TAX_FIELDS } from "../services/taxDetails";
 import type { Wire } from "./wire";
 
-// The subset of `keys` the caller may NOT read among the fields of `<base>.<code>.<subresource>`. Each check
-// is a pure in-memory decide() on `<base>.<code>.<subresource>.<key>` at read level - zero DB.
-export function deniedFieldKeys(grant: Grant, base: string, code: string, subresource: string, keys: string[], self: SelfContext): Set<string> {
+/**
+ * The subset of `keys` the caller may NOT reach among the fields of `<base>.<code>.<subresource>`, at `level`.
+ * Each check is a pure in-memory decide() on `<base>.<code>.<subresource>.<key>` - zero DB.
+ *
+ * `level` defaults to "read" because redaction is what this file is mostly for, but it is a PARAMETER because
+ * read and write are decided separately here, exactly as they are for a sub-resource body
+ * (middleware/authz.ts bodyDecision gates each key at write level, and the ACL accepts a rule written against
+ * `identity.<key>`). A destructive action asked at read level is the converse of the hazard noted over
+ * `redactedSub` in routes/employees.ts: somebody allowed to READ a field but denied WRITE on it could replace
+ * or delete the document behind it, because all three identity-document verbs shared one read check.
+ */
+export function deniedFieldKeys(grant: Grant, base: string, code: string, subresource: string, keys: string[], self: SelfContext, level: "read" | "write" = "read"): Set<string> {
   const denied = new Set<string>();
   for (const key of keys) {
-    if (!decide(grant, { kind: "standard", resource: `${base}.${code}.${subresource}.${key}`, level: "read" }, self).allow) denied.add(key);
+    if (!decide(grant, { kind: "standard", resource: `${base}.${code}.${subresource}.${key}`, level }, self).allow) denied.add(key);
   }
   return denied;
 }

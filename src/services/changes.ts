@@ -1,4 +1,4 @@
-import { gt } from "drizzle-orm";
+import { gte } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 
@@ -54,6 +54,29 @@ const EMBEDDED_IN: Record<string, string[]> = {
   "review-cycles": ["reviews"],
 };
 
+/**
+ * How far back the reference point handed to the client is rewound.
+ *
+ * THE TWO SIDES OF THIS COMPARISON COME FROM DIFFERENT CLOCKS. The stamps are written by SQLite triggers from
+ * the DATABASE's clock (`julianday('now')` - src/db/changeDdl.ts), while `now` is this Worker's. With a strict
+ * comparison and no margin, a database clock even slightly behind the Worker's means a write that happens just
+ * before this answer is stamped BELOW the `since` the client is told to use, and `at > since` is false for it
+ * ever after - so that collection is never named, the client keeps serving it from disk, and nothing corrects
+ * it until somebody writes to that collection again. A collection edited once and then left alone would be
+ * served stale for the life of the stored copy (seven days, lib/clientStore.ts MAX_AGE_MS).
+ *
+ * Rewinding the reference point makes the two clocks' disagreement harmless: the next call re-reports anything
+ * stamped inside the margin, which costs one list read for a collection that may not have changed. That is the
+ * affordable direction, and it is the same asymmetry http/pagination.ts settles the same way in its cursor
+ * fallback - "a duplicate row across a page boundary is a visible oddity; a row that no page ever shows is data
+ * loss". Here the loss is silent staleness, which src/db/changeDdl.ts names as the one failure this whole
+ * mechanism exists to prevent.
+ *
+ * Five seconds is far beyond any plausible NTP skew between two machines in the same platform and far below
+ * the freshness windows it interacts with, so in practice it re-reports nothing at all.
+ */
+const CLOCK_MARGIN_MS = 5_000;
+
 /** Collections whose stamp is newer than `sinceMs`. Unfiltered: the route drops the ones the caller may not
  *  list, so nothing is named that they could not have read for themselves. */
 export async function changedSince(deps: Deps, sinceMs: number, now = Date.now()): Promise<ChangesAnswer> {
@@ -64,18 +87,22 @@ export async function changedSince(deps: Deps, sinceMs: number, now = Date.now()
   // this question: a stored row carries the access hints and redactions computed for whoever fetched it, so a
   // change in the caller's own rights invalidates it even though no collection was written. The route adds it -
   // it comes off the already-loaded grant and costs no read here.
-  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return { collections: null, now };
+  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return { collections: null, now: now - CLOCK_MARGIN_MS };
   // Deliberately NO maximum age. The stamps are current state, not history, so a copy from last week is
   // answered as exactly as one from a minute ago - which is the point: a client that has been away can still
   // keep everything nobody touched while it was gone.
+  // INCLUSIVE of the reference point. A stamp equal to `since` is dropped by a strict comparison, and with
+  // `now` captured before this read (a default parameter, evaluated at entry) a write committing in that same
+  // millisecond is exactly the one that lands on it. Re-reporting a collection costs a read; missing one is
+  // silent staleness - see CLOCK_MARGIN_MS.
   const rows = (await deps.db
     .select({ collection: schema.collectionVersions.collection })
     .from(schema.collectionVersions)
-    .where(gt(schema.collectionVersions.at, new Date(sinceMs)))) as { collection: string }[];
+    .where(gte(schema.collectionVersions.at, new Date(sinceMs)))) as { collection: string }[];
   // A write to an embedded collection also invalidates whatever embeds it (see EMBEDDED_IN).
   const changed = new Set(rows.map((r) => r.collection));
   for (const collection of [...changed]) for (const outer of EMBEDDED_IN[collection] ?? []) changed.add(outer);
-  return { collections: [...changed], now };
+  return { collections: [...changed], now: now - CLOCK_MARGIN_MS };
 }
 
 /** The embed map, for the drift gate that keeps it honest. */

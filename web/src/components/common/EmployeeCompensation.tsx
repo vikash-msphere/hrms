@@ -4,6 +4,7 @@ import { get, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatMoney, cn, idOf, round2 as r2 } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
+import { currentFy } from "@/lib/fy";
 import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Compensation, PayComponent, PayGrade, SalaryStructure, Bonus } from "@/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,29 +40,50 @@ function BandBadge({ row }: { row: Compensation }) {
   );
 }
 
-// Monthly value of a recurring earning component against a given base (mirrors the server's payroll/ctc math).
-const monthlyOf = (c: PayComponent, basic: number) =>
-  c.method === "fixed" ? c.rate ?? 0 : c.method === "percent_base" ? basic * ((c.rate ?? 0) / 100) : 0;
+// THE SERVER'S OWN CTC MATH, imported rather than mirrored.
+//
+// Every helper below used to be a hand-written copy of a function in src/domain/payroll.ts, under comments
+// promising they matched. The build-up ones did; the SOLVER did not, and that is the one whose answer is acted
+// on. `ctcOf` is a STEP function - ESI stops at its eligibility ceiling and the PF family caps at the wage
+// ceiling - so the server scans for every crossing, bisects each bracket, scores the candidates on the ROUNDED
+// plug (which is what gets persisted), prefers the smaller plug on a tie, and refuses when nothing lands inside
+// tolerance. The copy here ran a single bisection on the assumption that the function rises monotonically, and
+// always returned an answer. Wherever an employee's plug range crossed a step the two disagreed - and
+// `staleSplit` below compares this answer against the STORED split to tell HR a row needs re-applying, under a
+// comment asserting both solvers are the same. That made the warning wrong in both directions.
+//
+// The web bundle importing from `src/` is the settled pattern here: web/src/pages/Expenses.tsx takes
+// `advanceRecurrence` from the server domain for exactly this reason ("the copy rolled end-of-month overflow
+// forward where the server clamps it, so the schedule disagreed with itself before it had run once"), and
+// web/src/lib/attendance.ts takes `leaveCover`. These are pure functions over data this page already holds.
+import { splitCtc, componentMonthly, pfWagesOf, type CtcComponent } from "../../../../src/domain/payroll";
 
-// Monthly value of any component dispatched purely by method, matching the server domain/payroll componentMonthly:
-// percent_base sits on basic, the PF family (epf + the employer's EDLI / administration charges) on PF wages
-// capped at the ceiling, esi on gross while within the ceiling (rounded up per ESIC), fixed a flat amount. Used
-// for the employer-contribution CTC build-up so nothing is hardcoded.
+/** A wire pay component as the domain's structural `CtcComponent`. Only the field spellings differ. */
+const asCtcComponent = (c: PayComponent): CtcComponent => ({
+  kind: c.kind as CtcComponent["kind"],
+  method: c.method,
+  name: c.display_name,
+  rate: c.rate ?? null,
+  cap: c.cap ?? null,
+  recurring: c.recurring,
+  disabled: c.disabled,
+  inCtc: c.in_ctc,
+  pfWages: c.pf_wages,
+});
+
+/** One component's monthly amount, dispatched by method - the domain's own `componentMonthly`. */
+const monthlyOf = (c: PayComponent, basic: number) => componentMonthly(asCtcComponent(c), basic, 0);
+
+/** The same, for the employer build-up, where the ESI arm needs gross and the PF family needs the PF wage. */
 const ctcCompMonthly = (c: PayComponent, basic: number, gross: number, pfWages = basic) =>
-  c.method === "fixed" ? c.rate ?? 0
-    : c.method === "percent_base" ? basic * ((c.rate ?? 0) / 100)
-    : c.method === "epf" ? Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 12) / 100)
-    : c.method === "edli" || c.method === "pf_admin" ? Math.min(pfWages, c.cap ?? Infinity) * ((c.rate ?? 0.5) / 100)
-    : c.method === "esi" ? (gross <= 0 || gross > (c.cap ?? 21000) ? 0 : Math.ceil(gross * ((c.rate ?? 0) / 100)))
-    : 0;
+  componentMonthly(asCtcComponent(c), basic, gross, pfWages);
 
 // The PF family: all three are opt-in on the employee's PF membership and priced on PF wages.
 const PF_METHODS = ["epf", "edli", "pf_admin"];
 
-// PF wages, mirroring the server pfWagesOf: basic only under the default basis, or basic + the Special Allowance
-// plug + every earning HR flagged `pf_wages` under "basic_plus" (settings/ctc pf_wage_basis).
-const pfWagesOf = (basic: number, special: number, earningComps: PayComponent[], basis: string) =>
-  basis !== "basic_plus" ? r2(basic) : r2(basic + special + earningComps.filter((c) => c.pf_wages).reduce((s, c) => s + monthlyOf(c, basic), 0));
+/** PF wages under the org's basis, from the domain (settings/ctc `pf_wage_basis`). */
+const pfWagesFor = (basic: number, special: number, earningComps: PayComponent[], basis: string) =>
+  pfWagesOf(basic, special, earningComps.map(asCtcComponent), basis === "basic_plus" ? "basic_plus" : "basic");
 
 // Salary history + a salary/CTC breakdown (earnings, deductions incl. EPF, employer PF, net & CTC), and a
 // "Revise / give increment" action. Payroll/super only (gated by the caller). `epfEnrolled` comes from the
@@ -160,7 +182,7 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     const epf = pcs.find((c) => c.method === "epf" && c.kind === "deduction");
     const enrolled = !!epf && epfEnrolled; // the employee-side PF DEDUCTION applies (needs that component)
     // PF wages per the org's configured basis (basic, or basic + the flagged allowances).
-    const pfWages = pfWagesOf(basic, special, earningComps, ctcCfg.pf_wage_basis ?? "basic");
+    const pfWages = pfWagesFor(basic, special, earningComps, ctcCfg.pf_wage_basis ?? "basic");
     // Employee EPF share = rate% of PF wages up to the wage ceiling (a payslip deduction). Employer provisions
     // (matching PF, EDLI/admin charges, ESI, gratuity) are the CTC build-up itemised below.
     const epfShare = enrolled && epf ? r2(Math.min(pfWages, epf.cap ?? Infinity) * ((epf.rate ?? 12) / 100)) : 0;
@@ -192,38 +214,42 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
     };
   }, [current, payComponents, earningCompsFor, epfEnrolled, ctcCfg]);
 
-  // Top-down (CTC-in) split preview: mirror the server `splitCtc` exactly - pin basic at ctcCfg.basic_pct% of
-  // the monthly CTC, then bisect the balancing Special Allowance so the all-in CTC lands on the target. Same
-  // employer-contribution math as the breakdown above, so the preview matches what the server will store.
+  // Top-down (CTC-in) split preview: THE SERVER'S OWN SOLVER, over the components this page already holds.
+  //
+  // It was a hand-written single bisection "mirroring `splitCtc` exactly", and that is the claim the header of
+  // this file now explains was false - `ctcOf` steps at the ESI and PF ceilings, so one bisection lands on the
+  // wrong side of a step and never notices. Calling the real one also means the infeasible case is decided by
+  // the same tolerance the server refuses on, instead of by a local `+ 0.5` guess: `null` here now means exactly
+  // what `null` there means, which is what the caller ("infeasible now - the org-wide banner reports these as
+  // skipped") already assumed it did.
+  //
+  // The earning set is the employee's structure (`earningCompsFor`), and the employer side is filtered the same
+  // way the server's `employerCostLines` filters it - by PF enrolment, not by an employee-side deduction
+  // component existing. Structure overrides are applied to the components BEFORE they are handed over, which is
+  // what `applyStructure` does on the server.
   const splitPreview = useCallback((annualCtc: number, structurePath?: string) => {
     if (!(annualCtc > 0)) return null;
     const monthlyCtc = annualCtc / 12;
-    const basic = r2(monthlyCtc * (ctcCfg.basic_pct / 100));
-    const earningComps = earningCompsFor(structurePath);
     const pcs = payComponents.filter((c) => c.recurring && !c.disabled);
-    // Employer PF applies on the employee's enrolment alone (server: employerCostLines), so the split solves the
-    // same target the server will - no dependency on an employee-side deduction component existing.
-    const employerComps = pcs.filter((c) => c.kind === "employer_contribution" && !(PF_METHODS.includes(c.method) && !epfEnrolled));
-    const ctcOf = (special: number) => {
-      const earn = earningComps.reduce((s, c) => s + monthlyOf(c, basic), 0) + special;
-      const gross = r2(basic + earn);
-      const pfWages = pfWagesOf(basic, special, earningComps, ctcCfg.pf_wage_basis ?? "basic");
-      // Off-CTC employer PF ("CTC + PF") is excluded from the target the split solves - it rides on top.
-      const employer = employerComps.reduce((s, c) => s + (c.in_ctc === false ? 0 : r2(ctcCompMonthly(c, basic, gross, pfWages))), 0);
-      return r2(gross + employer);
-    };
-    if (ctcOf(0) > monthlyCtc + 0.5) return null; // infeasible: committed cost already exceeds the target
-    let lo = 0, hi = monthlyCtc;
-    for (let i = 0; i < 48; i++) { const mid = (lo + hi) / 2; if (ctcOf(mid) < monthlyCtc) lo = mid; else hi = mid; }
-    return { basic, special: r2((lo + hi) / 2), monthlyCtc: r2(monthlyCtc) };
+    const earningComps = earningCompsFor(structurePath);
+    // The set the domain solves over: this employee's earnings (structure applied) plus every live
+    // non-earning component, so deductions and employer contributions price exactly as the server prices them.
+    const components = [...earningComps, ...pcs.filter((c) => c.kind !== "earning")].map(asCtcComponent);
+    const split = splitCtc(monthlyCtc, components, epfEnrolled, {
+      basic_pct: ctcCfg.basic_pct,
+      pf_wage_basis: ctcCfg.pf_wage_basis === "basic_plus" ? "basic_plus" : "basic",
+    });
+    if (!split) return null;
+    return { basic: split.basePay, special: split.specialAllowance, monthlyCtc: r2(monthlyCtc) };
   }, [payComponents, earningCompsFor, epfEnrolled, ctcCfg]);
 
   // The stored split vs a FRESH solve under the current catalog. basic + Special Allowance are CACHED on the
   // compensation row when it is saved, so anything changed afterwards - a contribution added, its CTC side
   // flipped, the employee's EPF enrolment toggled, a rate edited - leaves those cached figures describing the
   // OLD setup. The visible symptom is exactly this: the build-up no longer reconciles to the promised CTC (an
-  // employer contribution appears to ride on top of it). Same solver the server re-applies with, so a warning
-  // here means a re-apply really would change this row.
+  // employer contribution appears to ride on top of it). Literally the solver the server re-applies with (see
+  // `splitPreview`), so a warning here means a re-apply really would change this row - which is what this
+  // sentence used to claim while a second, differently-behaved solver stood behind it.
   const staleSplit = useMemo(() => {
     if (!current || !(current.annual_ctc > 0) || !payComponents.length) return null;
     const fresh = splitPreview(current.annual_ctc, current.salary_structure);
@@ -235,11 +261,16 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   // Variable pay = bonuses awarded in the current financial year (Apr–Mar). Annual actuals, so they fold into
   // a "total compensation" figure on top of the annualised fixed CTC (not into the monthly numbers).
   const variableFy = useMemo(() => {
-    const now = new Date();
-    const fyStartYear = now.getUTCMonth() >= 3 ? now.getUTCFullYear() : now.getUTCFullYear() - 1; // FY starts in April
+    // THE ORG'S FINANCIAL YEAR, from the one helper that knows it. This read `new Date()` through UTC getters
+    // and spelled the label out by hand - the viewer's browser deciding which year somebody's variable pay
+    // belongs to. Around the 31 March / 1 April boundary that is a different year from the one the server and
+    // every other surface are using (in IST the org is in the new FY from local midnight, UTC not until 05:30),
+    // so the whole total moved for those hours. `currentFy` was moved onto lib/orgDay for exactly this.
+    const fy = currentFy();
+    const fyStartYear = Number(fy.slice(0, 4));
     const start = `${fyStartYear}-04-01`, end = `${fyStartYear + 1}-03-31`;
     const total = bonuses.filter((b) => b.award_date >= start && b.award_date <= end).reduce((s, b) => s + (b.amount || 0), 0);
-    return { total: r2(total), label: `FY ${fyStartYear}-${String((fyStartYear + 1) % 100).padStart(2, "0")}` };
+    return { total: r2(total), label: `FY ${fy}` };
   }, [bonuses]);
 
   // Revision-over-revision change: each history row's % change in annual CTC vs the row it superseded (by

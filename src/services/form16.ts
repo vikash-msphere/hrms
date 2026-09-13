@@ -5,7 +5,9 @@
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
-import { notFound, invalidArgument } from "../lib/errors";
+import { notFound, invalidArgument, forbidden } from "../lib/errors";
+import { canReadObjectCode } from "../lib/objectAccess";
+import type { AppUser } from "../env";
 import { getSettingValue } from "./settings";
 import { documentLetterhead, documentLetterheadRef, type OrgWithDocumentLogos } from "./letterheads";
 import { loadTaxConfig, fyWindow, finalizedTotals, settlementTotals, verifiedDeductions, readDeclarations, tdsComponent } from "./taxProjection";
@@ -25,9 +27,26 @@ function fyForLabel(label?: string) {
   return fyWindow(new Date(Date.UTC(Number(m[1]), 5, 1))); // June of the start year is inside that FY
 }
 
-export async function assembleForm16(deps: Deps, employeeId: string, financialYear?: string) {
+/**
+ * Build a Form 16 for `employeeId`. `viewer` is the caller it is built FOR, and the check below is the whole
+ * reason it is a parameter.
+ *
+ * A Form 16 is the year's gross salary and the tax deducted from it - the same figures a payslip carries,
+ * annualised. This took no actor and made no access decision, while the verb that reaches it
+ * (`personal-documents:generateForm16`) is covered by the `personal-documents.**` an hr_admin holds and the
+ * seeded hr_admin grant holds no `payslips` entry at all. Unlike a letter there is no partial answer to give:
+ * the pay figures ARE the document, so a caller who may not read this person's payslips is refused rather than
+ * handed a narrowed one. Omitting `viewer` is for the paths with no principal to decide against (cron, a
+ * system-assembled batch), not a way around the check.
+ */
+export async function assembleForm16(deps: Deps, employeeId: string, financialYear?: string, viewer?: AppUser) {
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
   if (!emp || emp.deleteTime) throw notFound("employee not found");
+  // Decided against the EMPLOYEE's code, the scoping key their payslips hang off: `payslips.me.**` matches a
+  // person's own certificate, `payslips.**` (payroll_admin, super) matches anyone's.
+  if (viewer && !(await canReadObjectCode(deps, viewer, "payslips", emp.code))) {
+    throw forbidden("a Form 16 states this employee's salary and tax deducted; you don't have access to their pay records");
+  }
 
   const org = await getSettingValue<{ name?: string; legal_name?: string; address?: string; logo?: string; default_currency?: string; currency_decimals?: CurrencyDecimals } & OrgWithDocumentLogos>(deps, "organization", {});
   const letterheadRef = documentLetterheadRef(org, "form16");

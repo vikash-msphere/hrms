@@ -220,10 +220,44 @@ export type TaxBreakdown = {
   totalTax: number;
 };
 
+/**
+ * Refuse a regime block whose numbers are not numbers, the way `assertSupportedRegime` refuses one this module
+ * cannot compute.
+ *
+ * `getSettingValue` merges a stored `tax-config` over the default SHALLOWLY, so a row that sets `regimes` at
+ * all replaces the whole default map: a block written with only `slabs` arrives here with `standardDeduction`
+ * undefined. The arithmetic then did something worse than fail - `gross - undefined` is NaN, `Math.max(0, NaN)`
+ * is NaN rather than 0 (the "clamps at 0" comments notwithstanding), every later step propagates it, and
+ * `services/payroll.ts` drops the TDS line on `tax > 0`, which NaN fails. The result was a month of payslips
+ * with no income tax withheld, no error and no audit signal.
+ *
+ * The settings validator (routes/settings.ts validateTaxConfig) is the first line and stops this being
+ * storable. This is the second, because the config also reaches here from a row written before that validator
+ * existed - and `domain/money.ts` already states the rule this breaks: a money helper whose failure mode is
+ * "returns zero without saying so" is the exact shape these functions exist to prevent.
+ */
+export function assertComputableRegime(cfg: RegimeConfig | undefined | null): asserts cfg is RegimeConfig {
+  const bad: string[] = [];
+  if (!cfg || typeof cfg !== "object") throw new Error("income tax config: no regime block to compute with (settings/tax-config replaced the default regimes map without providing one)");
+  if (!Number.isFinite(cfg.standardDeduction)) bad.push("standardDeduction");
+  if (!Number.isFinite(cfg.cessRate)) bad.push("cessRate");
+  if (!Array.isArray(cfg.slabs) || !cfg.slabs.length || cfg.slabs.some((s) => !Number.isFinite(s?.rate))) bad.push("slabs");
+  if (!cfg.rebate87A || !Number.isFinite(cfg.rebate87A.taxableLimit) || !Number.isFinite(cfg.rebate87A.maxRebate)) bad.push("rebate87A");
+  if (!Array.isArray(cfg.surcharge)) bad.push("surcharge");
+  if (bad.length) {
+    throw new Error(
+      `income tax config is incomplete: ${bad.join(", ")} ${bad.length === 1 ? "is" : "are"} missing or not a number. ` +
+      "settings/tax-config is merged over the defaults SHALLOWLY, so a stored `regimes` block must carry every field, not only the ones being changed. " +
+      "Failing the payroll build is recoverable; withholding nothing without saying so is not.",
+    );
+  }
+}
+
 // The full annual computation for one regime, mirroring the gov calculator's order. `chapterVIA` is the already
 // regime-filtered, already-capped deduction total (see allowedDeductions) and comes off after the standard
 // deduction, before the slab walk.
 export function computeAnnualTax(grossForYear: number, cfg: RegimeConfig, chapterVIA = 0): TaxBreakdown {
+  assertComputableRegime(cfg);
   const gross = Math.max(0, r0(grossForYear));
   const deductions = Math.max(0, r0(chapterVIA));
   const taxableIncome = Math.max(0, gross - cfg.standardDeduction - deductions);
@@ -251,5 +285,11 @@ export function computeAnnualTax(grossForYear: number, cfg: RegimeConfig, chapte
 // Clamps at 0 (a pay cut or over-deduction never produces a negative deduction).
 export function monthlyTds(totalTax: number, alreadyDeducted: number, remainingMonths: number): number {
   if (remainingMonths <= 0) return 0;
-  return Math.max(0, r0((totalTax - alreadyDeducted) / remainingMonths));
+  // `Math.max(0, NaN)` is NaN, so the clamp on the next line is not one on its own - and a NaN that reaches
+  // `services/payroll.ts` drops the TDS line silently (`tax > 0` is false for NaN). Nothing should get here
+  // with a non-finite figure now that `computeAnnualTax` refuses an incomplete config, which is exactly why an
+  // arrival is worth a throw rather than a zero.
+  const due = (totalTax - alreadyDeducted) / remainingMonths;
+  if (!Number.isFinite(due)) throw new Error(`monthlyTds: non-finite figure (totalTax=${totalTax}, alreadyDeducted=${alreadyDeducted}, remainingMonths=${remainingMonths})`);
+  return Math.max(0, r0(due));
 }

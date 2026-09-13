@@ -27,7 +27,9 @@ export const form16Generate = new Hono<AppEnv>().post("/", async (c) => {
 
   const deps = c.get("deps");
   const user = c.get("user");
-  const { pdf, content, title, fileName, financialYear } = await assembleForm16(deps, employeeId, parsed.data.financial_year);
+  // The caller rides along: a Form 16 is a pay record, and the verb key that reaches here carries no object to
+  // scope on (see services/form16.ts).
+  const { pdf, content, title, fileName, financialYear } = await assembleForm16(deps, employeeId, parsed.data.financial_year, user);
 
   const row = await svc.create(deps, user, { employee: parsed.data.employee, display_name: title, document_type: "FORM16", content_type: "application/pdf" });
   await deps.docs.put(row.r2Key, pdf, "application/pdf");

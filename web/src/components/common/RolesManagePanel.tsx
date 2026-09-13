@@ -232,11 +232,13 @@ export function RolesManagePanel({ controlsSlot }: { controlsSlot?: HTMLElement 
             />
           </Field>
           <div className="flex items-start gap-2">
-            <Checkbox id="role-protected" className="mt-0.5" checked={form.protected} onCheckedChange={(v) => setForm({ ...form, protected: v === true })} />
-            <Label htmlFor="role-protected" className="font-normal leading-snug">
-              Protected
-              <span className="block text-xs text-muted-foreground">Nobody can delete this role, including you. Use it for the roles the org's access model is built on.</span>
-            </Label>
+            <Checkbox id="role-protected" className="mt-0.5" aria-describedby="role-protected-hint" checked={form.protected} onCheckedChange={(v) => setForm({ ...form, protected: v === true })} />
+            {/* The hint stays OUT of the label: text inside one joins the checkbox's accessible name, and a
+                name carrying a sentence about roles answers to every label this form has. Described, not named. */}
+            <span className="leading-snug">
+              <Label htmlFor="role-protected" className="font-normal">Protected</Label>
+              <span id="role-protected-hint" className="block text-xs text-muted-foreground">Nobody can delete this role, including you. Use it for the roles the org's access model is built on.</span>
+            </span>
           </div>
           {/* Most new roles are a near-copy of an existing one ("Finance Lead is Manager plus payroll"), and
               building that by hand across sixty collections is why a fresh role sits unused. Copying is

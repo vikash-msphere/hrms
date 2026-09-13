@@ -47,12 +47,16 @@ export async function keysetPage<T = any>(
   const keyValue: (row: any) => number = opts.order?.value ?? ((row) => +new Date(row.createdAt));
   if (cur) {
     const at = opts.order ? cur.createTimeMs : new Date(cur.createTimeMs);
-    // Strictly after the cursor in (key, uuid) order. If the token didn't decode (forged/garbage), fall
-    // back to the timestamp-only bound rather than leaking or erroring.
+    // Strictly after the cursor in (key, uuid) order. If the token didn't decode (forged/garbage), fall back
+    // to a timestamp-only bound rather than leaking or erroring - and make that bound INCLUSIVE of the cursor's
+    // instant. With no uuid to tiebreak on, a strict compare drops every row that ties at the cursor's
+    // timestamp, and those rows are then in no page at all; rows written in one seed or one batch share a
+    // timestamp, so ties are the normal case for the tokens that land here. Re-showing a boundary row is the
+    // recoverable direction of wrong. Same rule as http/pagination.ts.
     conds.push(
       curUid !== null
         ? or(cmp(key, at), and(eq(key, at), cmp(table.uuid, curUid)))
-        : cmp(key, at),
+        : or(cmp(key, at), eq(key, at)),
     );
   }
   const ord = dir === "asc" ? asc : desc;
