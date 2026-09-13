@@ -85,6 +85,32 @@ export function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
+/**
+ * A row carrying the org's calendar day, stamped by a route's `decorate` (services/orgDay.ts#stampOrgToday).
+ *
+ * The value is the UTC ms that day is stored at - the same anchor `dayStartMs` produces and every date-only
+ * column in the schema uses - so a serializer can compare one against "today" without a clock of its own.
+ */
+export type WithOrgToday = { _todayMs?: number };
+
+/**
+ * The day a serializer should compare a date-only column against.
+ *
+ * The UTC fallback is the pre-stamp behaviour and is kept only so a caller outside the collection factory
+ * cannot crash on a row it never decorated - it is NOT the supported path. Every route serializing a resource
+ * with a derived "today" field stamps it; a new one that forgets is a day out for part of the day rather than
+ * missing a field, which is the direction that hides, so the stamp belongs in the spec, not in the fallback.
+ *
+ * Lives here rather than in services/orgDay.ts because src/http/serialize.ts is one of its callers and
+ * `services/settings.ts` already imports that module - so the reader has to be in a leaf, or the import graph
+ * closes a cycle whose correctness depends on evaluation order.
+ */
+export function todayMsOf(row: WithOrgToday): number {
+  if (typeof row._todayMs === "number") return row._todayMs;
+  const n = new Date();
+  return Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+}
+
 // Weekday (0=Sun..6=Sat) of a "YYYY-MM-DD".
 export function weekdayOf(ymd: string): number {
   return new Date(`${ymd}T00:00:00Z`).getUTCDay();

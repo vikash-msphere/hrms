@@ -87,7 +87,10 @@ describe("narrowGrant - deny", () => {
 });
 
 describe("inScope", () => {
-  const scope: KeyScope = { collections: ["employees"], maxLevel: "read", verbs: ["getPhoto"] };
+  // `write`, not `read`: the verb axis sits under the level ceiling (a custom method runs a service, so it is
+  // a write), and this block is about the COLLECTION and VERB axes. Pinned at read it would have been testing
+  // the ceiling instead, and the verb assertions below could never be reached.
+  const scope: KeyScope = { collections: ["employees"], maxLevel: "write", verbs: ["getPhoto"] };
 
   it("rejects an out-of-scope collection", () => {
     expect(inScope(resolveRequest("GET", "/v1/payslips"), scope)).toBe(false);
@@ -95,8 +98,10 @@ describe("inScope", () => {
   });
 
   it("rejects a level above the ceiling", () => {
-    expect(inScope(resolveRequest("PATCH", "/v1/employees/04-001"), scope)).toBe(false);
-    expect(inScope(resolveRequest("DELETE", "/v1/employees/04-001", true), scope)).toBe(false);
+    expect(inScope(resolveRequest("PATCH", "/v1/employees/04-001"), scope)).toBe(true); // write, at the ceiling
+    expect(inScope(resolveRequest("DELETE", "/v1/employees/04-001", true), scope)).toBe(false); // ?force = admin
+    const readOnly: KeyScope = { ...scope, maxLevel: "read" };
+    expect(inScope(resolveRequest("PATCH", "/v1/employees/04-001"), readOnly)).toBe(false);
   });
 
   it("rejects an unlisted verb", () => {
@@ -113,7 +118,9 @@ describe("parseScope / scopeToWire", () => {
   const known = new Set(["employees", "holidays"]);
 
   it("accepts a well-formed scope and dedupes", () => {
-    expect(parseScope({ collections: ["employees", "employees"], max_level: "read", verbs: "*" }, known)).toEqual({ collections: ["employees"], maxLevel: "read", verbs: "*" });
+    expect(parseScope({ collections: ["employees", "employees"], max_level: "write", verbs: "*" }, known)).toEqual({ collections: ["employees"], maxLevel: "write", verbs: "*" });
+    // At `read` the verb axis is emptied as it is parsed - see "the level ceiling covers custom methods".
+    expect(parseScope({ collections: ["employees", "employees"], max_level: "read", verbs: "*" }, known)).toEqual({ collections: ["employees"], maxLevel: "read", verbs: [] });
   });
 
   it("rejects an unknown collection", () => {
@@ -206,5 +213,41 @@ describe("the ceiling actually restricts", () => {
     const g = narrowGrant(SUPER, { collections: ["holidays"], maxLevel: "admin", verbs: "*" });
     expect(decide(g, resolveRequest("GET", "/v1/holidays"), self).allow).toBe(true);
     expect(decide(g, resolveRequest("GET", "/v1/payslips"), self).allow).toBe(false);
+  });
+});
+
+// The VERB AXIS is under the level ceiling too. A custom method runs a service, so it is a write whatever the
+// verb is called - the same stance lib/viewAs.ts takes for a read-only simulation, which refuses every `:verb`
+// including `:pdf` and `:download`. Before this, `max_level: "read"` bounded only the standard methods, so a
+// key every surface described as "read only" could approve a leave request and publish a payroll run.
+describe("the level ceiling covers custom methods", () => {
+  it("empties the verb axis of a read scope as it is parsed", () => {
+    expect(parseScope({ collections: "*", max_level: "read", verbs: "*" })).toEqual({ collections: "*", maxLevel: "read", verbs: [] });
+    expect(parseScope({ collections: "*", max_level: "read", verbs: ["approve"] })!.verbs).toEqual([]);
+    // Untouched above the ceiling.
+    expect(parseScope({ collections: "*", max_level: "write", verbs: ["approve"] })!.verbs).toEqual(["approve"]);
+    expect(parseScope({ collections: "*", max_level: "admin", verbs: "*" })!.verbs).toEqual("*");
+  });
+
+  // NORMALISED, never refused: this function parses STORED scopes on the authentication path, so returning
+  // null would kill a key minted before the rule existed rather than narrowing it.
+  it("still parses a legacy read+verbs scope rather than rejecting it", () => {
+    expect(parseScope({ collections: ["payslips"], max_level: "read", verbs: "*" })).not.toBeNull();
+  });
+
+  it("refuses a custom method under a read ceiling, even from a scope stored before the rule", () => {
+    const legacy: KeyScope = { collections: "*", maxLevel: "read", verbs: "*" };
+    expect(inScope(resolveRequest("POST", "/v1/payroll-runs/04-1:publish"), legacy)).toBe(false);
+    expect(inScope(resolveRequest("POST", "/v1/leave-requests/04-001-1:approve"), legacy)).toBe(false);
+    // The reads it was actually labelled with still work.
+    expect(inScope(resolveRequest("GET", "/v1/payroll-runs/04-1"), legacy)).toBe(true);
+    // And a key minted to act still acts.
+    expect(inScope(resolveRequest("POST", "/v1/payroll-runs/04-1:publish"), FULL_SCOPE)).toBe(true);
+  });
+
+  it("drops the allow patterns from a read-ceilinged grant, so the hints agree with the gate", () => {
+    expect(narrowGrant(SUPER, { collections: "*", maxLevel: "read", verbs: "*" }).allow).toEqual([]);
+    expect(decide(narrowGrant(SUPER, { collections: "*", maxLevel: "read", verbs: "*" }), resolveRequest("POST", "/v1/payroll-runs/04-1:publish"), self).allow).toBe(false);
+    expect(narrowGrant(SUPER, FULL_SCOPE).allow.length).toBeGreaterThan(0);
   });
 });

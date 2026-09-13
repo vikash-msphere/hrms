@@ -12,6 +12,9 @@ import { parseFound, parseScope as parseStocktakeScope } from "../domain/stockta
 import { competencyScore, goalAttainment, parseCompetencyKeys, type Competency, type GoalSnapshot } from "../domain/performance";
 import { goalPace, staleDays } from "../domain/goals";
 import { maskedToken } from "../lib/apiKeyToken";
+// From the domain leaf, NOT from services/orgDay: `services/settings.ts` imports this module for `etagOf`, so
+// reaching into services here would close a cycle (serialize -> orgDay -> settings -> serialize).
+import { todayMsOf } from "../domain/attendance";
 
 // Entities whose id resolves via uuidToCode (the same set the activity authz gate uses). An activity row's
 // drill-ref is only emitted for these, so the feed never links to a non-resource entity (settings, batch,
@@ -209,10 +212,14 @@ export function toComplianceEventResource(r: any): Wire<"compliance-event"> {
   // web/src/pages/Compliance.tsx computes its own hint from calendar days and says "Due today" beside the
   // badge this flag was painting "Overdue". Both sides of the comparison are now the same kind of thing - the
   // start of a day against the start of a day - so the flag turns over when the due day ENDS.
-  const startOfToday = (() => {
-    const n = new Date();
-    return Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
-  })();
+  //
+  // AND THE DAY IS THE ORG'S, not UTC's. The two sides being the same KIND of thing is only half of it - they
+  // also have to be the same day. Derived from `new Date()` here, "today" rolled over at UTC midnight, which
+  // is the previous evening west of UTC and the small hours of the following morning east of it: for those
+  // hours a filing due today was already painted overdue, or one that was overdue yesterday still read as
+  // pending. `_todayMs` is the org's calendar day, stamped on the row by the route's `decorate` (the one hook
+  // on this path that has `Deps` to read the timezone with) - see services/orgDay.ts#stampOrgToday.
+  const startOfToday = todayMsOf(r);
   const overdue = r.status === "pending" && r.dueDate ? +new Date(r.dueDate) < startOfToday : false;
   return {
     ...baseResource(r, "compliance-events"),
@@ -1321,8 +1328,11 @@ export function toAssetRequestResource(r: any): Wire<"asset-request"> {
 export function toNoticePeriodResource(r: any): Wire<"notice-period"> {
   const lwd = +new Date(r.lastWorkingDay);
   const totalDays = Math.max(0, Math.round((lwd - +new Date(r.noticeDate)) / 86400000));
-  const now = new Date();
-  const todayMid = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  // The ORG's today, not UTC's. `last_working_day` is a date-only column at UTC midnight, so counting down to
+  // it from a UTC-derived day put `days_remaining` one out for the hours each day when the two disagree -
+  // "3 days left" on a screen the person is reading on the day it says 2. Stamped by the route's `decorate`
+  // (services/orgDay.ts#stampOrgToday); a serializer has no Deps of its own to read the timezone with.
+  const todayMid = todayMsOf(r);
   const remaining = r.status === "serving" ? Math.max(0, Math.round((lwd - todayMid) / 86400000)) : 0;
   return {
     ...baseResource(r, "notice-periods"),

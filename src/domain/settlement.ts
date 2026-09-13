@@ -50,10 +50,18 @@ export function computeSettlement(f: SettlementFacts): Settlement {
   // joiner is not paid from the 1st) and passes the month's unexcused absence day-units, which are docked at the
   // same per-day rate rather than left on a wage the employee never earned.
   const lopDays = Math.max(0, f.lopDaysInFinalMonth ?? 0);
-  const paidDays = Math.max(0, round2(f.daysWorkedInMonth - lopDays));
+  // A month is the ceiling. `daysWorkedInMonth` is assembled by the caller from a settlement date and a month
+  // start, and any disagreement between those two about which day (or which month) it is lands here as a
+  // fraction ABOVE one - which pays more than the month's whole gross for a month, silently, on the largest
+  // single payment most employees ever receive. The caller's arithmetic is exact now (services/settlements.ts
+  // anchors the settlement day rather than using a wall-clock instant); this is the invariant said out loud,
+  // so a future caller cannot reintroduce it. Clamped BEFORE loss of pay is taken off, so a docked day still
+  // reduces the payout from a full month rather than from an inflated one.
+  const workedDays = f.daysInMonth > 0 ? Math.min(f.daysWorkedInMonth, f.daysInMonth) : f.daysWorkedInMonth;
+  const paidDays = Math.max(0, round2(workedDays - lopDays));
   const salary = f.daysInMonth > 0 ? round2((f.monthlyGross * paidDays) / f.daysInMonth) : 0;
   if (salary > 0) {
-    const label = `Salary for ${round2(f.daysWorkedInMonth)} day(s)${lopDays > 0 ? ` less ${lopDays} day(s) loss of pay` : ""}`;
+    const label = `Salary for ${round2(workedDays)} day(s)${lopDays > 0 ? ` less ${lopDays} day(s) loss of pay` : ""}`;
     lines.push({ code: "SALARY", name: label, kind: "earning", amount: salary });
   }
 

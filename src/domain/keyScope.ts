@@ -67,6 +67,21 @@ function narrowLevels(grant: Grant, scope: KeyScope): Record<string, Level> {
   return levels;
 }
 
+// A custom method is a WRITE, whatever the verb is called.
+//
+// This is the app's existing answer to the question, not a new one: lib/viewAs.ts decides what a read-only
+// simulation may carry and admits GET/HEAD plus the GET-only batch transport - every `:verb` is refused,
+// including the ones that only render (`:pdf`, `:download`, `:preview`). A verb is a POST that runs a service,
+// so "it happens to return bytes" is not a property the gate can read off the request.
+//
+// The ceiling therefore has to cover the verb axis. It did not: `inScope` checked the collection and the verb
+// list for a custom method and never the level, so a key minted `{ max_level: "read", verbs: "*" }` - which
+// the mint dialog offers as "read" plus an "Allow actions" tick - could `payroll-runs/<id>:publish`,
+// `loans/<id>:disburse` and `leave-requests/<id>:approve`. Every surface a person audits these by calls that
+// key "read only", and `max_level` is the axis whose name promises it is not.
+const VERBS_NEED = "write" as const;
+export const verbsAllowedAt = (maxLevel: Level): boolean => LVL[VERBS_NEED] <= LVL[maxLevel];
+
 // Narrow a custom-method allow list, on both axes. A pattern whose verb slot is itself a wildcard
 // (`<col>.**`, granting every verb) is expanded to one pattern per allowed verb by APPENDING the verb - the
 // `**` then absorbs the id segments in between, so `<col>.**.approve` still matches both
@@ -77,6 +92,11 @@ function narrowLevels(grant: Grant, scope: KeyScope): Record<string, Level> {
 // something the owner could do, rather than allowing something they could not.
 function narrowAllow(grant: Grant, scope: KeyScope): string[] {
   const out = new Set<string>();
+  // A read-ceilinged key performs no custom methods at all, so it carries no allow patterns - which is also
+  // what makes every grant-derived ANSWER agree with the gate (an `access.can` hint computed off this grant
+  // would otherwise offer verbs `inScope` then refuses). `parseScope` already empties `verbs` for such a
+  // scope, so this is the same rule said where the grant is built.
+  if (!verbsAllowedAt(scope.maxLevel)) return [];
   for (const pattern of grant.allow) {
     for (const base of expandCollections(pattern, scope)) {
       if (scope.verbs === "*") {
@@ -112,6 +132,10 @@ export function narrowGrant(grant: Grant, scope: KeyScope): Grant {
 export function inScope(r: Resolved, scope: KeyScope): boolean {
   if (!collectionAllowed(scope, firstToken(r.resource))) return false;
   if (r.kind === "standard") return LVL[r.level] <= LVL[scope.maxLevel];
+  // The LEVEL CEILING APPLIES TO A VERB TOO - see verbsAllowedAt. Checked here as well as normalised in
+  // `parseScope`, because this is the gate: a scope stored before that normalisation existed, or written
+  // straight into `api_keys.scope_json`, must be refused rather than trusted.
+  if (!verbsAllowedAt(scope.maxLevel)) return false;
   return scope.verbs === "*" || scope.verbs.includes(r.verb);
 }
 
@@ -143,5 +167,14 @@ export function parseScope(value: unknown, known?: ReadonlySet<string>): KeyScop
   const collections = axis(raw.collections, known ? (s) => known.has(s) : undefined);
   const verbs = axis(raw.verbs);
   if (collections === null || verbs === null) return null;
-  return { collections, maxLevel: level, verbs };
+  // NORMALISED, not refused: a custom method is a write (see verbsAllowedAt), so a read-ceilinged scope holds
+  // no verbs. Refusing the combination here would be wrong in the one place this function must not be - it
+  // parses STORED scopes on the authentication path, and returning null there kills the key outright ("API key
+  // scope is unreadable"). Emptying the axis only ever narrows, so a key minted before this rule existed keeps
+  // working for exactly the reads it was labelled with. The MINT path refuses it loudly instead
+  // (services/apiKeys.ts), so nobody is quietly handed something narrower than they asked for.
+  //
+  // It also keeps the wire honest: http/serialize.ts round-trips the stored scope through this function, so
+  // the "· actions" marker the key list is audited by disappears with the authority it described.
+  return { collections, maxLevel: level, verbs: verbsAllowedAt(level) ? verbs : [] };
 }

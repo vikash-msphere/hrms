@@ -27,6 +27,7 @@ import { accessAudit, mutationAudit } from "../domain/auditAccess";
 import { DEFAULT_POLICY, subresourceBodyKey } from "../domain/manifests";
 import { audit } from "../lib/audit";
 import { isJsonBody } from "../http/jsonRequest";
+import { queryParam } from "../http/query";
 
 // Field-level + reference access control on write bodies (docs/archive/plan.txt 11C). For a POST/PATCH whose
 // resource-level write already passed, each PROTECTED field present in the body needs write on
@@ -124,10 +125,16 @@ async function bodyDecision(c: Context<AppEnv>, deps: Deps, coded: string, user:
   //
   // So the declared refs are collected from the query string as well, and gated identically. Only keys the
   // policy already NAMES for this collection are read, so nothing else about the query is interpreted here.
+  // READ THROUGH http/query.ts, like every other parameter this middleware decides from. That file states the
+  // rule and names `force` as the case that proved it: the app has two query parsers that do not agree about
+  // a fragment, and a gate reading one while the handler reads the other is how `#?force=true` was gated as a
+  // soft delete and executed as a hard purge. These keys are a gate input too - they decide whether a caller
+  // may file a record under someone else's ownership - so they are read by the parser the rest of the gate
+  // uses, rather than being the one reader in this file exempt from its own rule.
   const declared = [...Object.keys(refs), ...Object.keys(ownerRefs)];
   const fromQuery: Record<string, unknown> = {};
   for (const key of declared) {
-    const v = c.req.query(key);
+    const v = queryParam(c, key);
     if (typeof v === "string" && v.length > 0) fromQuery[key] = v;
   }
 

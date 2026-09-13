@@ -488,7 +488,16 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
           </Field>
 
           <Field label="Access level" hint="The ceiling. It cannot exceed your own access.">
-            <Select value={draft.maxLevel} onValueChange={(v) => setDraft({ ...draft, maxLevel: v as Draft["maxLevel"] })}>
+            {/* Dropping back to "Read only" clears the actions tick with it: a custom method is a write, so
+                the server refuses that pair outright (src/domain/keyScope.ts). Clearing it here means the form
+                cannot hold a combination the mint will reject, and the sentence below never promises one. */}
+            <Select
+              value={draft.maxLevel}
+              onValueChange={(v) => {
+                const maxLevel = v as Draft["maxLevel"];
+                setDraft({ ...draft, maxLevel, allowVerbs: maxLevel === "read" ? false : draft.allowVerbs });
+              }}
+            >
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="read">Read only</SelectItem>
@@ -591,10 +600,20 @@ export function ApiKeysPanel({ controlsSlot }: { controlsSlot?: HTMLElement | nu
           </Field>
 
           <div className="flex items-start gap-2">
-            <Checkbox id="key-verbs" className="mt-0.5" checked={draft.allowVerbs} onCheckedChange={(v) => setDraft({ ...draft, allowVerbs: v === true })} />
+            <Checkbox
+              id="key-verbs"
+              className="mt-0.5"
+              disabled={draft.maxLevel === "read"}
+              checked={draft.allowVerbs}
+              onCheckedChange={(v) => setDraft({ ...draft, allowVerbs: v === true })}
+            />
             <Label htmlFor="key-verbs" className="font-normal leading-snug">
               Allow actions (approve, cancel, download, …)
-              <span className="block text-xs text-muted-foreground">Off by default: an integration that only reads or writes rows should not be able to approve a leave request or pay a run.</span>
+              <span className="block text-xs text-muted-foreground">
+                {draft.maxLevel === "read"
+                  ? "Unavailable on a read-only key: an action runs a service, so it counts as a write. Raise the access level to allow actions."
+                  : "Off by default: an integration that only reads or writes rows should not be able to approve a leave request or pay a run."}
+              </span>
             </Label>
           </div>
 

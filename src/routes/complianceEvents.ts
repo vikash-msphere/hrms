@@ -2,6 +2,7 @@ import { z } from "zod";
 import { collectionRoutes } from "../http/collectionRoute";
 import { complianceEventSpec, listComplianceEvents } from "../services/complianceEvents";
 import { toComplianceEventResource } from "../http/serialize";
+import { stampOrgToday } from "../services/orgDay";
 
 // Statutory compliance calendar. NO access checks here - the middleware gates the path by grants (private by
 // default; super-only until access is granted via the ACL). Standard CRUD + soft-delete/restore.
@@ -26,6 +27,9 @@ export const complianceEvents = collectionRoutes({
   param: "compliance_event_id",
   writeSchema,
   serialize: toComplianceEventResource,
+  // The `overdue` flag compares `due_date` against today, and the day it means is the ORG's - resolved once
+  // per response here, because the serializer has no Deps to read the timezone with (services/orgDay.ts).
+  decorate: (deps, _actor, rows) => stampOrgToday(deps, rows),
   list: (c, page) =>
     listComplianceEvents(
       c.get("deps"),

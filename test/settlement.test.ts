@@ -147,3 +147,36 @@ describe("leave encashment exemption at exit (s.10(10AA))", () => {
     expect(leaveEncashmentExemption(1000, 0, 10, 5)).toBe(0);
   });
 });
+
+// A month is the ceiling on the final-month salary.
+//
+// `daysWorkedInMonth` is assembled by the caller from a settlement date and a month start, and a disagreement
+// between those two about which day (or which month) it is arrives here as a fraction above one - paying more
+// than a whole month's gross for a month, on the largest single payment most employees ever receive. The
+// caller's arithmetic is exact (services/settlements.ts anchors the settlement day to the org's calendar day
+// rather than using the wall-clock instant the request arrived on); this is the invariant stated where it
+// cannot be reintroduced from a new call site.
+describe("computeSettlement - the month is the ceiling", () => {
+  it("never pays more than a full month's gross for the final month", () => {
+    const full = computeSettlement({ monthlyGross: 60000, basePay: 60000, daysWorkedInMonth: 30, daysInMonth: 30, leaveDays: 0, noticeShortfallDays: 0, reimbursements: 0 });
+    // 31 days against a 30-day month is the shape the instant-vs-day bug produced on 30 September.
+    const over = computeSettlement({ monthlyGross: 60000, basePay: 60000, daysWorkedInMonth: 31, daysInMonth: 30, leaveDays: 0, noticeShortfallDays: 0, reimbursements: 0 });
+    expect(full.lines.find((l) => l.code === "SALARY")!.amount).toBe(60000);
+    expect(over.lines.find((l) => l.code === "SALARY")!.amount).toBe(60000);
+    expect(over.net).toBe(full.net);
+  });
+
+  it("takes loss of pay off the clamped month, not off an inflated one", () => {
+    const s = computeSettlement({
+      monthlyGross: 60000, basePay: 60000, daysWorkedInMonth: 31, daysInMonth: 30, lopDaysInFinalMonth: 2,
+      leaveDays: 0, noticeShortfallDays: 0, reimbursements: 0,
+    });
+    expect(s.lines.find((l) => l.code === "SALARY")!.amount).toBe(56000); // 28/30 of 60000, not 29/30
+    expect(s.lines.find((l) => l.code === "SALARY")!.name).toContain("30 day(s)");
+  });
+
+  it("leaves an ordinary partial month exactly as it was", () => {
+    const s = computeSettlement({ monthlyGross: 60000, basePay: 60000, daysWorkedInMonth: 13, daysInMonth: 30, leaveDays: 0, noticeShortfallDays: 0, reimbursements: 0 });
+    expect(s.lines.find((l) => l.code === "SALARY")!.amount).toBe(26000); // 13/30
+  });
+});

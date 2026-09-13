@@ -11,6 +11,7 @@ import { byIdChunks, insertBatches, runBatch } from "../lib/dbBatch";
 import { has, type CrudSpec, type SetOf } from "./crud";
 import { idFromPath } from "./documentsCommon";
 import { dueDatesInRange, periodLabelFor } from "../domain/complianceRecurrence";
+import { orgToday, dayStartMs } from "./orgDay";
 
 const FREQUENCIES = ["monthly", "quarterly", "annual"] as const;
 type Frequency = (typeof FREQUENCIES)[number];
@@ -29,10 +30,14 @@ export type ComplianceRuleInput = {
 
 type RuleRow = typeof schema.complianceRules.$inferSelect;
 
-const startOfTodayUTC = (deps: Deps): number => {
-  const d = new Date(+deps.clock.now());
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-};
+// The ORG's today, at the UTC midnight every date-only column in the schema stores a day at - not the day
+// UTC happens to be in. `compliance_events.due_date` is such a column and the horizon below is measured from
+// here, so reading "today" in UTC is the shape services/orgDay.ts exists to end: the nightly tick fires at
+// 02:00 UTC, which is still the previous evening west of UTC, so `from` sat a day ahead of the org's own
+// calendar and an obligation due TODAY was outside the window that materialises it. The daily roll-forward
+// usually filed that date the night before, which is exactly why this could sit here unnoticed - but a rule
+// created or edited today generates from this same function, with no earlier pass to cover for it.
+const startOfOrgToday = async (deps: Deps): Promise<number> => dayStartMs(await orgToday(deps));
 
 /**
  * Materialise the missing occurrences of every rule given, within the horizon (dedupe by rule + due date,
@@ -55,7 +60,7 @@ const startOfTodayUTC = (deps: Deps): number => {
 async function generateForRules(deps: Deps, rules: RuleRow[]): Promise<number> {
   const active = rules.filter((r) => r.active && !r.deleteTime);
   if (!active.length) return 0;
-  const from = startOfTodayUTC(deps);
+  const from = await startOfOrgToday(deps);
 
   // Every rule's existing due dates in one read, chunked for the D1 parameter cap. Soft-deleted rows count:
   // an occurrence somebody deleted must not come back on the next roll-forward.

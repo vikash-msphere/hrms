@@ -39,7 +39,15 @@ export function resolveField(ctx: EvalContext, path: string): unknown {
   const roots: Record<string, unknown> = { type: ctx.type, subject: ctx.subject, actorId: ctx.actorId, employeeId: ctx.employeeId, payload: ctx.payload, results: ctx.results ?? {}, now: ctx.now, today: ctx.today };
   const parts = path.split(".");
   let cur: unknown;
-  if (parts[0]! in roots) { cur = roots[parts[0]!]; parts.shift(); }
+  // OWN-PROPERTY HERE TOO, not `in`. `roots` is a plain object literal, so `in` consults Object.prototype:
+  // `toString`, `valueOf`, `constructor`, `hasOwnProperty` and `__proto__` all answered true and handed back
+  // Object internals as the resolved value. The loop below has always guarded against exactly that - its
+  // comment names `constructor`/`__proto__` - but the guard was on the TAIL of the path while the ROOT lookup
+  // walked the chain, so the one segment that chooses where the walk starts was the one segment unprotected.
+  // A condition on `{ field: "toString", op: "exists" }` therefore matched every event, and `__proto__.…`
+  // stepped straight onto Object.prototype. Nothing is invoked here, so this was a correctness hole rather
+  // than an execution one - a rule that fires on everything is still the outcome the bound exists to prevent.
+  if (Object.prototype.hasOwnProperty.call(roots, parts[0]!)) { cur = roots[parts[0]!]; parts.shift(); }
   else cur = ctx.payload; // bare name(s) index into the payload
   for (const p of parts) {
     // own-property only: never walk the prototype chain (so `constructor`/`__proto__` resolve to undefined,

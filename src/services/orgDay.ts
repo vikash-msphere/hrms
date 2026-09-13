@@ -17,8 +17,12 @@
 // read is memoized per request by lib/refData, so calling this is free wherever settings are already read and
 // one cached read otherwise.
 import { getSettingValue } from "./settings";
-import { DEFAULT_ATTENDANCE, localDay, type AttendanceConfig } from "../domain/attendance";
+import { DEFAULT_ATTENDANCE, localDay, type AttendanceConfig, type WithOrgToday } from "../domain/attendance";
 import type { Deps } from "../deps";
+
+// Re-exported so the pair reads as one concept from here (the stamp) as well as from the leaf that holds the
+// reader. See stampOrgToday for why the reader cannot live in this module.
+export { todayMsOf, type WithOrgToday } from "../domain/attendance";
 
 /** The org's IANA timezone, from `settings/attendance`. Never empty - falls back to the schedule default. */
 export async function orgTimezone(deps: Deps): Promise<string> {
@@ -45,6 +49,35 @@ export async function orgDayFromToday(deps: Deps, offsetDays: number): Promise<s
  */
 export function dayStartMs(ymd: string): number {
   return Date.parse(`${ymd}T00:00:00Z`);
+}
+
+/**
+ * Stamp the org's calendar day on each row of a page, for a serializer that has to compare a date-only column
+ * against "today".
+ *
+ * WHY A STAMP AND NOT A CLOCK IN THE SERIALIZER. src/http/serialize.ts is a pure row -> wire module with no
+ * `Deps` and a signature the collection factory fixes, so a serializer that needs "today" had no way to ask
+ * for the ORG's one and derived it from `new Date()` in UTC instead. That is the same shape this file exists
+ * to end, and it reached the wire: a compliance filing's `overdue` flag and a notice period's
+ * `days_remaining` both compare a date-only column (UTC midnight) against it, so for the hours each day when
+ * UTC and the org disagree a statutory deadline was painted red on the morning it was still due, and a
+ * leaver's remaining notice was a day out.
+ *
+ * `decorate` is the one hook that runs on EVERY response path the factory serves - item reads, list pages and
+ * the lifecycle verbs alike (http/collectionRoute.ts applies it before `serialize`) - and it does receive
+ * `Deps`. So the day is resolved once per response here, and read back by `todayMsOf`.
+ *
+ * The READER lives in domain/attendance.ts, not here, and the split is not cosmetic: `services/settings.ts`
+ * imports `http/serialize` for `etagOf`, so a serializer importing this module would close a cycle
+ * (serialize -> orgDay -> settings -> serialize) whose correctness would rest on evaluation order. The reader
+ * is pure, so it sits in the leaf that already owns `localDay`/`utcDay` and the date-only rule.
+ *
+ * One settings read per response (memoized by lib/refData for the rest of the request), never one per row.
+ */
+export async function stampOrgToday<T extends object>(deps: Deps, rows: T[]): Promise<(T & WithOrgToday)[]> {
+  if (!rows.length) return rows as (T & WithOrgToday)[];
+  const todayMs = dayStartMs(await orgToday(deps));
+  return rows.map((r) => ({ ...r, _todayMs: todayMs }));
 }
 
 /**

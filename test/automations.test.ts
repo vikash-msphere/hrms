@@ -278,3 +278,41 @@ describe("automations - condition depth", () => {
     }
   });
 });
+
+// The ROOT lookup is own-property too, not `in`.
+//
+// `resolveField`'s roots bag is a plain object literal, so `in` consulted Object.prototype: `toString`,
+// `valueOf`, `constructor`, `hasOwnProperty` and `__proto__` all answered true and handed back Object
+// internals as the resolved value. The loop that walks the REST of a dotted path had guarded against exactly
+// that since it was written - its comment names `constructor`/`__proto__` - but the guard was on the tail
+// while the segment that decides where the walk STARTS was unprotected. Nothing is invoked here, so this was
+// a correctness hole rather than an execution one: a condition on such a name matched every event, which is
+// the outcome ("the rule fires on everything") the bound exists to prevent.
+describe("automations - resolveField does not walk the prototype chain", () => {
+  const c = ctx({ days: 5 });
+
+  it("resolves an inherited name to undefined, not to an Object internal", () => {
+    for (const name of ["toString", "valueOf", "constructor", "hasOwnProperty", "isPrototypeOf", "__proto__"]) {
+      expect(resolveField(c, name)).toBeUndefined();
+      expect(evalCondition({ field: name, op: "exists" }, c)).toBe(false);
+      expect(evalCondition({ field: name, op: "notExists" }, c)).toBe(true);
+    }
+    expect(resolveField(c, "__proto__.constructor")).toBeUndefined();
+  });
+
+  it("a payload key that happens to share the name still resolves", () => {
+    // An inherited name is not a reserved word - it just is not a ROOT. Falling through to the payload is the
+    // same rule every other bare name follows.
+    expect(resolveField(ctx({ toString: "hello" }), "toString")).toBe("hello");
+  });
+
+  it("the real roots are untouched", () => {
+    expect(resolveField(c, "type")).toBe("leave.approved");
+    expect(resolveField(c, "employeeId")).toBe("e1");
+    expect(resolveField(c, "payload.days")).toBe(5);
+    expect(resolveField(c, "days")).toBe(5);
+    // Declared-but-unset roots stay roots (they resolve to undefined rather than indexing the payload).
+    expect(resolveField(ctx({ now: "from-payload" }), "now")).toBeUndefined();
+    expect(resolveField(ctx({}, { now: "2026-09-13T00:00:00Z" }), "now")).toBe("2026-09-13T00:00:00Z");
+  });
+});

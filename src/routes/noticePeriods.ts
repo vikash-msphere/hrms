@@ -3,6 +3,7 @@ import * as schema from "../db/schema";
 import { collectionRoutes } from "../http/collectionRoute";
 import { listNoticePeriods, createNoticePeriod, updateNoticePeriod, type NoticePeriodInput } from "../services/noticePeriods";
 import { toNoticePeriodResource } from "../http/serialize";
+import { stampOrgToday } from "../services/orgDay";
 
 const writeSchema = z
   .object({
@@ -29,6 +30,9 @@ export const noticePeriods = collectionRoutes<NoticePeriodInput, typeof schema.n
   param: "notice_period_id",
   writeSchema,
   serialize: toNoticePeriodResource,
+  // `days_remaining` counts down to the last working day from today, and the day it means is the ORG's -
+  // resolved once per response here, because the serializer has no Deps of its own (services/orgDay.ts).
+  decorate: (deps, _actor, rows) => stampOrgToday(deps, rows),
   overrides: {
     create: (deps, actor, input) => createNoticePeriod(deps, actor, input),
     update: (deps, actor, id, patch, ifMatch) => updateNoticePeriod(deps, actor, id, patch, ifMatch),

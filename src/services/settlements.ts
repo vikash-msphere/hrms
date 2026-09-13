@@ -13,6 +13,7 @@ import {
   assembleProjection, readDeclarations, verifiedDeductions, employedMonthsInFy, EMPTY_FINALIZED_TOTALS,
 } from "./taxProjection";
 import { encashmentRateConfig } from "./leaveEncashments";
+import { orgToday, dayStartMs } from "./orgDay";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig, type WorkEvent, localDay, utcDay, lopDayUnits, eventCreditByDay } from "../domain/attendance";
 import { esiEmployeeContribution, esiContributionPeriod, professionalTax, DEFAULT_PT_CONFIG, type PtConfig } from "../domain/statutory";
 import { approvedUnpaidReimbursements, markReimbursementsSettledStmt, releaseReimbursementsSettledStmt } from "./reimbursements";
@@ -115,8 +116,20 @@ function releaseSettlementStmts(deps: Deps, refs: SettledRefs, at: Date): BatchS
 // Unexcused absence day-units inside the final month's employed window, from exactly the facts a payroll run
 // uses (holidays, approved leave, attendance punches) so the exit month is docked the same way every other
 // month is. Scoped to one employee and one month, so it stays a handful of reads.
-async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number, toMs: number, endYmd: string, att: AttendanceConfig): Promise<number> {
+async function finalMonthLopDays(deps: Deps, employeeId: string, fromMs: number, untilMs: number, endYmd: string, att: AttendanceConfig): Promise<number> {
   const tz = att.timezone || "Asia/Kolkata";
+  // THE DATA WINDOW HAS TO COVER EVERY DAY THE WALK ENUMERATES, and `untilMs` on its own does not.
+  //
+  // `untilMs` is an INSTANT (the caller clamps it at the clock so a settlement computed early does not dock
+  // days that have not happened), while `endYmd` is the last DAY `lopDayUnits` judges. East of UTC the org's
+  // day rolls over first, so the two disagree by up to a day: the walk reached 14 September while the holiday
+  // and leave predicates below still cut off at the 13th's evening. A holiday or an approved leave day landing
+  // on that last day was then invisible to them and the day read as an unexcused absence - money, docked at
+  // the full daily rate, on the one payout a leaver has no later run to correct.
+  //
+  // Widening is safe in the other direction: the walk is bounded by `endYmd`, not by this, so a row a day past
+  // it is simply never consulted.
+  const toMs = Math.max(untilMs, Date.parse(`${endYmd}T00:00:00Z`));
   // `fromMs` is a DATE-ONLY anchor (the month start, or the employee's start_date), so its day is the UTC one
   // it is stored at; `endYmd` was resolved and clamped by the caller, which is the only place that knows which
   // source named it. Holidays and leave ranges below are date-only too. The punch days further down stay on
@@ -353,8 +366,21 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
   const tz = att.timezone || DEFAULT_ATTENDANCE.timezone;
   const datedMs = !Number.isNaN(dayMs(input.settlement_date)) ? dayMs(input.settlement_date) : emp.endDate ? +new Date(emp.endDate) : null;
-  const settleMs = datedMs ?? +deps.clock.now();
-  const settleYmd = datedMs !== null ? utcDay(datedMs) : localDay(settleMs, tz);
+  // THE CLOCK FALLBACK IS ANCHORED TO A DAY, not left as the instant the request happened to arrive.
+  //
+  // Every other consumer of `settleMs` below reads it as a DATE: `daysWorkedInMonth` subtracts it from UTC
+  // midnight of the month start, and the month itself comes off `settlementDate`'s UTC getters. An instant is
+  // not a date, and `Math.round` turns the difference into money: at 18:00 IST on the 13th the subtraction is
+  // 12.52 days, rounds to 13, and the +1 pays a FOURTEENTH day of a month the leaver worked thirteen of.
+  // Past 18:30 IST it is worse - the org-local day has rolled over while the UTC month has not, so a
+  // settlement run on the evening of 30 September computed 31 days against a 30-day month and paid more than
+  // a whole month's gross, with `lopEndYmd` naming a day outside the window `finalMonthLopDays` enumerates.
+  //
+  // `dayStartMs(orgToday())` is the same anchor `settleYmd` already used (services/orgDay.ts): the org's
+  // calendar day, at the UTC midnight every date-only column in the schema stores a day at. The subtraction is
+  // then exact, and the two halves cannot name different days or different months.
+  const settleMs = datedMs ?? dayStartMs(await orgToday(deps));
+  const settleYmd = utcDay(settleMs);
   const settlementDate = new Date(settleMs);
 
   // Encashable leave: explicit override, else the balance of the ENCASHABLE leave types only. The same
@@ -461,6 +487,9 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
   // PF and ESI on the wages it pays, PT for the month, and income tax on the chargeable part. Priced in two
   // passes because the tax base is what the first pass computes.
   const pass1 = computeSettlement(facts);
+  // The month fraction the final-month salary was actually paid on, clamped to the month the same way
+  // computeSettlement clamps it. The PF wage below rides on it, so the two can never disagree.
+  const paidMonthDays = Math.max(0, round2(Math.min(daysWorkedInMonth, daysInMonth) - lopDaysInFinalMonth));
   // Match the final-month salary by its stable CODE. `name` starts with "Salary" for the arrears line the
   // caller contributes too, so a label match picked that up whenever the final month itself paid nothing - and
   // then added the arrears into the ESI base a second time below.
@@ -485,7 +514,9 @@ export async function computeAndStoreSettlement(deps: Deps, actor: AppUser, inpu
     monthlyGross,
     // PF wages for the final month: the basic actually earned (the same day fraction the salary was paid on),
     // plus the basic slice of any arrears the FnF pays.
-    pfWages: round2((comp.basePay * (daysInMonth > 0 ? Math.max(0, daysWorkedInMonth - lopDaysInFinalMonth) / daysInMonth : 0)) + arrearsPfWages),
+    // The SAME day fraction the salary line was paid on - `paidMonthDays` is clamped to the month exactly as
+    // computeSettlement clamps it, so the PF wage and the wage it is due on can never describe different months.
+    pfWages: round2((comp.basePay * (daysInMonth > 0 ? paidMonthDays / daysInMonth : 0)) + arrearsPfWages),
     // ESI wages: the wage actually paid for the month plus arrears and overtime. Leave encashment, gratuity,
     // bonus and reimbursements are not ESI wages.
     esiWages: round2(salaryEarned + arrearsTotal + otAmount),

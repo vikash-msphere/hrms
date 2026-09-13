@@ -98,6 +98,15 @@ export async function createApiKey(deps: Deps, actor: AppUser, input: ApiKeyInpu
   if (!owner) throw invalidArgument("owner must be an existing user");
   if (owner.status !== "active") throw failedPrecondition("owner is disabled");
 
+  // REFUSED AT MINT, where `parseScope` only normalises. A custom method is a write (domain/keyScope.ts
+  // verbsAllowedAt), so `max_level: "read"` and a non-empty `verbs` describe a credential that cannot exist -
+  // and the two axes together are what an operator reads as the key's authority. Silently emptying the verb
+  // list would hand them a key labelled the way they asked for and narrower than they intended, which they
+  // would only find out about when the integration failed; saying so names the fix in one line.
+  const asked = input.scope as { max_level?: unknown; verbs?: unknown } | undefined;
+  if (asked && asked.max_level === "read" && asked.verbs !== undefined && !(Array.isArray(asked.verbs) && asked.verbs.length === 0)) {
+    throw invalidArgument("a read-only key cannot perform custom methods: set max_level to \"write\" to allow actions, or verbs to []");
+  }
   const scope = input.scope === undefined ? DEFAULT_SCOPE : parseScope(input.scope, COLLECTIONS);
   if (!scope) throw invalidArgument("scope must be { collections: [..] | \"*\", max_level: read|write|admin, verbs: [..] | \"*\" }");
 

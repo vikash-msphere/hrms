@@ -6,6 +6,7 @@ import { makeDocumentService } from "../services/documentService";
 import { toPersonalDocumentResource } from "../http/serialize";
 import { idFromPath, isPdfUpload, assertUploadSize, requireCappedBody } from "../services/documentsCommon";
 import { invalidArgument } from "../lib/errors";
+import { queryParam } from "../http/query";
 
 // Collection-level custom method `personal-documents:uploadForm16` - file the OFFICIAL TRACES Form 16 PDF for
 // an employee + financial year, marked official=true so the UI prefers it over the HRMS-generated Part-B copy.
@@ -22,13 +23,18 @@ function normalizeFy(label?: string): string {
 }
 
 export const form16Upload = new Hono<AppEnv>().post("/", async (c) => {
-  const employee = c.req.query("employee");
+  // THROUGH http/query.ts, because `employee` is a GATED parameter here. It is the declared owner ref for
+  // `personal-documents`, so middleware/authz.ts reads it to decide whether this caller may file a document
+  // under that person - and the pair that must agree is the gate and the handler (see the header of
+  // http/query.ts, and `force` for what a disagreement cost). The rest of the handler's parameters read the
+  // same way so no one has to remember which of the four is the one with a decision riding on it.
+  const employee = queryParam(c, "employee");
   const employeeId = idFromPath(employee);
   if (!employeeId) throw invalidArgument("employee is required");
-  const financialYear = normalizeFy(c.req.query("financial_year"));
+  const financialYear = normalizeFy(queryParam(c, "financial_year"));
 
-  const fileName = c.req.query("file_name") ?? `Form16-${financialYear}-official.pdf`;
-  const contentType = c.req.query("content_type") ?? "application/pdf";
+  const fileName = queryParam(c, "file_name") ?? `Form16-${financialYear}-official.pdf`;
+  const contentType = queryParam(c, "content_type") ?? "application/pdf";
   if (!isPdfUpload(fileName, contentType)) throw invalidArgument("Form 16 must be a PDF");
 
   // An oversized body never reaches here: middleware/bodyLimit.ts refuses it from `Content-Length` before any
