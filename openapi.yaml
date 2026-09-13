@@ -60,16 +60,22 @@ components:
             advance_notice:
               type: object
               nullable: true
-              description: Notice required before the leave starts, tiered by how long the request is. The shortest tier that covers the request wins; a request longer than every tier uses beyond_notice_days.
+              description: >-
+                Notice required before the leave starts, by how long the request is. The tiers are a LADDER,
+                not a set of rules that might miss: each tier's `up_to_days` is the top of a band (inclusive)
+                and the band's bottom is wherever the tier below it stopped, so every length falls in exactly
+                one band. Tiers of 1 and 5 make three bands - up to 1 day, over 1 up to 5, and over 5, the
+                last being `beyond_notice_days`. Two tiers ending at the same length are refused. A request
+                longer than every tier with no `beyond_notice_days` needs no notice at all.
               properties:
                 tiers:
                   type: array
                   items:
                     type: object
                     properties:
-                      up_to_days: { type: number, description: "This tier covers requests up to this many days." }
-                      notice_days: { type: number, description: "Calendar days of notice such a request needs." }
-                beyond_notice_days: { type: number, nullable: true }
+                      up_to_days: { type: number, description: "Top of this band, inclusive. The band starts where the tier below it ended." }
+                      notice_days: { type: number, description: "Calendar days of notice a request in this band needs." }
+                beyond_notice_days: { type: number, nullable: true, description: "Notice for anything longer than the last tier. Null = none required." }
             max_advance_days: { type: number, nullable: true, description: "How far ahead this type may be booked." }
             blackouts:
               type: array

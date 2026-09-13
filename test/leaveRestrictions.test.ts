@@ -6,6 +6,8 @@ import {
   historyWindow,
   mergeRestrictions,
   needsLifetime,
+  noticeBandLabel,
+  noticeBands,
   parseRestrictions,
   requiredNotice,
   validateRestrictions,
@@ -75,6 +77,36 @@ describe("parse / validate / merge", () => {
     expect(() => validateRestrictions({ soft_rules: ["advance_notiec"] })).toThrow(/unknown rule code/);
   });
 
+  // The read path is lenient by design, so anything it cannot make sense of it drops. On the WRITE path that
+  // is the enemy: a policy that saves cleanly and then enforces nothing is the exact failure this feature
+  // exists to prevent, and every one of these used to do precisely that.
+  it("refuses shapes the lenient parser would silently discard", () => {
+    expect(() => validateRestrictions({ counting: { sandwich: { weekends: "intervining" } } })).toThrow(/exclude, intervening or flanking/);
+    expect(() => validateRestrictions({ timing: { blackouts: [{ from: "soon", to: "later" }] } })).toThrow(/YYYY-MM-DD/);
+    expect(() => validateRestrictions({ timing: { advance_notice: { tiers: [{ up_to: 1, notice: 2 }] } } })).toThrow(/up_to_days and notice_days/);
+    expect(() => validateRestrictions({ exit: { during_notice: "blockd" } })).toThrow(/allowed, blocked or capped/);
+    expect(() => validateRestrictions({ quota: { year_basis: "financial" } })).toThrow(/calendar, fiscal or anniversary/);
+    expect(() => validateRestrictions({ accrual: { joining_rule: { cutoff_day: "15th" } } })).toThrow(/numeric cutoff_day/);
+    expect(() => validateRestrictions({ request: { blocked_weekdays: ["monday"] } })).toThrow(/list of numbers/);
+    expect(() => validateRestrictions({ quota: { max_days_per_month: "2" } })).toThrow(/must be a number, not text/);
+    // …while the same rules written properly go through.
+    expect(() => validateRestrictions({
+      counting: { sandwich: { weekends: "intervening", holidays: "exclude" } },
+      timing: { blackouts: [{ from: "2026-03-25", to: "2026-03-31", label: "close" }], advance_notice: { tiers: [{ up_to_days: 1, notice_days: 2 }] } },
+      exit: { during_notice: "capped", notice_cap_days: 3 },
+      quota: { year_basis: "fiscal", max_days_per_year: 12 },
+      accrual: { joining_rule: { cutoff_day: 15, if_after: "none" } },
+      request: { blocked_weekdays: [1, 5] },
+    })).not.toThrow();
+  });
+
+  it("refuses a policy too big to carry", () => {
+    // The blob rides on the leave type, and the leave types are ONE cached snapshot read by the accrual job,
+    // every leave request and the serializers - so an oversized policy taxes every request in the system.
+    const huge = { timing: { blackouts: Array.from({ length: 5000 }, () => ({ from: "2026-01-01", to: "2026-01-02", label: "x".repeat(100) })) } };
+    expect(() => validateRestrictions(huge)).toThrow(/at most 64 KB/);
+  });
+
   it("refuses values that could never be satisfied", () => {
     expect(() => validateRestrictions({ request: { min_days: 5, max_days: 2 } })).toThrow(/min_days cannot exceed/);
     expect(() => validateRestrictions({ accrual: { joining_rule: { cutoff_day: 30 } } })).toThrow(/cutoff_day is 1 to 28/);
@@ -113,6 +145,38 @@ describe("parse / validate / merge", () => {
 
 describe("advance notice tiers", () => {
   const notice = { tiers: [{ up_to_days: 1, notice_days: 2 }, { up_to_days: 2, notice_days: 7 }], beyond_notice_days: 14 };
+
+  // The tiers are a LADDER: each one's `up_to_days` is the top of a band and the band below it sets the
+  // bottom, so every length falls in exactly one band and "what applies between two tiers" has no answer
+  // because there is no between. The editor renders these same bands, so both sides read the list one way.
+  it("reads as bands with no gaps, including an open-ended last one", () => {
+    const bands = noticeBands(parseRestrictions({ timing: { advance_notice: notice } }).timing.advance_notice);
+    expect(bands).toEqual([
+      { moreThan: null, upTo: 1, noticeDays: 2 },
+      { moreThan: 1, upTo: 2, noticeDays: 7 },
+      { moreThan: 2, upTo: null, noticeDays: 14 },
+    ]);
+    expect(bands.map(noticeBandLabel)).toEqual(["up to 1 day", "over 1 day, up to 2 days", "over 2 days"]);
+  });
+
+  it("still shows the last band when nothing was set for it - a policy that asks for no notice says so", () => {
+    const open = noticeBands(parseRestrictions({ timing: { advance_notice: { tiers: [{ up_to_days: 1, notice_days: 2 }] } } }).timing.advance_notice);
+    expect(open).toHaveLength(2);
+    expect(open[1]).toEqual({ moreThan: 1, upTo: null, noticeDays: null });
+  });
+
+  it("orders the bands however the tiers were stored", () => {
+    const jumbled = parseRestrictions({ timing: { advance_notice: { tiers: [{ up_to_days: 5, notice_days: 7 }, { up_to_days: 1, notice_days: 2 }] } } });
+    expect(noticeBands(jumbled.timing.advance_notice).map((b) => b.upTo)).toEqual([1, 5, null]);
+    expect(requiredNotice(jumbled.timing.advance_notice, 1)).toBe(2);
+  });
+
+  it("refuses two tiers that end at the same length", () => {
+    // One of them could never apply, and which one would depend on the order they happened to be stored in.
+    expect(() => validateRestrictions({ timing: { advance_notice: { tiers: [{ up_to_days: 2, notice_days: 1 }, { up_to_days: 2, notice_days: 9 }] } } }))
+      .toThrow(/both end at 2/);
+  });
+
   it("picks the shortest tier that covers the request", () => {
     expect(requiredNotice(parseRestrictions({ timing: { advance_notice: notice } }).timing.advance_notice, 1)).toBe(2);
     expect(requiredNotice(parseRestrictions({ timing: { advance_notice: notice } }).timing.advance_notice, 2)).toBe(7);
@@ -380,8 +444,31 @@ describe("historyWindow", () => {
     const month = historyWindow(parseRestrictions({ quota: { max_days_per_month: 2 } }), ms("2026-03-10"), ms("2026-03-10"), null)!;
     expect(new Date(month.fromMs).toISOString().slice(0, 10)).toBe("2026-03-01");
     expect(new Date(month.toMs).toISOString().slice(0, 10)).toBe("2026-03-31");
+    // A gap counted in WORKING days needs a window wider than that many CALENDAR days, or the neighbour that
+    // breaks the rule sits outside the query and the rule passes silently. 30 working days is six weeks of
+    // calendar; the window has to reach at least that far back.
     const gap = historyWindow(parseRestrictions({ quota: { min_gap_days: 30 } }), ms("2026-03-10"), ms("2026-03-10"), null)!;
-    expect(Math.round((ms("2026-03-10") - gap.fromMs) / DAY)).toBe(31);
+    expect(Math.round((ms("2026-03-10") - gap.fromMs) / DAY)).toBeGreaterThanOrEqual(42);
+  });
+
+  it("reaches far enough back for a gap measured in working days", () => {
+    // The regression this pins: a 5-working-day gap padded by 5 CALENDAR days missed a neighbour nine days
+    // back across two weekends, so the rule never fired.
+    const win = historyWindow(parseRestrictions({ quota: { min_gap_days: 5 } }), ms("2026-03-16"), ms("2026-03-16"), null)!;
+    const neighbourEnd = ms("2026-03-06"); // Friday, 4 working days before Monday the 16th
+    expect(win.fromMs).toBeLessThanOrEqual(neighbourEnd);
+  });
+
+  // `hasAnyRestriction` is what decides whether a leave request pays for the policy reads at all, so a leaf
+  // that restricts NOTHING on its own must not switch them on.
+  it("is not switched on by a modifier, an empty list, or a waiver", () => {
+    expect(hasAnyRestriction(parseRestrictions({ quota: { year_basis: "fiscal", fiscal_year_start_month: 4 } }))).toBe(false);
+    expect(hasAnyRestriction(parseRestrictions({ combinations: { no_combination_with: [], gap_days: 3 } }))).toBe(false);
+    expect(hasAnyRestriction(parseRestrictions({ exit: { notice_cap_days: 5 } }))).toBe(false);
+    expect(hasAnyRestriction(parseRestrictions({ soft_rules: ["advance_notice"] }))).toBe(false);
+    // …and IS switched on by an actual rule, including one that only rides alongside a modifier.
+    expect(hasAnyRestriction(parseRestrictions({ quota: { max_days_per_year: 12, year_basis: "fiscal" } }))).toBe(true);
+    expect(hasAnyRestriction(parseRestrictions({ combinations: { no_combination_with: ["leave-types/x"] } }))).toBe(true);
   });
 
   it("knows when a lifetime total is needed instead of a window", () => {
@@ -446,7 +533,8 @@ describe("describeRestrictions", () => {
       counting: { sandwich: { weekends: "intervening", holidays: "exclude" } },
       exit: { during_notice: "blocked" },
     }));
-    expect(said.join(" · ")).toMatch(/notice: 2 days for up to 1 day/);
+    // Said as the bands it enforces, so a reader never has to work out what falls where.
+    expect(said.join(" · ")).toMatch(/notice: up to 1 day needs 2 days; over 1 day needs 7 days/);
     expect(said.join(" · ")).toMatch(/at most 2 days a month/);
     expect(said.join(" · ")).toMatch(/sandwich rule charges weekends/);
     expect(said.join(" · ")).toMatch(/not during notice period/);

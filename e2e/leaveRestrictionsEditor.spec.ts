@@ -110,15 +110,24 @@ test("the notice tiers survive a save, and the org tab shows the same editor", a
     await form.getByRole("button", { name: "Notice & timing" }).click();
     await form.getByRole("checkbox", { name: "Advance notice required" }).check();
 
-    await form.getByLabel("Tier 1 covers requests up to (days)").fill("1");
-    await form.getByLabel("Tier 1 needs notice (days)").fill("2");
-    await form.getByRole("button", { name: "Add a tier" }).click();
-    await form.getByLabel("Tier 2 covers requests up to (days)").fill("5");
-    await form.getByLabel("Tier 2 needs notice (days)").fill("7");
-    await form.getByLabel("Longer than every tier").fill("14");
+    // Every row states the band it covers - the top is typed, the bottom is wherever the row above stopped -
+    // so there is no "between two tiers" left for a reader to guess at.
+    await form.getByLabel("Band 1 covers leave up to (days)").fill("1");
+    await form.getByLabel("Band 1 needs notice (days)").fill("2");
+    await form.getByRole("button", { name: "Add a band" }).click();
+    await form.getByLabel("Band 2 covers leave up to (days)").fill("5");
+    await form.getByLabel("Band 2 needs notice (days)").fill("7");
+    // The second row says where it starts - which is where the first one stopped, so nothing falls between.
+    await expect(form.getByText("Over 1 day, up to", { exact: true })).toBeVisible();
 
-    // The sentence says the whole ladder back before it is saved.
-    await expect(form.getByText(/notice: 2 days for up to 1 day, 7 days for up to 5 days, 14 days beyond that/)).toBeVisible();
+    // The open-ended last band is a row of the ladder, not a field underneath it: until it is filled in, the
+    // editor says out loud that long requests need no notice at all.
+    await expect(form.getByText("no notice required")).toBeVisible();
+    await form.getByLabel("Anything longer needs notice (days)").fill("14");
+    await expect(form.getByText("no notice required")).toHaveCount(0);
+
+    // The sentence says the whole ladder back before it is saved, in the same band language.
+    await expect(form.getByText(/notice: up to 1 day needs 2 days; over 1 day, up to 5 days needs 7 days; over 5 days needs 14 days/)).toBeVisible();
 
     await form.getByRole("button", { name: "Create" }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
@@ -140,7 +149,8 @@ test("the notice tiers survive a save, and the org tab shows the same editor", a
     const edit = page.getByRole("dialog");
     await expect(edit.getByRole("heading", { name: "Edit leave type" })).toBeVisible({ timeout: 30_000 });
     await edit.getByRole("button", { name: "Notice & timing" }).click();
-    await expect(edit.getByLabel("Tier 2 needs notice (days)")).toHaveValue("7");
+    await expect(edit.getByLabel("Band 2 needs notice (days)")).toHaveValue("7");
+    await expect(edit.getByLabel("Anything longer needs notice (days)")).toHaveValue("14");
     await edit.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 30_000 });
 

@@ -1,15 +1,14 @@
-import { useMemo } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { cn, idOf } from "@/lib/utils";
-import { describeRestrictions, parseRestrictions, RESTRICTION_CODES, type LeaveRestrictions } from "../../../../src/domain/leaveRestrictions";
+import { describeRestrictions, mergeRestrictions, noticeBands, RESTRICTION_CODES, type LeaveRestrictions } from "../../../../src/domain/leaveRestrictions";
 import type { LeaveType } from "@/types";
+import { todayStr } from "@/lib/orgDay";
 import { Field, FieldRow } from "@/components/common/Field";
 import { FoldSection } from "@/components/common/FoldSection";
-import { InfoHint } from "@/components/common/InfoHint";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 // The leave-policy editor, shared by the org baseline (Settings -> Leave policy) and one leave type's
@@ -26,6 +25,184 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 type Blob = Record<string, Record<string, unknown> | unknown> | null;
 type Group = Exclude<keyof LeaveRestrictions, "soft_rules">;
+
+/**
+ * How a rule control reaches the blob it edits.
+ *
+ * THROUGH A CONTEXT, AND THE CONTROLS LIVE AT MODULE SCOPE - which is not a style choice. Defined inside the
+ * editor, each control was a NEW component type on every render, so React unmounted and remounted the whole
+ * panel on every keystroke: the field being typed into lost focus after each character, which made the policy
+ * form effectively unusable for anything longer than one digit. Hoisting them out fixes that; the context is
+ * what keeps the call sites from having to pass four accessors apiece.
+ */
+type RuleAccess = {
+  scope: "org" | "type";
+  /** Does this scope sit under an org baseline? `type` does, `org` has nothing above it. */
+  inheriting: boolean;
+  /** The stored leaf: `undefined` = never set (inherits), `null` = explicitly exempt, else the value. */
+  read: (g: Group, leaf: string) => unknown;
+  /** `undefined` removes the leaf (back to inheriting); `null` exempts; anything else sets it. */
+  write: (g: Group, leaf: string, v: unknown) => void;
+  /** What the org baseline says for this leaf, for the "inherits X" hints. */
+  inherited: (g: Group, leaf: string) => unknown;
+};
+const RuleCtx = createContext<RuleAccess | null>(null);
+function useRules(): RuleAccess {
+  const ctx = useContext(RuleCtx);
+  if (!ctx) throw new Error("a leave-policy control was rendered outside RestrictionsEditor");
+  return ctx;
+}
+
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** A numeric rule: empty = inherit, a figure = this scope's own, "No limit" = exempt from the org's. */
+function NumRule({ g, leaf, label, info, unit, min = 0, max }: { g: Group; leaf: string; label: string; info?: string; unit?: string; min?: number; max?: number }) {
+  const { read, write, inherited, inheriting, scope } = useRules();
+  const stored = read(g, leaf);
+  const org = inherited(g, leaf) as number | null | undefined;
+  const off = stored === null;
+  const hint = off
+    ? "No limit - overrides the org rule"
+    : stored === undefined
+      ? inheriting && org != null ? `Inherits the org rule: ${org}${unit ? ` ${unit}` : ""}` : "No rule"
+      : undefined;
+  // `htmlFor` by hand: the control sits in a row beside its "No limit" switch, so Field has no single child
+  // to bind its label to and the label would name nothing (see the note in components/common/Field.tsx).
+  const id = `rule-${scope}-${g}-${leaf}`;
+  return (
+    <Field label={label} info={info} hint={hint} htmlFor={id}>
+      <div className="flex items-center gap-2">
+        <Input
+          id={id}
+          type="number"
+          min={min}
+          max={max}
+          disabled={off}
+          placeholder={off ? "No limit" : org != null ? String(org) : "None"}
+          value={stored === undefined || stored === null ? "" : String(stored)}
+          onChange={(e) => write(g, leaf, e.target.value.trim() === "" ? undefined : Number(e.target.value))}
+        />
+        {inheriting && org != null && (
+          <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
+            <Checkbox checked={off} onCheckedChange={(v) => write(g, leaf, v === true ? null : undefined)} />
+            No limit
+          </label>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+function BoolRule({ g, leaf, label, info }: { g: Group; leaf: string; label: string; info?: string }) {
+  const { read, write, inherited, inheriting } = useRules();
+  const stored = read(g, leaf) as boolean | null | undefined;
+  const org = inherited(g, leaf) as boolean | null | undefined;
+  const v = stored === undefined ? "inherit" : stored === null ? "off" : stored ? "yes" : "no";
+  return (
+    <Field label={label} info={info}>
+      <Select
+        value={v}
+        onValueChange={(next) => write(g, leaf, next === "inherit" ? undefined : next === "off" ? null : next === "yes")}
+      >
+        <SelectTrigger><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="inherit">{inheriting && org != null ? `Inherit (${org ? "yes" : "no"})` : "No rule"}</SelectItem>
+          {/* Only where there is something to be exempt FROM: with no org rule set, "no rule" and "exempt"
+              are the same statement and offering both invites the reader to think they differ. */}
+          {inheriting && org != null && <SelectItem value="off">No rule for this type</SelectItem>}
+          <SelectItem value="yes">Yes</SelectItem>
+          <SelectItem value="no">No</SelectItem>
+        </SelectContent>
+      </Select>
+    </Field>
+  );
+}
+
+function EnumRule({ g, leaf, label, info, options, noneLabel = "No rule" }: {
+  g: Group; leaf: string; label: string; info?: string; options: { value: string; label: string }[]; noneLabel?: string;
+}) {
+  const { read, write, inherited, inheriting } = useRules();
+  const stored = read(g, leaf) as string | null | undefined;
+  const org = inherited(g, leaf) as string | null | undefined;
+  return (
+    <Field label={label} info={info}>
+      <Select
+        value={stored === undefined ? "__inherit" : stored === null ? "__none" : stored}
+        onValueChange={(next) => write(g, leaf, next === "__inherit" ? undefined : next === "__none" ? null : next)}
+      >
+        <SelectTrigger><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__inherit">
+            {inheriting && org ? `Inherit (${options.find((o) => o.value === org)?.label ?? org})` : noneLabel}
+          </SelectItem>
+          {inheriting && org != null && <SelectItem value="__none">{noneLabel} for this type</SelectItem>}
+          {options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </Field>
+  );
+}
+
+/** Arrays and nested shapes are edited behind one switch: off = inherit, on = this is the whole list. */
+function OverrideSwitch({ g, leaf, label, empty, children }: { g: Group; leaf: string; label: string; empty: unknown; children: ReactNode }) {
+  const { read, write, inherited, inheriting } = useRules();
+  const stored = read(g, leaf);
+  const on = stored !== undefined && stored !== null;
+  const org = inherited(g, leaf);
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <label className="flex items-center gap-2 text-sm font-medium">
+          {/* Unticking goes back to INHERIT (the leaf is removed), never to null - "exempt" is its own
+              affordance beside this one, because the two are different statements. */}
+          <Checkbox checked={on} onCheckedChange={(v) => write(g, leaf, v === true ? empty : undefined)} />
+          {label}
+        </label>
+        {!on && stored !== null && (
+          <span className="text-xs text-muted-foreground">{inheriting && org ? "Inheriting the org rule" : "No rule"}</span>
+        )}
+        {on && inheriting && org != null && (
+          <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => write(g, leaf, null)}>
+            Exempt this type
+          </button>
+        )}
+      </div>
+      {stored === null && (
+        <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          Exempt - the org rule doesn't apply to this type.
+          <button type="button" className="font-medium text-primary hover:underline" onClick={() => write(g, leaf, undefined)}>
+            Follow the org rule again
+          </button>
+        </p>
+      )}
+      {on && children}
+    </div>
+  );
+}
+
+function DayChips({ g, leaf, values, labels, offset = 0 }: { g: Group; leaf: string; values: number[]; labels: string[]; offset?: number }) {
+  const { read, write } = useRules();
+  const list = (read(g, leaf) as number[] | null) ?? [];
+  const toggle = (n: number) => write(g, leaf, list.includes(n) ? list.filter((x) => x !== n) : [...list, n].sort((a, b) => a - b));
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {values.map((n) => (
+        <button
+          key={n}
+          type="button"
+          aria-pressed={list.includes(n)}
+          onClick={() => toggle(n)}
+          className={cn(
+            "rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:bg-accent",
+            list.includes(n) && "border-primary bg-primary/10 text-primary",
+          )}
+        >
+          {labels[n - offset]}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function RestrictionsEditor({
   value,
@@ -67,164 +244,33 @@ export function RestrictionsEditor({
   const inherited = (g: Group, leaf: string): unknown =>
     baseline ? (baseline[g] as unknown as Record<string, unknown>)[leaf] : undefined;
 
-  const effective = useMemo(() => {
-    // What the type (or the org) will actually enforce once this blob is merged over the baseline - the same
-    // merge the server does, so the sentence under the editor is the policy and not a guess at it.
-    const base = baseline ?? parseRestrictions({});
-    const merged = JSON.parse(JSON.stringify(base)) as LeaveRestrictions;
-    for (const [g, leaves] of Object.entries(blob)) {
-      if (g === "soft_rules") { merged.soft_rules = (leaves as unknown as string[]) ?? null; continue; }
-      if (!leaves || typeof leaves !== "object") continue;
-      for (const [leaf, v] of Object.entries(leaves as Record<string, unknown>)) {
-        (merged[g as Group] as unknown as Record<string, unknown>)[leaf] = v ?? null;
-      }
-    }
-    return merged;
-  }, [blob, baseline]);
+  // What this type (or the org) will actually enforce - through the SERVER'S OWN merge, not a copy of it here.
+  // A second implementation would be the place the sentence under the editor and the rule the server applies
+  // quietly stop agreeing, and the whole point of the sentence is that it can be trusted.
+  const effective = useMemo(() => mergeRestrictions(baseline ?? {}, blob), [blob, baseline]);
 
-  // ---- the three-state controls ----
-
-  const NumRule = ({ g, leaf, label, info, unit, min = 0 }: { g: Group; leaf: string; label: string; info?: string; unit?: string; min?: number }) => {
-    const stored = read(g, leaf);
-    const org = inherited(g, leaf) as number | null | undefined;
-    const off = stored === null;
-    const hint = off
-      ? "No limit - overrides the org rule"
-      : stored === undefined
-        ? inheriting
-          ? org != null ? `Inherits the org rule: ${org}${unit ? ` ${unit}` : ""}` : "No rule"
-          : "No rule"
-        : undefined;
+  // Everything the rule controls need, handed down once. The controls themselves live at module scope - see
+  // RuleAccess for why that is not optional.
+  const ctx: RuleAccess = { scope, inheriting, read, write, inherited };
     // `htmlFor` by hand: the control sits in a row beside its "No limit" switch, so Field has no single child
     // to bind its label to and the label would name nothing (see the note in components/common/Field.tsx).
-    const id = `rule-${scope}-${g}-${leaf}`;
-    return (
-      <Field label={label} info={info} hint={hint} htmlFor={id}>
-        <div className="flex items-center gap-2">
-          <Input
-            id={id}
-            type="number"
-            min={min}
-            disabled={off}
-            placeholder={off ? "No limit" : org != null ? String(org) : "None"}
-            value={stored === undefined || stored === null ? "" : String(stored)}
-            onChange={(e) => write(g, leaf, e.target.value.trim() === "" ? undefined : Number(e.target.value))}
-          />
-          {inheriting && org != null && (
-            <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
-              <Checkbox checked={off} onCheckedChange={(v) => write(g, leaf, v === true ? null : undefined)} />
-              No limit
-            </label>
-          )}
-        </div>
-      </Field>
-    );
-  };
-
-  const BoolRule = ({ g, leaf, label, info }: { g: Group; leaf: string; label: string; info?: string }) => {
-    const stored = read(g, leaf) as boolean | null | undefined;
-    const org = inherited(g, leaf) as boolean | null | undefined;
-    const v = stored === undefined ? "inherit" : stored === null ? "off" : stored ? "yes" : "no";
-    return (
-      <Field label={label} info={info}>
-        <Select
-          value={v}
-          onValueChange={(next) => write(g, leaf, next === "inherit" ? undefined : next === "off" ? null : next === "yes")}
-        >
-          <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {inheriting && <SelectItem value="inherit">{org == null ? "No rule (org)" : `Inherit (${org ? "yes" : "no"})`}</SelectItem>}
-            {!inheriting && <SelectItem value="inherit">No rule</SelectItem>}
-            <SelectItem value="yes">Yes</SelectItem>
-            <SelectItem value="no">No</SelectItem>
-          </SelectContent>
-        </Select>
-      </Field>
-    );
-  };
-
-  const EnumRule = ({ g, leaf, label, info, options, noneLabel = "No rule" }: {
-    g: Group; leaf: string; label: string; info?: string; options: { value: string; label: string }[]; noneLabel?: string;
-  }) => {
-    const stored = read(g, leaf) as string | null | undefined;
-    const org = inherited(g, leaf) as string | null | undefined;
-    return (
-      <Field label={label} info={info}>
-        <Select
-          value={stored === undefined ? "__inherit" : stored === null ? "__none" : stored}
-          onValueChange={(next) => write(g, leaf, next === "__inherit" ? undefined : next === "__none" ? null : next)}
-        >
-          <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {inheriting
-              ? <SelectItem value="__inherit">{org ? `Inherit (${options.find((o) => o.value === org)?.label ?? org})` : "Inherit (no rule)"}</SelectItem>
-              : <SelectItem value="__inherit">{noneLabel}</SelectItem>}
-            {inheriting && <SelectItem value="__none">{noneLabel}</SelectItem>}
-            {options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      </Field>
-    );
-  };
-
-  /** Arrays and nested shapes are edited behind one switch: off = inherit, on = this is the whole list. */
-  const OverrideSwitch = ({ g, leaf, label, empty, children }: { g: Group; leaf: string; label: string; empty: unknown; children: React.ReactNode }) => {
-    const stored = read(g, leaf);
-    const on = stored !== undefined && stored !== null;
-    const org = inherited(g, leaf);
-    return (
-      <div className="space-y-2 rounded-md border p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <Checkbox checked={on} onCheckedChange={(v) => write(g, leaf, v === true ? empty : inheriting ? undefined : undefined)} />
-            {label}
-          </label>
-          {!on && (
-            <span className="text-xs text-muted-foreground">
-              {inheriting ? (org ? "Inheriting the org rule" : "No rule") : "No rule"}
-            </span>
-          )}
-          {on && inheriting && (
-            <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => write(g, leaf, null)}>
-              Exempt this type
-            </button>
-          )}
-        </div>
-        {stored === null && <p className="text-xs text-muted-foreground">Exempt - the org rule doesn't apply to this type.</p>}
-        {on && children}
-      </div>
-    );
-  };
-
-  // ---- list editors ----
-
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const DayChips = ({ g, leaf, values, labels, offset = 0 }: { g: Group; leaf: string; values: number[]; labels: string[]; offset?: number }) => {
-    const list = (read(g, leaf) as number[] | null) ?? [];
-    const toggle = (n: number) => write(g, leaf, list.includes(n) ? list.filter((x) => x !== n) : [...list, n].sort((a, b) => a - b));
-    return (
-      <div className="flex flex-wrap gap-1.5">
-        {values.map((n) => (
-          <button
-            key={n}
-            type="button"
-            onClick={() => toggle(n)}
-            className={cn(
-              "rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:bg-accent",
-              list.includes(n) && "border-primary bg-primary/10 text-primary",
-            )}
-          >
-            {labels[n - offset]}
-          </button>
-        ))}
-      </div>
-    );
-  };
-
-  const tiers = ((read("timing", "advance_notice") as { tiers?: { up_to_days: number; notice_days: number }[] } | null)?.tiers) ?? [];
+  const tiers =((read("timing", "advance_notice") as { tiers?: { up_to_days: number; notice_days: number }[] } | null)?.tiers) ?? [];
   const beyond = (read("timing", "advance_notice") as { beyond_notice_days?: number | null } | null)?.beyond_notice_days ?? null;
   const writeNotice = (nextTiers: typeof tiers, nextBeyond: number | null) =>
     write("timing", "advance_notice", { tiers: nextTiers, beyond_notice_days: nextBeyond });
+  // Kept in order as they are typed. The evaluator sorts before it reads them either way, so an unsorted list
+  // enforces the same policy - but it DISPLAYS as a ladder whose rungs are out of order, and each row's band
+  // is stated relative to the row above it, which then reads as nonsense.
+  const sortTiers = (list: typeof tiers) => [...list].sort((a, b) => a.up_to_days - b.up_to_days);
+  /** The words in front of a band's own input: where it starts, which is where the row above it stopped. */
+  const bandPrefix = (b: { moreThan: number | null }, last: boolean) => {
+    if (b.moreThan === null) return last ? "Leave of any length" : "Leave of up to";
+    const d = `${b.moreThan} day${b.moreThan === 1 ? "" : "s"}`;
+    return last ? `Over ${d}` : `Over ${d}, up to`;
+  };
+  // The rows ARE the bands (domain/leaveRestrictions.ts), last one included - so what the editor shows and
+  // what the server enforces are the same reading of the same list.
+  const noticeRows = noticeBands({ tiers, beyond_notice_days: beyond });
 
   const blackouts = (read("timing", "blackouts") as { from: string; to: string; label?: string }[] | null) ?? [];
   const excluded = (read("combinations", "no_combination_with") as string[] | null) ?? [];
@@ -233,6 +279,7 @@ export function RestrictionsEditor({
   const sentence = describeRestrictions(effective);
 
   return (
+    <RuleCtx.Provider value={ctx}>
     <div className="space-y-3">
       <FoldSection title="Eligibility" summary="Who may take this leave" defaultOpen={false}>
         <FieldRow>
@@ -261,37 +308,81 @@ export function RestrictionsEditor({
         </FieldRow>
         <NumRule g="request" leaf="document_required_over_days" label="Document required over (days)" unit="days" info="A sick note or similar, required past this many days. Checked when the request is approved - the request has to exist before a file can be attached to it." />
         <OverrideSwitch g="request" leaf="blocked_weekdays" label="Block particular weekdays" empty={[]}>
-          <DayChips g="request" leaf="blocked_weekdays" values={[0, 1, 2, 3, 4, 5, 6]} labels={weekdays} />
+          <DayChips g="request" leaf="blocked_weekdays" values={[0, 1, 2, 3, 4, 5, 6]} labels={WEEKDAY_LABELS} />
         </OverrideSwitch>
       </FoldSection>
 
       <FoldSection title="Notice & timing" summary="How far ahead it must be asked for">
-        <OverrideSwitch g="timing" leaf="advance_notice" label="Advance notice required" empty={{ tiers: [], beyond_notice_days: null }}>
+        {/* Seeded with one band rather than an empty ladder: a notice rule with no bands says nothing, so the
+            server refuses it - and ticking a switch should not produce something that cannot be saved. */}
+        <OverrideSwitch g="timing" leaf="advance_notice" label="Advance notice required" empty={{ tiers: [{ up_to_days: 1, notice_days: 1 }], beyond_notice_days: null }}>
+          {/* THE LADDER, WRITTEN AS THE BANDS IT ENFORCES. Each row used to be a bare "up to (days)" box, which
+              says nothing about where that band STARTS and left "what does a 3-day request need?" for the
+              reader to work out. Every row now states its own band ("over 1 day, up to 5 days"), the bands are
+              kept in order as they are typed, and the open-ended last one is a row of the table rather than a
+              separate field underneath - because a policy that says nothing about long requests is a policy
+              that lets them go with no notice at all, and that has to be on screen. */}
           <div className="space-y-2">
-            {/* Only the first row carries a visible label - a column of repeated headings reads as noise - so
-                every row names its own controls with `aria-label`, which is the only name the later ones have. */}
-            {tiers.map((t, i) => (
-              <div key={i} className="flex items-end gap-2">
-                <Field label={i === 0 ? "Up to (days)" : ""} className="flex-1">
-                  <Input type="number" min={0.5} step={0.5} aria-label={`Tier ${i + 1} covers requests up to (days)`} value={String(t.up_to_days)}
-                    onChange={(e) => writeNotice(tiers.map((x, j) => (j === i ? { ...x, up_to_days: Number(e.target.value) } : x)), beyond)} />
-                </Field>
-                <Field label={i === 0 ? "Needs notice (days)" : ""} className="flex-1">
-                  <Input type="number" min={0} aria-label={`Tier ${i + 1} needs notice (days)`} value={String(t.notice_days)}
-                    onChange={(e) => writeNotice(tiers.map((x, j) => (j === i ? { ...x, notice_days: Number(e.target.value) } : x)), beyond)} />
-                </Field>
-                <Button type="button" variant="ghost" size="icon" aria-label={`Remove tier ${i + 1}`} onClick={() => writeNotice(tiers.filter((_, j) => j !== i), beyond)}>
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-            <Button type="button" variant="outline" size="sm" onClick={() => writeNotice([...tiers, { up_to_days: (tiers[tiers.length - 1]?.up_to_days ?? 0) + 1, notice_days: 0 }], beyond)}>
-              Add a tier
+            <p className="text-xs text-muted-foreground">
+              Longer requests need more warning. Each row covers everything up to its own length, starting where the row above it stopped.
+            </p>
+            {noticeRows.map((band, i) => {
+              const last = band.upTo === null;
+              return (
+                <div key={i} className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm">
+                  {/* The band's LOWER bound is text (it is whatever the row above ended at, so it is not this
+                      row's to edit) and its upper bound is the input. Printing the whole band label here as
+                      well would say the same number twice, once editable and once not. */}
+                  <span className="shrink-0 text-muted-foreground">{bandPrefix(band, last)}</span>
+                  {!last && (
+                    <>
+                      <Input
+                        type="number"
+                        min={0.5}
+                        step={0.5}
+                        className="h-8 w-20"
+                        aria-label={`Band ${i + 1} covers leave up to (days)`}
+                        value={String(band.upTo)}
+                        onChange={(e) => writeNotice(sortTiers(tiers.map((x, j) => (j === i ? { ...x, up_to_days: Number(e.target.value) } : x))), beyond)}
+                      />
+                      <span className="text-muted-foreground">days</span>
+                    </>
+                  )}
+                  <span className="text-muted-foreground">needs</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    className="h-8 w-20"
+                    placeholder={last ? "none" : "0"}
+                    aria-label={last ? "Anything longer needs notice (days)" : `Band ${i + 1} needs notice (days)`}
+                    value={band.noticeDays == null ? "" : String(band.noticeDays)}
+                    onChange={(e) => {
+                      const v = e.target.value.trim() === "" ? null : Number(e.target.value);
+                      if (last) writeNotice(tiers, v);
+                      else writeNotice(tiers.map((x, j) => (j === i ? { ...x, notice_days: v ?? 0 } : x)), beyond);
+                    }}
+                  />
+                  <span className="text-muted-foreground">days' notice</span>
+                  {last ? (
+                    band.noticeDays == null && <span className="text-xs text-warning-foreground dark:text-warning">no notice required</span>
+                  ) : (
+                    <Button type="button" variant="ghost" size="icon" className="ml-auto h-8 w-8" aria-label={`Remove band ${i + 1}`} onClick={() => writeNotice(tiers.filter((_, j) => j !== i), beyond)}>
+                      <X className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              // A day past the LONGEST band so far, not past whichever happens to be last in the array - a new
+              // band that lands in the middle of the ladder is confusing to have to fix.
+              onClick={() => writeNotice(sortTiers([...tiers, { up_to_days: Math.max(0, ...tiers.map((t) => t.up_to_days)) + 1, notice_days: 0 }]), beyond)}
+            >
+              Add a band
             </Button>
-            <Field label="Longer than every tier" hint="Notice required for anything past the last tier. Blank = no requirement.">
-              <Input type="number" min={0} value={beyond == null ? "" : String(beyond)} placeholder="No requirement"
-                onChange={(e) => writeNotice(tiers, e.target.value.trim() === "" ? null : Number(e.target.value))} />
-            </Field>
           </div>
         </OverrideSwitch>
         <FieldRow>
@@ -316,7 +407,10 @@ export function RestrictionsEditor({
                 </Button>
               </div>
             ))}
-            <Button type="button" variant="outline" size="sm" onClick={() => write("timing", "blackouts", [...blackouts, { from: "", to: "", label: "" }])}>
+            {/* Seeded with a real date, not blank: the wire schema requires YYYY-MM-DD on both ends, so a row
+                left empty made the whole leave type fail to save with a field error about a date the author
+                had not got to yet. */}
+            <Button type="button" variant="outline" size="sm" onClick={() => write("timing", "blackouts", [...blackouts, { from: todayStr(), to: todayStr(), label: "" }])}>
               Add a period
             </Button>
           </div>
@@ -345,7 +439,7 @@ export function RestrictionsEditor({
             options={[{ value: "calendar", label: "Calendar year" }, { value: "fiscal", label: "Financial year" }, { value: "anniversary", label: "From the joining date" }]}
           />
         </FieldRow>
-        <NumRule g="quota" leaf="fiscal_year_start_month" label="Financial year starts in month" min={1} info="1 = January, 4 = April. Only used when a year means the financial year." />
+        <NumRule g="quota" leaf="fiscal_year_start_month" label="Financial year starts in month" min={1} max={12} info="1 = January, 4 = April. Only used when a year means the financial year." />
       </FoldSection>
 
       <FoldSection title="Combinations" summary="Leave types this can't be taken with">
@@ -374,8 +468,8 @@ export function RestrictionsEditor({
 
       <FoldSection title="Counting" summary="What a day off inside the leave costs">
         <div className="grid gap-3 sm:grid-cols-2">
-          <SandwichRule part="weekends" label="Weekends inside the leave" read={read} write={write} baseline={baseline} inheriting={inheriting} />
-          <SandwichRule part="holidays" label="Holidays inside the leave" read={read} write={write} baseline={baseline} inheriting={inheriting} />
+          <SandwichRule part="weekends" label="Weekends inside the leave" />
+          <SandwichRule part="holidays" label="Holidays inside the leave" />
         </div>
         <p className="text-xs text-muted-foreground">
           Charged = the day comes off the balance. "Between the leave" charges days off that fall inside the block; "beside it too" also charges the days off it runs up against.
@@ -390,14 +484,16 @@ export function RestrictionsEditor({
             label="While serving notice"
             noneLabel="No rule"
             info="Applies once a notice period is being served, or a last working day is recorded and still ahead."
-            options={[{ value: "allowed", label: "Allowed" }, { value: "blocked", label: "Not allowed" }, { value: "capped", label: "Capped" }]}
+            // No "Allowed" option: it would mean exactly what "No rule" already means, and two controls that
+            // do the same thing is how somebody ends up believing they set something.
+            options={[{ value: "blocked", label: "Not allowed" }, { value: "capped", label: "Capped" }]}
           />
           <NumRule g="exit" leaf="notice_cap_days" label="Cap during notice (days)" unit="days" info="Required when the rule above is Capped." />
         </FieldRow>
       </FoldSection>
 
       <FoldSection title="Joining month" summary="How the month someone joins is credited">
-        <JoiningRuleEditor read={read} write={write} inheriting={inheriting} baseline={baseline} />
+        <JoiningRuleEditor />
       </FoldSection>
 
       <FoldSection title="Waivers" summary={softRules?.length ? `${softRules.length} rule(s) warn instead of blocking` : "Every rule blocks"}>
@@ -438,20 +534,15 @@ export function RestrictionsEditor({
         )}
       </p>
     </div>
+    </RuleCtx.Provider>
   );
 }
 
 /** One half of the sandwich rule. Split out because both halves are the same control over a nested object. */
-function SandwichRule({ part, label, read, write, baseline, inheriting }: {
-  part: "weekends" | "holidays";
-  label: string;
-  read: (g: Group, leaf: string) => unknown;
-  write: (g: Group, leaf: string, v: unknown) => void;
-  baseline?: LeaveRestrictions | null;
-  inheriting: boolean;
-}) {
+function SandwichRule({ part, label }: { part: "weekends" | "holidays"; label: string }) {
+  const { read, write, inherited, inheriting } = useRules();
   const stored = read("counting", "sandwich") as { weekends?: string; holidays?: string } | null | undefined;
-  const org = baseline?.counting.sandwich?.[part];
+  const org = (inherited("counting", "sandwich") as { weekends?: string; holidays?: string } | null | undefined)?.[part];
   const v = stored?.[part];
   return (
     <Field label={label}>
@@ -480,14 +571,10 @@ function SandwichRule({ part, label, read, write, baseline, inheriting }: {
   );
 }
 
-function JoiningRuleEditor({ read, write, inheriting, baseline }: {
-  read: (g: Group, leaf: string) => unknown;
-  write: (g: Group, leaf: string, v: unknown) => void;
-  inheriting: boolean;
-  baseline?: LeaveRestrictions | null;
-}) {
+function JoiningRuleEditor() {
+  const { read, write, inherited, inheriting } = useRules();
   const stored = read("accrual", "joining_rule") as { cutoff_day?: number; if_on_or_before?: string; if_after?: string } | null | undefined;
-  const org = baseline?.accrual.joining_rule;
+  const org = inherited("accrual", "joining_rule") as { cutoff_day?: number } | null | undefined;
   const on = !!stored;
   return (
     <div className="space-y-3">
@@ -535,7 +622,3 @@ function JoiningRuleEditor({ read, write, inheriting, baseline }: {
   );
 }
 
-/** The label/hint helper the Approvals card and the request dialog share. */
-export function policyWarningLabel(code: string): string {
-  return code.replace(/_/g, " ");
-}

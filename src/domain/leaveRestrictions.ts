@@ -116,6 +116,9 @@ export type RestrictionCode = (typeof RESTRICTION_CODES)[number];
 
 export type Violation = { code: RestrictionCode; severity: "error" | "warning"; message: string };
 
+/** The most one leave type's policy may serialize to - see the note in `validateRestrictions`. */
+export const MAX_RESTRICTIONS_BYTES = 64 * 1024;
+
 // ---- Parse / validate / merge ---------------------------------------------------------------------------
 //
 // Lenient on the way in, strict on the way out - the same split domain/policyValidate.ts documents. A blob
@@ -217,6 +220,15 @@ function parseJoining(v: Record<string, unknown>): JoiningRule | null {
 export function validateRestrictions(raw: unknown): LeaveRestrictions {
   if (raw == null) return DEFAULT_LEAVE_RESTRICTIONS;
   if (!isObj(raw)) throw invalidArgument("restrictions must be an object");
+  // A CEILING, for the same reason services/settings.ts puts one on a settings value: this blob rides on the
+  // leave type, and the leave types are read as ONE cached snapshot (lib/refData.ts) by the accrual job, every
+  // leave request and the serializers - so an oversized policy on one type is a tax on every request in the
+  // system until somebody edits it back. 64 KB is far more than the biggest real policy (a hundred blackout
+  // windows is about 6 KB) and far under anything that would matter.
+  const size = JSON.stringify(raw).length;
+  if (size > MAX_RESTRICTIONS_BYTES) {
+    throw invalidArgument(`these restrictions are ${Math.round(size / 1024)} KB; a leave policy may be at most ${MAX_RESTRICTIONS_BYTES / 1024} KB`);
+  }
   const known: Record<string, Set<string>> = {
     eligibility: new Set(Object.keys(DEFAULT_LEAVE_RESTRICTIONS.eligibility)),
     request: new Set(Object.keys(DEFAULT_LEAVE_RESTRICTIONS.request)),
@@ -240,6 +252,13 @@ export function validateRestrictions(raw: unknown): LeaveRestrictions {
     if (!isObj(v)) throw invalidArgument(`restrictions.${k} must be an object`);
     for (const leaf of Object.keys(v)) if (!known[k]!.has(leaf)) throw invalidArgument(`unknown restriction "${k}.${leaf}"`);
   }
+  // NOTHING MAY BE SILENTLY DROPPED. `parseRestrictions` is deliberately lenient - it has to be, since it runs
+  // on every leave request and a blob that has gone bad must not take the feature down - so anything it does
+  // not recognise it discards. On the WRITE path that leniency is the enemy: a mistyped sandwich mode, a
+  // blackout with a malformed date, a tier that is not a pair of numbers would all be accepted here, stored,
+  // and then quietly ignored for ever by a policy screen that said it had saved. So each shape the parser
+  // filters is checked against the RAW value first, and a write that would lose anything is refused.
+  assertNothingDropped(raw as Record<string, unknown>);
   const parsed = parseRestrictions(raw);
   // Shape is right; now the values have to be usable. Each of these is a number that would otherwise be
   // enforced literally - a cutoff of 0 bars every joiner, a negative cap refuses every request.
@@ -261,9 +280,20 @@ export function validateRestrictions(raw: unknown): LeaveRestrictions {
   for (const d of parsed.request.blocked_weekdays ?? []) if (d < 0 || d > 6) throw invalidArgument("blocked_weekdays are 0 (Sunday) to 6 (Saturday)");
   for (const d of parsed.timing.blackout_days_of_month ?? []) if (d < 1 || d > 31) throw invalidArgument("blackout_days_of_month are 1 to 31");
   for (const b of parsed.timing.blackouts ?? []) if (b.to < b.from) throw invalidArgument(`blackout "${b.label ?? b.from}" ends before it starts`);
+  // A notice rule with no bands at all is not a rule - it would store, read back as nothing, and leave the
+  // switch that created it looking switched off.
+  const notice = isObj(raw.timing) ? (raw.timing as Record<string, unknown>).advance_notice : undefined;
+  if (isObj(notice) && !parsed.timing.advance_notice) {
+    throw invalidArgument("an advance-notice rule needs at least one band, or a figure for anything longer");
+  }
+  const tops = new Set<number>();
   for (const t of parsed.timing.advance_notice?.tiers ?? []) {
     if (t.up_to_days <= 0) throw invalidArgument("an advance-notice tier covers requests UP TO a length, which must be positive");
     if (t.notice_days < 0) throw invalidArgument("advance-notice days cannot be negative");
+    // Two tiers ending at the same length is not a ladder - one of them silently never applies, and which one
+    // depends on the order they happen to be stored in.
+    if (tops.has(t.up_to_days)) throw invalidArgument(`two advance-notice tiers both end at ${t.up_to_days} day(s); each tier needs its own upper bound`);
+    tops.add(t.up_to_days);
   }
   const fy = parsed.quota.fiscal_year_start_month;
   if (fy !== null && (fy < 1 || fy > 12)) throw invalidArgument("fiscal_year_start_month is 1 to 12");
@@ -275,6 +305,99 @@ export function validateRestrictions(raw: unknown): LeaveRestrictions {
     throw invalidArgument("during_notice \"capped\" needs notice_cap_days");
   }
   return parsed;
+}
+
+/**
+ * Refuse a write whose shapes the lenient parser would discard - see the call site.
+ *
+ * Checked against the RAW blob, value by value, because "the parser kept it" is not the same question as "the
+ * author meant it": a sandwich mode of "intervining" parses to "exclude" and a blackout of `{from: "soon"}`
+ * parses to nothing at all, and both would be stored looking exactly like a rule that works.
+ */
+function assertNothingDropped(raw: Record<string, unknown>): void {
+  const group = (k: string): Record<string, unknown> => (isObj(raw[k]) ? (raw[k] as Record<string, unknown>) : {});
+  const present = (v: unknown) => v !== undefined && v !== null;
+
+  const tm = group("timing");
+  if (present(tm.blackouts)) {
+    if (!Array.isArray(tm.blackouts)) throw invalidArgument("timing.blackouts must be a list of closed periods");
+    for (const b of tm.blackouts) {
+      if (!isObj(b) || !YMD_RE.test(String(b.from)) || !YMD_RE.test(String(b.to))) {
+        throw invalidArgument("every closed period needs a from and to date as YYYY-MM-DD");
+      }
+    }
+  }
+  if (present(tm.advance_notice)) {
+    if (!isObj(tm.advance_notice)) throw invalidArgument("timing.advance_notice must be an object");
+    const tiers = tm.advance_notice.tiers;
+    if (present(tiers)) {
+      if (!Array.isArray(tiers)) throw invalidArgument("advance_notice.tiers must be a list");
+      for (const t of tiers) {
+        if (!isObj(t) || num(t.up_to_days) === null || num(t.notice_days) === null) {
+          throw invalidArgument("every advance-notice tier needs up_to_days and notice_days as numbers");
+        }
+      }
+    }
+    if (present(tm.advance_notice.beyond_notice_days) && num(tm.advance_notice.beyond_notice_days) === null) {
+      throw invalidArgument("advance_notice.beyond_notice_days must be a number");
+    }
+  }
+  for (const [g, leaf, kind] of [
+    ["request", "blocked_weekdays", "numbers"],
+    ["timing", "blackout_days_of_month", "numbers"],
+    ["combinations", "no_combination_with", "strings"],
+  ] as const) {
+    const v = group(g)[leaf];
+    if (!present(v)) continue;
+    const ok = kind === "numbers" ? numArray(v) !== null : strArray(v) !== null;
+    if (!ok) throw invalidArgument(`${g}.${leaf} must be a list of ${kind}`);
+  }
+
+  const sandwich = group("counting").sandwich;
+  if (present(sandwich)) {
+    if (!isObj(sandwich)) throw invalidArgument("counting.sandwich must be an object");
+    for (const part of ["weekends", "holidays"] as const) {
+      if (present(sandwich[part]) && mode(sandwich[part]) === null) {
+        throw invalidArgument(`counting.sandwich.${part} must be exclude, intervening or flanking`);
+      }
+    }
+  }
+
+  const during = group("exit").during_notice;
+  if (present(during) && during !== "allowed" && during !== "blocked" && during !== "capped") {
+    throw invalidArgument("exit.during_notice must be allowed, blocked or capped");
+  }
+  const basis = group("quota").year_basis;
+  if (present(basis) && basis !== "calendar" && basis !== "fiscal" && basis !== "anniversary") {
+    throw invalidArgument("quota.year_basis must be calendar, fiscal or anniversary");
+  }
+  const joining = group("accrual").joining_rule;
+  if (present(joining)) {
+    if (!isObj(joining) || num(joining.cutoff_day) === null) throw invalidArgument("accrual.joining_rule needs a numeric cutoff_day");
+    if (present(joining.if_on_or_before) && joining.if_on_or_before !== "full" && joining.if_on_or_before !== "prorate") {
+      throw invalidArgument("joining_rule.if_on_or_before must be full or prorate");
+    }
+    if (present(joining.if_after) && joining.if_after !== "none" && joining.if_after !== "prorate") {
+      throw invalidArgument("joining_rule.if_after must be none or prorate");
+    }
+  }
+  // Every remaining leaf is a plain number or boolean, and a string where a number belongs is the same silent
+  // loss as the shapes above.
+  for (const [g, leaves] of Object.entries(raw)) {
+    if (g === "soft_rules" || !isObj(leaves)) continue;
+    for (const [leaf, v] of Object.entries(leaves)) {
+      if (v === null || v === undefined) continue;
+      const expected = (DEFAULT_LEAVE_RESTRICTIONS[g as RestrictionGroup] as Record<string, unknown>);
+      if (!(leaf in expected)) continue; // unknown leaves are refused by the caller
+      if (typeof v === "object") continue; // the structured shapes are checked above
+      if (typeof v !== "number" && typeof v !== "boolean" && typeof v !== "string") {
+        throw invalidArgument(`${g}.${leaf} has an unusable value`);
+      }
+      if (typeof v === "string" && !["year_basis", "during_notice"].includes(leaf)) {
+        throw invalidArgument(`${g}.${leaf} must be a number, not text`);
+      }
+    }
+  }
 }
 
 /**
@@ -331,25 +454,89 @@ function storedLeaves(raw: unknown): Set<string> {
   return out;
 }
 
+/**
+ * Leaves that MODIFY a rule rather than being one. On their own they restrict nothing - "a year means the
+ * financial year" with no yearly cap to apply it to, a cap figure with no mode that reads it - so they must
+ * not switch the evaluation on: `hasAnyRestriction` is what decides whether this request pays for the reads
+ * the rules need, and an org that has only ever touched a dropdown should pay for none of them.
+ */
+const MODIFIER_LEAVES = new Set([
+  "quota.year_basis",
+  "quota.fiscal_year_start_month",
+  "combinations.gap_days", // inert without `no_combination_with`
+  "exit.notice_cap_days", // inert without `during_notice: "capped"`
+  "request.reason_min_length", // inert without `reason_required`
+]);
+
 /** Does this blob configure anything at all? Used to skip the whole evaluation - and the reads that feed it. */
 export function hasAnyRestriction(r: LeaveRestrictions): boolean {
   for (const [group, v] of Object.entries(r)) {
     if (group === "soft_rules") continue; // waivers alone restrict nothing
-    for (const leaf of Object.values(v as object)) if (leaf !== null) return true;
+    for (const [leaf, value] of Object.entries(v as Record<string, unknown>)) {
+      if (value === null) continue;
+      if (MODIFIER_LEAVES.has(`${group}.${leaf}`)) continue;
+      // An empty list is not a rule either: a type that once named an incompatible leave type and no longer
+      // does has `[]` stored, and that must not keep the machinery running for ever after.
+      if (Array.isArray(value) && value.length === 0) continue;
+      return true;
+    }
   }
   return false;
 }
 
 // ---- Derived helpers ------------------------------------------------------------------------------------
 
-/** The notice a request of `days` needs: the shortest tier that COVERS it, else the beyond-tiers figure.
- *  Absent policy (or a request longer than every tier with no beyond figure) = no requirement. */
+/**
+ * The notice a request of `days` needs.
+ *
+ * THE TIERS ARE A LADDER, NOT A SET OF RULES THAT MIGHT MISS. Each tier's `up_to_days` is the TOP of a band,
+ * inclusive, and the band's bottom is wherever the tier below it stopped - so every possible length falls in
+ * exactly one band and there is no "in between two tiers" to wonder about. Tiers of 1 and 5 make three bands:
+ * up to 1 day, over 1 up to 5, and over 5 (which is `beyond_notice_days`).
+ *
+ * A request longer than every tier with no `beyond_notice_days` set needs NO notice - which surprises people,
+ * so the editor says it in as many words rather than leaving the field blank and silent.
+ */
 export function requiredNotice(notice: AdvanceNotice | null, days: number): number | null {
   if (!notice) return null;
   for (const t of [...notice.tiers].sort((a, b) => a.up_to_days - b.up_to_days)) {
     if (days <= t.up_to_days) return t.notice_days;
   }
   return notice.beyond_notice_days;
+}
+
+/** One band of the notice ladder: everything longer than `moreThan` (null = from zero) up to and including
+ *  `upTo` (null = no upper bound) needs `noticeDays`. Derived, never stored - the bands ARE the tiers, read
+ *  the way a reader has to read them. */
+export type NoticeBand = { moreThan: number | null; upTo: number | null; noticeDays: number | null };
+
+/**
+ * The tiers as the bands they actually mean, in order, including the open-ended last one.
+ *
+ * One implementation so the editor, the policy sentence and the refusal message cannot describe the ladder
+ * three different ways - which is how "up to 1 day" ends up meaning something different on each screen.
+ * The final band is always present: a policy with no `beyond_notice_days` still has to say what happens to a
+ * request longer than its last tier, and the honest answer is "nothing", not silence.
+ */
+export function noticeBands(notice: AdvanceNotice | null): NoticeBand[] {
+  if (!notice) return [];
+  const sorted = [...notice.tiers].sort((a, b) => a.up_to_days - b.up_to_days);
+  const out: NoticeBand[] = [];
+  let floor: number | null = null;
+  for (const t of sorted) {
+    out.push({ moreThan: floor, upTo: t.up_to_days, noticeDays: t.notice_days });
+    floor = t.up_to_days;
+  }
+  out.push({ moreThan: floor, upTo: null, noticeDays: notice.beyond_notice_days });
+  return out;
+}
+
+/** A band as a phrase: "up to 1 day", "over 1 day, up to 5 days", "over 5 days". */
+export function noticeBandLabel(b: NoticeBand): string {
+  const d = (n: number) => `${fmt(n)} day${n === 1 ? "" : "s"}`;
+  if (b.upTo === null) return b.moreThan === null ? "any length" : `over ${d(b.moreThan)}`;
+  if (b.moreThan === null) return `up to ${d(b.upTo)}`;
+  return `over ${d(b.moreThan)}, up to ${d(b.upTo)}`;
 }
 
 /** The sandwich rule to charge days with (absent policy = charge nothing for days off, as before). */
@@ -388,14 +575,32 @@ export function historyWindow(
     widen(yearStart(startMs, basis, fyStart, employeeStartMs), yearEnd(endMs, basis, fyStart, employeeStartMs));
   }
   // A gap or adjacency rule only ever looks that far out; the merged-run and single-block rules need enough
-  // room to find the neighbours that would join this request into one stretch, and a run can only be as long
-  // as the cap it is measured against (plus the days off that bridge it).
-  if (r.quota.min_gap_days !== null) pad(r.quota.min_gap_days + 1);
-  if (r.combinations.no_combination_with?.length) pad((r.combinations.gap_days ?? 0) + 1);
-  if (r.request.max_consecutive_days !== null) pad(r.request.max_consecutive_days + 7);
+  // room to find the neighbours that would join this request into one stretch.
+  //
+  // IN CALENDAR DAYS, WHICH IS NOT WHAT THESE RULES COUNT IN. `min_gap_days`, the combination gap and the
+  // merged run are all measured in WORKING days, and a window padded by the same number of calendar days is
+  // too short by every weekend and holiday in between: five working days can be nine calendar days apart, so
+  // the neighbour that breaks the rule sat outside the query and the rule quietly passed. A window that is too
+  // WIDE only reads a few rows it then ignores; one that is too narrow under-enforces silently, which is the
+  // worse failure by far - so the conversion is deliberately generous.
+  if (r.quota.min_gap_days !== null) pad(calendarSpanOf(r.quota.min_gap_days));
+  if (r.combinations.no_combination_with?.length) pad(calendarSpanOf(r.combinations.gap_days ?? 0));
+  if (r.request.max_consecutive_days !== null) pad(calendarSpanOf(r.request.max_consecutive_days));
   if (r.request.must_be_single_block) pad(370); // "one block" is a claim about the whole entitlement year
 
   return needed ? { fromMs: from, toMs: to } : null;
+}
+
+/**
+ * Calendar days wide enough to be sure of containing `workingDays` working days.
+ *
+ * A five-day working week is the worst ordinary case (7/5), and the extra fortnight covers a run of public
+ * holidays and the two part-weeks at either end. It is a bound for a QUERY WINDOW, not an answer anybody is
+ * shown - being too wide costs a few rows that the rule then ignores, and being too narrow means the rule
+ * never sees the row that breaks it.
+ */
+function calendarSpanOf(workingDays: number): number {
+  return Math.ceil(Math.max(0, workingDays) * 1.4) + 14;
 }
 
 /** Do any configured rules need this employee's whole history of this type (rather than a window)? */
@@ -506,6 +711,13 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
   const chargeable = (startMs: number, endMs: number, ss: number, es: number) =>
     leaveDays(startMs, endMs, ss, es, f.workDays, f.holidays, f.halfDayHolidays, sandwich);
   const sameType = f.neighbours.filter((n) => n.leaveTypeId === f.leaveTypeId);
+  // Walked once each, not once per rule that wants them: three rules read the charged days and two read the
+  // neighbours' monthly totals, and each walk is a day-by-day pass over the request (or over every neighbour
+  // in the window).
+  let chargedMemo: number[] | null = null;
+  const charged = () => (chargedMemo ??= chargedDays(f));
+  let monthlyMemo: Record<string, number> | null = null;
+  const usedByMonth = () => (monthlyMemo ??= monthTotals(f, sameType, sandwich));
 
   // ---- eligibility ----
   const tenure = r.eligibility.min_tenure_days;
@@ -534,7 +746,7 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
   }
   const blockedDows = r.request.blocked_weekdays;
   if (blockedDows?.length && !f.onBehalf) {
-    const hit = chargedDays(f).find((ms) => blockedDows.includes(new Date(ms).getUTCDay()));
+    const hit = charged().find((ms) => blockedDows.includes(new Date(ms).getUTCDay()));
     if (hit !== undefined) add("blocked_weekday", `${type} can't be taken on a ${WEEKDAYS[new Date(hit).getUTCDay()]} (${ymdUtc(hit)}).`);
   }
   if (r.request.reason_required && (f.reason ?? "").trim().length < Math.max(1, r.request.reason_min_length ?? 1)) {
@@ -576,12 +788,11 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
     add("max_advance", `${type} can't be booked more than ${plural(r.timing.max_advance_days)} ahead.`);
   }
   if (!f.onBehalf) {
-    const charged = chargedDays(f);
-    const window = (r.timing.blackouts ?? []).find((b) => charged.some((ms) => { const d = ymdUtc(ms); return d >= b.from && d <= b.to; }));
+    const window = (r.timing.blackouts ?? []).find((b) => charged().some((ms) => { const d = ymdUtc(ms); return d >= b.from && d <= b.to; }));
     if (window) add("blackout", `${type} is closed from ${window.from} to ${window.to}${window.label ? ` (${window.label})` : ""}.`);
     const dom = r.timing.blackout_days_of_month;
     if (dom?.length) {
-      const hit = charged.find((ms) => dom.includes(new Date(ms).getUTCDate()));
+      const hit = charged().find((ms) => dom.includes(new Date(ms).getUTCDate()));
       if (hit !== undefined) add("blackout", `${type} can't be taken on the ${dom.map(ordinal).join(", ")} of a month (${ymdUtc(hit)}).`);
     }
   }
@@ -599,7 +810,7 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
   const fyStart = r.quota.fiscal_year_start_month ?? 4;
   const mineByMonth = daysByMonth(f.startMs, f.endMs, f.startSession, f.endSession, f.workDays, f.holidays, f.halfDayHolidays, sandwich);
   if (r.quota.max_days_per_month !== null) {
-    const used = monthTotals(f, sameType, sandwich);
+    const used = usedByMonth();
     for (const [ym, mine] of Object.entries(mineByMonth)) {
       const total = mine + (used[ym] ?? 0);
       if (total > r.quota.max_days_per_month + 1e-9) {
@@ -609,7 +820,7 @@ export function checkLeaveRestrictions(f: RestrictionFacts): Violation[] {
     }
   }
   if (r.quota.max_days_per_year !== null) {
-    const used = monthTotals(f, sameType, sandwich);
+    const used = usedByMonth();
     const byYear = (m: Record<string, number>) => {
       const o: Record<string, number> = {};
       for (const [ym, v] of Object.entries(m)) {
@@ -786,11 +997,11 @@ export function describeRestrictions(r: LeaveRestrictions): string[] {
   if (rq.reason_required) out.push("a reason is required");
   if (rq.document_required_over_days !== null) out.push(`a document is required over ${d(rq.document_required_over_days)}`);
   if (rq.backdate_days !== null) out.push(rq.backdate_days === 0 ? "no back-dating" : `back-dated up to ${d(rq.backdate_days)}`);
-  const tiers = t.advance_notice;
-  if (tiers) {
-    const parts = tiers.tiers.map((x) => `${d(x.notice_days)} for up to ${d(x.up_to_days)}`);
-    if (tiers.beyond_notice_days !== null) parts.push(`${d(tiers.beyond_notice_days)} beyond that`);
-    if (parts.length) out.push(`notice: ${parts.join(", ")}`);
+  // Said as the BANDS it enforces, not as the tiers it is stored as - "2 days for up to 1 day" leaves a
+  // reader to work out for themselves what a 3-day request needs.
+  const bands = noticeBands(t.advance_notice);
+  if (bands.length) {
+    out.push(`notice: ${bands.map((b) => `${noticeBandLabel(b)} needs ${b.noticeDays === null ? "none" : d(b.noticeDays)}`).join("; ")}`);
   }
   if (t.max_advance_days !== null) out.push(`booked at most ${d(t.max_advance_days)} ahead`);
   if (t.blackouts?.length) out.push(`closed ${t.blackouts.map((b) => b.label || `${b.from}-${b.to}`).join(", ")}`);

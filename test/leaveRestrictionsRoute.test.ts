@@ -10,6 +10,8 @@ import type { Bindings, AppUser } from "../src/env";
 import { makeDeps, type Deps } from "../src/deps";
 import { genId } from "../src/lib/idCodec";
 import { bustRef } from "../src/lib/refData";
+import { grantFor } from "../src/domain/grants";
+import { DEFAULT_POLICY } from "../src/domain/manifests";
 import { createLeaveRequest, approveLeaveRequest } from "../src/services/leaveRequests";
 import { accrueLeave } from "../src/services/leaveAccrual";
 
@@ -65,11 +67,18 @@ async function seedLeaveType(over: Partial<typeof schema.leaveTypes.$inferInsert
   return uuid;
 }
 
-async function seedActor(employeeId: string): Promise<AppUser> {
-  await deps.db.insert(schema.roles).values({ name: "employee", label: "Employee" }).onConflictDoNothing();
+/** An actor carrying the REAL grant for their role, because the on-behalf exemption is decided from it. */
+async function seedActor(employeeId: string, role = "employee"): Promise<AppUser> {
+  await deps.db.insert(schema.roles).values({ name: role, label: role }).onConflictDoNothing();
   const uuid = genId();
-  await deps.db.insert(schema.users).values({ uuid, code: `u-${genId().slice(0, 4)}`, email: `${uuid}@test.example`, role: "employee", employeeId });
-  return { uuid, email: `${uuid}@test.example`, role: "employee", status: "active", employeeId, employeeCode: null } as unknown as AppUser;
+  await deps.db.insert(schema.users).values({ uuid, code: `u-${genId().slice(0, 4)}`, email: `${uuid}@test.example`, role, employeeId });
+  const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
+  return {
+    uuid, email: `${uuid}@test.example`, role, status: "active", employeeId,
+    employeeCode: emp?.code ?? null,
+    grant: grantFor(role),
+    policy: DEFAULT_POLICY,
+  } as unknown as AppUser;
 }
 
 /** An unpaid type by default, so the balance check never masks the policy being tested. */
@@ -102,6 +111,42 @@ describe("the org baseline and a type's overrides", () => {
     await setSetting("leave_restrictions", { timing: { advance_notice: { tiers: [{ up_to_days: 1, notice_days: 2 }] } } });
     const { actor, leaveTypeId } = await fixture({ restrictions: { timing: { advance_notice: null } } });
     await expect(file(deps, actor, leaveTypeId, "2026-03-03")).resolves.toBeTruthy();
+  });
+});
+
+describe("who gets the planning exemptions", () => {
+  // The notice, blackout, weekday and back-dating rules are waived for HR filing on somebody else's behalf.
+  // WHO COUNTS AS HR IS AN AUTHZ QUESTION, and it used to be read straight off the payload: naming another
+  // employee in the body set the flag, and the create gate on this collection is collection-level (that is how
+  // self-service works), so it decides nothing about whose leave is being filed. Any employee could therefore
+  // file leave that skipped the org's notice policy simply by addressing it to a colleague.
+  it("does not hand the exemption to an employee who names a colleague", async () => {
+    await setSetting("leave_restrictions", { timing: { advance_notice: { tiers: [{ up_to_days: 99, notice_days: 30 }] } } });
+    const { actor, leaveTypeId } = await fixture();
+    const colleague = await seedEmployee();
+    await expect(
+      createLeaveRequest(deps, actor, {
+        leave_type: `leave-types/${leaveTypeId}`,
+        employee: `employees/${colleague}`,
+        start_date: "2026-03-03",
+        end_date: "2026-03-03",
+      }),
+    ).rejects.toThrow(/notice/i);
+  });
+
+  it("does hand it to a caller whose reach goes past their own rows", async () => {
+    await setSetting("leave_restrictions", { timing: { advance_notice: { tiers: [{ up_to_days: 99, notice_days: 30 }] } } });
+    const { leaveTypeId } = await fixture();
+    const subject = await seedEmployee();
+    const hr = await seedActor(await seedEmployee(), "hr_admin");
+    await expect(
+      createLeaveRequest(deps, hr, {
+        leave_type: `leave-types/${leaveTypeId}`,
+        employee: `employees/${subject}`,
+        start_date: "2026-03-03",
+        end_date: "2026-03-03",
+      }),
+    ).resolves.toBeTruthy();
   });
 });
 

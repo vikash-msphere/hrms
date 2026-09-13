@@ -257,7 +257,10 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         collection="leave-types"
         objectPath={editing?.path}
         guardLabel="leave type"
-        form={form}
+        // The restrictions ride along, because the discard guard watches exactly what it is given: they live
+        // in their own state (a nested blob, where `form` is a flat map of strings), so a dialog closed after
+        // editing only the policy threw the edit away without ever asking.
+        form={{ ...form, restrictions }}
         submitLabel={editing ? "Save changes" : "Create"}
         canSubmit={!!form.name.trim()}
         whyNot="Give the leave type a name."

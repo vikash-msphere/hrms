@@ -3426,8 +3426,11 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   const [allowBackdated, setAllowBackdated] = useState(true);
   // The org-wide restrictions baseline, edited as the blob it is stored as (see RestrictionsEditor).
   const [restrictions, setRestrictions] = useState<Record<string, unknown> | null>(null);
-  // For the "can't be combined with" picker, which names other leave types.
-  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
+  // Which tab is showing, so the read below can wait for the one that needs it.
+  const [tab, setTab] = useState("carry-forward");
+  // For the "can't be combined with" picker, which names other leave types. Behind the tab that draws it:
+  // this card is four other panels as well, and none of them has anything to say about leave types.
+  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types", { enabled: tab === "restrictions" });
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const writeSettings = useSettingsBatch();
@@ -3500,7 +3503,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
     <Card>
       <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/leave_caps" label="Leave policy"><span>Policy</span></AccessAction></CardTitle></CardHeader>
       <CardContent className="space-y-4">
-        <Tabs defaultValue="carry-forward">
+        <Tabs value={tab} onValueChange={setTab}>
           <TabsList variant="segmented">
             <TabsTrigger value="carry-forward">Carry-forward</TabsTrigger>
             <TabsTrigger value="encashment">Encashment</TabsTrigger>

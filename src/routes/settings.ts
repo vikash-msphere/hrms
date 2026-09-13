@@ -9,6 +9,7 @@ import { notFound, invalidArgument } from "../lib/errors";
 import { parsePayslipTemplate } from "../domain/payslipTemplate";
 import { DOCUMENT_KINDS } from "../services/letterheads";
 import { validateStateMachine, type StateMachine } from "../domain/stateMachines";
+import { validateRestrictions } from "../domain/leaveRestrictions";
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
 import { stagesInUse } from "../services/ats";
@@ -413,6 +414,12 @@ const SETTING_VALIDATORS = new Map<string, (value: unknown) => void>([
   ["ticket-workflow", validateTicketWorkflow],
   ["ats", validateAts],
   ["gratuity", validateGratuity],
+  // The org-wide leave policy. It is the SAME blob a leave type carries in its `restrictions` field, and that
+  // one is validated strictly on write (routes/leaveTypes.ts + domain/leaveRestrictions.ts) - so without this
+  // the identical shape was refused on one path and stored unexamined on the other, where it applies to EVERY
+  // leave type. The read side is deliberately lenient, which is what makes the gap silent: a mistyped rule
+  // here would simply never be enforced, on a screen that had said it saved.
+  ["leave_restrictions", (v) => void validateRestrictions(v)],
 ]);
 
 // Exported so test/attendanceSettings.test.ts can drive the per-key rules without a request: these guard the

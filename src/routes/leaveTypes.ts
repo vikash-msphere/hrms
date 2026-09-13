@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RESTRICTION_CODES } from "../domain/leaveRestrictions";
 import { collectionRoutes } from "../http/collectionRoute";
 import { leaveTypeSpec } from "../services/leaveTypes";
 import { toLeaveTypeResource } from "../http/serialize";
@@ -20,7 +21,7 @@ const restrictionsSchema = z.object({
     max_days: nnum,
     max_consecutive_days: nnum,
     half_day_allowed: nbool,
-    blocked_weekdays: z.array(z.number().int().min(0).max(6)).nullable().optional(),
+    blocked_weekdays: z.array(z.number().int().min(0).max(6)).max(7).nullable().optional(),
     must_be_single_block: nbool,
     reason_required: nbool,
     reason_min_length: nnum,
@@ -29,16 +30,19 @@ const restrictionsSchema = z.object({
   }).strict().nullable().optional(),
   timing: z.object({
     advance_notice: z.object({
-      tiers: z.array(z.object({ up_to_days: z.number(), notice_days: z.number() }).strict()).optional(),
+      tiers: z.array(z.object({ up_to_days: z.number(), notice_days: z.number() }).strict()).max(20).optional(),
       beyond_notice_days: nnum,
     }).strict().nullable().optional(),
     max_advance_days: nnum,
+    // Bounded, like every list here: this blob is read as part of the cached leave-type snapshot on most
+    // requests in the app, so an unbounded array is a tax on all of them (domain/leaveRestrictions.ts caps the
+    // whole blob too, which is the backstop for callers that don't come through this route).
     blackouts: z.array(z.object({
       from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-      label: z.string().optional(),
-    }).strict()).nullable().optional(),
-    blackout_days_of_month: z.array(z.number().int().min(1).max(31)).nullable().optional(),
+      label: z.string().max(120).optional(),
+    }).strict()).max(200).nullable().optional(),
+    blackout_days_of_month: z.array(z.number().int().min(1).max(31)).max(31).nullable().optional(),
     block_adjacent_to_holiday: nbool,
   }).strict().nullable().optional(),
   quota: z.object({
@@ -51,7 +55,7 @@ const restrictionsSchema = z.object({
     fiscal_year_start_month: nnum,
   }).strict().nullable().optional(),
   combinations: z.object({
-    no_combination_with: z.array(z.string()).nullable().optional(),
+    no_combination_with: z.array(z.string().max(200)).max(100).nullable().optional(),
     gap_days: nnum,
   }).strict().nullable().optional(),
   counting: z.object({
@@ -71,7 +75,7 @@ const restrictionsSchema = z.object({
       if_after: z.enum(["none", "prorate"]).optional(),
     }).strict().nullable().optional(),
   }).strict().nullable().optional(),
-  soft_rules: z.array(z.string()).nullable().optional(),
+  soft_rules: z.array(z.string().max(64)).max(RESTRICTION_CODES.length).nullable().optional(),
 }).strict();
 
 const writeSchema = z.object({

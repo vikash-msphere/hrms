@@ -129,10 +129,16 @@ export function RequestLeaveDialog({
       .then((s) => setOrgRestrictions(s.value ?? {}))
       .catch(() => {});
   }, []);
-  // Whether this person is serving notice, for the exit-process rules. Private by default: with no read
-  // access the hook returns [] and fires nothing, and the rule then simply isn't previewed here - the server
-  // still enforces it.
-  const { rows: noticePeriods } = useCollection<NoticePeriod>("notice-periods", { params: mineParams, enabled: !!mineParams });
+  // Whether this person is serving notice, for the exit-process rules - fetched ONLY when some leave type
+  // actually has such a rule, which almost no org will. An unconditional read here would be one extra query
+  // per opening of this dialog, for a preview of a rule nobody had configured. Private by default too: with
+  // no read access the hook returns [] and fires nothing, and the rule simply isn't previewed - the server
+  // still enforces it either way.
+  const anyExitRule = useMemo(
+    () => types.some((t) => { const d = mergeRestrictions(orgRestrictions, t.restrictions).exit.during_notice; return !!d && d !== "allowed"; }),
+    [types, orgRestrictions],
+  );
+  const { rows: noticePeriods } = useCollection<NoticePeriod>("notice-periods", { params: mineParams, enabled: !!mineParams && anyExitRule });
   // The ORG's day. The server refuses a back-dated start against `services/orgDay.ts`, so a `min` computed
   // from the browser's day is a floor the server does not share: west of UTC it offered a date that came
   // back rejected, east of it the picker blocked a start the server would have taken.
@@ -434,6 +440,10 @@ export function RequestLeaveDialog({
       todayMs: Date.parse(todayYmd + "T00:00:00Z"),
       employeeStartMs: meEmployee?.start_date ? Date.parse(meEmployee.start_date.slice(0, 10) + "T00:00:00Z") : null,
       onBehalf: false,
+      // Answered here, where the server cannot answer it at all: the create path passes null because the row
+      // has to exist before a file can hang off it, so IT defers the document rule to approval. This form has
+      // the file in hand, so it asks for it now - which is the moment it is easiest to produce, and stops a
+      // request being filed today only to be refused by the approver on Friday.
       hasDocument: !!doc,
       reason: form.reason,
       workDays,
@@ -448,19 +458,13 @@ export function RequestLeaveDialog({
     });
   }, [selectedType, selectedRules, rulesFor, form.start_date, form.end_date, form.startSession, form.endSession, form.reason, formDays, myRequests, types, me.employee_id, todayYmd, meEmployee, workDays, holidaySet, halfHolidaySet, doc, noticePeriods]);
   /**
-   * Why a type can't be taken by this person AT ALL, independent of which dates they pick - a service
-   * requirement they haven't met, or a type shut for the whole notice period. Answered in the picker so the
-   * choice isn't offered and then refused.
+   * Why a type can't be taken by this person AT ALL, whatever dates they pick. Only reasons that are true of
+   * the PERSON belong here - a type shut for the whole notice period is one; a service requirement is not,
+   * because leave that starts after the waiting period ends is allowed and booking ahead for it is the point
+   * (the violation panel names the eligible-from date once dates are chosen, which is the honest answer).
    */
   const eligibilityBlock = (t: LeaveType): string | null => {
     const r = rulesFor(t);
-    const tenure = r.eligibility.min_tenure_days;
-    if (tenure != null && meEmployee?.start_date) {
-      const eligibleFrom = Date.parse(meEmployee.start_date.slice(0, 10) + "T00:00:00Z") + tenure * 86400000;
-      // Against the last date they could pick, not today: a type they become eligible for next month is one
-      // they may still book ahead for, which is what the server's rule says too.
-      if (eligibleFrom > Date.parse(todayYmd + "T00:00:00Z") + 365 * 86400000) return `needs ${tenure} days of service`;
-    }
     if (r.exit.during_notice === "blocked" && noticePeriods.some((n) => (n.status ?? "").toLowerCase() === "serving" && !n.delete_time)) {
       return "not available during notice period";
     }

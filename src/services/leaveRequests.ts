@@ -3,7 +3,7 @@ import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 import { eq, ne, and, gte, lte, inArray, isNull, sql } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
-import type { ListScope } from "../domain/access";
+import { scopeFor, type ListScope } from "../domain/access";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import type { AppUser } from "../env";
@@ -136,6 +136,24 @@ export const DEFAULT_LEAVE_REQUEST_CONFIG = { allow_backdated: true };
  * The policy in force for one leave type: the org baseline (settings/leave_restrictions) with that type's own
  * overrides on top. See domain/leaveRestrictions.ts for what the two blobs mean together.
  */
+/**
+ * Does this caller's authority over leave requests reach past their own rows?
+ *
+ * Asked of the ENGINE rather than of the payload - see the note where it is used. It fails CLOSED: an actor
+ * assembled without a grant (a caller that is not a real request - an internal helper, a test double) gets
+ * "own", which waives nothing. Being wrong in that direction costs an HR user an exemption they can restore by
+ * going through the API properly; being wrong in the other hands every employee a way past the org's policy.
+ */
+function reachesBeyondOwnRows(actor: AppUser): boolean {
+  if (!actor.grant) return false;
+  try {
+    return scopeFor(actor, "leave-requests").breadth !== "own";
+  } catch {
+    // A grant the decision engine cannot read is not authority either.
+    return false;
+  }
+}
+
 export async function effectiveLeaveRules(deps: Deps, leaveType: { restrictions?: unknown }): Promise<LeaveRestrictions> {
   const org = await getSettingValue<Record<string, unknown>>(deps, "leave_restrictions", {});
   return mergeRestrictions(org, leaveType.restrictions);
@@ -157,6 +175,10 @@ async function inboundCombinationGap(deps: Deps, leaveTypeId: string): Promise<n
   let gap: number | null = null;
   for (const t of await refLeaveTypes(deps)) {
     if (t.uuid === leaveTypeId || t.deleteTime || t.disabled) continue;
+    // Through the ONE merge, per type, rather than a cheaper hand-rolled read of the two leaves this needs:
+    // the inheritance rule (absent inherits, null exempts) is subtle enough that a second implementation of it
+    // here would be the place the two quietly disagree. It is object copying over a handful of types, not a
+    // read - the cost that matters on this path is the queries, and this issues none.
     const c = mergeRestrictions(org, t.restrictions).combinations;
     if (!c.no_combination_with?.some((ref) => (ref.split("/").pop() ?? ref) === leaveTypeId)) continue;
     gap = Math.max(gap ?? 0, c.gap_days ?? 0);
@@ -232,6 +254,10 @@ async function gatherPolicyFacts(
     if (latest) exitWindow = { fromMs: +new Date(latest.noticeDate), toMs: +new Date(latest.lastWorkingDay) };
     else if (a.employeeEndMs != null && a.employeeEndMs >= a.todayMs) exitWindow = { fromMs: a.todayMs, toMs: a.employeeEndMs };
     if (exitWindow && rules.exit.during_notice === "capped") {
+      // Days on requests that OVERLAP the notice window, counted whole - a request that straddles the notice
+      // date contributes all of itself. An aggregate is what keeps this one cheap statement rather than a page
+      // of rows plus a recount, and the difference only shows on a request that begins before the person
+      // resigned, which the cap is not really aimed at.
       const row = (await deps.db
         .select({ d: sql<number>`coalesce(sum(${schema.leaveRequests.days}), 0)` })
         .from(schema.leaveRequests)
@@ -307,7 +333,22 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
 
-  const onBehalf = !!idFromPath(input.employee) && idFromPath(input.employee) !== actor.employeeId;
+  /**
+   * "HR IS FILING THIS FOR SOMEBODY ELSE" - which waives the planning courtesies (notice, blackouts, blocked
+   * weekdays, back-dating), because those exist to protect a team's plans from its own members' short notice,
+   * not to stop HR recording leave that has already happened.
+   *
+   * IT IS A QUESTION ABOUT AUTHORITY, NOT ABOUT THE BODY. Naming another employee in the payload is something
+   * any caller can do - the create gate on this collection is collection-level (`leave-requests: write` is how
+   * self-service works), so it decides nothing about WHOSE leave is being filed. Reading the exemption off the
+   * payload alone therefore handed every employee a way to file leave that skips the org's notice policy, by
+   * addressing it to a colleague. The scope the caller actually holds is the honest question, and
+   * `scopeFor` answers it with the same engine the middleware used to let the request in: only a caller whose
+   * reach extends past their own rows (a manager over their department, HR over all) can be filing on anybody
+   * else's behalf.
+   */
+  const subjectIsSomeoneElse = !!idFromPath(input.employee) && idFromPath(input.employee) !== actor.employeeId;
+  const onBehalf = subjectIsSomeoneElse && reachesBeyondOwnRows(actor);
 
   // A disabled (or deleted) leave type can't be used for new requests. Read FIRST, because the type carries
   // the policy every check below is made under (its own back-dating window included).
@@ -416,6 +457,15 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   // still what a caller hears first, and the reads it needs only happen for a request that would otherwise be
   // accepted. A hard violation refuses the request; a soft one (the org listed the rule in `soft_rules`) is
   // carried onto the row for the approver to weigh.
+  //
+  // THIS IS A READ, AND IT IS NOT RE-CHECKED AFTER THE INSERT - unlike the overlap invariant above, which is.
+  // Two requests filed in the same instant by the same person can therefore both pass a quota that only one of
+  // them fits, and both land. That is a deliberate line rather than an oversight: the guarded re-check costs a
+  // second read of the window on EVERY create, and the two failures are not the same size. The balance cannot
+  // be overdrawn whatever happens here (the debit below is a conditional decrement), so what a lost race costs
+  // is a policy breach an approver still sees - where the overlap it does guard would double-book the same days
+  // and debit them twice. The realistic way to submit twice at once is a double-clicked button, and that files
+  // the SAME dates, which the overlap guard already catches.
   let warnings: Violation[] = [];
   if (policyOn) {
     const facts = await gatherPolicyFacts(deps, rules, {
@@ -588,7 +638,10 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
   // is also where it matters - "a sick note is required past three days" is a condition of allowing the leave,
   // not of asking for it. Only read when the rule is actually configured for this type.
   if (to === "APPROVED") {
-    const lt = (await deps.db.select().from(schema.leaveTypes).where(eq(schema.leaveTypes.uuid, row.leaveTypeId)).limit(1))[0];
+    // From the CACHED leave-type snapshot (lib/refData.ts), not a query of its own: this runs on every
+    // approval in the org, and an org that has configured no document rule must not pay a read to find that
+    // out. The snapshot is already in hand for any request that touched leave types this invocation.
+    const lt = (await refLeaveTypes(deps)).find((t) => t.uuid === row.leaveTypeId);
     const rules = lt ? await effectiveLeaveRules(deps, lt) : null;
     const over = rules?.request.document_required_over_days ?? null;
     if (over !== null && row.days > over + 1e-9) {
