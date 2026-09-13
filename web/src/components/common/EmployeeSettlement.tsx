@@ -35,7 +35,10 @@ export function EmployeeSettlement({ employeeId, canEdit }: { employeeId: string
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
   const load = useCallback(async () => {
     try {
-      const r = await get<{ results: Settlement[] }>(`settlements?employee=${encodeURIComponent("employees/" + employeeId)}`);
+      // One row is all this panel shows, and the list is ordered by settlement date descending
+      // (services/settlements.ts), so ask for one rather than letting the server's default of 50 apply to a
+      // read whose other 49 rows are dropped on the floor.
+      const r = await get<{ results: Settlement[] }>(`settlements?employee=${encodeURIComponent("employees/" + employeeId)}&max_page_size=1`);
       setLatest(r.results?.[0] ?? null);
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't load settlement", description: (e as Error).message });

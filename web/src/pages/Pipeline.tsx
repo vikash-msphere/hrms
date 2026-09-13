@@ -421,7 +421,9 @@ export default function Pipeline({ me, openId }: { me: Me; openId?: string }) {
                                 <button
                                   type="button"
                                   onClick={() => navigate(`offers/${idOf(o.path)}`)}
-                                  title={`Offer ${m.label.toLowerCase()}${o.base_comp ? ` · ${o.base_comp}` : ""} - open it`}
+                                  // No figure in the tooltip: `maskAttributes` is empty (instrument.ts), so a
+                                  // title attribute is recorded verbatim in session replay.
+                                  title={`Offer ${m.label.toLowerCase()} - open it`}
                                   className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                 >
                                   <Badge variant={m.variant} className="text-[10px] hover:opacity-80">Offer · {m.label}</Badge>
@@ -1092,7 +1094,8 @@ function ApplicationDrawer({ app, me, candidate, req, stages, criteria, siblings
                 {offers.map((o) => (
                   <button key={o.path} type="button" onClick={() => { onClose(); navigate(`offers/${idOf(o.path)}`); }} className="flex w-full flex-wrap items-baseline gap-2 rounded-lg border p-2.5 text-left text-sm hover:bg-accent">
                     <Badge variant={o.status === "accepted" ? "success" : o.status === "declined" || o.status === "rescinded" ? "destructive" : "secondary"}>{o.status}</Badge>
-                    {o.base_comp != null && <span className="tabular-nums">{o.base_comp.toLocaleString()} {o.currency_code}</span>}
+                    {/* Masked in replay like every other rendering of an offered figure (instrument.ts). */}
+                    {o.base_comp != null && <span data-sentry-mask className="tabular-nums">{o.base_comp.toLocaleString()} {o.currency_code}</span>}
                     {o.join_time && <span className="text-xs text-muted-foreground">joins {formatDate(o.join_time)}</span>}
                     {o.expiry_time && <span className="text-xs text-muted-foreground">expires {formatDate(o.expiry_time)}</span>}
                   </button>

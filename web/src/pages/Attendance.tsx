@@ -154,14 +154,24 @@ export default function Attendance({ me }: { me: Me }) {
   const { rows: departments } = useCollection<Department>("departments", { enabled: canApprove, all: true });
   const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
-  const { rows: regularizations, reload: reloadRegs } = useCollection<AttendanceRegularization>("attendance-regularizations");
+  // THE CALLER'S OWN correction requests, narrowed server-side (`?employee=`, routes/attendanceRegularizations)
+  // and walked. Reading one org-wide page and filtering to "mine" in the browser worked only for a caller the
+  // server had already scoped to themselves: an APPROVER gets everybody's rows newest-first, so their own
+  // corrections lost their slots to the org's, "My requests" rendered empty, the duplicate-day guard below
+  // stopped firing, and `cancelReg` could not reach a request that was not in the window.
+  const { rows: regularizations, reload: reloadRegs } = useCollection<AttendanceRegularization>("attendance-regularizations", {
+    enabled: !!me.employee_id,
+    params: { employee: me.employee_id ? `employees/${me.employee_id}` : "" },
+    all: true,
+  });
   const rosterTruncated = useCollectionHasMore(["employees", "leave-requests"]);
 
   // `useCallback`, because five memos and an effect on this page filter with it: as a bare arrow it changed
   // identity every render, so each of those either had to restate `me.employee_id` by hand or keep the copy it
   // was first given. Its identity now moves with the one field it reads.
   const mine = useCallback((ref?: string) => !!ref && idOf(ref) === me.employee_id, [me.employee_id]);
-  // My correction requests (attendance-regularizations), newest first, so pending + decided are visible in one place.
+  // My correction requests, newest first, so pending + decided are visible in one place. The read above is
+  // already scoped to this person; the `mine` filter stays as the belt to its braces.
   const myRegs = useMemo(
     () => regularizations.filter((r) => mine(r.employee)).sort((a, b) => (b.date ?? "").localeCompare(a.date ?? "") || (b.create_time ?? "").localeCompare(a.create_time ?? "")),
     [regularizations, mine],

@@ -5,6 +5,7 @@
 import { asc, eq, and, isNull, sql } from "drizzle-orm";
 import { allocFlatCode, allocOwnedCode } from "./codeAlloc";
 import { applyScope } from "./listScope";
+import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
 import { keysetPage } from "./keysetPage";
 import * as schema from "../db/schema";
@@ -152,8 +153,18 @@ export type CandidateInput = {
   notes?: string | null;
 };
 
-export async function listCandidates(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false) {
-  const where = and(showDeleted ? undefined : isNull(schema.candidates.deleteTime), applyScope(scope, schema.candidates.code, schema.candidates.code));
+export async function listCandidates(deps: Deps, scope: ListScope | undefined, maxPageSize: number, pageToken?: string, showDeleted = false, q?: string) {
+  // Server-side text filter (FTS, services/searchFilter.ts). Narrows the scope above; it can never widen it.
+  // A candidate pool is the archetype of a collection that outgrows a page and stays useful afterwards - the
+  // recruiter's normal question is about somebody who applied months ago, who is exactly who a newest-first
+  // window does not hold - and the rows are already indexed (domain/searchIndex.ts), so ⌘K could find people
+  // the page's own search box could not.
+  const textMatch = await searchFilter(deps, "candidates", q, schema.candidates.uuid);
+  const where = and(
+    showDeleted ? undefined : isNull(schema.candidates.deleteTime),
+    applyScope(scope, schema.candidates.code, schema.candidates.code),
+    textMatch,
+  );
   return keysetPage(deps, schema.candidates, "candidates", where, { max: maxPageSize, pageToken });
 }
 

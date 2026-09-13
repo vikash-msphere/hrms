@@ -21,7 +21,7 @@ import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
 import { useRowKeys } from "@/lib/rowKeys";
 import { describeError, isConflict } from "@/lib/formError";
-import { thisYearStr } from "@/lib/orgDay";
+import { thisYearStr, setOrgTimezone } from "@/lib/orgDay";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Letterhead, Me, AtsConfig, AtsStage, Automation } from "@/types";
 import { DEFAULT_ATS_CONFIG } from "@/types";
@@ -786,7 +786,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
         <Card>
           <CardHeader><CardTitle className="text-base"><AccessAction collection="settings" objectPath="settings/ctc" label="CTC provisions"><span>CTC provisions</span></AccessAction></CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here, including whether each one counts inside CTC or is paid over and above it.</p>
+            <p className="text-sm text-muted-foreground">How an entered CTC splits into pay. Basic is set as a % of CTC; the rest becomes a Special Allowance after employer contributions are added on top. The employer contributions themselves (gratuity, employer PF/ESI, or any you add) are <a href="#/settings/pay-components" className="underline">pay components</a> of kind "employer contribution" - configured there, not here, including whether each one counts inside CTC or is paid over and above it.</p>
             <SplitStaleBanner staleCount={staleCount} skippedCount={skippedCount} reapplying={reapplying} canReapply={canReapply} onReapply={doReapply} />
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Basic % of CTC" hint="Basic = this % of monthly CTC. New wage code wants ≥ 50%."><Input type="number" step="1" value={ctc.basic_pct} onChange={(e) => setCtc((c) => ({ ...c, basic_pct: Number(e.target.value) }))} /></Field>
@@ -804,7 +804,7 @@ function PayrollPolicyTab({ toast }: { toast: Toast }) {
               </Field>
             </div>
             {ctc.pf_wage_basis === "basic_plus" && (
-              <p className="text-xs text-muted-foreground">Which allowances count is per component: tick "Counts as PF wages" on each one in <a href="/pay-components" className="underline">pay components</a>. HRA, overtime and bonus are excluded by statute - leave them off.</p>
+              <p className="text-xs text-muted-foreground">Which allowances count is per component: tick "Counts as PF wages" on each one in <a href="#/settings/pay-components" className="underline">pay components</a>. HRA, overtime and bonus are excluded by statute - leave them off.</p>
             )}
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={saveCtc}><Save className="h-4 w-4" /> Save</Button>
@@ -1251,6 +1251,12 @@ function AttendanceTab({ toast }: { toast: Toast }) {
     setSaving(true);
     try {
       await saveSetting("attendance", { value: cfg });
+      // The SPA's idea of "today" is this key (lib/orgDay), memoised at bootstrap and never re-read. The
+      // server adopts the new zone on the very next request, so without this line the tab that just changed
+      // it - and every date input on it - carries on in the old one until a full page reload. The value is
+      // right here, so no read is needed; the clock provider picks the rest of the blob up from the
+      // invalidation `saveSetting` has already published.
+      setOrgTimezone(cfg.timezone);
       markSaved();
       toast({ title: "Attendance schedule saved" });
     } catch (e) {
@@ -1935,10 +1941,15 @@ function LetterheadRow({ logo, reload, toast, onDesign }: { logo: Letterhead; re
 function useOrgBlob(toast: Toast) {
   const { reload } = useOrg();
   const [blob, setBlob] = useState<Partial<OrgSettings> | null>(null);
+  // The version THIS blob was read at, carried to the save. The read happens once at mount and the save
+  // rebuilds the whole blob from it, so the write has to be checked against the version the value came from -
+  // a version looked up at write time can be a sibling tab's newer one, which turns "your copy is stale" into
+  // an accepted write that silently reverts their slice (see saveSetting).
+  const version = useRef<string | undefined>(undefined);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     getSetting<Partial<OrgSettings>>("organization")
-      .then((s) => setBlob(s.value ?? {}))
+      .then((s) => { version.current = s.version; setBlob(s.value ?? {}); })
       .catch(() => setBlob({}));
   }, []);
   // Returns whether the save landed, so callers can clear their unsaved-changes baseline only on success.
@@ -1946,7 +1957,10 @@ function useOrgBlob(toast: Toast) {
     setSaving(true);
     try {
       const value = { ...(blob ?? {}), ...slice };
-      await saveSetting("organization", { value });
+      await saveSetting("organization", { value }, version.current);
+      // The row this tab now holds is the one it just wrote, so re-read the version it landed at: without it a
+      // second save from the same open panel would carry the pre-save version and take a 409 it has not earned.
+      version.current = (await getSetting<Partial<OrgSettings>>("organization")).version;
       setBlob(value as Partial<OrgSettings>);
       reload();
       toast({ title: savedTitle, variant: "success" });
@@ -3574,17 +3588,41 @@ function FieldsTab({ toast }: { toast: Toast }) {
   const [fields, setFields] = useState<EmployeeFieldDef[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
+  const confirm = useConfirm();
+  // The keys the ORG has actually stored. A row that was never saved carries nobody's data, so removing it is
+  // an edit; removing a saved one is what puts employees' PAN/Aadhaar values on the line.
+  const savedKeys = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     getSetting<{ fields?: EmployeeFieldDef[] }>("employee_fields")
-      .then((s) => setFields(s.value?.fields?.length ? s.value.fields : DEFAULT_FIELDS))
+      .then((s) => {
+        const initial = s.value?.fields?.length ? s.value.fields : DEFAULT_FIELDS;
+        savedKeys.current = new Set(initial.map((f) => f.key || slug(f.label)));
+        setFields(initial);
+      })
       .catch(() => setFields(DEFAULT_FIELDS))
       .finally(() => setLoaded(true));
   }, []);
 
   const update = (i: number, patch: Partial<EmployeeFieldDef>) =>
     setFields((fs) => fs.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
-  const remove = (i: number) => setFields((fs) => fs.filter((_, idx) => idx !== i));
+  // Removing a field is a data decision, not a layout one: the values stop being shown, and on save the
+  // server deletes them along with any uploaded proof (routes/settings.ts). Say so before the row vanishes.
+  const remove = async (i: number) => {
+    const f = fields[i];
+    const key = f ? f.key || slug(f.label) : "";
+    if (key && savedKeys.current.has(key)) {
+      const ok = await confirm({
+        title: `Remove ${f!.label.trim() || "this field"}?`,
+        description:
+          "When you save, every employee's stored value for this field is DELETED, along with any document uploaded as proof of it. This cannot be undone, and the exact count is confirmed again on save.",
+        destructive: true,
+        confirmLabel: "Remove field",
+      });
+      if (!ok) return;
+    }
+    setFields((fs) => fs.filter((_, idx) => idx !== i));
+  };
   const fieldKeys = useRowKeys(fields);
   const add = () => setFields((fs) => [...fs, { key: "", label: "", mandatory: false, sensitive: false, document: "none" }]);
 
@@ -3601,10 +3639,41 @@ function FieldsTab({ toast }: { toast: Toast }) {
     setSaving(true);
     try {
       await saveSetting("employee_fields", { value: { fields: cleaned } });
+      savedKeys.current = new Set(cleaned.map((f) => f.key));
       setFields(cleaned);
       markSaved();
       toast({ title: "Employee fields saved", variant: "success" });
     } catch (e) {
+      // The server refuses a removal that would strand stored values, and its message names the fields and how
+      // many employees hold one - the count this panel cannot know on its own. Put that sentence in front of
+      // the admin and only then re-send with the confirmation flag, which deletes those values and the proofs
+      // uploaded against them.
+      const message = (e as Error).message ?? "";
+      if (message.includes("delete_removed_values")) {
+        const ok = await confirm({
+          title: "Delete the stored values too?",
+          description: `${message.replace(/ - re-send with delete_removed_values to confirm\.$/, ".")} Deleting cannot be undone. Cancel and add the field back to keep them.`,
+          destructive: true,
+          confirmLabel: "Delete the values",
+        });
+        if (ok) {
+          try {
+            // The confirmation travels inside the value and is consumed by the route, never stored
+            // (routes/settings.ts).
+            await saveSetting("employee_fields", { value: { fields: cleaned, delete_removed_values: true } });
+            savedKeys.current = new Set(cleaned.map((f) => f.key));
+            setFields(cleaned);
+            markSaved();
+            toast({ title: "Employee fields saved", description: "The removed fields' values and proofs were deleted.", variant: "success" });
+            return;
+          } catch (retryError) {
+            toast(saveSettingError(retryError));
+            return;
+          } finally {
+            setSaving(false);
+          }
+        }
+      }
       toast(saveSettingError(e));
     } finally {
       setSaving(false);
@@ -3642,7 +3711,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
                   className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-2 p-2 sm:grid-cols-[1fr_auto_auto_auto_auto]"
                 >
                   <Input value={f.label} placeholder="e.g. Passport number" onChange={(e) => update(i, { label: e.target.value })} />
-                  <Button variant="ghost" size="icon" className="h-8 w-8 sm:hidden" onClick={() => remove(i)} aria-label="Remove field">
+                  <Button variant="ghost" size="icon" className="h-8 w-8 sm:hidden" onClick={() => void remove(i)} aria-label="Remove field">
                     <Trash2 className="h-4 w-4" />
                   </Button>
                   {/* One checkbox per flag either way - only the caption comes and goes. Below `sm` the
@@ -3665,7 +3734,7 @@ function FieldsTab({ toast }: { toast: Toast }) {
                     <option value="allowed">Allowed</option>
                     <option value="required">Required</option>
                   </select>
-                  <Button variant="ghost" size="icon" className="hidden h-8 w-8 sm:inline-flex" onClick={() => remove(i)} aria-label="Remove field">
+                  <Button variant="ghost" size="icon" className="hidden h-8 w-8 sm:inline-flex" onClick={() => void remove(i)} aria-label="Remove field">
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>

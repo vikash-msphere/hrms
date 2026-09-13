@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Briefcase, Plus } from "lucide-react";
-import { get, create } from "@/api";
+import { getAllPages, create } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { idOf } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
@@ -24,6 +24,8 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
   const { toast } = useToast();
   const { rows: departments } = useCollection<Department>("departments", { all: true });
   const [rows, setRows] = useState<Position[]>([]);
+  const [cropped, setCropped] = useState(false); // the walk hit its ceiling: the timeline below is a window
+  const reqSeq = useRef(0); // only the newest walk may write the rows (see `load`)
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ job_title: "", department: NONE, location: "", effective_from: todayYmd(), note: "" });
@@ -35,9 +37,17 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
 
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
   const load = useCallback(async () => {
+    // Several sequential round-trips, re-keyed on the person being viewed and called again after a role
+    // change: only the newest walk may write (test/staleResponseDrift).
+    const seq = ++reqSeq.current;
     try {
-      const r = await get<{ results: Position[] }>(`positions?employee=${encodeURIComponent("employees/" + employeeId)}`);
-      setRows(r.results ?? []);
+      // WALKED, not a raw `get()`: a bare list read sends no `max_page_size`, so the server's default of 50
+      // applies (http/pagination.ts) and the response's cursor is thrown away. Positions are newest-first, so
+      // a window loses the first role and the early promotions - the part a role history is opened for.
+      const r = await getAllPages<Position>(`positions?employee=${encodeURIComponent("employees/" + employeeId)}`, 200);
+      if (seq !== reqSeq.current) return;
+      setRows(r.results);
+      setCropped(r.truncated);
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't load role history", description: (e as Error).message });
     } finally {
@@ -122,6 +132,7 @@ export function EmployeeRoleHistory({ employeeId, canEdit }: { employeeId: strin
               ))}
             </tbody>
           </table>
+          {cropped && <p className="mt-2 text-xs text-muted-foreground">Showing the most recent roles - older ones are not loaded here.</p>}
           </div>
         )}
       </CardContent>

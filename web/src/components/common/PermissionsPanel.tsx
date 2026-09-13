@@ -61,7 +61,20 @@ export function PermissionsPanel({ controlsSlot }: { controlsSlot?: HTMLElement 
   }, []);
 
   async function setFourEyesEnabled(enabled: boolean) {
-    if (enabled && !(await confirm({ title: "Require a second approver for permission changes?", description: "From now on every access-rule change waits for a DIFFERENT access admin to approve it. A new grant does nothing until approved; a removal keeps working until approved. If you are the only access admin, nobody can approve your changes - turn this back off to unblock.", confirmLabel: "Turn on" }))) return;
+    // BOTH directions ask. Turning this off is the consequential one: it removes the second pair of eyes from
+    // every subsequent rule write (accessRules.ts `approvalRequired` is consulted per write, so the next grant
+    // goes live immediately), and it is one unticked checkbox away for anyone holding a single access-admin
+    // session. The on-direction adds a control; the off-direction takes it away, so it gets the destructive
+    // prompt rather than no prompt at all.
+    const ok = enabled
+      ? await confirm({ title: "Require a second approver for permission changes?", description: "From now on every access-rule change waits for a DIFFERENT access admin to approve it. A new grant does nothing until approved; a removal keeps working until approved. If you are the only access admin, nobody can approve your changes - turn this back off to unblock.", confirmLabel: "Turn on" })
+      : await confirm({
+          title: "Stop requiring a second approver?",
+          description: "Every access-rule change will take effect immediately, with no second admin reviewing it. Changes already waiting stay in the queue until someone decides them.",
+          destructive: true,
+          confirmLabel: "Turn off",
+        });
+    if (!ok) return;
     try {
       await saveSetting("access-approval", { value: { enabled } });
       setFourEyes(enabled);

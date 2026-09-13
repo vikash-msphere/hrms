@@ -4,7 +4,7 @@ import { create, patch, remove, invoke, get, getAllPages } from "@/api";
 import type { ListResponse } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { cn, idOf } from "@/lib/utils";
-import { todayStr, addDaysYmd } from "@/lib/orgDay";
+import { todayStr, addDaysYmd, orgDayOf } from "@/lib/orgDay";
 import { isConflict } from "@/lib/formError";
 import { navigate, recordUrl, setRouteRecord } from "@/router";
 import type { Me, Interview, InterviewFeedback, Application, Candidate, JobRequisition, Employee, LeaveRequest, Event as EventRow } from "@/types";
@@ -110,8 +110,12 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
   // "On my panel" is the only question an interviewer has here, and a slot whose time has passed while still
   // scheduled is the one blocking a scorecard. Both are clickable metrics rather than a scan of the list.
   const onMyPanel = (i: Interview) => !!me.employee_id && (i.interviewers ?? []).some((ref) => idOf(ref) === me.employee_id);
+  // Bucketed on the ORG's clock (lib/orgDay), not the viewer's: `toDateString()` renders an instant in the
+  // browser's timezone, and interviewing is the one workflow that routinely crosses zones. A panelist in
+  // London reading an IST org's 01:00 slot saw it as "Today" the evening before, and a panelist west of the
+  // org read today's slots as tomorrow and found the day's queue empty.
   const isToday = (i: Interview) =>
-    i.status === "scheduled" && !!i.scheduled_start_time && new Date(i.scheduled_start_time).toDateString() === new Date().toDateString();
+    i.status === "scheduled" && !!i.scheduled_start_time && orgDayOf(i.scheduled_start_time) === todayStr();
   const isPastDue = (i: Interview) =>
     i.status === "scheduled" && !!i.scheduled_start_time && i.scheduled_start_time < new Date().toISOString() && !isToday(i);
   const kf = useKpiFocus<Interview, "today" | "scheduled" | "done" | "mine" | "pastDue">({
@@ -266,9 +270,7 @@ export default function Interviews({ me, openId }: { me: Me; openId?: string }) 
                     {panel.length > 0 && <div className="mt-0.5 text-xs text-muted-foreground">Panel: {panel.join(", ")}</div>}
                   </div>
                   <div className="text-sm text-muted-foreground">{fmtWhen(i.scheduled_start_time)}</div>
-                  {i.status === "scheduled" && i.scheduled_start_time && new Date(i.scheduled_start_time).toDateString() === new Date().toDateString() && (
-                    <Badge variant="warning">Today</Badge>
-                  )}
+                  {isToday(i) && <Badge variant="warning">Today</Badge>}
                   <Badge variant={sm.variant}>{sm.label}</Badge>
                   <div className="flex flex-wrap items-center gap-1">
                     {/* After the interview the scorecard is the pending action - promote it. */}

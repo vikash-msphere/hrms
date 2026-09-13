@@ -19,6 +19,7 @@
 // (lib/settingsStore.ts), so this adds no request.
 import { DEFAULT_SCHEDULE, localDay, weekdayOf } from "./attendance";
 import { readSetting } from "./settingsStore";
+import { subscribeInvalidations } from "./resourceStore";
 
 let orgTz: string = DEFAULT_SCHEDULE.timezone;
 let hydrating: Promise<void> | null = null;
@@ -47,6 +48,27 @@ export function hydrateOrgTimezone(): Promise<void> {
     .catch(() => { /* not configured, or the snapshot failed: the default stands */ });
   return hydrating;
 }
+
+/**
+ * Read it AGAIN, because the memo above is settled for the life of the page.
+ *
+ * The org's timezone is editable in Settings, and the server adopts a saved one on the very next request
+ * (services/orgDay.ts reads the key per request). Without this the SPA kept the timezone it booted with for
+ * the rest of the session - so straight after the save the two disagreed, which is precisely the drift the
+ * header of this module describes: a date input defaulted to the wrong day, and the server refused what the
+ * client's own `min` had permitted.
+ */
+export function rehydrateOrgTimezone(): Promise<void> {
+  hydrating = null;
+  return hydrateOrgTimezone();
+}
+
+// Any settings write - this tab's or a sibling's, since the bus routes a remote invalidation through the same
+// subscription - re-reads the zone. That covers the admin who saved it, the second admin watching in another
+// tab, and the rest of the app when the clock provider is not mounted at all (an org with attendance off).
+subscribeInvalidations((collections) => {
+  if (collections.includes("settings")) void rehydrateOrgTimezone();
+});
 
 /** Today, as "YYYY-MM-DD", in the ORG's timezone. The one `todayStr` for the whole SPA. */
 export const todayStr = (): string => localDay(new Date().toISOString(), orgTz);

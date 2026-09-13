@@ -10,6 +10,7 @@ import { useOrg, currencyDecimals } from "@/lib/org";
 import type { Employee, LeaveType, LeaveBalance, LeaveEncashment, Me } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { metaColumns } from "@/components/common/metaColumns";
 import { withNewBadge } from "@/components/common/NewBadge";
@@ -38,7 +39,6 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   const { rows, state, error, reload } = useCollection<LeaveEncashment>(COL);
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
-  const { rows: balances } = useCollection<LeaveBalance>("leave-balances");
   const { toast } = useToast();
   const confirm = useConfirm();
   const { org } = useOrg();
@@ -47,6 +47,24 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY);
+
+  // THE SELECTED EMPLOYEE'S OWN ROWS, NARROWED SERVER-SIDE (`?employee=`, routes/leaveBalances.ts and
+  // routes/leaveEncashments.ts). `leave-balances` holds one row per employee PER LEAVE TYPE and
+  // `leave-encashments` is org-wide newest-first, so reading a page of either and matching in the browser
+  // answered "what is this person's balance / what have they already encashed this year" with "whatever of the
+  // newest hundred rows happens to be theirs" - and both answers gate a money form. Only fetched once somebody
+  // is selected, so the page costs nothing extra until the dialog is actually being filled in.
+  const { rows: balances } = useCollection<LeaveBalance>("leave-balances", {
+    enabled: !!form.employee,
+    params: { employee: form.employee },
+    all: true,
+  });
+  const { rows: empEncashments } = useCollection<LeaveEncashment>(COL, {
+    enabled: !!form.employee,
+    params: { employee: form.employee },
+    all: true,
+  });
+
   // "Encash days" on a Leaves balance card hands the type over: open the form already pointed at that balance
   // instead of making the caller re-pick the type they just clicked.
   useEffect(() => {
@@ -72,9 +90,13 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   }, [leaveTypes]);
 
   const encashableTypes = useMemo(() => leaveTypes.filter((t) => t.encashable && !t.delete_time && !t.disabled), [leaveTypes]);
-  const balanceFor = (empRef: string, typeRef: string): number => {
+  // `null` means "no balance row for this pair", which is NOT the same as a zero balance: an employee who has
+  // never accrued this type has no row, and so does one whose row simply has not loaded yet. Asserting 0 for
+  // an unknown blocked the form on `maxEncashable` while telling the reader the balance was zero - the
+  // posture `capLeft` already takes for its own unknown, two blocks down.
+  const balanceFor = (empRef: string, typeRef: string): number | null => {
     const b = balances.find((x) => x.employee && x.leave_type && idOf(x.employee) === idOf(empRef) && idOf(x.leave_type) === idOf(typeRef));
-    return b?.balance_days ?? 0;
+    return b?.balance_days ?? null;
   };
   // Current balance for the selected (employee, leave type) - shown as guidance in the dialog.
   const selectedBalance = form.employee && form.leave_type ? balanceFor(form.employee, form.leave_type) : null;
@@ -110,29 +132,34 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
   // In cumulative mode the running total is across every type, not just the selected one.
   const encashedThisYear = useMemo(() => {
     if (!form.employee || !form.leave_type) return 0;
-    return rows
-      .filter((r) => r.employee && r.leave_type && idOf(r.employee) === idOf(form.employee)
-        && (cumulative || idOf(r.leave_type) === idOf(form.leave_type)))
+    return empEncashments
+      .filter((r) => r.leave_type && (cumulative || idOf(r.leave_type) === idOf(form.leave_type)))
       .filter((r) => ["APPROVED", "PAID"].includes(upper(r.state)) && (r.create_time ?? "") >= yearStart)
       .reduce((n, r) => n + (r.days || 0), 0);
-  }, [rows, form.employee, form.leave_type, yearStart, cumulative]);
+  }, [empEncashments, form.employee, form.leave_type, yearStart, cumulative]);
   const retained = selectedType?.min_balance_retained_days ?? 0;
   const yearCap = cumulative ? caps?.cumulativeCapDays ?? null : selectedType?.encashment_cap_days_per_year ?? null;
   // Until the policy is known, say nothing about the cap rather than mis-state it - the posture
   // lib/leaveForecast.ts takes for the same choice - and let the server's `failedPrecondition` be the
   // authority, rather than blocking on a number known to be for the wrong policy.
   const capLeft = caps && yearCap != null ? Math.max(0, yearCap - encashedThisYear) : null;
-  const maxEncashable = selectedBalance == null ? null : Math.max(0, Math.min(selectedBalance - retained, capLeft ?? Infinity));
+  // An unknown balance drops out of the ceiling the same way an unknown cap does: whatever is still known
+  // bounds the form, and if nothing is known the server's `failedPrecondition` decides. Blocking on a balance
+  // read as 0 because the row was not loaded refuses a payout the server would have made.
+  const maxEncashable =
+    selectedBalance == null
+      ? capLeft
+      : Math.max(0, Math.min(selectedBalance - retained, capLeft ?? Infinity));
 
   // Most recent known day-rate for the selected employee (from any prior encashment) - estimate only;
   // the server computes the real rate from current salary.
   const lastRate = useMemo(() => {
     if (!form.employee) return null;
-    const prior = rows
-      .filter((r) => r.employee && idOf(r.employee) === idOf(form.employee) && r.rate_per_day != null)
+    const prior = empEncashments
+      .filter((r) => r.rate_per_day != null)
       .sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""));
     return prior[0]?.rate_per_day ?? null;
-  }, [rows, form.employee]);
+  }, [empEncashments, form.employee]);
 
   const daysNum = Number(form.days);
   const canSubmit = !!form.employee && !!form.leave_type && !!form.days && daysNum > 0 && (maxEncashable == null || daysNum <= maxEncashable);
@@ -245,6 +272,9 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
 
       {/* Three tiles, two across a phone: the third stretches to fill its own row rather than sitting next to
           a hole. */}
+      {/* The tiles are money folded over the rows this page holds, which is one server page of an org-wide
+          collection - so say so when there are more, the way the tables below do through DataTable. */}
+      {rows.length > 0 && <TruncationNotice collection={COL} what="encashments" className="mb-4" />}
       {rows.length > 0 && (
         <StatRow caps={[2, 3]} gap={{ base: "0.75rem" }} className="mb-6">
           <Stat label="Pending" value={money(sum(pending))} sub={`${pending.length} request${pending.length === 1 ? "" : "s"}`} />
@@ -312,14 +342,17 @@ export default function LeaveEncashments({ embedded, initialType, meEmployeeId }
             label="Days to encash"
             htmlFor="encashment-days"
             hint={
-              selectedBalance != null && maxEncashable != null
-                ? [
-                    `Balance: ${selectedBalance} day${selectedBalance === 1 ? "" : "s"}`,
-                    ...(retained > 0 ? [`policy keeps ${retained} unencashed`] : []),
-                    ...(capLeft != null ? [`${capLeft} of the ${yearCap}/year ${cumulative ? "org-wide cap" : "cap"} left`] : []),
-                    ...(retained > 0 || capLeft != null ? [`max now: ${maxEncashable}`] : []),
-                  ].join(" · ")
-                : undefined
+              // Says only what is known. With no balance row for this pair the balance line is left out rather
+              // than printed as "0 days" - see `balanceFor`.
+              (() => {
+                const parts = [
+                  ...(selectedBalance != null ? [`Balance: ${selectedBalance} day${selectedBalance === 1 ? "" : "s"}`] : []),
+                  ...(selectedBalance != null && retained > 0 ? [`policy keeps ${retained} unencashed`] : []),
+                  ...(capLeft != null ? [`${capLeft} of the ${yearCap}/year ${cumulative ? "org-wide cap" : "cap"} left`] : []),
+                  ...(maxEncashable != null && (selectedBalance == null || retained > 0 || capLeft != null) ? [`max now: ${maxEncashable}`] : []),
+                ];
+                return parts.length ? parts.join(" · ") : undefined;
+              })()
             }
             error={
               form.days !== "" && daysNum <= 0

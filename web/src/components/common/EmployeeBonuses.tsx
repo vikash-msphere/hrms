@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Gift, Plus } from "lucide-react";
-import { get, create } from "@/api";
+import { getAllPages, create } from "@/api";
 import { formatMoney, round2 } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
 import { useOrg, currencyDecimals } from "@/lib/org";
@@ -27,6 +27,8 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
   const { org } = useOrg();
   const money = (n: number, cc?: string) => formatMoney(n, cc || org.default_currency, currencyDecimals(cc, org));
   const [rows, setRows] = useState<Bonus[]>([]);
+  const [cropped, setCropped] = useState(false); // the walk hit its ceiling: the list below is a window
+  const reqSeq = useRef(0); // only the newest walk may write the rows (see `load`)
   const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ amount: "", kind: "", award_date: todayYmd(), reason: "" });
@@ -40,9 +42,17 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
   // `employeeId`, so the fetch follows the person being viewed instead of the one this mounted with. `toast`
   // is a module-level function, so naming it costs nothing.
   const load = useCallback(async () => {
+    // The walk is several sequential round-trips, and this loader is re-keyed on the person being viewed (and
+    // called again after recording an award), so an older walk can land last - test/staleResponseDrift.
+    const seq = ++reqSeq.current;
     try {
-      const r = await get<{ results: Bonus[] }>(`bonuses?employee=${encodeURIComponent("employees/" + employeeId)}`);
-      setRows(r.results ?? []);
+      // WALKED, not a raw `get()`: a bare list read sends no `max_page_size`, so the server defaults to 50
+      // (http/pagination.ts) and the cursor in the response is discarded - and the list is newest-first, so
+      // what goes missing is the older awards this card's totals are summed from.
+      const r = await getAllPages<Bonus>(`bonuses?employee=${encodeURIComponent("employees/" + employeeId)}`, 500);
+      if (seq !== reqSeq.current) return;
+      setRows(r.results);
+      setCropped(r.truncated);
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't load awards", description: (e as Error).message });
     } finally {
@@ -114,6 +124,7 @@ export function EmployeeBonuses({ employeeId, canEdit }: { employeeId: string; c
               ))}
             </tbody>
           </table>
+          {cropped && <p className="mt-2 text-xs text-muted-foreground">Showing the most recent awards - older ones are not loaded here.</p>}
           </div>
         )}
       </CardContent>

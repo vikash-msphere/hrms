@@ -40,7 +40,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { useConfirm } from "@/components/common/confirm";
 import { confirmDecision } from "@/lib/confirmDecision";
 import { cn, formatDate, formatMoney, idOf } from "@/lib/utils";
-import { addDaysYmd, orgDayFromToday, todayStr, weekStartYmd } from "@/lib/orgDay";
+import { addDaysYmd, orgDayFromToday, orgDayOf, todayStr, weekStartYmd } from "@/lib/orgDay";
 import { useApprovals } from "@/lib/approvals";
 import { boardTime } from "@/lib/boardOrder";
 import { useNotifications, timeAgo } from "@/lib/notifications";
@@ -626,9 +626,11 @@ export default function Dashboard({ me }: { me: Me }) {
     const now = new Date().toISOString();
     return interviews.filter((i) => i.status === "scheduled" && (i.scheduled_start_time ?? "") >= now);
   }, [interviews]);
+  // On the ORG's day, not the viewer's: panelists read this across timezones, and the browser's calendar day
+  // puts a slot on the wrong side of midnight for anyone not sitting in the org's zone (lib/orgDay).
   const interviewsToday = useMemo(() => {
-    const t = new Date().toDateString();
-    return upcomingInterviews.filter((i) => i.scheduled_start_time && new Date(i.scheduled_start_time).toDateString() === t).length;
+    const t = todayStr();
+    return upcomingInterviews.filter((i) => i.scheduled_start_time && orgDayOf(i.scheduled_start_time) === t).length;
   }, [upcomingInterviews]);
   // Referrals still live (not yet joined or rejected).
   const openReferrals = useMemo(() => referrals.filter((r) => r.status !== "joined" && r.status !== "rejected"), [referrals]);

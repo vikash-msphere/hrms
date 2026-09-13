@@ -25,7 +25,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { SettingsButton } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
 import { EmptyState } from "@/components/common/EmptyState";
-import { StatsSkeleton } from "@/components/common/Skeletons";
+import { StatsSkeleton, PageSkeleton } from "@/components/common/Skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIntent } from "@/lib/intent";
 import { Field, FieldRow } from "@/components/common/Field";
@@ -369,7 +369,12 @@ const LAST_BOARD_KEY = () => userKey("boards:last");
 const CARD_FETCH_CAP = 500; // follow the cards cursor up to here; past it the TruncationNotice takes over
 
 export default function Boards({ me, openId }: { me: Me; openId?: string }) {
-  const { rows: boards, state, error, reload } = useCollection<Board>("boards");
+  // `all: true`: every consumer on this page treats `boards` as the complete catalogue - the switcher below,
+  // `valid()`, and the `boards.find` that resolves the selection - so one page of them is not a short list, it
+  // is a wrong answer. A deep link to a board past the window resolved to `null` and silently dropped the
+  // reader on somebody else's board with the URL still naming theirs. The residual ALL_CAP is admitted by the
+  // TruncationNotice below.
+  const { rows: boards, state, error, reload, hasMore: boardsHasMore } = useCollection<Board>("boards", { all: true });
   // Shared cache with the view below (no extra read) — used only to map a deep-linked card id to its board.
   const { rows: navCards, hasMore: cardsHasMore, loadMore: loadMoreCards } = useCollection<CardT>("cards");
   const route = useRoute();
@@ -392,12 +397,19 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
     const fromUrl = valid(route.query.board);
     if (fromUrl && fromUrl !== selectedId) { setSelectedId(fromUrl); return; }
     if (valid(selectedId)) return;
+    // "Not in the rows we hold" is only "deleted, access lost" once the rows ARE the collection. While the
+    // walk is still short of it, a requested board that has not arrived keeps its place instead of being
+    // replaced by somebody else's board under a URL that still names theirs.
+    if (boardsHasMore && (route.query.board || selectedId)) {
+      if (route.query.board && route.query.board !== selectedId) setSelectedId(route.query.board);
+      return;
+    }
     const lastKey = LAST_BOARD_KEY();
     // The id here is a SELECTION, not a label: it picks which board to show and never reaches the screen, so
     // the "a ref reads as a word" rule is not the one that applies.
     // eslint-disable-next-line no-restricted-syntax
     setSelectedId(fromUrl ?? valid(lastKey ? readLocal(lastKey) : null) ?? idOf(boards[0]!.path));
-  }, [boards, selectedId, route.query.board]);
+  }, [boards, selectedId, route.query.board, boardsHasMore]);
 
   // Remember the selection and keep the URL shareable. Query-only hash writes don't add history entries here
   // (setQueryParam preserves the path), and the unsaved-changes guard ignores them.
@@ -444,12 +456,15 @@ export default function Boards({ me, openId }: { me: Me; openId?: string }) {
         }
       />
 
-      <TruncationNotice collection="cards" what="cards" className="mb-3" />
+      <TruncationNotice collection={["boards", "cards"]} what="boards and cards" className="mb-3" />
       <DataState state={state} error={error} onRetry={reload}>
         {boards.length === 0 ? (
           <EmptyState icon={KanbanSquare} title="No boards yet" description="Create a board to start tracking work with columns, WIP limits and swimlanes." action={newBtn} />
         ) : (
           <>
+            {/* Only reachable while the boards walk is still short of the collection and the requested board
+                has not arrived yet - the case `valid()` used to answer by showing a different board. */}
+            {!board && <PageSkeleton />}
             {board && (
               <Tabs value={tab} onValueChange={setTab}>
                 <div className="flex items-center justify-between gap-2">

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Users, Plus, Pencil, Trash2, Paperclip, Download, Search, FileText, UserPlus } from "lucide-react";
 import { create, patch, remove, upload, download, get } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
+import { useDebounced } from "@/hooks/useDebounced";
 import { idOf } from "@/lib/utils";
 import { isConflict } from "@/lib/formError";
 import { parseContact } from "@/lib/ats";
@@ -50,7 +51,17 @@ export default function Candidates({ me }: { me: Me }) {
   // Applications put a "where are they in the pipeline" line on each candidate, and the dialog lists that
   // person's own applications - so an empty pool with no dialog open needs none of them.
   const { rows: apps } = useCollection<Application>("applications", { enabled: rows.length > 0 || dialog !== null, all: true });
+  // THE SEARCH RUNS ON THE SERVER (`?q=`, FTS-backed - routes/candidates.ts), because a list page caps at 100
+  // rows: a `String.includes` over the loaded page only ever searched the newest hundred, so the candidate who
+  // applied last quarter - the one a recruiter is actually looking for - read as "no such candidate". ⌘K
+  // already found them, over the same index.
+  //
+  // Two reads, like Directory: the unfiltered one above backs the metric tiles, which count the pool rather
+  // than the current search; this one is the result set.
   const [q, setQ] = useState("");
+  const debouncedQ = useDebounced(q.trim(), 250);
+  const searching = debouncedQ.length >= 2;
+  const { rows: searchRows, state: searchState } = useCollection<Candidate>("candidates", { q: debouncedQ, enabled: searching });
   const [uploading, setUploading] = useState<string | null>(null);
   const uploadFor = useRef<Candidate | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -88,15 +99,10 @@ export default function Candidates({ me }: { me: Me }) {
   });
 
   const items = useMemo(() => {
-    const sorted = [...rows].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""));
-    const needle = q.trim().toLowerCase();
-    const matched = !needle
-      ? sorted
-      : sorted.filter((c) =>
-          [c.name, c.email, c.phone, c.tags, sourceLabel(c.source), c.source_detail].filter(Boolean).join(" ").toLowerCase().includes(needle),
-        );
-    return kf.apply(matched);
-  }, [rows, q, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
+    const source = searching ? searchRows : rows;
+    const sorted = [...source].sort((a, b) => (b.create_time ?? "").localeCompare(a.create_time ?? ""));
+    return kf.apply(sorted);
+  }, [rows, searchRows, searching, kf.focus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function del(c: Candidate) {
     if (!(await confirm({ title: "Remove this candidate?", destructive: true, confirmLabel: "Remove" }))) return;
@@ -146,7 +152,11 @@ export default function Candidates({ me }: { me: Me }) {
         {rows.length > 0 && (
           <div className="relative mb-4 max-w-sm">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, email, tag, source…" className="h-9 pl-8" />
+            <Input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search the whole pool…" className="h-9 pl-8" />
+            {/* Two characters is where the server's FTS filter starts (services/searchFilter.ts); below that
+                the box is not searching anything, so it says so rather than appearing to have matched all. */}
+            {q.trim().length === 1 && <p className="mt-1 text-xs text-muted-foreground">Type one more character to search.</p>}
+            {searching && searchState === "loading" && <p className="mt-1 text-xs text-muted-foreground">Searching…</p>}
           </div>
         )}
         {items.length === 0 ? (

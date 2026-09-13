@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { useIntent } from "@/lib/intent";
 import { PageSettings } from "@/components/common/SettingsButton";
 import { DataState } from "@/components/common/DataState";
+import { TruncationNotice } from "@/components/common/TruncationNotice";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Field, FieldRow } from "@/components/common/Field";
 import { ActivitySection } from "@/components/common/ActivitySection";
@@ -82,7 +83,11 @@ function BonusCell({ r, money }: { r: Referral; money: (n?: number) => string })
 }
 
 export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
-  const { rows, state, error, reload } = useCollection<Referral>("referrals");
+  // `all: true`, like the three reads below it: this is a card list, not a DataTable, so nothing on screen
+  // admits a window - and the strip folds money over these rows. Newest-first means what drops off a page is
+  // the OLDEST referral, which is exactly where an unpaid bonus nobody chased lives, so "Bonus owed" would
+  // under-report the queue it exists to surface. The residual ALL_CAP is admitted by the notice below.
+  const { rows, state, error, reload } = useCollection<Referral>("referrals", { all: true });
   const { rows: employees } = useCollection<Employee>("employees", { all: true });
   const { rows: departments } = useCollection<Department>("departments", { all: true });
   // Only loads for callers who can read candidates (HR/recruiters); others get an empty list, which is fine -
@@ -181,6 +186,7 @@ export default function Referrals({ me, openId }: { me: Me; openId?: string }) {
       <input ref={fileInput} type="file" className="hidden" onChange={onFile} />
 
       <DataState state={state} error={error} onRetry={reload}>
+        {items.length > 0 && <TruncationNotice collection="referrals" what="referrals" className="mb-4" />}
         {items.length > 0 && (
           <SummaryStrip
             items={[

@@ -53,6 +53,11 @@ const dsn = import.meta.env.DEV && !devOptIn ? undefined : import.meta.env.VITE_
 const SENSITIVE_PAGES = [
   "payslips", // a table of net pay, deductions and statutory contributions - values with labels around them
   "payroll-runs", // the same, per employee, for a whole company
+  // Offers: a table of what the company offered named people, which is the payroll-runs shape one step before
+  // anybody is an employee - and the more negotiation-sensitive version of it, since two candidates' figures
+  // side by side is the comparison an offer is confidential to prevent. The panel's own scorecard is already
+  // masked; the salary beside it was not.
+  "offers",
   "documents", // scanned identity documents, contracts, insurance cards
   // Performance. Ratings and written assessments, plus 360 feedback, whose whole design is that the subject
   // cannot attribute it - a replay of the calibration grid or a reviewer's draft undoes that from outside.

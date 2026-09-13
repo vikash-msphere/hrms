@@ -68,14 +68,20 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
   // so narrow to it server-side. With several applications there is no one-shot filter for "any of these", so
   // the page reads the collections and matches; either way it reads nothing at all for a candidate who has not
   // applied to anything.
+  //
+  // THE FALLBACK WALKS ITS CURSOR. One org-wide page of `interviews` / `offers`, newest-first, meant a
+  // re-applicant's earlier rounds appeared only if they happened to be among the org's newest hundred - which
+  // an earlier application's rounds never are - so the profile of somebody who applied last year and again
+  // this month rendered as a candidate with no interview and no offer history at all. The walk runs only for
+  // the uncommon multi-application case and is bounded by ALL_CAP.
   const soleApp = myApps.length === 1 ? myApps[0]!.path : undefined; // already a `applications/<token>` ref
-  const { rows: interviews } = useCollection<Interview>("interviews", {
+  const { rows: interviews, hasMore: interviewsCropped } = useCollection<Interview>("interviews", {
     enabled: myApps.length > 0,
-    params: soleApp ? { application: soleApp } : {},
+    ...(soleApp ? { params: { application: soleApp } } : { all: true }),
   });
-  const { rows: offers } = useCollection<Offer>("offers", {
+  const { rows: offers, hasMore: offersCropped } = useCollection<Offer>("offers", {
     enabled: myApps.length > 0,
-    params: soleApp ? { application: soleApp } : {},
+    ...(soleApp ? { params: { application: soleApp } } : { all: true }),
   });
   // Role titles for the applications on screen, and names for the interviewers / referrer on them. Read only
   // when there is something to label.
@@ -176,10 +182,17 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
               )}
             </section>
 
-            {/* Interviews across all their applications. */}
-            {myInterviews.length > 0 && (
+            {/* Interviews across all their applications. Rendered whenever they have applied at all, with an
+                empty state rather than an absence: a hidden section says the same thing for "no interviews"
+                and for "not loaded", and the reader cannot tell which they are looking at. */}
+            {myApps.length > 0 && (
               <section>
                 <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold"><CalendarClock className="h-4 w-4 text-muted-foreground" /> Interviews</h2>
+                {myInterviews.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    {interviewsCropped ? "Some interviews could not be loaded here." : "No interviews scheduled."}
+                  </p>
+                )}
                 <div className="grid gap-2">
                   {myInterviews.map((i) => {
                     const sm = meta(INTERVIEW_STATUS, i.status);
@@ -200,17 +213,25 @@ export default function CandidateProfile({ id }: { id: string; me: Me }) {
               </section>
             )}
 
-            {/* Offers. */}
-            {myOffers.length > 0 && (
+            {/* Offers - same treatment, same reason. */}
+            {myApps.length > 0 && (
               <section>
                 <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold"><FileSignature className="h-4 w-4 text-muted-foreground" /> Offers</h2>
+                {myOffers.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    {offersCropped ? "Some offers could not be loaded here." : "Nothing offered yet."}
+                  </p>
+                )}
                 <div className="grid gap-2">
                   {myOffers.map((o) => {
                     const sm = meta(OFFER_STATUS, o.status);
                     return (
                       <AccessItem key={o.path} collection="offers" objectPath={o.path} can={o.access?.can} label="Offer">
                       <Card className="flex flex-wrap items-center gap-x-3 gap-y-1 p-3">
-                        {o.base_comp != null && <span className="font-medium tabular-nums">{money(o.base_comp, o.currency_code || undefined)}</span>}
+                        {/* The offered figure, beside the candidate's name: masked in session replay for the
+                            same reason the offers route is (instrument.ts). `candidates` is names and stages
+                            rather than values, so the tag goes on the value rather than the whole route. */}
+                        {o.base_comp != null && <span data-sentry-mask className="font-medium tabular-nums">{money(o.base_comp, o.currency_code || undefined)}</span>}
                         <Badge variant={sm.variant}>{sm.label}</Badge>
                         <span className="ml-auto text-xs text-muted-foreground">
                           {[

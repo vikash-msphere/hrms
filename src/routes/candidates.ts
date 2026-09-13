@@ -42,7 +42,9 @@ export const candidates = collectionRoutes<CandidateInput, typeof schema.candida
     create: (deps, actor, input, id) => createCandidate(deps, actor, input, id),
     update: (deps, actor, id, patch, ifMatch) => updateCandidate(deps, actor, id, patch, ifMatch),
   },
-  list: (c, page) => listCandidates(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted),
+  // `?q=` is the page's search box, run on the server (FTS) rather than over the loaded page - the same shape
+  // employees, tickets, expenses and the rest already use.
+  list: (c, page) => listCandidates(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, page.showDeleted, c.req.query("q")),
   verbs: {
     upload: {
       run: async (deps, user, id, _body, c) => {

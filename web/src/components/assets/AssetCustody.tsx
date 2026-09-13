@@ -59,7 +59,12 @@ export function AssetCustodyDialog({
   const [scan, setScan] = useState(presetScan ?? "");
   const [manual, setManual] = useState("");
   const [condition, setCondition] = useState("good");
-  const [note, setNote] = useState("");
+  // TWO fields, two states. They were one, and both boxes render at once the moment the override is opened -
+  // so typing "scratch on the lid" into the condition note also filled the justification, `ready` saw a
+  // non-empty value and the confirm button enabled with no reason for skipping the scan ever given. The wire
+  // still carries one `note`; it is composed from the two below.
+  const [note, setNote] = useState(""); // the physical condition of the item
+  const [reason, setReason] = useState(""); // why it could not be scanned
   const [override, setOverride] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -100,10 +105,11 @@ export function AssetCustodyDialog({
   async function confirm() {
     setBusy(true);
     try {
+      const composedNote = [reason.trim(), note.trim()].filter(Boolean).join(" · ");
       await invoke(asset.path, mode, undefined, {
         ...(scan.trim() ? { scan: scan.trim() } : { override: true }),
         condition,
-        ...(note.trim() ? { note: note.trim() } : {}),
+        ...(composedNote ? { note: composedNote } : {}),
       });
       stopCamera();
       toast({ title: copy.done, variant: "success" });
@@ -116,7 +122,10 @@ export function AssetCustodyDialog({
     }
   }
 
-  const ready = belongsHere || (override && !!note.trim());
+  // The gate measures the JUSTIFICATION, not the condition note beside it: an unscanned confirmation is
+  // allowed only once somebody has written why the scan could not happen (the server insists on a non-empty
+  // note - services/assets.ts - but only this side decides what goes in it).
+  const ready = belongsHere || (override && !!reason.trim());
 
   return (
     <Dialog open onOpenChange={(v) => { if (!v) { stopCamera(); onClose(); } }}>
@@ -169,10 +178,14 @@ export function AssetCustodyDialog({
               />
             </div>
             <Field label="Or type the tag / scan into this box" hint="USB scanners type here and press Enter by themselves.">
+              {/* Applied on BLUR as well as Enter: a reader who typed the tag and reached for the confirm
+                  button had typed into a box that was discarded, so `scan` stayed empty and the button stayed
+                  disabled with the tag visibly sitting in the field. */}
               <Input
                 value={manual}
                 onChange={(e) => setManual(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && manual.trim()) takeScan(manual.trim()); }}
+                onBlur={() => { if (manual.trim()) takeScan(manual.trim()); }}
                 placeholder="e.g. LAP-014"
               />
             </Field>
@@ -193,7 +206,7 @@ export function AssetCustodyDialog({
         {allowManual && !belongsHere && (
           override ? (
             <Field label="Why you can't scan it" hint="Recorded on the asset's history as a confirmation without a scan.">
-              <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. sticker peeled off; serial checked by hand" />
+              <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. sticker peeled off; serial checked by hand" />
             </Field>
           ) : (
             <button className="self-start text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground" onClick={() => setOverride(true)}>

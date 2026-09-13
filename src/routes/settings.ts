@@ -12,10 +12,13 @@ import { validateStateMachine, type StateMachine } from "../domain/stateMachines
 import { assertPublicHttpsUrl } from "../lib/urlGuard";
 import { validateAtsConfig, orphanedStages, type AtsStage } from "../domain/ats";
 import { stagesInUse } from "../services/ats";
+import { getFieldDefs, identityValueCounts, purgeIdentityFields } from "../services/identityDetails";
 
 const writeSchema = z.object({ value: z.unknown().optional(), key: z.string().optional() }).strict();
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+// The key an identity field gets when none was given, exactly as the editor derives it (web/src/pages/Settings).
+const slugKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 const isIntIn = (v: unknown, lo: number, hi: number) => typeof v === "number" && Number.isInteger(v) && v >= lo && v <= hi;
 
 // `ctc.basic_pct` pins basic at that % of CTC in the top-down split - outside (0, 100] the split produces
@@ -450,6 +453,42 @@ export const settings = new Hono<AppEnv>()
           throw invalidArgument(
             `these stages still hold active applications and cannot be removed: ${orphaned.join(", ")}. Move those candidates to another stage first.`,
           );
+        }
+      }
+    }
+    // The same rule for the employee identity fields, which nothing checked at all: removing a field is what
+    // stops its values ever being shown, edited or cleared again, while they stay in every employee's
+    // encrypted blob (services/identityDetails.ts prunes lazily, per employee, on the next write to THAT
+    // employee's details - a write removing the field is exactly what stops anyone making). So a removal that
+    // would strand values is refused, naming the fields and how many people hold one, and
+    // `?delete_removed_values=true` is the caller saying "yes, delete them" - at which point the values AND
+    // the proofs uploaded against them are actually deleted, rather than hidden and left resurrectable by any
+    // later field whose label slugs the same way.
+    if (key === "employee_fields") {
+      const value = c.req.valid("json").value;
+      const next = isObj(value) && Array.isArray(value.fields) ? (value.fields as { key?: unknown; label?: unknown }[]) : null;
+      // The confirmation rides INSIDE the value (which is an opaque object on the wire) and is consumed here
+      // rather than stored: a query parameter on the standard Update method is the one thing the AEP linter
+      // refuses, and this is a per-key rule rather than a property of Update.
+      const confirmed = isObj(value) && value.delete_removed_values === true;
+      if (isObj(value)) delete value.delete_removed_values;
+      if (next) {
+        const keep = new Set(
+          next
+            .map((f) => (typeof f?.key === "string" && f.key ? f.key : typeof f?.label === "string" ? slugKey(f.label) : ""))
+            .filter(Boolean),
+        );
+        const removed = (await getFieldDefs(c.get("deps"))).filter((f) => !keep.has(f.key));
+        if (removed.length) {
+          const counts = await identityValueCounts(c.get("deps"), removed.map((f) => f.key));
+          const inUse = removed.filter((f) => (counts.get(f.key) ?? 0) > 0);
+          if (inUse.length && !confirmed) {
+            throw invalidArgument(
+              `these identity fields still hold values: ${inUse.map((f) => `${f.label} (${counts.get(f.key)})`).join(", ")}. ` +
+                "Removing them deletes those values and any uploaded proof - re-send with delete_removed_values to confirm.",
+            );
+          }
+          await purgeIdentityFields(c.get("deps"), c.get("user"), removed.map((f) => f.key));
         }
       }
     }

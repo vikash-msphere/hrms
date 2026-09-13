@@ -139,11 +139,20 @@ export default function LeaveCalendar({ me }: { me: Me }) {
   const { rows: holidays } = useCollection<Holiday>("holidays", { all: true });
   // Org events show in the SELECTED day's panel and nowhere else on the calendar, so a month nobody has
   // clicked into reads none of them.
-  const { rows: events } = useCollection<Event>("events", { enabled: !!selected });
+  // `all: true` for the same reason the leave read above carries it, and the lazy gating stays: the route has
+  // no date window, so one page of an org-wide, newest-first collection meant clicking into any day older than
+  // the newest hundred events showed a day the panel called clear.
+  const { rows: events } = useCollection<Event>("events", { enabled: !!selected, all: true });
+  // The remote layer is drawn on the same grid as the leave layer and was the one read that kept the window
+  // without the walk - so a hybrid month past a hundred remote-work requests drew part of one layer and all of
+  // the other, with nothing to tell "nobody was remote" from "not loaded".
   const { rows: remoteRows } = useCollection<RemoteWorkRequest>("remote-work-requests", {
     enabled: showRemote,
+    all: true,
     params: { from: range.from, to: range.to },
   });
+  // Employees only: this one marks the HEADCOUNT as approximate, and a windowed event list says nothing about
+  // how many people the org has. The layers admit their own ceiling through the notice below.
   const employeesTruncated = useCollectionHasMore(["employees"]);
   const approvals = useApprovals();
   const canRequest = usePermission("leave-requests.write");
@@ -387,7 +396,9 @@ export default function LeaveCalendar({ me }: { me: Me }) {
         {typeFilter !== "all" ? ` · ${typeName(`leave-types/${typeFilter}`)}` : ""}
       </p>
 
-      <TruncationNotice collection="leave-requests" what="leave requests" className="mb-3" />
+      {/* Every layer the grid draws, not just the leave one: a remote-work or event layer that stopped at its
+          ceiling looks exactly like a quiet day. */}
+      <TruncationNotice collection={["leave-requests", "remote-work-requests", "events"]} what="entries" className="mb-3" />
 
       {/* `grid-cols-1` is not redundant with a bare `grid`. With no explicit template the single implicit
           column is an `auto` track, which sizes toward MAX-content - so the calendar card grew to whatever its

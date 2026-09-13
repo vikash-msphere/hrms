@@ -231,8 +231,12 @@ export async function readSetting<T>(key: string): Promise<T | undefined> {
  * resolves to `{ value: undefined }` instead of rejecting with a 404, which every one of those consumers was
  * already treating as "not configured".
  */
-export async function getSetting<T>(key: string): Promise<{ value?: T }> {
-  return { value: await readSetting<T>(key) };
+export async function getSetting<T>(key: string): Promise<{ value?: T; version?: string }> {
+  const value = await readSetting<T>(key);
+  // THE VERSION THE VALUE WAS READ AT, handed back with it. A panel that rebuilds a whole blob from a snapshot
+  // it took at mount must write against the version THAT value came from; looking one up at write time is a
+  // different claim, and in one specific case a false one - see `saveSetting`.
+  return { value, version: etags.get(key) };
 }
 
 /**
@@ -249,10 +253,19 @@ export async function getSetting<T>(key: string): Promise<{ value?: T }> {
  * (there is no version to hold, and the server treats an `If-Match` on a missing row as a conflict - correctly,
  * so it must not be sent), or the snapshot predates this format. Both write unguarded, exactly as before.
  */
-export async function saveSetting(key: string, body: { value: unknown }): Promise<void> {
-  await load(); // ensures the snapshot - and so the etag - is the one this session read
+export async function saveSetting(key: string, body: { value: unknown }, version?: string): Promise<void> {
+  await load(); // ensures the snapshot - and so the etag - is loaded at all
   try {
-    await patch(`settings/${key}`, body, etags.get(key));
+    // `version` is the one the caller's VALUE was read at (getSetting hands it back). Pass it whenever the
+    // write rebuilds a blob from a snapshot taken earlier, because the fallback below is only honest while
+    // that snapshot is still the current one:
+    //
+    // a sibling tab's write to the SAME key invalidates this tab's snapshot over the bus, so the `load()`
+    // above refetches and `etags.get(key)` is then the OTHER tab's new version. The If-Match matched, the
+    // server accepted, and a panel holding a pre-write copy of the blob wrote the sibling's fields back to
+    // their old values - with a green toast and no 409 anywhere. Holding the version with the value turns
+    // that back into the conflict the guard is for.
+    await patch(`settings/${key}`, body, version ?? etags.get(key));
   } catch (e) {
     // A refused save means the version this session holds is no longer the current one, so the SNAPSHOT is
     // what has to go. Without this the etag that just lost stayed in the map and every later attempt sent it

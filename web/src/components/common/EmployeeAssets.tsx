@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Laptop, Plus, HandHeart, PackagePlus, X } from "lucide-react";
-import { get, getAllPages, patch, invoke, create } from "@/api";
+import { getAllPages, patch, invoke, create } from "@/api";
 import { cn, formatDate, idOf } from "@/lib/utils";
 import { todayStr as today } from "@/lib/orgDay";
 import { useCollection } from "@/hooks/useCollection";
@@ -59,16 +59,22 @@ export function EmployeeAssets({
 
   const empRef = `employees/${employeeId}`;
   const [requests, setRequests] = useState<AssetRequest[]>([]);
+  // Either walk hit its ceiling: the kit list / request queue below is then a window, and says so.
+  const [rowsCropped, setRowsCropped] = useState(false);
+  const [requestsCropped, setRequestsCropped] = useState(false);
 
   const load = useCallback(() => {
-    get<{ results: Asset[] }>(`assets?employee=${encodeURIComponent(empRef)}`)
-      .then((r) => setRows(r.results ?? []))
+    // Walked, like the stock read below: a raw `get()` sends no `max_page_size`, so the server's default of 50
+    // applies and the cursor comes back unread - a long-serving employee's earliest kit and oldest requests
+    // simply stop being listed, with nothing on the card saying so.
+    getAllPages<Asset>(`assets?employee=${encodeURIComponent(empRef)}`, 200)
+      .then((r) => { setRows(r.results); setRowsCropped(r.truncated); })
       .catch((e) => toast({ variant: "destructive", title: "Couldn't load assets", description: (e as Error).message }))
       .finally(() => setLoaded(true));
     // Requests share this card's one open: a person who cannot read them (no grant) just sees no section.
-    get<{ results: AssetRequest[] }>(`asset-requests?employee=${encodeURIComponent(empRef)}`)
-      .then((r) => setRequests(r.results ?? []))
-      .catch(() => setRequests([]));
+    getAllPages<AssetRequest>(`asset-requests?employee=${encodeURIComponent(empRef)}`, 200)
+      .then((r) => { setRequests(r.results); setRequestsCropped(r.truncated); })
+      .catch(() => { setRequests([]); setRequestsCropped(false); });
   }, [empRef, toast]);
 
   useEffect(() => { load(); }, [load]);
@@ -216,6 +222,7 @@ export function EmployeeAssets({
               ))}
             </tbody>
           </table>
+          {rowsCropped && <p className="mt-2 text-xs text-muted-foreground">Showing the most recent assets - older ones are not loaded here.</p>}
           </div>
         )}
 
@@ -245,6 +252,7 @@ export function EmployeeAssets({
                 </div>
               ))}
             </div>
+            {requestsCropped && <p className="mt-2 text-xs text-muted-foreground">Showing the most recent requests - older ones are not loaded here.</p>}
           </div>
         )}
       </CardContent>

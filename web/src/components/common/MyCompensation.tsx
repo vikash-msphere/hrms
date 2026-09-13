@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { TrendingUp, Building2, ArrowUpRight, ArrowDownRight, ReceiptText } from "lucide-react";
-import { get } from "@/api";
+import { getAllPages } from "@/api";
 import { navigate } from "@/router";
 import { formatMoney, cn } from "@/lib/utils";
 import { useOrg, currencyDecimals } from "@/lib/org";
@@ -30,10 +30,15 @@ export function MyCompensation({ employeeId }: { employeeId: string }) {
   // Monthly/annual display toggle; CTC is stored annual, the build-up lines carry both.
   const [unit, setUnit] = useState<"monthly" | "annual">("monthly");
 
+  // WALKED TO THE END, not a raw `get()`. A bare list read carries no `max_page_size`, so the server applies
+  // its own default of 50 (http/pagination.ts) and the cursor in the response is dropped on the floor. The
+  // collection is newest-first, so what a window loses is the OLDEST revisions - the joining salary, which is
+  // most of the reason anyone opens a salary history.
+  const [cropped, setCropped] = useState(false);
   useEffect(() => {
     let live = true;
-    get<{ results: Compensation[] }>(`compensation?employee=${encodeURIComponent("employees/" + employeeId)}`)
-      .then((r) => { if (live) setRows(r.results ?? []); })
+    getAllPages<Compensation>(`compensation?employee=${encodeURIComponent("employees/" + employeeId)}`, 200)
+      .then((r) => { if (live) { setRows(r.results); setCropped(r.truncated); } })
       .catch((e) => toast({ variant: "destructive", title: "Couldn't load your compensation", description: (e as Error).message }))
       .finally(() => { if (live) setLoaded(true); });
     return () => { live = false; };
@@ -129,6 +134,7 @@ export function MyCompensation({ employeeId }: { employeeId: string }) {
             {rows.length > 1 && (
               <>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Salary history</p>
+                {cropped && <p className="mb-2 text-xs text-muted-foreground">Showing the most recent revisions - older ones are not loaded here.</p>}
                 {/* Four money columns do not fit a phone, and sideways scrolling inside a card is a gesture
                     nobody finds. Below `sm` each revision becomes a short labelled list instead. */}
                 <div className="scroll-shadow-x -mx-1 overflow-x-auto px-1 [--scroll-ground:hsl(var(--card))]">

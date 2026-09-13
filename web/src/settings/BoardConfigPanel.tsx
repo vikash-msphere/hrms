@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Plus, X, ChevronUp, ChevronDown, Trash2 } from "lucide-react";
 import { invoke, patch, remove } from "@/api";
-import { useCollection } from "@/hooks/useCollection";
+import { useResource } from "@/hooks/useResource";
 import { idOf } from "@/lib/utils";
 import type { Board, BoardColumn, BoardMode, SwimlaneMode, WipScope, Label as BoardLabel } from "@/types";
 import { Field } from "@/components/common/Field";
@@ -19,12 +19,15 @@ import { useUnsaved } from "@/components/common/UnsavedChanges";
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "col";
 
 // Per-board configuration (columns / WIP / swimlanes / labels), rendered inline in the settings Sheet from the
-// board's gear - the object-scoped counterpart to the org settings panels. Reads the board from the shared
-// boards cache (no extra fetch: the Boards page already loaded it) and saves through the same cache, so the
-// board view refreshes automatically. `objectPath` is the board's resource path from the deep-link.
+// board's gear - the object-scoped counterpart to the org settings panels. `objectPath` is the board's
+// resource path from the deep-link.
+//
+// READ BY ID, not by scanning the shared boards cache. That cache is one server page, so an org past a
+// hundred boards got a flat "This board is no longer available." for a board that was open behind the sheet -
+// and the panel is reachable by deep link (`#/boards?setting=board-config`) with the Boards page never having
+// mounted, where the cache holds nothing at all. One id, one indexed read, always the right board.
 export function BoardConfigPanel({ objectPath, onClose }: { objectPath: string; onClose?: () => void }) {
-  const { rows, state } = useCollection<Board>("boards");
-  const board = rows.find((b) => b.path === objectPath);
+  const { row: board, state, reload } = useResource<Board>("boards", idOf(objectPath));
   if (!board) {
     return state === "loading" ? (
       <PanelSkeleton />
@@ -33,10 +36,10 @@ export function BoardConfigPanel({ objectPath, onClose }: { objectPath: string; 
     );
   }
   // Key by path so edits survive the post-save refetch (same path, fresh object) but reset if the board changes.
-  return <BoardConfigForm key={board.path} board={board} onClose={onClose} />;
+  return <BoardConfigForm key={board.path} board={board} onClose={onClose} onSaved={reload} />;
 }
 
-function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => void }) {
+function BoardConfigForm({ board, onClose, onSaved }: { board: Board; onClose?: () => void; onSaved?: () => void }) {
   const { toast } = useToast();
   const confirm = useConfirm();
   const [name, setName] = useState(board.name);
@@ -159,6 +162,9 @@ function BoardConfigForm({ board, onClose }: { board: Board; onClose?: () => voi
         no_lane_label: mode === "custom" ? noLaneLabel.trim() : board.no_lane_label ?? "",
       });
       markSaved();
+      // Re-read the board this panel holds: the PATCH above moved its etag, and a second save from the same
+      // open panel would otherwise carry the one it mounted with and take a 409.
+      onSaved?.();
       toast({ title: "Board configured", variant: "success" });
     } catch (e) {
       toast({ title: "Couldn't save", description: (e as Error).message, variant: "destructive" });

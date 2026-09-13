@@ -76,6 +76,7 @@ describe("session replay: sensitive dialogs are masked", () => {
 // Asserted from source, like the dialogs above: what is being checked is that the tag is PRESENT, which no
 // single rendered case can prove.
 const CONFIDENTIAL_ROUTES = [
+  "offers", // what the company offered a named person - the payroll-runs shape, before they are an employee
   "reviews", // ratings, written assessments, 360 feedback the subject cannot attribute
   "suggestions", // anonymity is a product promise (services/suggestions.ts keeps the submitter hidden)
   "check-ins", // private 1:1 notes
@@ -123,6 +124,16 @@ describe("session replay: the confidential fields on ordinary pages", () => {
 
   it("an interview scorecard - a panelist's private read, held back from the panel", () => {
     expect(page("Interviews")).toMatch(/className="sentry-mask"/);
+  });
+
+  it("an offered salary, on the two ATS surfaces that are not masked whole", () => {
+    // `offers` is in SENSITIVE_PAGES above, but the same figure is rendered beside the same candidate's name on
+    // #/candidates/<id> and on the pipeline board - routes that are mostly names and stages, so they are tagged
+    // per value rather than masked whole. A title attribute is NOT masked (`maskAttributes: []`), so the board
+    // card's tooltip must not carry the figure at all.
+    expect(page("CandidateProfile")).toMatch(/data-sentry-mask[^>]*>\{money\(o\.base_comp/);
+    expect(page("Pipeline")).toMatch(/data-sentry-mask[^>]*>\{o\.base_comp\.toLocaleString/);
+    expect(page("Pipeline")).not.toMatch(/title=\{`Offer[^`]*base_comp/);
   });
 
   it("dependents - a family member's name, relationship and date of birth", () => {

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { TrendingUp, Plus, Wallet, Building2, ArrowUpRight, ArrowDownRight, Pencil, Trash2 } from "lucide-react";
-import { get, create, patch, remove } from "@/api";
+import { get, getAllPages, create, patch, remove } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
 import { formatMoney, cn, idOf, round2 as r2 } from "@/lib/utils";
 import { todayStr as todayYmd } from "@/lib/orgDay";
@@ -104,6 +104,11 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
   const { canReapply, reapplying, reapply: doReapply } = useSplitStaleness({ auto: false });
   const [rows, setRows] = useState<Compensation[]>([]);
   const [bonuses, setBonuses] = useState<Bonus[]>([]);
+  // The two walks hit their ceiling: the timeline and the FY variable-pay total are then windows, and a
+  // history that looks whole but is not is worse than one that says so.
+  const [cropped, setCropped] = useState(false);
+  const [bonusesCropped, setBonusesCropped] = useState(false);
+  const reqSeq = useRef(0); // only the newest walk may write the rows (see `load`)
   // Projected monthly TDS from the tax endpoint (best-effort; absent grant / not configured = null) so the
   // card can show an after-tax take-home estimate next to the contractual pre-tax figure.
   const [monthlyTds, setMonthlyTds] = useState<number | null>(null);
@@ -130,12 +135,27 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
 
   // The loader is the effect's dependency (see the note in EmployeeBankDetails).
   const load = useCallback(async () => {
+    // Each walk is several sequential round-trips and this loader is re-keyed on the employee (and called
+    // again after a revision), so an older one can resolve last and repaint another person's timeline over
+    // this one - test/staleResponseDrift. Only the newest walk writes.
+    const seq = ++reqSeq.current;
     try {
-      const r = await get<{ results: Compensation[] }>(`compensation?employee=${encodeURIComponent("employees/" + employeeId)}`);
-      setRows(r.results ?? []);
+      // WALKED TO THE END, not a raw `get()`: a bare list read sends no `max_page_size`, so the server's own
+      // default of 50 applies (http/pagination.ts) and the cursor is discarded. Both collections are
+      // newest-first, so a window drops the OLDEST rows - the joining salary the timeline is read for, and
+      // the earlier bonuses the FY total is summed from.
+      const r = await getAllPages<Compensation>(`compensation?employee=${encodeURIComponent("employees/" + employeeId)}`, 200);
+      if (seq !== reqSeq.current) return;
+      setRows(r.results);
+      setCropped(r.truncated);
       // Bonuses fold the year's variable pay into the total-compensation view (best-effort; absent grant = none).
-      try { const b = await get<{ results: Bonus[] }>(`bonuses?employee=${encodeURIComponent("employees/" + employeeId)}`); setBonuses(b.results ?? []); } catch { setBonuses([]); }
-      try { const t = await get<{ tds_configured?: boolean; monthly_tds?: number }>(`employees/${employeeId}/tax`); setMonthlyTds(t.monthly_tds && t.monthly_tds > 0 ? t.monthly_tds : null); } catch { setMonthlyTds(null); }
+      try {
+        const b = await getAllPages<Bonus>(`bonuses?employee=${encodeURIComponent("employees/" + employeeId)}`, 500);
+        if (seq !== reqSeq.current) return;
+        setBonuses(b.results);
+        setBonusesCropped(b.truncated);
+      } catch { if (seq === reqSeq.current) { setBonuses([]); setBonusesCropped(false); } }
+      try { const t = await get<{ tds_configured?: boolean; monthly_tds?: number }>(`employees/${employeeId}/tax`); if (seq === reqSeq.current) setMonthlyTds(t.monthly_tds && t.monthly_tds > 0 ? t.monthly_tds : null); } catch { if (seq === reqSeq.current) setMonthlyTds(null); }
     } catch (e) {
       toast({ variant: "destructive", title: "Couldn't load compensation", description: (e as Error).message });
     } finally {
@@ -570,12 +590,14 @@ export default function EmployeeCompensation({ employeeId, canEdit, epfEnrolled 
                       <span>Total comp (annual, incl. variable)</span>
                       <span className="tabular-nums">{money((current?.annual_ctc ?? 0) + variableFy.total, cc)}</span>
                     </div>
+                    {bonusesCropped && <p className="mt-1 text-xs text-muted-foreground">Some older bonuses are not loaded, so this total is partial.</p>}
                   </div>
                 )}
               </div>
             </div>
 
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Revision history</p>
+            {cropped && <p className="mb-2 text-xs text-muted-foreground">Showing the most recent revisions - older ones are not loaded here.</p>}
             {/* One labelled block per revision on a phone, five columns from `sm` up. */}
             <div className="scroll-shadow-x -mx-1 overflow-x-auto px-1 [--scroll-ground:hsl(var(--card))]">
             <table className="table-stack w-full text-sm sm:min-w-[32rem]">

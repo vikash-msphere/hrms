@@ -8,6 +8,7 @@ import { DEFAULT_SCHEDULE, type AttendanceSchedule } from "@/lib/attendance";
 import { useToast } from "@/components/ui/use-toast";
 import type { AttendanceSession, Me } from "@/types";
 import { getSetting } from "@/lib/settingsStore";
+import { subscribeInvalidations } from "@/lib/resourceStore";
 import { setOrgTimezone } from "@/lib/orgDay";
 import { hasCapability } from "@/lib/perm";
 
@@ -85,7 +86,8 @@ function ActiveProvider({ me, children }: { me: Me; children: ReactNode }) {
   }, []);
 
   useEffect(() => { void reload(); }, [reload]);
-  useEffect(() => {
+
+  const readSchedule = useCallback(() => {
     getSetting<Partial<AttendanceSchedule>>("attendance")
       .then((cfg) => {
         if (!cfg.value) return;
@@ -96,6 +98,18 @@ function ActiveProvider({ me, children }: { me: Me; children: ReactNode }) {
       })
       .catch(() => { /* not configured -> defaults */ });
   }, []);
+
+  // Read on mount AND whenever a settings write lands - this tab's or a sibling's (subscribeInvalidations
+  // covers both). A mount-only effect meant that saving the org's timezone, shift or working days left every
+  // consumer of this schedule - the TopBar chip, the Attendance page's late/early flags, `workingDaysInRange`,
+  // the overtime suggestion - and the whole SPA's idea of "today" running on the pre-save values until
+  // somebody reloaded the page, while the server had already adopted the new ones.
+  useEffect(() => {
+    readSchedule();
+    return subscribeInvalidations((collections) => {
+      if (collections.includes("settings")) readSchedule();
+    });
+  }, [readSchedule]);
 
   // Whether to offer the remote-work request when the network fence refuses a punch. Gated on the capability
   // for the same reason every other affordance is: nothing the caller can't actually use may be offered.

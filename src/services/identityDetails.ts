@@ -5,7 +5,7 @@ import type { AppUser } from "../env";
 import { audit, fieldsMeta } from "../lib/audit";
 import { notFound, invalidArgument } from "../lib/errors";
 import { getSettingValue } from "./settings";
-import { getAttachmentsFor } from "./attachments";
+import { getAttachmentsFor, deleteAttachment } from "./attachments";
 import { etagOf } from "../http/serialize";
 import { checkEtag, updateAtVersion } from "./versionGuard";
 
@@ -66,6 +66,57 @@ async function readValues(deps: Deps, enc: string | null): Promise<Record<string
 // report files). NOT wire-safe - never serialize directly; the masked `toView` is the wire form.
 export async function readIdentityValues(deps: Deps, employee: { identityDetailsEnc: string | null }): Promise<Record<string, string>> {
   return readValues(deps, employee.identityDetailsEnc);
+}
+
+/**
+ * How many employees still hold a stored value for each of these field keys.
+ *
+ * Removing a field from `settings/employee_fields` is what stops anyone ever opening that employee's identity
+ * form again, and the only pruning this module does is lazy - per employee, on the next write to THAT
+ * employee's details (see `setIdentityDetails`). So for almost everyone the write never comes and the value
+ * stays in the encrypted blob, readable server-side and re-adopted the moment a field with the same slug is
+ * added back. "We stopped collecting Aadhaar" and "we no longer hold anyone's Aadhaar" are not the same
+ * thing; this is what lets the caller be told which one they are about to do.
+ */
+export async function identityValueCounts(deps: Deps, keys: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (!keys.length) return counts;
+  const rows = await deps.db
+    .select({ uuid: schema.employees.uuid, enc: schema.employees.identityDetailsEnc })
+    .from(schema.employees);
+  for (const row of rows) {
+    if (!row.enc) continue;
+    const values = await readValues(deps, row.enc);
+    for (const k of keys) if (values[k]) counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Delete these field keys' values from every employee's blob, and the proofs uploaded against them.
+ *
+ * The lazy prune above touches only the values map, so a removed field left every employee's scanned identity
+ * document on the shelf, attached to a slot no surface renders. Removal means removal: both go.
+ */
+export async function purgeIdentityFields(deps: Deps, actor: AppUser, keys: string[]): Promise<number> {
+  if (!keys.length) return 0;
+  const rows = await deps.db.select().from(schema.employees);
+  let touched = 0;
+  for (const row of rows) {
+    const slots = keys.map(identityDocSlot);
+    for (const slot of slots) await deleteAttachment(deps, actor, "employees", row.uuid, slot);
+    if (!row.identityDetailsEnc) continue;
+    const values = await readValues(deps, row.identityDetailsEnc);
+    const present = keys.filter((k) => values[k] !== undefined);
+    if (!present.length) continue;
+    for (const k of present) delete values[k];
+    const enc = await deps.encryptor.encrypt(JSON.stringify(values));
+    await deps.db.update(schema.employees).set({ identityDetailsEnc: enc, updatedAt: new Date() }).where(eq(schema.employees.uuid, row.uuid));
+    // Field names only, never values - the same rule the update path follows (see bankDetails).
+    await audit(deps, actor, "employee.identity_details.purge", "employees", row.uuid, { fields: present });
+    touched++;
+  }
+  return touched;
 }
 
 // Wire-safe view driven by the current field config; sensitive values are masked. `attachedSlots` are the

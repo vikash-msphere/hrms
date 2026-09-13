@@ -4059,6 +4059,11 @@ paths:
         blob, so a save rewrites all of it: send `If-Match` with the `etag` the value was read at and a save
         that would overwrite a concurrent one is refused with 409 rather than silently reverting it. Omit the
         header for last-write-wins.
+
+
+        `employee_fields` carries one extra rule: removing an identity field is refused while employees still
+        hold a value for it, naming the fields and the counts. Re-send with `value.delete_removed_values: true`
+        to confirm - the flag is consumed, never stored, and DELETES those values and any uploaded proof.
       operationId: UpdateSetting
       requestBody: { required: true, content: { application/merge-patch+json: { schema: { $ref: '#/components/schemas/setting' } } } }
       responses:
@@ -9919,6 +9924,7 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: state, schema: { type: string } }
+        - { in: query, name: employee, schema: { type: string }, description: "employees/{id} - only this employee's correction requests" }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }
@@ -12213,6 +12219,7 @@ paths:
         - { in: query, name: max_page_size, schema: { type: integer } }
         - { in: query, name: page_token, schema: { type: string } }
         - { in: query, name: show_deleted, schema: { type: boolean } }
+        - { in: query, name: q, schema: { type: string }, description: "Free-text filter across the collection's indexed fields. Narrows the caller's normal scope; it never widens it. Ignored below 2 characters." }
       responses:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/PermissionDenied' }

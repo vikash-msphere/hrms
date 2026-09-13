@@ -32,8 +32,10 @@ export const attendanceRegularizations = collectionRoutes<RegularizationInput, t
     create: (deps, actor, input) => createRegularization(deps, actor, input),
   },
   list: (c, page) => {
-    // Row visibility was decided in middleware (scopeFor over the grant); `?state` narrows it further.
-    return listRegularizations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"));
+    // Row visibility was decided in middleware (scopeFor over the grant); `?state` and `?employee` narrow it
+    // further. The inbound edge (decodeWireIds) already decoded the query ref to its internal id.
+    const emp = c.req.query("employee");
+    return listRegularizations(c.get("deps"), c.get("scope"), page.maxPageSize, page.pageToken, c.req.query("state"), emp ? emp.split("/").pop()! : undefined);
   },
   verbs: {
     approve: { run: (deps, user, id) => approveRegularization(deps, user, id) },

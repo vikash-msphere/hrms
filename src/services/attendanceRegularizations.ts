@@ -42,9 +42,14 @@ function normalizeSessions(sessions: SessionInput[]): { clock_in: string; clock_
   return pairs.map((p) => ({ clock_in: new Date(p.cin).toISOString(), clock_out: new Date(p.cout).toISOString() }));
 }
 
-export async function listRegularizations(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string) {
+// `employeeId` narrows to ONE person's requests, the same `?employee=` every profile panel already has
+// (leaveBalances, bonuses, compensation, positions, assets). It narrows what the scope already allows and
+// never widens it: an approver asking for their own rows is asking for a subset of what they may read, and a
+// caller scoped to themselves passing somebody else's id still gets nothing.
+export async function listRegularizations(deps: Deps, scope: ListScope, maxPageSize: number, pageToken?: string, stateFilter?: string, employeeId?: string) {
   const conds = [applyScope(scope, schema.attendanceRegularizations.code, schema.attendanceRegularizations.employeeId)];
   if (stateFilter) conds.push(eq(schema.attendanceRegularizations.state, stateFilter as typeof schema.attendanceRegularizations.$inferSelect.state));
+  if (employeeId) conds.push(eq(schema.attendanceRegularizations.employeeId, employeeId));
   return keysetPage<typeof schema.attendanceRegularizations.$inferSelect>(deps, schema.attendanceRegularizations, "attendance-regularizations", and(...(conds.filter(Boolean) as any)), { max: maxPageSize, pageToken });
 }
 
