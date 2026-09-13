@@ -265,6 +265,99 @@ describe("computeAccrual", () => {
   it("ymOf returns a UTC year-month key", () => {
     expect(ymOf(ms("2026-07-15"))).toBe("2026-07");
   });
+
+  // REGRESSION. The exit reconciliation took back "a whole month minus what was earned", but a month is only
+  // ever credited for what it was worth AT THE TIME - and for the JOINING month that is the joining proration,
+  // never a whole month. Somebody who joined and left inside one month was therefore charged back more than
+  // they were ever given, on a balance the FnF encashes for cash.
+  it("claws back only what the joining month was actually credited", () => {
+    const joined = ms("2026-06-10");
+    // Tick one, before anybody knows they are leaving: June is credited 21/30 of the rate.
+    const first = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: joined,
+      endMs: null,
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: null,
+      currentMs: ms("2026-06-12"),
+    });
+    expect(first.add).toBeCloseTo(21 / 30, 2); // round2, as every accrual result is
+    expect(first.newLastYm).toBe("2026-06");
+    // Tick two, with a last working day of the 20th now on the record: they earned 11/30, so the claw-back is
+    // the difference (10/30) - leaving 11/30 on the balance, not 2/30.
+    const second = computeAccrual({
+      accrualDaysPerYear: ANNUAL,
+      startMs: joined,
+      endMs: ms("2026-06-20"),
+      probationEndMs: null,
+      probationAccrualDaysPerYear: ANNUAL,
+      lastAccrualYm: first.newLastYm,
+      currentMs: ms("2026-06-25"),
+    });
+    expect(first.add + second.add).toBeCloseTo(11 / 30, 2);
+    expect(second.newLastYm).toBe("2026-06~");
+  });
+});
+
+describe("computeAccrual (the joining-date rule)", () => {
+  const base = {
+    accrualDaysPerYear: ANNUAL,
+    probationAccrualDaysPerYear: ANNUAL,
+    probationEndMs: null,
+    endMs: null,
+    lastAccrualYm: null,
+    currentMs: ms("2026-08-05"),
+  };
+
+  it("credits nothing for the joining month when they joined after the cutoff", () => {
+    const r = computeAccrual({ ...base, startMs: ms("2026-06-20"), joiningRule: { cutoff_day: 15, if_on_or_before: "full", if_after: "none" } });
+    // June earns nothing; July and August are whole months.
+    expect(r.add).toBeCloseTo(2, 2);
+    expect(r.newLastYm).toBe("2026-08");
+  });
+
+  it("credits the joining month in FULL when they joined on or before it", () => {
+    const r = computeAccrual({ ...base, startMs: ms("2026-06-10"), joiningRule: { cutoff_day: 15, if_on_or_before: "full", if_after: "none" } });
+    expect(r.add).toBeCloseTo(3, 2); // June, July, August - June not prorated
+  });
+
+  it("still prorates on either side when the rule says prorate", () => {
+    const r = computeAccrual({ ...base, startMs: ms("2026-06-20"), joiningRule: { cutoff_day: 15, if_on_or_before: "prorate", if_after: "prorate" } });
+    expect(r.add).toBeCloseTo(11 / 30 + 2, 2); // exactly the behaviour with no rule at all
+  });
+
+  it("does not let a full joining month outlive the employment", () => {
+    // Joined the 10th, left the 20th, with the cutoff waiving the joining proration: the EXIT clamp still
+    // applies, so this is 11/30 of a month and not a whole one.
+    const r = computeAccrual({
+      ...base,
+      startMs: ms("2026-06-10"),
+      endMs: ms("2026-06-20"),
+      currentMs: ms("2026-06-25"),
+      joiningRule: { cutoff_day: 15, if_on_or_before: "full", if_after: "none" },
+    });
+    expect(r.add).toBeCloseTo(11 / 30, 2);
+  });
+
+  it("applies to BOTH halves of the joining month on a semi-monthly type", () => {
+    const late = computeAccrual({
+      ...base,
+      frequency: "semi_monthly",
+      startMs: ms("2026-06-20"),
+      currentMs: ms("2026-07-20"),
+      joiningRule: { cutoff_day: 15, if_on_or_before: "full", if_after: "none" },
+    });
+    expect(late.add).toBeCloseTo(1, 2); // June's two halves earn nothing; July's two are 0.5 each
+    const early = computeAccrual({
+      ...base,
+      frequency: "semi_monthly",
+      startMs: ms("2026-06-10"),
+      currentMs: ms("2026-07-20"),
+      joiningRule: { cutoff_day: 15, if_on_or_before: "full", if_after: "none" },
+    });
+    expect(early.add).toBeCloseTo(2, 2); // June's two halves credited in full, plus July's two
+  });
 });
 
 describe("computeAccrual (semi-monthly: annual/24 on the 1st & 16th)", () => {

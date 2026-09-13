@@ -15,6 +15,27 @@ export function roundToIncrement(value: number, increment: number): number {
 const DAY_MS = 86_400_000;
 const ymdUtc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
+/**
+ * The SANDWICH RULE: whether the days off inside (or beside) a leave block are charged to the balance anyway.
+ *
+ * - "exclude"    - the default, and what this function did before it took the argument: a weekend or holiday
+ *                  costs nothing, so Friday + Monday is two days.
+ * - "intervening" - days off that fall BETWEEN the first and last charged day are charged. Friday + Monday is
+ *                  four days, because the weekend was sandwiched.
+ * - "flanking"   - intervening, plus the unbroken run of days off the leave ABUTS on either side. A single
+ *                  Friday costs three, because the weekend behind it follows the leave.
+ *
+ * Weekends and holidays are configured SEPARATELY because real policies differ on them: charging the weekend
+ * inside a block is common, charging a public holiday inside it much less so.
+ */
+export type SandwichMode = "exclude" | "intervening" | "flanking";
+export type SandwichRule = { weekends: SandwichMode; holidays: SandwichMode };
+export const NO_SANDWICH: SandwichRule = { weekends: "exclude", holidays: "exclude" };
+// How far a "flanking" walk may run outwards. A long weekend plus a holiday is four or five days; anything
+// past a week is a calendar nobody has, and an unbounded walk off the end of the holiday set is a loop with
+// no reason to stop.
+const FLANK_LIMIT_DAYS = 7;
+
 // Chargeable leave days for a range, counting only the org's configured working days and excluding holidays.
 // `workDays` is the weekday set (0=Sun..6=Sat; default Mon-Fri); `holidays` is a set of "YYYY-MM-DD" (UTC).
 // Sessions: 1 = first half (morning), 2 = second half (afternoon). The leave runs contiguously from
@@ -22,6 +43,8 @@ const ymdUtc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 // (startSession=2) and a last day that ends at midday (endSession=1) each drop half a working day - but only
 // when that boundary day is itself a working day (a half flag on a weekend/holiday is ignored). Works for a
 // single day too: (1,1)=morning, (2,2)=afternoon, (1,2)=full.
+//
+// `sandwich` (default: charge nothing for days off) can put those days back - see SandwichRule.
 export function leaveDays(
   startMs: number,
   endMs: number,
@@ -30,22 +53,110 @@ export function leaveDays(
   workDays: readonly number[] = [1, 2, 3, 4, 5],
   holidays: ReadonlySet<string> = new Set(),
   halfDayHolidays: ReadonlySet<string> = new Set(),
+  sandwich: SandwichRule = NO_SANDWICH,
 ): number {
-  // What one calendar day is worth: a working day is 1, a holiday 0, and a half-day holiday 0.5 (the office
-  // is open for the other half, so leave across it costs half a day).
-  const valueOf = (ms: number) => {
+  let total = 0;
+  for (const v of Object.values(daysByMonth(startMs, endMs, startSession, endSession, workDays, holidays, halfDayHolidays, sandwich))) total += v;
+  return Math.round(total * 2) / 2;
+}
+
+/**
+ * The same walk as `leaveDays`, split by the calendar month each day falls in ("YYYY-MM" -> days).
+ *
+ * It exists because the per-month quota rules (domain/leaveRestrictions.ts) have to ask what a request costs
+ * in ONE month, and a request that straddles a month boundary cannot answer that from its stored total. Both
+ * functions therefore share one implementation rather than one being a re-derivation of the other: the number
+ * the employee is shown, the number charged to the balance, and the number a monthly cap is checked against
+ * are the same arithmetic or they are a bug.
+ *
+ * Months with no chargeable day are absent rather than zero.
+ */
+export function daysByMonth(
+  startMs: number,
+  endMs: number,
+  startSession = 1,
+  endSession = 2,
+  workDays: readonly number[] = [1, 2, 3, 4, 5],
+  holidays: ReadonlySet<string> = new Set(),
+  halfDayHolidays: ReadonlySet<string> = new Set(),
+  sandwich: SandwichRule = NO_SANDWICH,
+): Record<string, number> {
+  // What kind of day this is, before any sandwich rule: a weekend is one the org doesn't work, a holiday is a
+  // working weekday the org has declared off. The distinction is the whole point of two sandwich settings.
+  const kindOf = (ms: number): "work" | "weekend" | "holiday" | "half" => {
+    if (!workDays.includes(new Date(ms).getUTCDay())) return "weekend";
     const ymd = ymdUtc(ms);
-    if (!workDays.includes(new Date(ms).getUTCDay()) || holidays.has(ymd)) return 0;
-    return halfDayHolidays.has(ymd) ? 0.5 : 1;
+    if (holidays.has(ymd)) return "holiday";
+    return halfDayHolidays.has(ymd) ? "half" : "work";
   };
-  let days = 0;
-  for (let d = startMs; d <= endMs; d += DAY_MS) days += valueOf(d);
-  if (days === 0) return 0;
-  // A session flag shaves at most what the boundary day is actually worth (so a PM start on a morning-only
-  // half-day holiday costs nothing, not -0.5).
-  if (startSession === 2) days -= Math.min(0.5, valueOf(startMs)); // first day starts after lunch
-  if (endSession === 1) days -= Math.min(0.5, valueOf(endMs)); // last day ends at lunch
-  return Math.round(days * 2) / 2;
+  // What one calendar day is worth with no sandwich rule applied: a working day is 1, a holiday 0, and a
+  // half-day holiday 0.5 (the office is open for the other half, so leave across it costs half a day).
+  const baseOf = (ms: number) => {
+    const k = kindOf(ms);
+    return k === "work" ? 1 : k === "half" ? 0.5 : 0;
+  };
+  // What the sandwich rule adds back for a day off, given which mode covers that kind of day.
+  const modeFor = (k: ReturnType<typeof kindOf>) => (k === "weekend" ? sandwich.weekends : sandwich.holidays);
+  const sandwichTop = (ms: number) => {
+    const k = kindOf(ms);
+    if (k === "work") return 0;
+    return modeFor(k) === "exclude" ? 0 : 1 - baseOf(ms); // a half-day holiday is topped up to a whole day
+  };
+
+  // The per-day charge, built up before anything is totalled. It is a map rather than a running sum because
+  // the session shave has to take back what a boundary day was ACTUALLY charged - which, once a sandwich rule
+  // is in play, is not something the day can be asked for on its own: a Saturday at the head of the range is
+  // charged nothing (nothing was sandwiched behind it) while the same Saturday inside the block is charged a
+  // full day. Deriving the shave from the day's kind instead got that wrong in exactly that case.
+  const charged = new Map<number, number>();
+  const add = (ms: number, v: number) => { if (v) charged.set(ms, (charged.get(ms) ?? 0) + v); };
+
+  // Pass one: the base value of every day in the range, and where the charged days actually begin and end -
+  // the sandwich is what sits BETWEEN those two, not between the requested dates (a range that opens on a
+  // Saturday has not sandwiched that Saturday).
+  let firstCharged = -1;
+  let lastCharged = -1;
+  for (let d = startMs; d <= endMs; d += DAY_MS) {
+    const base = baseOf(d);
+    add(d, base);
+    if (base > 0) {
+      if (firstCharged < 0) firstCharged = d;
+      lastCharged = d;
+    }
+  }
+  if (firstCharged < 0) return {}; // nothing chargeable: no sandwich to apply, and no sessions to shave
+
+  // Pass two: the days off the rule charges anyway. Inside first: everything between the first and last
+  // charged day. Then, for "flanking", the unbroken run of days off immediately before and after the block.
+  for (let d = firstCharged; d <= lastCharged; d += DAY_MS) add(d, sandwichTop(d));
+  const flank = (from: number, step: number) => {
+    for (let i = 1, d = from + step; i <= FLANK_LIMIT_DAYS; i++, d += step) {
+      const k = kindOf(d);
+      if (k === "work") return; // the run of days off has ended
+      if (modeFor(k) !== "flanking") return; // this kind of day off isn't charged on the flank
+      add(d, 1);
+    }
+  };
+  flank(firstCharged, -DAY_MS);
+  flank(lastCharged, DAY_MS);
+
+  // A session flag shaves at most what the boundary day was actually charged (so a PM start on a morning-only
+  // half-day holiday costs nothing, not -0.5 - unless a sandwich rule charged that holiday in full, in which
+  // case half of it is genuinely being skipped).
+  if (startSession === 2) add(startMs, -Math.min(0.5, charged.get(startMs) ?? 0)); // first day starts after lunch
+  if (endSession === 1) add(endMs, -Math.min(0.5, charged.get(endMs) ?? 0)); // last day ends at lunch
+
+  const out: Record<string, number> = {};
+  for (const [ms, v] of charged) {
+    const ym = ymdUtc(ms).slice(0, 7);
+    out[ym] = (out[ym] ?? 0) + v;
+  }
+  for (const [ym, v] of Object.entries(out)) {
+    const rounded = Math.round(v * 2) / 2;
+    if (rounded <= 0) delete out[ym];
+    else out[ym] = rounded;
+  }
+  return out;
 }
 
 // ---- Prorated monthly accrual ----
@@ -112,7 +223,50 @@ function monthFraction(monthIdx: number, startMs: number, endMs: number | null):
   return Math.min(1, (Math.round((to - from) / 86_400_000) + 1) / daysInMonth);
 }
 
+/**
+ * The joining-date rule applied to ONE period's fraction - see JoiningRule.
+ *
+ * It only ever touches the period the employee JOINED in (`isJoiningPeriod`); every later period is whatever
+ * the proration said. "full" is expressed by re-asking for the fraction with the month's own start in place of
+ * the joining date, which is what keeps the exit clamp: a month someone joined AND left in is still priced for
+ * the days they were here, because `endMs` is still in the answer.
+ */
+function applyJoiningRule(
+  base: number,
+  isJoiningPeriod: boolean,
+  startMs: number,
+  rule: JoiningRule | null | undefined,
+  fullFraction: () => number,
+): number {
+  if (!rule || !isJoiningPeriod) return base;
+  const joinedOn = new Date(startMs).getUTCDate();
+  if (joinedOn <= rule.cutoff_day) return rule.if_on_or_before === "full" ? fullFraction() : base;
+  return rule.if_after === "none" ? 0 : base;
+}
+
 export type AccrualFrequency = "monthly" | "semi_monthly";
+
+/**
+ * The JOINING-DATE RULE: how the month somebody joins in is priced.
+ *
+ * The default (no rule) is the proration above - join on the 20th of a 30-day month and earn a third of that
+ * month's entitlement. Plenty of policies are written as a cutoff instead: join on or before the 15th and the
+ * month counts in full, join after it and the month does not count at all. `cutoff_day` is that date;
+ * `if_on_or_before` and `if_after` say what happens on each side of it, so a policy can waive the proration on
+ * one side without changing the other.
+ *
+ * `if_after: "none"` ALSO bars requests of that type starting in the joining month (services/leaveRequests.ts):
+ * a month that earns nothing is a month there is nothing to spend, and for an unpaid type - which no balance
+ * check would stop - saying so is the only place the rule exists.
+ *
+ * The exit clamp still wins. "full" waives the JOINING proration, not the leaving one; somebody who joins and
+ * leaves inside one month is priced for the days they were here either way.
+ */
+export type JoiningRule = {
+  cutoff_day: number; // 1..28
+  if_on_or_before: "full" | "prorate";
+  if_after: "none" | "prorate";
+};
 
 export type AccrualInputs = {
   accrualDaysPerYear: number; // normal (post-probation) annual rate
@@ -123,6 +277,7 @@ export type AccrualInputs = {
   lastAccrualYm: string | null; // last period credited: "YYYY-MM" (monthly) or "YYYY-MM-H1/H2" (semi-monthly)
   currentMs: number;
   frequency?: AccrualFrequency; // default "monthly"
+  joiningRule?: JoiningRule | null; // null/absent = prorate the joining month, as before
 };
 
 export type AccrualResult = { add: number; newLastYm: string | null };
@@ -148,6 +303,23 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
   if (fromIdx < startIdx) fromIdx = startIdx;
 
   const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? monthlyProbation : monthly);
+  // The joining month's fraction, once the joining-date rule has had its say (see applyJoiningRule). The
+  // month's own first day stands in for the joining date when the rule credits the month in full.
+  const monthStartOf = (idx: number) => Date.UTC(Math.floor(idx / 12), idx % 12, 1);
+  // "Credit the joining month in full" waives the JOINING proration and nothing else. If the employment also
+  // ENDS in that month the waiver stands down entirely and the month is priced for the days actually worked:
+  // the alternative - crediting from the 1st, before the person had joined - hands out entitlement for days
+  // nobody was employed, and accrued leave is encashed for cash at exit.
+  const fullOrWorked = (idx: number) => {
+    const capped = monthFraction(idx, monthStartOf(idx), i.endMs);
+    return capped < 1 ? monthFraction(idx, i.startMs!, i.endMs) : 1;
+  };
+  const fractionAt = (idx: number) =>
+    applyJoiningRule(monthFraction(idx, i.startMs!, i.endMs), idx === startIdx, i.startMs!, i.joiningRule, () => fullOrWorked(idx));
+  // The same fraction as it stood when the month was first credited - i.e. with no last working day known.
+  // The exit reconciliation below is a difference between these two, so it needs both.
+  const creditedFractionAt = (idx: number) =>
+    applyJoiningRule(monthFraction(idx, i.startMs!, null), idx === startIdx, i.startMs!, i.joiningRule, () => 1);
 
   let add = 0;
   let credited = i.lastAccrualYm;
@@ -157,7 +329,7 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
     credited = ymFromIndex(idx) + (i.endMs != null && idx >= endIdx ? FINAL_MARK : ""); // processed even if it accrues nothing
     // Prorated at BOTH ends of employment, not just the joining month - see monthFraction. A full month in the
     // middle is 1, so this is the same arithmetic as before everywhere except the first and last months.
-    add += rateAt(idx) * monthFraction(idx, i.startMs!, i.endMs);
+    add += rateAt(idx) * fractionAt(idx);
   }
 
   // ---- The exit reconciliation ---------------------------------------------------------------------------
@@ -178,7 +350,13 @@ function computeMonthly(i: AccrualInputs): AccrualResult {
   if (i.endMs != null && credited && !isFinalMarker(credited)) {
     const markerIdx = ymIndex(credited);
     if (markerIdx >= endIdx && endIdx >= startIdx) {
-      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (1 - monthFraction(idx, i.startMs!, i.endMs));
+      // WHAT WAS CREDITED, not "a whole month". The claw-back is the difference between the two prices, so
+      // both halves of it have to be the price this walk would really have paid: the month was credited with
+      // `endMs` unknown, which is `monthFraction(idx, start, null)` - exactly 1 for every month after the
+      // joining one, but the joining PRORATION for the joining month, and whatever the joining-date rule says
+      // where one is configured. Hard-coding 1 took back a full month's entitlement from someone who joined
+      // and left inside the same month, having only ever been credited part of it.
+      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (creditedFractionAt(idx) - fractionAt(idx));
       credited = ymFromIndex(endIdx) + FINAL_MARK;
     }
   }
@@ -229,12 +407,27 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
   if (fromIdx < startIdx) fromIdx = startIdx;
 
   const rateAt = (idx: number) => (probationEndIdx !== null && idx < probationEndIdx ? halfProbation : half);
+  // The joining-date rule, on half-periods. It is a rule about the MONTH somebody joined, so it covers both
+  // halves of it - a joiner past the cutoff earns nothing for either half, and a waived proration credits both
+  // in full. `isJoiningMonth` is therefore a month comparison, not the `idx === startIdx` of the monthly twin.
+  const monthStartOfHalf = (hIdx: number) => { const m = Math.floor(hIdx / 2); return Date.UTC(Math.floor(m / 12), m % 12, 1); };
+  const joiningMonthIdx = Math.floor(startIdx / 2);
+  const isJoiningMonth = (hIdx: number) => Math.floor(hIdx / 2) === joiningMonthIdx;
+  // See the monthly twin: a waived joining proration stands down when the employment ends in that month too.
+  const fullOrWorked = (idx: number) => {
+    const capped = halfFraction(idx, monthStartOfHalf(idx), i.endMs);
+    return capped < 1 ? halfFraction(idx, i.startMs!, i.endMs) : 1;
+  };
+  const fractionAt = (idx: number) =>
+    applyJoiningRule(halfFraction(idx, i.startMs!, i.endMs), isJoiningMonth(idx), i.startMs!, i.joiningRule, () => fullOrWorked(idx));
+  const creditedFractionAt = (idx: number) =>
+    applyJoiningRule(halfFraction(idx, i.startMs!, null), isJoiningMonth(idx), i.startMs!, i.joiningRule, () => 1);
 
   let add = 0;
   let credited = i.lastAccrualYm;
   for (let idx = fromIdx; idx <= lastIdx; idx++) {
     credited = halfMarker(idx) + (i.endMs != null && idx >= endIdx ? FINAL_MARK : "");
-    add += rateAt(idx) * halfFraction(idx, i.startMs!, i.endMs);
+    add += rateAt(idx) * fractionAt(idx);
   }
   // The exit reconciliation, on half-periods - see the monthly twin for the whole argument. The window is
   // narrower here (half a period rather than a whole month), and the failure is the same one: a half-period
@@ -242,7 +435,9 @@ function computeSemiMonthly(i: AccrualInputs): AccrualResult {
   if (i.endMs != null && credited && !isFinalMarker(credited)) {
     const markerIdx = halfMarkerToIndex(credited);
     if (markerIdx >= endIdx && endIdx >= startIdx) {
-      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (1 - halfFraction(idx, i.startMs!, i.endMs));
+      // The difference between what was credited and what was earned - see the monthly twin for why it is not
+      // `1 - fraction`.
+      for (let idx = endIdx; idx <= markerIdx; idx++) add -= rateAt(idx) * (creditedFractionAt(idx) - fractionAt(idx));
       credited = halfMarker(endIdx) + FINAL_MARK;
     }
   }

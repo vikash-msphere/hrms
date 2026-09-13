@@ -322,6 +322,11 @@ export const leaveTypes = sqliteTable("leave_types", {
   // that survive into the next year (null = unlimited when the flag is on; flag off = balance resets to 0).
   carryForward: integer("carry_forward", { mode: "boolean" }).notNull().default(false),
   carryForwardCapDays: real("carry_forward_cap_days"),
+  // The rest of the policy: notice requirements, frequency caps, sandwich counting, combinations with other
+  // types, exit-process limits, joining-month cutoffs, blackout windows (domain/leaveRestrictions.ts). Null =
+  // this type adds nothing to the org baseline in settings/leave_restrictions; a leaf set here overrides that
+  // baseline, and a leaf set to null exempts this type from it.
+  restrictions: text("restrictions", { mode: "json" }).$type<Record<string, unknown>>(),
   deleteTime: integer("delete_time", { mode: "timestamp_ms" }), // soft-delete
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   locked: integer("locked", { mode: "boolean" }).notNull().default(false),
@@ -364,6 +369,10 @@ export const leaveRequests = sqliteTable("leave_requests", {
   state: text("state", { enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED"] }).notNull().default("PENDING"),
   reason: text("reason"),
   decidedBy: text("decided_by").references(() => users.uuid),
+  // Policy rules this request broke that the org has chosen to WARN on rather than refuse (`soft_rules` in
+  // domain/leaveRestrictions.ts): `[{ code, message }]`. Recorded at create time and shown to whoever approves
+  // it - a waiver nobody sees is not a waiver, it is a rule that quietly does nothing. Null = broke nothing.
+  policyWarnings: text("policy_warnings", { mode: "json" }).$type<{ code: string; message: string }[]>(),
   createdAt: created(),
   updatedAt: updated(),
 }, (t) => ({ pageIdx: index("leave_requests_page_idx").on(t.createdAt, t.uuid), empIdx: index("lr_emp_idx").on(t.employeeId, t.createdAt, t.uuid), stateIdx: index("lr_state_idx").on(t.state) }));

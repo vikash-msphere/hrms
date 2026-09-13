@@ -6,7 +6,17 @@ import { cn, formatDate, idOf } from "@/lib/utils";
 import { orgDayFromToday, todayStr } from "@/lib/orgDay";
 import { chargeableDays } from "@/lib/leaveDays";
 import { bestBridge, breakAround } from "@/lib/holidayBreaks";
-import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, Me } from "@/types";
+import {
+  checkLeaveRestrictions,
+  hasAnyRestriction,
+  mergeRestrictions,
+  parseRestrictions,
+  requiredNotice,
+  sandwichOf,
+  type LeaveNeighbour,
+  type LeaveRestrictions,
+} from "../../../../src/domain/leaveRestrictions";
+import type { ApprovalDelegation, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, NoticePeriod, Me } from "@/types";
 import type { LeaveDraft } from "@/lib/leaveDraft";
 import { DateRangeCalendar, type DayInfo } from "@/components/common/DateRangeCalendar";
 import { AccessAction } from "@/components/access/AccessAction";
@@ -110,6 +120,19 @@ export function RequestLeaveDialog({
       .then((s) => { if (typeof s.value?.allow_backdated === "boolean") setAllowBackdated(s.value.allow_backdated); })
       .catch(() => {});
   }, []);
+  // The org's restrictions baseline. The effective policy for the SELECTED type is this merged with that
+  // type's own overrides, exactly as the server merges them - so what this dialog refuses and what the server
+  // refuses are one rule set rather than two that agree today.
+  const [orgRestrictions, setOrgRestrictions] = useState<Record<string, unknown>>({});
+  useEffect(() => {
+    getSetting<Record<string, unknown>>("leave_restrictions")
+      .then((s) => setOrgRestrictions(s.value ?? {}))
+      .catch(() => {});
+  }, []);
+  // Whether this person is serving notice, for the exit-process rules. Private by default: with no read
+  // access the hook returns [] and fires nothing, and the rule then simply isn't previewed here - the server
+  // still enforces it.
+  const { rows: noticePeriods } = useCollection<NoticePeriod>("notice-periods", { params: mineParams, enabled: !!mineParams });
   // The ORG's day. The server refuses a back-dated start against `services/orgDay.ts`, so a `min` computed
   // from the browser's day is a floor the server does not share: west of UTC it offered a date that came
   // back rejected, east of it the picker blocked a start the server would have taken.
@@ -187,15 +210,34 @@ export function RequestLeaveDialog({
     };
   }, [meEmployee, delegations, employees, todayYmd]);
 
-  const formDays = chargeableDays(form.start_date, form.end_date, form.startSession, form.endSession, workDays, holidaySet, halfHolidaySet);
+  // The policy in force for one type, and for the one currently selected. Computed before the day count
+  // because the sandwich rule is part of what a day COSTS: a type that charges the weekend inside a block
+  // makes Friday-to-Monday four days, and the number on screen has to be the number the balance is charged.
+  const rulesFor = useMemo(() => {
+    const cache = new Map<string, LeaveRestrictions>();
+    return (t?: LeaveType) => {
+      if (!t) return parseRestrictions({});
+      const key = t.path;
+      if (!cache.has(key)) cache.set(key, mergeRestrictions(orgRestrictions, t.restrictions));
+      return cache.get(key)!;
+    };
+  }, [orgRestrictions]);
+  const selectedType = types.find((t) => form.leave_type && idOf(t.path) === idOf(form.leave_type));
+  const selectedRules = rulesFor(selectedType);
+
+  const formDays = chargeableDays(form.start_date, form.end_date, form.startSession, form.endSession, workDays, holidaySet, halfHolidaySet, sandwichOf(selectedRules));
   const rangeInverted = !!form.start_date && !!form.end_date && form.end_date < form.start_date;
-  // How many calendar days in the range are weekends/holidays (not charged) - shown so the total isn't a surprise.
+  // How many calendar days in the range are weekends/holidays (not charged) - shown so the total isn't a
+  // surprise. Counted UNDER THE SELECTED TYPE'S SANDWICH RULE, not against a plain working week: a type that
+  // charges the weekend inside a block skips nothing, and saying "2 weekend days in between don't count"
+  // beside a total that had just counted them is the one sentence on this form that could make somebody file
+  // a request they would not have filed.
   const skippedDays = useMemo(() => {
     if (!form.start_date || !form.end_date || rangeInverted) return 0;
     const span = Math.round((Date.parse(form.end_date + "T00:00:00Z") - Date.parse(form.start_date + "T00:00:00Z")) / 86400000) + 1;
-    const working = chargeableDays(form.start_date, form.end_date, 1, 2, workDays, holidaySet, halfHolidaySet) ?? span;
-    return span - working;
-  }, [form.start_date, form.end_date, rangeInverted, workDays, holidaySet, halfHolidaySet]);
+    const charged = chargeableDays(form.start_date, form.end_date, 1, 2, workDays, holidaySet, halfHolidaySet, sandwichOf(selectedRules)) ?? span;
+    return Math.max(0, span - charged);
+  }, [form.start_date, form.end_date, rangeInverted, workDays, holidaySet, halfHolidaySet, selectedRules]);
 
   // Is a single day already free (weekend or full holiday)? Used to label the date pickers, so "why did my
   // Saturday cost nothing" is answered before the request is filed rather than after.
@@ -217,7 +259,6 @@ export function RequestLeaveDialog({
   // words (lib/leaveApproval.tsx: "undefined = not visible / untracked"), and degrades to showing no balance
   // line rather than to "you have none". `null` stays "this type has no balance to track" (unpaid leave).
   const availableFor = (t: LeaveType): number | null | undefined => (t.paid ? balanceByType.get(idOf(t.path)) : null);
-  const selectedType = types.find((t) => form.leave_type && idOf(t.path) === idOf(form.leave_type));
   const selectedAvail = selectedType ? availableFor(selectedType) : null;
   const insufficient = selectedAvail != null && formDays != null && formDays > selectedAvail + 1e-9;
 
@@ -348,7 +389,91 @@ export function RequestLeaveDialog({
     return { holiday, halfHoliday: halfHolidaySet.has(ymd), away };
   };
 
-  const canSubmit = !!form.leave_type && !!form.start_date && !!form.end_date && !!formDays && !insufficient && myConflicts.length === 0;
+  /**
+   * The leave policy, previewed before the round trip.
+   *
+   * The SERVER is the authority - it re-runs this same function over rows it can see and this one cannot (a
+   * request of somebody else's that the window dropped, a notice period this caller can't read). What running
+   * it here buys is that the common refusals - short notice, a quota, a blackout - are answered while the form
+   * is still open and the dates can be changed, instead of coming back as a sentence under a closed dialog.
+   */
+  const violations = useMemo(() => {
+    if (!selectedType || !form.start_date || !form.end_date || formDays == null || formDays <= 0) return [];
+    if (!hasAnyRestriction(selectedRules)) return [];
+    const startMs = Date.parse(form.start_date + "T00:00:00Z");
+    const endMs = Date.parse(form.end_date + "T00:00:00Z");
+    if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return [];
+    const typeId = idOf(selectedType.path);
+    const neighbours: LeaveNeighbour[] = myRequests
+      .filter((lr) => lr.employee && idOf(lr.employee) === me.employee_id && (upper(lr.state) === "APPROVED" || upper(lr.state) === "PENDING"))
+      .map((lr) => {
+        const t = types.find((x) => lr.leave_type && idOf(x.path) === idOf(lr.leave_type));
+        return {
+          uuid: lr.path,
+          leaveTypeId: lr.leave_type ? idOf(lr.leave_type) : "",
+          leaveTypeName: t?.display_name,
+          startMs: Date.parse(lr.start_date.slice(0, 10) + "T00:00:00Z"),
+          endMs: Date.parse(lr.end_date.slice(0, 10) + "T00:00:00Z"),
+          startSession: lr.start_session ?? 1,
+          endSession: lr.end_session ?? 2,
+          noCombinationWith: t ? rulesFor(t).combinations.no_combination_with : null,
+        };
+      });
+    // "Ever" can't be answered from a page of requests, so the lifetime rules are left to the server rather
+    // than previewed from a window that would under-count them and say yes to something it will refuse.
+    const serving = noticePeriods.find((n) => (n.status ?? "").toLowerCase() === "serving" && !n.delete_time);
+    return checkLeaveRestrictions({
+      rules: selectedRules,
+      leaveTypeId: typeId,
+      leaveTypeName: selectedType.display_name,
+      startMs,
+      endMs,
+      startSession: form.startSession,
+      endSession: form.endSession,
+      days: formDays,
+      todayMs: Date.parse(todayYmd + "T00:00:00Z"),
+      employeeStartMs: meEmployee?.start_date ? Date.parse(meEmployee.start_date.slice(0, 10) + "T00:00:00Z") : null,
+      onBehalf: false,
+      hasDocument: !!doc,
+      reason: form.reason,
+      workDays,
+      holidays: holidaySet,
+      halfDayHolidays: halfHolidaySet,
+      neighbours: neighbours.filter((n) => n.leaveTypeId),
+      lifetime: null,
+      exitWindow: serving
+        ? { fromMs: Date.parse(serving.notice_date.slice(0, 10) + "T00:00:00Z"), toMs: Date.parse(serving.last_working_day.slice(0, 10) + "T00:00:00Z") }
+        : null,
+      exitDaysUsed: 0,
+    });
+  }, [selectedType, selectedRules, rulesFor, form.start_date, form.end_date, form.startSession, form.endSession, form.reason, formDays, myRequests, types, me.employee_id, todayYmd, meEmployee, workDays, holidaySet, halfHolidaySet, doc, noticePeriods]);
+  /**
+   * Why a type can't be taken by this person AT ALL, independent of which dates they pick - a service
+   * requirement they haven't met, or a type shut for the whole notice period. Answered in the picker so the
+   * choice isn't offered and then refused.
+   */
+  const eligibilityBlock = (t: LeaveType): string | null => {
+    const r = rulesFor(t);
+    const tenure = r.eligibility.min_tenure_days;
+    if (tenure != null && meEmployee?.start_date) {
+      const eligibleFrom = Date.parse(meEmployee.start_date.slice(0, 10) + "T00:00:00Z") + tenure * 86400000;
+      // Against the last date they could pick, not today: a type they become eligible for next month is one
+      // they may still book ahead for, which is what the server's rule says too.
+      if (eligibleFrom > Date.parse(todayYmd + "T00:00:00Z") + 365 * 86400000) return `needs ${tenure} days of service`;
+    }
+    if (r.exit.during_notice === "blocked" && noticePeriods.some((n) => (n.status ?? "").toLowerCase() === "serving" && !n.delete_time)) {
+      return "not available during notice period";
+    }
+    return null;
+  };
+
+  const blocking = violations.filter((v) => v.severity === "error");
+  const waived = violations.filter((v) => v.severity === "warning");
+  // What the selected type needs for a request of this length, said BEFORE the dates are wrong rather than
+  // after: "two days' notice" on the date field is a rule you can plan around.
+  const noticeNeeded = formDays != null && formDays > 0 ? requiredNotice(selectedRules.timing.advance_notice, formDays) : null;
+
+  const canSubmit = !!form.leave_type && !!form.start_date && !!form.end_date && !!formDays && !insufficient && myConflicts.length === 0 && blocking.length === 0;
 
   async function submit() {
     setBusy(true);
@@ -428,6 +553,23 @@ export function RequestLeaveDialog({
                 <p className="mt-1.5 text-xs text-muted-foreground">Change the dates, or cancel the existing request first.</p>
               </div>
             )}
+            {blocking.length > 0 && (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm">
+                <p className="font-medium text-destructive">This doesn't meet the {selectedType?.display_name ?? "leave"} policy</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {blocking.map((v) => <li key={v.code}>{v.message}</li>)}
+                </ul>
+              </div>
+            )}
+            {waived.length > 0 && (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
+                <p className="font-medium text-warning-foreground dark:text-warning">Outside the usual policy - your approver will be told</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {waived.map((v) => <li key={v.code}>{v.message}</li>)}
+                </ul>
+                <p className="mt-1.5 text-xs text-muted-foreground">You can still file this; it goes for approval with a note of what it breaks.</p>
+              </div>
+            )}
             {overlaps.length > 0 && (
               <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm">
                 <p className="mb-1.5 flex items-center gap-1.5 font-medium text-warning-foreground dark:text-warning"><Users className="h-4 w-4" /> Also off in your department</p>
@@ -453,9 +595,13 @@ export function RequestLeaveDialog({
                     // A type the policy bars on probation is a guaranteed server rejection; say so in the list
                     // rather than after the click.
                     const barred = onProbation && t.available_during_probation === false;
+                    // The same for a type nobody at this tenure may take at all, or one shut for the whole
+                    // notice period - both are properties of the PERSON rather than of the dates, so they can
+                    // be answered in the list instead of after a date is picked.
+                    const ineligible = eligibilityBlock(t);
                     return (
-                      <SelectItem key={t.path} value={`leave-types/${idOf(t.path)}`} disabled={lacks || barred}>
-                        {t.display_name}{avail != null ? ` · ${avail} left` : ""}{barred ? " - not available during probation" : lacks ? " - not enough balance" : ""}
+                      <SelectItem key={t.path} value={`leave-types/${idOf(t.path)}`} disabled={lacks || barred || !!ineligible}>
+                        {t.display_name}{avail != null ? ` · ${avail} left` : ""}{barred ? " - not available during probation" : ineligible ? ` - ${ineligible}` : lacks ? " - not enough balance" : ""}
                       </SelectItem>
                     );
                   })}
@@ -463,7 +609,7 @@ export function RequestLeaveDialog({
               </Select>
             </Field>
             <FieldRow>
-              <Field label="Start date" hint={dayNote(form.start_date)}>
+              <Field label="Start date" hint={noticeNeeded ? `${selectedType?.display_name ?? "This leave"} needs ${noticeNeeded} day${noticeNeeded === 1 ? "" : "s"}' notice for ${fmtDays(formDays ?? 0)} day${formDays === 1 ? "" : "s"}. ${dayNote(form.start_date) ?? ""}`.trim() : dayNote(form.start_date)}>
                 <Input
                   type="date"
                   min={minDate}

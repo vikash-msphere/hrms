@@ -39,6 +39,12 @@ export function leaveDecisionContext(r: LeaveRequest, balances: LeaveBalance[], 
     );
   const overlap = leaveOverlapCount(r, allLeave);
   if (overlap > 0) parts.push(<span key="ov" className="font-medium text-warning">{overlap} {overlap === 1 ? "person is" : "people are"} already off then</span>);
+  // Policy the org waives rather than enforces (`soft_rules`): the request was allowed through carrying what
+  // it breaks, and this is the decision it was carried to. A waiver the approver is never shown is a rule
+  // that quietly does nothing, so it leads the line rather than trailing it.
+  for (const w of r.policy_warnings ?? []) {
+    parts.push(<span key={`pw-${w.code}`} className="font-medium text-warning">{w.message}</span>);
+  }
   if (r.reason?.trim()) parts.push(<span key="why">"{r.reason.trim()}"</span>);
   if (parts.length === 0) return undefined;
   return parts.map((p, i) => (

@@ -2,6 +2,7 @@ import { and, eq, gte, isNotNull, isNull, or } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { Deps } from "../deps";
 import { computeAccrual, roundToIncrement } from "../domain/leave";
+import { mergeRestrictions, type LeaveRestrictions } from "../domain/leaveRestrictions";
 import { allocOwnedCodeRuns } from "./codeAlloc";
 import { getSettingValue } from "./settings";
 import { orgToday, dayStartMs } from "./orgDay";
@@ -41,6 +42,10 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
   // driven over a month boundary by any test.
   const now = dayStartMs(await orgToday(deps));
   const inc = await accrualIncrement(deps);
+  // The org's policy baseline, read ONCE for the whole tick (it is a settings row, so the per-request snapshot
+  // in lib/refData has it already) and merged per type below. Only the joining-date rule takes part in
+  // accrual; the rest of the blob is request-time policy.
+  const orgRestrictions = await getSettingValue<Record<string, unknown>>(deps, "leave_restrictions", {});
   let credited = 0;
   // Both conditions in SQL. `status` and the soft-delete mark are independent columns (the generic soft delete
   // never touches status), and the loop below already skipped deleted rows - so this changes no behaviour, it
@@ -95,6 +100,11 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
       ),
     );
   const leaveTypes = (await refLeaveTypes(deps)).filter((lt) => !onlyLeaveTypeId || lt.uuid === onlyLeaveTypeId);
+  // Merged once per TYPE, not once per (employee x type): the merge walks the whole blob, and the walk below
+  // runs headcount times over each type.
+  const rulesByType = new Map<string, LeaveRestrictions>(
+    leaveTypes.map((lt) => [lt.uuid, mergeRestrictions(orgRestrictions, lt.restrictions)]),
+  );
   // One read for every balance row, keyed (employee, type) - the nightly walk over employees x types is then
   // pure lookups, instead of one query per pair (which alone could blow the per-invocation subrequest budget).
   // Same reason as the roster read above: the map is keyed (employee, type) and the walk reads the row's id,
@@ -151,6 +161,7 @@ export async function accrueLeave(deps: Deps, onlyLeaveTypeId?: string): Promise
         lastAccrualYm: existing?.lastAccrualYm ?? null,
         currentMs: now,
         frequency: lt.accrualFrequency === "semi_monthly" ? "semi_monthly" : "monthly",
+        joiningRule: rulesByType.get(lt.uuid)?.accrual.joining_rule ?? null,
       });
       if (existing) {
         // Round the resulting balance to the configured increment; also re-rounds (normalizes) an existing

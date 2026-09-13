@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5034aa78-1cc9-4700-8fab-df460f0b848f",
+  "id": "ef6ed780-a85d-49f3-bfe0-70ac4bb67fea",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_rules": {
@@ -9430,6 +9430,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "policy_warnings": {
+          "name": "policy_warnings",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -9635,6 +9642,13 @@
         "carry_forward_cap_days": {
           "name": "carry_forward_cap_days",
           "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "restrictions": {
+          "name": "restrictions",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

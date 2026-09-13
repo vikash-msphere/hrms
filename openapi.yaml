@@ -25,6 +25,116 @@ components:
           description: >-
             The scope by which the caller holds READ on this object, shown as provenance.
             Absent when the object carries no addressable code to resolve a scope against.
+    leave_restrictions:
+      type: object
+      description: >-
+        Optional leave-policy restrictions. Held in two places with this same shape: the settings key
+        `leave_restrictions` is the org-wide baseline for every leave type, and a leave type's `restrictions`
+        field holds that type's overrides. Every leaf is optional and null means "no such rule" - an org that
+        sets nothing keeps the behaviour it had before this existed. Enforced when a leave request is filed
+        (the joining rule also prices accrual, and the document rule is checked on approval, where the
+        document can exist).
+      properties:
+        eligibility:
+          type: object
+          properties:
+            min_tenure_days: { type: number, nullable: true, description: "Service required before this type may be requested. Measured against the leave's start date, so booking ahead for a date you will be eligible on is allowed." }
+            max_occurrences_lifetime: { type: number, nullable: true, description: "How many separate times this type may ever be taken (e.g. maternity twice)." }
+            max_lifetime_days: { type: number, nullable: true, description: "Total days of this type over the whole employment." }
+        request:
+          type: object
+          properties:
+            min_days: { type: number, nullable: true, description: "Shortest request allowed. 1 also bars half days." }
+            max_days: { type: number, nullable: true, description: "Longest single request allowed." }
+            max_consecutive_days: { type: number, nullable: true, description: "Longest unbroken RUN of this type - neighbouring requests separated only by days off count as one run, so splitting a block into two requests does not evade it." }
+            half_day_allowed: { type: boolean, nullable: true, description: "When false the leave must run whole days (sessions 1 to 2)." }
+            blocked_weekdays: { type: array, nullable: true, items: { type: integer }, description: "Weekdays this type may not fall on: 0 = Sunday .. 6 = Saturday." }
+            must_be_single_block: { type: boolean, nullable: true, description: "The entitlement has to be taken as one unbroken block (maternity-style)." }
+            reason_required: { type: boolean, nullable: true }
+            reason_min_length: { type: number, nullable: true }
+            document_required_over_days: { type: number, nullable: true, description: "A supporting document is required past this many days. Checked on APPROVAL - the request must exist before a file can be attached to it." }
+            backdate_days: { type: number, nullable: true, description: "How far this type may be back-dated (0 = not at all). When set it replaces the org-wide `leave-requests.allow_backdated` toggle for this type." }
+        timing:
+          type: object
+          properties:
+            advance_notice:
+              type: object
+              nullable: true
+              description: Notice required before the leave starts, tiered by how long the request is. The shortest tier that covers the request wins; a request longer than every tier uses beyond_notice_days.
+              properties:
+                tiers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      up_to_days: { type: number, description: "This tier covers requests up to this many days." }
+                      notice_days: { type: number, description: "Calendar days of notice such a request needs." }
+                beyond_notice_days: { type: number, nullable: true }
+            max_advance_days: { type: number, nullable: true, description: "How far ahead this type may be booked." }
+            blackouts:
+              type: array
+              nullable: true
+              description: Closed windows - no leave of this type may fall inside one.
+              items:
+                type: object
+                properties:
+                  from: { type: string, format: date }
+                  to: { type: string, format: date }
+                  label: { type: string }
+            blackout_days_of_month: { type: array, nullable: true, items: { type: integer }, description: "Recurring closed days, e.g. [28,29,30,31] for a month-end close." }
+            block_adjacent_to_holiday: { type: boolean, nullable: true, description: "When true this type may not be taken on a day touching a public holiday (no bridging)." }
+        quota:
+          type: object
+          properties:
+            max_days_per_month: { type: number, nullable: true }
+            max_days_per_year: { type: number, nullable: true }
+            max_requests_per_month: { type: number, nullable: true, description: "A request counts in the period its start date falls in." }
+            max_requests_per_year: { type: number, nullable: true }
+            min_gap_days: { type: number, nullable: true, description: "Working days required between one request of this type and the next." }
+            year_basis: { type: string, nullable: true, enum: [calendar, fiscal, anniversary], description: "Which year the yearly caps count over. Default calendar." }
+            fiscal_year_start_month: { type: number, nullable: true, description: "1-12; used only by year_basis fiscal. Default 4 (April)." }
+        combinations:
+          type: object
+          properties:
+            no_combination_with: { type: array, nullable: true, items: { type: string }, description: "Leave types this one may not be taken with, as leave-types/{leave_type_id} refs. The rule holds whichever of the two types declares it." }
+            gap_days: { type: number, nullable: true, description: "0 = the two may not abut; N = they may not come within N working days." }
+        counting:
+          type: object
+          properties:
+            sandwich:
+              type: object
+              nullable: true
+              description: >-
+                Whether days off are charged to the balance anyway. "exclude" is the default (a weekend inside
+                a leave block costs nothing), "intervening" charges days off that fall between the first and
+                last charged day, and "flanking" also charges the run of days off the leave abuts.
+              properties:
+                weekends: { type: string, enum: [exclude, intervening, flanking] }
+                holidays: { type: string, enum: [exclude, intervening, flanking] }
+        exit:
+          type: object
+          properties:
+            during_notice: { type: string, nullable: true, enum: [allowed, blocked, capped], description: "What this type may do once the employee is serving notice (a serving notice-period row, or a recorded last working day still ahead)." }
+            notice_cap_days: { type: number, nullable: true, description: "Required by during_notice 'capped'." }
+        accrual:
+          type: object
+          properties:
+            joining_rule:
+              type: object
+              nullable: true
+              description: >-
+                How the joining month is priced. By default it is prorated by the days actually worked; a
+                cutoff can waive that on either side. if_after "none" also bars requests of this type starting
+                in the joining month, since that month earns nothing.
+              properties:
+                cutoff_day: { type: integer, description: "1-28." }
+                if_on_or_before: { type: string, enum: [full, prorate] }
+                if_after: { type: string, enum: [none, prorate] }
+        soft_rules:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: Rule codes that warn instead of blocking. A request breaking one of these is still created, carries the warning in `policy_warnings`, and is shown to the approver.
     Problem:
       title: An RFC 9457 problem object
       type: object
@@ -1134,6 +1244,15 @@ components:
         min_balance_retained_days: { type: number, description: The balance may not be encashed below this many days. }
         carry_forward: { type: boolean, description: When true unused balance carries into the next calendar year (capped); off = the balance resets at year end. }
         carry_forward_cap_days: { type: number, nullable: true, description: Max days of this type that carry into the next year (null = uncapped). Ignored when leave_caps uses cumulative carry-forward. }
+        restrictions:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/leave_restrictions'
+          description: >-
+            This type's leave-policy overrides. The org-wide baseline is the settings key `leave_restrictions`,
+            which has the same shape; the two combine per LEAF - a leaf set here wins, a leaf omitted here
+            inherits the baseline, and a leaf set to null exempts this type from the baseline's rule. Arrays
+            replace wholesale. Null/absent = this type adds nothing to the baseline.
         disabled: { type: boolean, readOnly: true }
         locked: { type: boolean, readOnly: true }
         locked_by: { type: string, readOnly: true, description: "Resource path: users/{user_id}. Who locked the record." }
@@ -1721,6 +1840,15 @@ components:
         state: { type: string, readOnly: true, description: State value PENDING/APPROVED/REJECTED/CANCELLED. }
         reason: { type: string }
         has_document: { type: boolean, readOnly: true, description: "Whether a supporting file (sick note, travel document) is attached to this request." }
+        policy_warnings:
+          type: array
+          readOnly: true
+          description: Leave-policy rules this request breaks that the org has chosen to warn on rather than refuse (see the leave type's `restrictions.soft_rules`). Recorded when the request is filed, and shown to whoever approves it. Absent when it breaks none.
+          items:
+            type: object
+            properties:
+              code: { type: string, description: The rule code that was waived. }
+              message: { type: string, description: What the rule would have refused. }
         access:
           readOnly: true
           $ref: '#/components/schemas/access_hint'

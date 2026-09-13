@@ -1,6 +1,6 @@
 import { allocOwnedCode, withFreshCode } from "./codeAlloc";
 // WORKFLOW resource template (custom methods :approve/:reject/:cancel).
-import { eq, ne, and, gte, lte, inArray, sql } from "drizzle-orm";
+import { eq, ne, and, gte, lte, inArray, isNull, sql } from "drizzle-orm";
 import { applyScope } from "./listScope";
 import { searchFilter } from "./searchFilter";
 import type { ListScope } from "../domain/access";
@@ -15,11 +15,24 @@ import { invalidArgument, notFound, failedPrecondition } from "../lib/errors";
 import { keysetPage } from "./keysetPage";
 import { dateWindow } from "./dateWindow";
 import { leaveDays } from "../domain/leave";
+import {
+  checkLeaveRestrictions,
+  hasAnyRestriction,
+  historyWindow,
+  mergeRestrictions,
+  needsLifetime,
+  parseRestrictions,
+  sandwichOf,
+  type LeaveNeighbour,
+  type LeaveRestrictions,
+  type Violation,
+} from "../domain/leaveRestrictions";
 import { holidayApplies } from "./holidays";
 import { getSettingValue } from "./settings";
 import { orgToday } from "./orgDay";
 import { DEFAULT_ATTENDANCE, type AttendanceConfig } from "../domain/attendance";
-import { refHolidays } from "../lib/refData";
+import { refHolidays, refLeaveTypes } from "../lib/refData";
+import { getAttachment } from "./attachments";
 import { runBatchChecked, type BatchStmt, type CheckedStmt } from "../lib/dbBatch";
 
 // Holidays (UTC YYYY-MM-DD) in [startMs, endMs] - the days leave shouldn't count. Non-deleted, non-disabled
@@ -119,6 +132,122 @@ const arrivedFirst = (a: LeaveRow, b: LeaveRow) =>
 // (back-dating allowed); HR can turn it off in Settings.
 export const DEFAULT_LEAVE_REQUEST_CONFIG = { allow_backdated: true };
 
+/**
+ * The policy in force for one leave type: the org baseline (settings/leave_restrictions) with that type's own
+ * overrides on top. See domain/leaveRestrictions.ts for what the two blobs mean together.
+ */
+export async function effectiveLeaveRules(deps: Deps, leaveType: { restrictions?: unknown }): Promise<LeaveRestrictions> {
+  const org = await getSettingValue<Record<string, unknown>>(deps, "leave_restrictions", {});
+  return mergeRestrictions(org, leaveType.restrictions);
+}
+
+/**
+ * How far out to look for a combination rule some OTHER type declares about this one, or null when none does.
+ *
+ * A combination rule binds both types - "sick leave may not follow annual leave" is the same fact whichever of
+ * the two it is written on, and the evaluator honours it from either side. But the request being filed only
+ * consults ITS OWN policy to decide whether there is any policy to evaluate at all, so a rule written solely
+ * on the other type would never be reached: the type being requested has an empty blob, the whole evaluation
+ * is skipped as a no-policy request, and the rule silently does nothing on one side of the pair.
+ *
+ * Reads the cached leave-type snapshot (lib/refData.ts), so it costs no query of its own.
+ */
+async function inboundCombinationGap(deps: Deps, leaveTypeId: string): Promise<number | null> {
+  const org = await getSettingValue<Record<string, unknown>>(deps, "leave_restrictions", {});
+  let gap: number | null = null;
+  for (const t of await refLeaveTypes(deps)) {
+    if (t.uuid === leaveTypeId || t.deleteTime || t.disabled) continue;
+    const c = mergeRestrictions(org, t.restrictions).combinations;
+    if (!c.no_combination_with?.some((ref) => (ref.split("/").pop() ?? ref) === leaveTypeId)) continue;
+    gap = Math.max(gap ?? 0, c.gap_days ?? 0);
+  }
+  return gap;
+}
+
+/**
+ * Everything the pure evaluator needs that only the database knows, gathered under one rule: READ NOTHING A
+ * CONFIGURED RULE DOES NOT ASK FOR.
+ *
+ * That is not tidiness. D1 bills rows read and this is the hot create path, so an org that has set no policy
+ * at all must pay exactly what it paid before this feature existed - which is why `historyWindow` can answer
+ * "no window" and every read below is behind its own rule being present.
+ */
+async function gatherPolicyFacts(
+  deps: Deps,
+  rules: LeaveRestrictions,
+  a: {
+    employeeId: string;
+    leaveTypeId: string;
+    start: number;
+    end: number;
+    liveRows: LeaveRow[]; // already read for the overlap check, over at least the policy window
+    employeeEndMs: number | null;
+    todayMs: number;
+  },
+) {
+  const types = await refLeaveTypes(deps);
+  const nameOf = new Map(types.map((t) => [t.uuid, t.name]));
+  const exclusionsOf = new Map(types.map((t) => [t.uuid, parseRestrictions(t.restrictions).combinations.no_combination_with]));
+  const neighbours: LeaveNeighbour[] = a.liveRows.map((r) => ({
+    uuid: r.uuid,
+    leaveTypeId: r.leaveTypeId,
+    leaveTypeName: nameOf.get(r.leaveTypeId),
+    startMs: +new Date(r.startDate),
+    endMs: +new Date(r.endDate),
+    startSession: r.startSession,
+    endSession: r.endSession,
+    noCombinationWith: exclusionsOf.get(r.leaveTypeId) ?? null,
+  }));
+
+  // Lifetime totals are an AGGREGATE, never a row read: "ever" is not a window, and a career of leave is not
+  // something to pull into the isolate to add up.
+  let lifetime: { requests: number; days: number } | null = null;
+  if (needsLifetime(rules)) {
+    const row = (await deps.db
+      .select({ n: sql<number>`count(*)`, d: sql<number>`coalesce(sum(${schema.leaveRequests.days}), 0)` })
+      .from(schema.leaveRequests)
+      .where(and(
+        eq(schema.leaveRequests.employeeId, a.employeeId),
+        eq(schema.leaveRequests.leaveTypeId, a.leaveTypeId),
+        inArray(schema.leaveRequests.state, ["PENDING", "APPROVED"]),
+      )))[0];
+    lifetime = { requests: Number(row?.n ?? 0), days: Number(row?.d ?? 0) };
+  }
+
+  // The exit window: a notice period being SERVED is the authoritative statement that someone is leaving; a
+  // recorded last working day with no notice row is the fallback, because the two are entered independently
+  // and a policy that only fired for one of them would look like it was not working.
+  let exitWindow: { fromMs: number; toMs: number } | null = null;
+  let exitDaysUsed = 0;
+  if (rules.exit.during_notice && rules.exit.during_notice !== "allowed") {
+    const serving = await deps.db
+      .select({ noticeDate: schema.noticePeriods.noticeDate, lastWorkingDay: schema.noticePeriods.lastWorkingDay })
+      .from(schema.noticePeriods)
+      .where(and(
+        eq(schema.noticePeriods.employeeId, a.employeeId),
+        eq(schema.noticePeriods.status, "serving"),
+        isNull(schema.noticePeriods.deleteTime),
+      ));
+    const latest = serving.sort((x, y) => +new Date(y.lastWorkingDay) - +new Date(x.lastWorkingDay))[0];
+    if (latest) exitWindow = { fromMs: +new Date(latest.noticeDate), toMs: +new Date(latest.lastWorkingDay) };
+    else if (a.employeeEndMs != null && a.employeeEndMs >= a.todayMs) exitWindow = { fromMs: a.todayMs, toMs: a.employeeEndMs };
+    if (exitWindow && rules.exit.during_notice === "capped") {
+      const row = (await deps.db
+        .select({ d: sql<number>`coalesce(sum(${schema.leaveRequests.days}), 0)` })
+        .from(schema.leaveRequests)
+        .where(and(
+          eq(schema.leaveRequests.employeeId, a.employeeId),
+          eq(schema.leaveRequests.leaveTypeId, a.leaveTypeId),
+          inArray(schema.leaveRequests.state, ["PENDING", "APPROVED"]),
+          gte(schema.leaveRequests.endDate, new Date(exitWindow.fromMs)),
+          lte(schema.leaveRequests.startDate, new Date(exitWindow.toMs)),
+        )))[0];
+      exitDaysUsed = Number(row?.d ?? 0);
+    }
+  }
+  return { neighbours, lifetime, exitWindow, exitDaysUsed };
+}
+
 export async function listLeaveRequests(
   deps: Deps,
   scope: ListScope,
@@ -178,45 +307,76 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   const employeeId = idFromPath(input.employee) ?? actor.employeeId;
   if (!employeeId) throw invalidArgument("employee is required");
 
-  // Back-dated requests: gated by the org policy toggle, but only for self-service. HR acting on behalf of
-  // someone else (input.employee set to another person) can always back-date, e.g. to record past leave.
   const onBehalf = !!idFromPath(input.employee) && idFromPath(input.employee) !== actor.employeeId;
-  if (!onBehalf) {
-    const { allow_backdated } = await getSettingValue(deps, "leave-requests", DEFAULT_LEAVE_REQUEST_CONFIG);
-    if (!allow_backdated) {
-      // "Today" in the ORG's timezone, not the Worker's UTC. The requested `start` is a date-only value
-      // anchored at UTC midnight, and so is this once it is parsed back - but WHICH calendar day it names is
-      // now the one the employee is living in. Derived in UTC, this refused a request starting today for
-      // anyone west of UTC after their evening rollover, and let a genuinely back-dated one through for the
-      // first hours of the local day east of it. See services/orgDay.ts.
-      const todayMs = dayMs(await orgToday(deps));
-      if (start < todayMs) throw failedPrecondition("back-dated leave requests aren't allowed - pick today or a future date");
-    }
-  }
 
-  // No overlapping leave for the same person (including self): a new request can't intersect an existing
-  // PENDING/APPROVED leave for this employee. Half-day sessions are respected by mapping each endpoint to a
-  // half-day slot, so a morning-ending leave can still abut an afternoon-starting one on the same day.
-  const newStartSlot = slotOf(start, startSession);
-  const newEndSlot = slotOf(end, endSession);
-  if (overlapping(await liveLeaveInWindow(deps, employeeId, start, end), newStartSlot, newEndSlot).length) {
-    throw failedPrecondition("this overlaps an existing leave request for these dates");
-  }
-
-  // A disabled (or deleted) leave type can't be used for new requests.
+  // A disabled (or deleted) leave type can't be used for new requests. Read FIRST, because the type carries
+  // the policy every check below is made under (its own back-dating window included).
   const leaveTypeId = idFromPath(input.leave_type)!;
   const lt = (await deps.db.select().from(schema.leaveTypes).where(eq(schema.leaveTypes.uuid, leaveTypeId)).limit(1))[0];
   if (!lt || lt.deleteTime || lt.disabled) throw invalidArgument("that leave type is unavailable");
+  const rules = await effectiveLeaveRules(deps, lt);
+  // A type with no policy of its own is still bound by a combination rule another type declares about it.
+  const inboundGap = await inboundCombinationGap(deps, leaveTypeId);
+  const policyOn = hasAnyRestriction(rules) || inboundGap !== null;
+
+  // Back-dated requests: gated by the org policy toggle, but only for self-service. HR acting on behalf of
+  // someone else (input.employee set to another person) can always back-date, e.g. to record past leave.
+  //
+  // A leave type that sets its OWN back-dating window takes over from the toggle entirely - the toggle is one
+  // yes/no for the whole org, and "sick leave may be filed three days late, nothing else may be back-dated"
+  // is a sentence the toggle cannot say. The per-type rule is enforced with the rest of the policy below.
+  //
+  // "Today" in the ORG's timezone, not the Worker's UTC. The requested `start` is a date-only value anchored
+  // at UTC midnight, and so is this once it is parsed back - but WHICH calendar day it names is now the one
+  // the employee is living in. Derived in UTC, this refused a request starting today for anyone west of UTC
+  // after their evening rollover, and let a genuinely back-dated one through for the first hours of the local
+  // day east of it. See services/orgDay.ts.
+  const perTypeBackdating = rules.request.backdate_days !== null;
+  const { allow_backdated } = await getSettingValue(deps, "leave-requests", DEFAULT_LEAVE_REQUEST_CONFIG);
+  const needsToday = policyOn || (!onBehalf && !allow_backdated && !perTypeBackdating);
+  const todayMs = needsToday ? dayMs(await orgToday(deps)) : 0;
+  if (!onBehalf && !allow_backdated && !perTypeBackdating && start < todayMs) {
+    throw failedPrecondition("back-dated leave requests aren't allowed - pick today or a future date");
+  }
+
   // Probation policy. A request "during probation" is one whose leave starts on or before probation end.
   const emp = (await deps.db.select().from(schema.employees).where(eq(schema.employees.uuid, employeeId)).limit(1))[0];
   const probationEndMs = emp?.probationEndDate ? +new Date(emp.probationEndDate) : null;
   const duringProbation = probationEndMs !== null && start <= probationEndMs;
   if (duringProbation && !lt.availableDuringProbation) throw failedPrecondition("that leave type is not available during probation");
 
-  // Chargeable days = configured working days in the range, minus holidays, honoring the start/end sessions.
+  // ONE read of this employee's live leave, over the widest window anything needs. The overlap check below
+  // only ever cared about the requested range, but the policy rules (quotas, gaps, combinations, the merged
+  // run) look further out - and reading the union once is a query, where reading it twice is two. With no
+  // policy configured `historyWindow` answers null and the window collapses back to the requested range,
+  // which is exactly what this path read before.
+  const ownWindow = policyOn ? historyWindow(rules, start, end, emp?.startDate ? +new Date(emp.startDate) : null) : null;
+  // Widened for a rule declared on the other side of a combination: that neighbour has to be in the window or
+  // the rule cannot see it.
+  const inboundPad = inboundGap !== null ? (inboundGap + 1) * 86_400_000 : 0;
+  const policyWindow = ownWindow || inboundPad
+    ? { fromMs: Math.min(ownWindow?.fromMs ?? start, start - inboundPad), toMs: Math.max(ownWindow?.toMs ?? end, end + inboundPad) }
+    : null;
+  const liveRows = await liveLeaveInWindow(deps, employeeId, policyWindow?.fromMs ?? start, policyWindow?.toMs ?? end);
+
+  // No overlapping leave for the same person (including self): a new request can't intersect an existing
+  // PENDING/APPROVED leave for this employee. Half-day sessions are respected by mapping each endpoint to a
+  // half-day slot, so a morning-ending leave can still abut an afternoon-starting one on the same day.
+  const newStartSlot = slotOf(start, startSession);
+  const newEndSlot = slotOf(end, endSession);
+  if (overlapping(liveRows, newStartSlot, newEndSlot).length) {
+    throw failedPrecondition("this overlaps an existing leave request for these dates");
+  }
+
+  // Chargeable days = configured working days in the range, minus holidays, honoring the start/end sessions -
+  // and then whatever the sandwich rule puts back (domain/leave.ts). The holiday set is fetched over the whole
+  // policy window, not just the requested range, because the same set answers the rules below; the flanking
+  // sandwich and the "not next to a holiday" rule both look one day past each end, so the window is padded.
   const att = await getSettingValue<AttendanceConfig>(deps, "attendance", DEFAULT_ATTENDANCE);
-  const holidays = await holidaysInRange(deps, start, end, await employeeLocation(deps, employeeId));
-  const days = leaveDays(start, end, startSession, endSession, att.work_days, holidays.full, holidays.half);
+  const holidayFrom = Math.min(start, policyWindow?.fromMs ?? start) - 8 * 86_400_000;
+  const holidayTo = Math.max(end, policyWindow?.toMs ?? end) + 8 * 86_400_000;
+  const holidays = await holidaysInRange(deps, holidayFrom, holidayTo, await employeeLocation(deps, employeeId));
+  const days = leaveDays(start, end, startSession, endSession, att.work_days, holidays.full, holidays.half, sandwichOf(rules));
   if (days <= 0) throw invalidArgument("no working days in the selected range (weekends and holidays aren't counted) - pick a working day");
 
   // Balance check: a paid (entitlement-tracked) leave type can't be drawn below zero. The balance is reserved
@@ -250,11 +410,54 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
       throw failedPrecondition(`exceeds the probation cap of ${lt.probationCapDays} day(s) for this leave type (already used ${used})`);
     }
   }
+
+  // ---- The leave policy (domain/leaveRestrictions.ts) -------------------------------------------------------
+  // Runs LAST of the checks, so the cheap structural refusals (a disabled type, an overlap, no balance) are
+  // still what a caller hears first, and the reads it needs only happen for a request that would otherwise be
+  // accepted. A hard violation refuses the request; a soft one (the org listed the rule in `soft_rules`) is
+  // carried onto the row for the approver to weigh.
+  let warnings: Violation[] = [];
+  if (policyOn) {
+    const facts = await gatherPolicyFacts(deps, rules, {
+      employeeId,
+      leaveTypeId,
+      start,
+      end,
+      liveRows,
+      employeeEndMs: emp?.endDate ? +new Date(emp.endDate) : null,
+      todayMs,
+    });
+    const violations = checkLeaveRestrictions({
+      rules,
+      leaveTypeId,
+      leaveTypeName: lt.name,
+      startMs: start,
+      endMs: end,
+      startSession,
+      endSession,
+      days,
+      todayMs,
+      employeeStartMs: emp?.startDate ? +new Date(emp.startDate) : null,
+      onBehalf,
+      // The row has to exist before bytes can hang off it (the attachment is a second call), so at create time
+      // there is nothing to look for and the document rule is skipped here. It is enforced where the document
+      // can actually be checked: on approval, below.
+      hasDocument: null,
+      reason: input.reason ?? null,
+      workDays: att.work_days,
+      holidays: holidays.full,
+      halfDayHolidays: holidays.half,
+      ...facts,
+    });
+    const blocking = violations.filter((v) => v.severity === "error");
+    if (blocking.length) throw failedPrecondition(blocking.map((v) => v.message).join(" "));
+    warnings = violations;
+  }
   // Allocated inside the retry (codeAlloc.ts): a long weekend is booked by the whole team in one afternoon,
   // and the second person to press should get their request rather than an error telling them to try again.
   const row = (await withFreshCode(async () => deps.db
     .insert(schema.leaveRequests)
-    .values({ code: await allocOwnedCode(deps, schema.leaveRequests, schema.leaveRequests.employeeId, employeeId), employeeId, leaveTypeId, startDate: new Date(start), endDate: new Date(end), days, startSession, endSession, reason: input.reason?.trim() || null, state: "PENDING" })
+    .values({ code: await allocOwnedCode(deps, schema.leaveRequests, schema.leaveRequests.employeeId, employeeId), employeeId, leaveTypeId, startDate: new Date(start), endDate: new Date(end), days, startSession, endSession, reason: input.reason?.trim() || null, state: "PENDING", policyWarnings: warnings.length ? warnings.map((w) => ({ code: w.code, message: w.message })) : null })
     .returning()))[0]!;
 
   // INSERT, THEN LOOK AGAIN. The check above is a read, and two submissions for the same dates - a double-
@@ -292,12 +495,22 @@ export async function createLeaveRequest(deps: Deps, actor: AppUser, input: Leav
   } else {
     await adjustLeaveBalance(deps, employeeId, leaveTypeId, -days);
   }
-  await audit(deps, actor, "leave_request.create", "leave-requests", row.uuid, createdMeta(row, "leave-requests"), row);
+  // The waived rules go into the trail and onto the event as well as onto the row: the audit entry is where
+  // "who let this through" is answered later, and an automation that routes short-notice leave to a second
+  // approver has nothing else to key on.
+  const waivedMeta = warnings.length ? { note: `policy waived: ${warnings.map((w) => w.code).join(", ")}` } : {};
+  await audit(deps, actor, "leave_request.create", "leave-requests", row.uuid, { ...createdMeta(row, "leave-requests"), ...waivedMeta }, row);
   await notifyManager(deps, employeeId, { type: "leave.requested", noun: "leave request" });
   await emitEvent(deps, actor, "leave.requested", {
     subject: `leave-requests/${row.uuid}`,
     employeeId,
-    payload: { leaveTypeId, days, from: new Date(start).toISOString(), to: new Date(end).toISOString() },
+    payload: {
+      leaveTypeId,
+      days,
+      from: new Date(start).toISOString(),
+      to: new Date(end).toISOString(),
+      ...(warnings.length ? { policyWarnings: warnings.map((w) => w.code) } : {}),
+    },
   });
   return row;
 }
@@ -369,6 +582,22 @@ async function decide(deps: Deps, actor: AppUser, id: string, to: "APPROVED" | "
     }
   } else if (row.state !== "PENDING") {
     throw failedPrecondition("request is not pending");
+  }
+  // The one policy rule that cannot be checked when the request is filed: the supporting document is uploaded
+  // against the row, so at create time there is nothing to look for. Approval is where it can be answered, and
+  // is also where it matters - "a sick note is required past three days" is a condition of allowing the leave,
+  // not of asking for it. Only read when the rule is actually configured for this type.
+  if (to === "APPROVED") {
+    const lt = (await deps.db.select().from(schema.leaveTypes).where(eq(schema.leaveTypes.uuid, row.leaveTypeId)).limit(1))[0];
+    const rules = lt ? await effectiveLeaveRules(deps, lt) : null;
+    const over = rules?.request.document_required_over_days ?? null;
+    if (over !== null && row.days > over + 1e-9) {
+      const doc = await getAttachment(deps, "leave-requests", row.uuid);
+      if (!doc) {
+        const soft = (rules?.soft_rules ?? []).includes("document_required");
+        if (!soft) throw failedPrecondition(`${lt!.name} over ${over} day(s) needs a supporting document before it can be approved.`);
+      }
+    }
   }
   // Guard the flip on the state we just validated so the decision is EXACTLY-ONCE: a concurrent or
   // double-clicked reject/cancel that also read PENDING loses here (0 rows) instead of both refunding the

@@ -496,6 +496,11 @@ export function toLeaveTypeResource(r: any): Wire<"leave-type"> {
     min_balance_retained_days: r.minBalanceRetainedDays ?? 0,
     carry_forward: r.carryForward,
     carry_forward_cap_days: r.carryForwardCapDays ?? undefined,
+    // The blob AS STORED, not a parsed one: a leaf this type never set has to come back absent, because the
+    // editor reads "absent" as "inherits the org baseline" and an explicit null as "exempt from it"
+    // (domain/leaveRestrictions.ts mergeRestrictions). Filling the gaps here would turn every type into an
+    // exemption from every org rule the first time it was saved back.
+    restrictions: r.restrictions ?? undefined,
   };
 }
 
@@ -1040,6 +1045,9 @@ export function toLeaveRequestResource(r: any): Wire<"leave-request"> {
     state: r.state,
     reason: r.reason ?? undefined,
     has_document: !!r.hasDocument, // set by the route when a supporting file is attached to this request
+    // Policy rules the org waives rather than enforces, recorded when this was filed. The approver sees them
+    // on the decision card - a waiver nobody is shown is a rule that quietly does nothing.
+    policy_warnings: r.policyWarnings ?? undefined,
   };
 }
 

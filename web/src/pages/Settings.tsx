@@ -16,6 +16,7 @@ import { useOrg, currencyDecimals, orgNameFontStack, orgNameWeight, orgNameSizeP
 import { useCollection } from "@/hooks/useCollection";
 import { useLetterheads } from "@/lib/letterheads";
 import { LetterheadDesigner } from "@/components/settings/LetterheadDesigner";
+import { RestrictionsEditor } from "@/components/leave/RestrictionsEditor";
 import { useSplitStaleness } from "@/hooks/useSplitStaleness";
 import { SplitStaleBanner } from "@/components/common/SplitStaleBanner";
 import { cn, idOf, formatMoney } from "@/lib/utils";
@@ -23,7 +24,7 @@ import { useRowKeys } from "@/lib/rowKeys";
 import { describeError, isConflict } from "@/lib/formError";
 import { thisYearStr, setOrgTimezone } from "@/lib/orgDay";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Letterhead, Me, AtsConfig, AtsStage, Automation } from "@/types";
+import type { EmployeeFieldDef, Employee, Department, TicketCategory, TicketChecklist, Letterhead, LeaveType, Me, AtsConfig, AtsStage, Automation } from "@/types";
 import { DEFAULT_ATS_CONFIG } from "@/types";
 import { PageHeader } from "@/components/common/PageHeader";
 import { EmptyState } from "@/components/common/EmptyState";
@@ -3423,12 +3424,18 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   const [encDivisor, setEncDivisor] = useState("30");
   const [rounding, setRounding] = useState<"none" | "half" | "day">("half");
   const [allowBackdated, setAllowBackdated] = useState(true);
+  // The org-wide restrictions baseline, edited as the blob it is stored as (see RestrictionsEditor).
+  const [restrictions, setRestrictions] = useState<Record<string, unknown> | null>(null);
+  // For the "can't be combined with" picker, which names other leave types.
+  const { rows: leaveTypes } = useCollection<LeaveType>("leave-types");
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const writeSettings = useSettingsBatch();
 
   useEffect(() => {
     void Promise.allSettled([
+      getSetting<Record<string, unknown>>("leave_restrictions")
+        .then((s) => setRestrictions(s.value && Object.keys(s.value).length ? s.value : null)),
       getSetting<Record<string, unknown>>("leave_caps")
         .then((s) => {
           const v = s.value ?? {};
@@ -3448,7 +3455,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
   }, []);
 
   const { markSaved } = useUnsaved(
-    { excess, cfMode, cfCap, encMode, encCap, encRateBasis, encDivisor, rounding, allowBackdated },
+    { excess, cfMode, cfCap, encMode, encCap, encRateBasis, encDivisor, rounding, allowBackdated, restrictions },
     ready,
     save,
   );
@@ -3474,6 +3481,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
         { key: "leave_encashment", label: "the encashment rate", value: { rate_basis: encRateBasis, per_day_divisor: encDivisor.trim() === "" ? 30 : Number(encDivisor) } },
         { key: "leave_accrual", label: "accrual rounding", value: { rounding } },
         { key: "leave-requests", label: "back-dating", value: { allow_backdated: allowBackdated } },
+        { key: "leave_restrictions", label: "the leave restrictions", value: restrictions ?? {} },
       ]);
       if (!r.ok) {
         toast(batchError(r));
@@ -3498,6 +3506,7 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
             <TabsTrigger value="encashment">Encashment</TabsTrigger>
             <TabsTrigger value="accrual">Accrual</TabsTrigger>
             <TabsTrigger value="requests">Requests</TabsTrigger>
+            <TabsTrigger value="restrictions">Restrictions</TabsTrigger>
           </TabsList>
 
           <TabsContent value="carry-forward" className="space-y-3">
@@ -3576,6 +3585,15 @@ function LeaveCapsTab({ toast }: { toast: Toast }) {
               <Checkbox checked={allowBackdated} onCheckedChange={(v) => setAllowBackdated(v === true)} className="mt-0.5" />
               <span>Allow back-dated requests<span className="block text-xs text-muted-foreground">When off, employees can only request today or future dates. HR applying leave on someone's behalf can still back-date.</span></span>
             </label>
+          </TabsContent>
+
+          <TabsContent value="restrictions" className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              The org-wide baseline every leave type starts from: notice requirements, quotas, combinations,
+              the sandwich rule, exit-process limits, joining-month cutoffs. A leave type can override any of
+              these for itself, or opt out of one, in Leave Types.
+            </p>
+            <RestrictionsEditor scope="org" value={restrictions} onChange={(v) => setRestrictions(v as Record<string, unknown> | null)} leaveTypes={leaveTypes} />
           </TabsContent>
         </Tabs>
         <Button onClick={save} loading={saving}>{!saving && <Save className="h-4 w-4" />} Save leave policy</Button>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CalendarRange, Plus } from "lucide-react";
 import { create, patch } from "@/api";
 import { useCollection } from "@/hooks/useCollection";
@@ -29,6 +29,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { InfoHint } from "@/components/common/InfoHint";
 import { useToast } from "@/components/ui/use-toast";
+import { RestrictionsEditor } from "@/components/leave/RestrictionsEditor";
+import { getSetting } from "@/lib/settingsStore";
+import { describeRestrictions, mergeRestrictions, parseRestrictions } from "../../../src/domain/leaveRestrictions";
 
 export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embedded?: boolean; title?: string; openId?: string }) {
   const { rows, state, error, reload } = useCollection<LeaveType>("leave-types", { showDeleted: true });
@@ -43,10 +46,22 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
   const [editing, setEditing] = useState<LeaveType | null>(null);
   const EMPTY_FORM = { name: "", accrual: "0", frequency: "monthly", paid: true, probation: true, probationAccrual: "0", probationCap: "", encashable: false, encashCap: "", minRetained: "0", carryForward: false, carryForwardCap: "", color: "" };
   const [form, setForm] = useState(EMPTY_FORM);
+  // The type's own policy overrides, edited as the blob they are stored as. Held beside `form` rather than
+  // inside it because `form` is a flat map of strings that WriteDialog diffs for its unsaved-changes guard.
+  const [restrictions, setRestrictions] = useState<Record<string, unknown> | null>(null);
+  // The org baseline, so every control can say what it inherits. One settings read for the page.
+  const [orgRestrictions, setOrgRestrictions] = useState<Record<string, unknown>>({});
+  useEffect(() => {
+    getSetting<Record<string, unknown>>("leave_restrictions")
+      .then((s) => setOrgRestrictions(s.value ?? {}))
+      .catch(() => {});
+  }, []);
+  const orgRules = useMemo(() => parseRestrictions(orgRestrictions), [orgRestrictions]);
 
   function openCreate() {
     setEditing(null);
     setForm(EMPTY_FORM);
+    setRestrictions(null);
     setOpen(true);
   }
   function openEdit(lt: LeaveType) {
@@ -67,6 +82,7 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       color: lt.color ?? "",
     };
     setForm(next);
+    setRestrictions((lt.restrictions as Record<string, unknown> | undefined) ?? null);
     setOpen(true);
   }
 
@@ -90,6 +106,10 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
       // so an empty string was rejected outright - every leave type saved without touching the swatch came
       // back 400.
       color: form.color || null,
+      // Sent as edited, INCLUDING its absences: a leaf this type doesn't mention inherits the org rule and a
+      // leaf set to null exempts it, so filling the gaps in here would quietly turn every save into a blanket
+      // exemption from the org policy.
+      restrictions,
     };
     if (editing) {
       await patch("leave-types/" + idOf(editing.path), body, editing.etag);
@@ -122,6 +142,9 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
         : "not encashable",
     );
     parts.push(form.carryForward ? `carries into the next year${form.carryForwardCap.trim() ? ` (up to ${form.carryForwardCap.trim()} days)` : ""}` : "unused balance resets on 31 Dec");
+    // The restriction rules in the same sentence, read through the SAME merge the server enforces - the panel
+    // below says what this type overrides, and this says what it ends up with.
+    parts.push(...describeRestrictions(mergeRestrictions(orgRestrictions, restrictions)));
     return parts.join(" · ");
   })();
 
@@ -343,6 +366,22 @@ export default function LeaveTypes({ embedded, title, openId }: { me?: Me; embed
                 <Input type="number" min={0} value={form.carryForwardCap} disabled={!form.carryForward} placeholder="No cap" onChange={(e) => setForm({ ...form, carryForwardCap: e.target.value })} />
               </Field>
             </div>
+          </div>
+          {/* The restrictions, folded by section: a leave type with no policy of its own shows eight closed
+              headers rather than forty controls, and the ones it does set say so in their summaries. */}
+          <div className="rounded-lg border p-3">
+            <div className="mb-2 flex items-center gap-1.5">
+              <p className="text-sm font-medium">Restrictions</p>
+              <InfoHint text="Rules on top of the org-wide leave policy in Settings. A rule left on 'inherit' follows the org; one set here overrides it for this type only." />
+            </div>
+            <RestrictionsEditor
+              scope="type"
+              value={restrictions}
+              onChange={(v) => setRestrictions(v as Record<string, unknown> | null)}
+              baseline={orgRules}
+              leaveTypes={rows}
+              selfPath={editing?.path}
+            />
           </div>
           <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
             <span className="font-medium text-foreground">{form.name.trim() || "This leave type"}:</span> {policySummary}.

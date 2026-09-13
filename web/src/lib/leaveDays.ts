@@ -9,7 +9,7 @@
 // EmployeeCompensation.tsx), which is why this one calls the original instead.
 //
 // Sessions: 1 = first half (morning), 2 = second half (afternoon). null = incomplete/unparseable input.
-import { leaveDays } from "../../../src/domain/leave";
+import { leaveDays, type SandwichRule } from "../../../src/domain/leave";
 
 export function chargeableDays(
   startStr: string,
@@ -19,9 +19,13 @@ export function chargeableDays(
   workDays: number[],
   holidays: Set<string>,
   halfDayHolidays: Set<string> = new Set(),
+  // The leave type's sandwich rule, when it has one: weekends or holidays inside (or beside) the block that
+  // the policy charges anyway. Omitted = charge nothing for days off, which is what every caller did before
+  // the rule existed - and what the server computes for a type that configures none.
+  sandwich?: SandwichRule,
 ): number | null {
   if (!startStr || !endStr) return null;
   const s = Date.parse(startStr + "T00:00:00Z"), e = Date.parse(endStr + "T00:00:00Z");
   if (Number.isNaN(s) || Number.isNaN(e) || e < s) return null;
-  return leaveDays(s, e, startSession, endSession, workDays, holidays, halfDayHolidays);
+  return leaveDays(s, e, startSession, endSession, workDays, holidays, halfDayHolidays, sandwich);
 }
